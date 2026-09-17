@@ -231,9 +231,9 @@ pub fn restore_history_from_jsonl(
     // Pass 2: locate the most recent compaction marker. On the fast path
     // there is exactly one (the anchored one); on the legacy path there may
     // be several and only the last is honored.
-    let last_compaction_idx = entries.iter().rposition(|e| {
-        e.kind.as_deref() == Some(ENTRY_KIND_COMPACTION)
-    });
+    let last_compaction_idx = entries
+        .iter()
+        .rposition(|e| e.kind.as_deref() == Some(ENTRY_KIND_COMPACTION));
 
     // Pass 3: build the working entry slice based on whether a compaction
     // exists. With compaction: keep leading System entries + the compaction
@@ -295,6 +295,17 @@ pub fn restore_history_from_jsonl(
                 ..Default::default()
             });
             replayed += 1;
+            continue;
+        }
+
+        // Internal runtime entries (e.g. the output-budget nudge) are part of
+        // the live LLM context but must NOT be replayed as genuine turns: an
+        // interrupted turn is never resumed after a restart, so replaying the
+        // nudge would leak a stale internal instruction into subsequent turns.
+        // Mirrors the Desktop transcript, which filters the same marker.
+        if entry.is_internal() {
+            pending_reasoning = None;
+            skipped += 1;
             continue;
         }
 
@@ -399,9 +410,7 @@ pub fn restore_history_from_jsonl(
                     );
                 if merged {
                     let last = messages.last_mut().unwrap();
-                    last.tool_calls
-                        .get_or_insert_with(Vec::new)
-                        .push(new_call);
+                    last.tool_calls.get_or_insert_with(Vec::new).push(new_call);
                 } else {
                     messages.push(ChatMessage {
                         role: MessageRole::Assistant,
@@ -555,12 +564,10 @@ fn drop_orphan_tool_results(messages: &mut Vec<ChatMessage>) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::conversation::{
-        CompactionEventMeta, ConversationSession, SessionConfig,
-    };
+    use crate::conversation::{CompactionEventMeta, ConversationSession, SessionConfig};
     use std::path::PathBuf;
-    use std::sync::atomic::AtomicUsize;
     use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
 
     fn temp_workdir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -589,14 +596,17 @@ mod tests {
                 model: None,
                 provider: None,
             },
-            0, Arc::new(AtomicUsize::new(0)), // unlimited in tests
+            0,
+            Arc::new(AtomicUsize::new(0)), // unlimited in tests
         )
         .unwrap();
         session.append_message("user", "hi", None);
         session.append_message("assistant", "hello", None);
         flush();
 
-        let path = work.join("conversations").join(format!("{}.jsonl", session_id));
+        let path = work
+            .join("conversations")
+            .join(format!("{}.jsonl", session_id));
         let outcome = restore_history_from_jsonl(&path, None).unwrap();
         assert!(!outcome.had_compaction);
         assert_eq!(outcome.messages.len(), 2);
@@ -619,7 +629,8 @@ mod tests {
                 model: None,
                 provider: None,
             },
-            0, Arc::new(AtomicUsize::new(0)), // unlimited in tests
+            0,
+            Arc::new(AtomicUsize::new(0)), // unlimited in tests
         )
         .unwrap();
         session.append_message("user", "q", None);
@@ -627,10 +638,68 @@ mod tests {
         session.append_message("assistant", "a", None);
         flush();
 
-        let path = work.join("conversations").join(format!("{}.jsonl", session_id));
+        let path = work
+            .join("conversations")
+            .join(format!("{}.jsonl", session_id));
         let outcome = restore_history_from_jsonl(&path, None).unwrap();
-        assert_eq!(outcome.messages.len(), 2, "thought should not enter context");
-        assert!(outcome.messages.iter().all(|m| !matches!(m.role, MessageRole::System)));
+        assert_eq!(
+            outcome.messages.len(),
+            2,
+            "thought should not enter context"
+        );
+        assert!(
+            outcome
+                .messages
+                .iter()
+                .all(|m| !matches!(m.role, MessageRole::System))
+        );
+        assert!(outcome.skipped_entry_count >= 1);
+    }
+
+    #[test]
+    fn restore_skips_internal_entries() {
+        // The output-budget nudge is persisted to JSONL marked
+        // `metadata.internal`. It must NOT be replayed as a genuine user turn:
+        // an interrupted turn is never resumed, so a replayed nudge would leak
+        // a stale internal instruction into subsequent turns.
+        let work = temp_workdir("internal");
+        let session_id = "sess-internal";
+        let (session, _config_rx, _state_rx) = ConversationSession::new(
+            &work,
+            session_id,
+            SessionConfig {
+                agent_id: "test".into(),
+                workspace_id: None,
+                model: None,
+                provider: None,
+            },
+            0,
+            Arc::new(AtomicUsize::new(0)), // unlimited in tests
+        )
+        .unwrap();
+        session.append_message("user", "real question", None);
+        session.append_internal_message("user", "output budget exhausted — wrap up");
+        session.append_message("assistant", "real answer", None);
+        flush();
+
+        let path = work
+            .join("conversations")
+            .join(format!("{}.jsonl", session_id));
+        let outcome = restore_history_from_jsonl(&path, None).unwrap();
+        assert_eq!(
+            outcome.messages.len(),
+            2,
+            "internal entry must not enter the replay context"
+        );
+        assert_eq!(outcome.messages[0].content, "real question");
+        assert_eq!(outcome.messages[1].content, "real answer");
+        assert!(
+            outcome
+                .messages
+                .iter()
+                .all(|m| !m.content.contains("output budget exhausted")),
+            "no message should carry the nudge text"
+        );
         assert!(outcome.skipped_entry_count >= 1);
     }
 
@@ -654,7 +723,8 @@ mod tests {
                 model: None,
                 provider: None,
             },
-            0, Arc::new(AtomicUsize::new(0)), // unlimited in tests
+            0,
+            Arc::new(AtomicUsize::new(0)), // unlimited in tests
         )
         .unwrap();
         session.append_message("user", "q1", None);
@@ -686,7 +756,9 @@ mod tests {
         );
         flush();
 
-        let path = work.join("conversations").join(format!("{}.jsonl", session_id));
+        let path = work
+            .join("conversations")
+            .join(format!("{}.jsonl", session_id));
         let outcome = restore_history_from_jsonl(&path, None).unwrap();
 
         // User, Assistant{tc_1, rc-one}, Tool(tc_1),
@@ -729,7 +801,8 @@ mod tests {
                 model: None,
                 provider: None,
             },
-            0, Arc::new(AtomicUsize::new(0)), // unlimited in tests
+            0,
+            Arc::new(AtomicUsize::new(0)), // unlimited in tests
         )
         .unwrap();
         session.append_message("user", "list files", None);
@@ -757,7 +830,9 @@ mod tests {
         );
         flush();
 
-        let path = work.join("conversations").join(format!("{}.jsonl", session_id));
+        let path = work
+            .join("conversations")
+            .join(format!("{}.jsonl", session_id));
         let outcome = restore_history_from_jsonl(&path, None).unwrap();
 
         // Expected: User, Assistant{tool_calls:[tc_1,tc_2]}, Tool(tc_1), Tool(tc_2)
@@ -787,7 +862,8 @@ mod tests {
                 model: None,
                 provider: None,
             },
-            0, Arc::new(AtomicUsize::new(0)), // unlimited in tests
+            0,
+            Arc::new(AtomicUsize::new(0)), // unlimited in tests
         )
         .unwrap();
         // tool_result with no preceding tool_call → orphan
@@ -800,7 +876,9 @@ mod tests {
         session.append_message("assistant", "ok", None);
         flush();
 
-        let path = work.join("conversations").join(format!("{}.jsonl", session_id));
+        let path = work
+            .join("conversations")
+            .join(format!("{}.jsonl", session_id));
         let outcome = restore_history_from_jsonl(&path, None).unwrap();
         // user + assistant, orphan tool_result dropped
         assert_eq!(outcome.messages.len(), 2);
@@ -820,7 +898,8 @@ mod tests {
                 model: None,
                 provider: None,
             },
-            0, Arc::new(AtomicUsize::new(0)), // unlimited in tests
+            0,
+            Arc::new(AtomicUsize::new(0)), // unlimited in tests
         )
         .unwrap();
         // Pre-compaction noise
@@ -845,7 +924,9 @@ mod tests {
         session.append_message("assistant", "a3", None);
         flush();
 
-        let path = work.join("conversations").join(format!("{}.jsonl", session_id));
+        let path = work
+            .join("conversations")
+            .join(format!("{}.jsonl", session_id));
         let outcome = restore_history_from_jsonl(&path, None).unwrap();
         assert!(outcome.had_compaction);
         // Expected: [compaction_summary marker, u3, a3]
@@ -878,13 +959,16 @@ mod tests {
                 model: None,
                 provider: None,
             },
-            0, Arc::new(AtomicUsize::new(0)), // unlimited in tests
+            0,
+            Arc::new(AtomicUsize::new(0)), // unlimited in tests
         )
         .unwrap();
         session.append_message("user", "ok1", None);
         flush();
         // Inject a bogus line directly into the file
-        let path = work.join("conversations").join(format!("{}.jsonl", session_id));
+        let path = work
+            .join("conversations")
+            .join(format!("{}.jsonl", session_id));
         {
             use std::io::Write;
             let mut f = std::fs::OpenOptions::new()
@@ -938,7 +1022,8 @@ mod tests {
                 model: None,
                 provider: None,
             },
-            0, Arc::new(AtomicUsize::new(0)), // unlimited in tests
+            0,
+            Arc::new(AtomicUsize::new(0)), // unlimited in tests
         )
         .unwrap();
         // Leading system context (must survive restore).
@@ -977,7 +1062,9 @@ mod tests {
         session.append_message("assistant", "a3", None);
         flush();
 
-        let path = work.join("conversations").join(format!("{}.jsonl", session_id));
+        let path = work
+            .join("conversations")
+            .join(format!("{}.jsonl", session_id));
         let abs = last_compaction_offset(&path);
         let outcome = restore_history_from_jsonl(&path, Some(abs)).unwrap();
 
@@ -995,14 +1082,18 @@ mod tests {
         assert_eq!(outcome.messages[2].content, "u3");
         assert_eq!(outcome.messages[3].content, "a3");
         // The stale rounds between the two compactions must be gone.
-        assert!(!outcome
-            .messages
-            .iter()
-            .any(|m| m.content.contains("stale-between")));
-        assert!(!outcome
-            .messages
-            .iter()
-            .any(|m| m.content.contains("first compaction")));
+        assert!(
+            !outcome
+                .messages
+                .iter()
+                .any(|m| m.content.contains("stale-between"))
+        );
+        assert!(
+            !outcome
+                .messages
+                .iter()
+                .any(|m| m.content.contains("first compaction"))
+        );
     }
 
     #[test]
@@ -1020,7 +1111,8 @@ mod tests {
                 model: None,
                 provider: None,
             },
-            0, Arc::new(AtomicUsize::new(0)), // unlimited in tests
+            0,
+            Arc::new(AtomicUsize::new(0)), // unlimited in tests
         )
         .unwrap();
         session.append_message("user", "pre", None);
@@ -1038,14 +1130,19 @@ mod tests {
         session.append_message("user", "post", None);
         flush();
 
-        let path = work.join("conversations").join(format!("{}.jsonl", session_id));
+        let path = work
+            .join("conversations")
+            .join(format!("{}.jsonl", session_id));
         // Offset far beyond EOF — stale hint.
         let huge = std::fs::metadata(&path).unwrap().len() + 4096;
         let outcome = restore_history_from_jsonl(&path, Some(huge)).unwrap();
         assert!(outcome.had_compaction);
         // Legacy semantics: [marker, post]; pre-compaction "pre" is dropped.
         assert_eq!(outcome.messages.len(), 2);
-        assert_eq!(outcome.messages[0].name.as_deref(), Some("compaction_summary"));
+        assert_eq!(
+            outcome.messages[0].name.as_deref(),
+            Some("compaction_summary")
+        );
         assert_eq!(outcome.messages[1].content, "post");
     }
 
@@ -1068,7 +1165,8 @@ mod tests {
                 model: None,
                 provider: None,
             },
-            0, Arc::new(AtomicUsize::new(0)), // unlimited in tests
+            0,
+            Arc::new(AtomicUsize::new(0)), // unlimited in tests
         )
         .unwrap();
 
@@ -1133,7 +1231,9 @@ mod tests {
         );
         flush();
 
-        let path = work.join("conversations").join(format!("{}.jsonl", session_id));
+        let path = work
+            .join("conversations")
+            .join(format!("{}.jsonl", session_id));
         let outcome = restore_history_from_jsonl(&path, None).unwrap();
 
         // The most recent *synthetic* injected round is `toolu_inj_42`; the

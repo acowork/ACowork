@@ -6,17 +6,16 @@
 //! ADR-051 P4: `SharedMemoryStore` is now `Arc<dyn MemoryAdminService>`
 //! instead of concrete `Arc<GrafeoStore>`.
 
-
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 
 use crate::error::Result;
-use crate::http::{memory_query, SharedEmbedDimension, SharedMemoryStore};
+use crate::http::{SharedEmbedDimension, SharedMemoryStore, memory_query};
 use crate::usecases::memory_query::{
-    CreateMemoryNodeInput, MemoryNode, MemoryNodeListResponse, MemoryNodeQuery,
-    MemoryQueryService, MemoryStats, RebuildReport,
+    CreateMemoryNodeInput, MemoryNode, MemoryNodeListResponse, MemoryNodeQuery, MemoryQueryService,
+    MemoryStats, RebuildReport,
 };
 
 pub struct GrafeoMemoryAdapter {
@@ -36,11 +35,7 @@ impl GrafeoMemoryAdapter {
 #[async_trait]
 impl MemoryQueryService for GrafeoMemoryAdapter {
     async fn list_nodes(&self, query: &MemoryNodeQuery) -> Result<MemoryNodeListResponse> {
-        let store = self
-            .memory_store
-            .read()
-            .ok()
-            .and_then(|g| g.clone());
+        let store = self.memory_store.read().ok().and_then(|g| g.clone());
         let params = memory_query::ListNodesParams {
             page: query.page,
             size: query.size,
@@ -80,31 +75,19 @@ impl MemoryQueryService for GrafeoMemoryAdapter {
     }
 
     async fn get_node(&self, node_id: u64) -> Result<serde_json::Value> {
-        let store = self
-            .memory_store
-            .read()
-            .ok()
-            .and_then(|g| g.clone());
+        let store = self.memory_store.read().ok().and_then(|g| g.clone());
         let out = memory_query::get_node(store.as_ref(), node_id);
         Ok(memory_query::get_output_to_json(&out))
     }
 
     async fn get_stats(&self) -> Result<MemoryStats> {
-        let store = self
-            .memory_store
-            .read()
-            .ok()
-            .and_then(|g| g.clone());
+        let store = self.memory_store.read().ok().and_then(|g| g.clone());
         let dim = self.embed_dim.read().map(|d| *d).unwrap_or(0);
         Ok(memory_query::get_stats(store.as_ref(), dim))
     }
 
     async fn delete_node(&self, node_id: u64) -> Result<()> {
-        let store = self
-            .memory_store
-            .read()
-            .ok()
-            .and_then(|g| g.clone());
+        let store = self.memory_store.read().ok().and_then(|g| g.clone());
         memory_query::delete_node(store.as_ref(), node_id);
         Ok(())
     }
@@ -133,11 +116,12 @@ impl MemoryQueryService for GrafeoMemoryAdapter {
         memory_query::update_node(Some(&store), node_id, properties)
     }
 
-    async fn rebuild_embeddings(
+    async fn rebuild_embeddings_with_progress(
         &self,
         endpoint: &str,
         model_id: &str,
         dimension: usize,
+        progress: Option<Arc<dyn Fn(u64, u64) + Send + Sync>>,
     ) -> Result<RebuildReport> {
         let store = self
             .memory_store
@@ -186,14 +170,15 @@ impl MemoryQueryService for GrafeoMemoryAdapter {
                 }
             };
 
+            let progress_cb: Option<&dyn Fn(u64, u64)> = progress
+                .as_ref()
+                .map(|cb| &**cb as &dyn Fn(u64, u64));
             admin
-                .migrate_embedding_dimension(&embed_fn, dimension)
+                .migrate_embedding_dimension_with_progress(&embed_fn, dimension, progress_cb)
                 .map_err(|e| crate::error::RuntimeError::Memory(e.to_string()))
         })
         .await
-        .map_err(|e| {
-            crate::error::RuntimeError::Memory(format!("rebuild task panicked: {e}"))
-        })??;
+        .map_err(|e| crate::error::RuntimeError::Memory(format!("rebuild task panicked: {e}")))??;
 
         let message = format!(
             "Rebuilt {} embeddings (scanned {}, skipped {} no-embedding / {} no-content, {} errors)",
@@ -220,8 +205,8 @@ mod tests {
 
     use acowork_grafeo::grafeo::GrafeoStore;
     use acowork_grafeo::types::labels;
-    use grafeo_common::types::Value;
     use acowork_memory::admin::MemoryAdminService;
+    use grafeo_common::types::Value;
 
     use super::*;
 

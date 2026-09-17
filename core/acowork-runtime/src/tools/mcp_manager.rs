@@ -11,8 +11,9 @@ use acowork_core::protocol::McpServerConfigDef;
 use acowork_core::tools::traits::Tool;
 use acowork_mcp::client::McpRegistry;
 use acowork_mcp::wrapper::McpToolWrapper;
+use indexmap::IndexMap;
 
-use crate::agent_config::{tool_enabled_in, AgentMcpToolsConfig, McpToolDescriptor};
+use crate::agent_config::{AgentMcpToolsConfig, McpToolDescriptor, tool_enabled_in};
 
 /// Re-export from acowork-mcp so SessionManager can reference it.
 pub use acowork_mcp::client::McpConnectionFailure;
@@ -221,7 +222,9 @@ mod tests {
     #[tokio::test]
     async fn connect_empty_yields_empty_registry() {
         let mut mgr = McpManager::new();
-        let (registry, wrappers, specs, failures) = mgr.connect(&[], &crate::agent_config::AgentMcpToolsConfig::default()).await;
+        let (registry, wrappers, specs, failures) = mgr
+            .connect(&[], &crate::agent_config::AgentMcpToolsConfig::default())
+            .await;
         assert!(registry.is_empty());
         assert!(wrappers.is_empty());
         assert!(specs.is_empty());
@@ -281,11 +284,16 @@ fn tool_allowed(tools_cfg: &AgentMcpToolsConfig, server_name: &str, tool_name: &
 }
 
 /// Extract the live `tools/list` for every connected MCP server.
+///
+/// ADR-069 follow-up: returns `IndexMap`, not `HashMap`. `merge_mcp_tools_config`
+/// iterates this map and writes the result to `agent_mcp_tools.json`;
+/// `HashMap` would reshuffle the per-tool order on every reconnect
+/// (which `PUT /mcp-tools` triggers), making the Tools-panel tool list
+/// reshuffle whenever the user toggles a single tool.
 pub fn collect_server_tools_from_registry(
     registry: &McpRegistry,
-) -> std::collections::HashMap<String, Vec<McpToolDescriptor>> {
-    use std::collections::HashMap;
-    let mut out: HashMap<String, Vec<McpToolDescriptor>> = HashMap::new();
+) -> IndexMap<String, Vec<McpToolDescriptor>> {
+    let mut out: IndexMap<String, Vec<McpToolDescriptor>> = IndexMap::new();
     for prefixed in registry.tool_names() {
         let Some((server_name, tool_name)) = split_prefixed_tool(&prefixed) else {
             continue;

@@ -120,13 +120,21 @@ describe("gitStore URL construction", () => {
     expect(fetchUrls[0]).toBe("http://gw.test/api/agents/a1/git/status");
   });
 
-  it("builds the diff URL with path and cached params", async () => {
-    await useGitStore.getState().fetchDiff("a1", "ws1", "src/a.ts", 1);
+  it("builds the diff URL with path, base_ref, and head_ref", async () => {
+    await useGitStore.getState().fetchDiff("a1", "ws1", "src/a.ts", "abc123", ":");
     const url = fetchUrls[0];
     expect(url).toContain("/api/agents/a1/git/diff");
     expect(url).toContain("workspace_id=ws1");
     expect(url).toContain("path=src%2Fa.ts");
-    expect(url).toContain("cached=1");
+    expect(url).toContain("base_ref=abc123");
+    expect(url).toContain("head_ref=%3A");
+  });
+
+  it("defaults diff refs to HEAD vs working tree", async () => {
+    await useGitStore.getState().fetchDiff("a1", "ws1", "src/a.ts");
+    const url = fetchUrls[0];
+    expect(url).toContain("base_ref=HEAD");
+    expect(url).toContain("head_ref=");
   });
 
   it("builds the log URL with limit (clamped to 200) and optional path", async () => {
@@ -148,6 +156,45 @@ describe("gitStore URL construction", () => {
     await useGitStore.getState().fetchDiff("a1", "ws1", "x.ts");
     await useGitStore.getState().fetchLog("a1", "ws1");
     expect(mockWith503Retry).toHaveBeenCalledTimes(3);
+  });
+
+  it("revertFile POSTs the snake_case body the Runtime deserializes", async () => {
+    let captured: { url: string; init: RequestInit } | undefined;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string | URL, init?: RequestInit) => {
+        captured = { url: String(url), init: init ?? {} };
+        return Promise.resolve(mockFetchOk({ path: "src/a.ts", oldPath: null }));
+      }),
+    );
+
+    const resp = await useGitStore
+      .getState()
+      .revertFile("a1", "ws1", "src/a.ts", "src/a.old.ts");
+    expect(resp.path).toBe("src/a.ts");
+    expect(captured?.url).toBe("http://gw.test/api/agents/a1/git/revert");
+    expect(captured?.init.method).toBe("POST");
+    const body = JSON.parse(captured!.init.body as string);
+    // Runtime `GitRevertParams` deserializes snake_case field names —
+    // the same convention as the GET querystrings.
+    expect(body).toEqual({
+      path: "src/a.ts",
+      workspace_id: "ws1",
+      old_path: "src/a.old.ts",
+    });
+  });
+
+  it("revertFile elides workspace_id for the default workspace", async () => {
+    let body: string | undefined;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((_url: string | URL, init?: RequestInit) => {
+        body = init?.body as string;
+        return Promise.resolve(mockFetchOk({ path: "a.ts", oldPath: null }));
+      }),
+    );
+    await useGitStore.getState().revertFile("a1", "__agent_home__", "a.ts");
+    expect(JSON.parse(body!)).toEqual({ path: "a.ts" });
   });
 });
 

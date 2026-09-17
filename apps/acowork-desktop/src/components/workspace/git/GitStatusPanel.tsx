@@ -2,13 +2,17 @@
  * GitStatusPanel — ADR-078 decision 6. Flat (non-tree) list of uncommitted
  * changes below GitStatusBar. Row styling mirrors the file-tree rows
  * (FileTreeNode.tsx). Right-click menu: Show Diff / Show Log / Open in
- * editor. Deleted rows redirect to Show Diff (decision 6).
+ * editor / Revert (destructive, confirm-guarded — discards uncommitted
+ * changes back to HEAD; untracked files are deleted). Deleted rows
+ * redirect to Show Diff (decision 6).
  */
 
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   AlertCircle,
   ArrowRightLeft,
+  ChevronLeft,
+  ChevronRight,
   FileMinus,
   FilePlus,
   GitMerge,
@@ -19,12 +23,34 @@ import {
   type GitDiffResponse,
   type GitLogResponse,
   gitGroupKey,
+  gitViewKey,
   useGitStore,
 } from "../../../stores/gitStore";
 import { useFileEditorStore } from "../../../stores/fileEditorStore";
 import { useTranslation } from "../../../i18n/useTranslation";
 import { useContextMenu, ContextMenu } from "../../common/ContextMenu";
+import { ConfirmDialog } from "../../common/ConfirmDialog";
+import { showToast } from "../../common/ToastProvider";
 import { cn } from "../../../lib/utils";
+
+// Pagination: a workspace with a stray `node_modules/` or `target/`
+// under version control can balloon the changed-file list to 5000+
+// rows, which freezes the panel before the user even sees it. 100
+// rows/page matches the git-domain LOG_STEP=50 in GitVirtualNav (file
+// rows are denser, single-line, so we double it).  Sized to leave the
+// scrolled viewport filled without becoming a wall of text.
+const PAGE_SIZE = 100;
+
+// Stable empty array so `changes` reference doesn't churn when the
+// store is still loading (avoiding an extra render loop on first mount).
+const EMPTY_CHANGES: GitChangeDto[] = [];
+
+/** Inline-friendly sibling of `BUTTON_CLASS` from GitVirtualNav.tsx —
+ *  same icon size + zinc-100/border treatment, minus the overlay
+ *  decorations (absolute, shadow, animate-in) which would look out
+ *  of place inside the flat file-list footer. */
+const PAGINATION_BUTTON_CLASS =
+  "inline-flex items-center justify-center rounded-full border border-zinc-200 bg-zinc-100 p-1 text-text-tertiary transition-colors hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-30 dark:border-zinc-600 dark:bg-zinc-700  dark:hover:bg-zinc-600";
 
 interface GitStatusPanelProps {
   agentId: string;
@@ -81,7 +107,7 @@ function statusMeta(c: GitChangeDto): { icon: React.ReactNode; color: string; la
   if (c.index === "renamed" || c.index === "added") {
     return {
       icon: c.index === "renamed" ? <ArrowRightLeft size={13} /> : <FilePlus size={13} />,
-      color: c.staged ? "text-emerald-600 dark:text-emerald-400" : "text-zinc-500 dark:text-zinc-400",
+      color: c.staged ? "text-emerald-600 dark:text-emerald-400" : "text-text-tertiary ",
       labelKey: c.index === "renamed" ? "gitStatus.renamed" : "gitStatus.added",
     };
   }
@@ -108,21 +134,64 @@ function statusMeta(c: GitChangeDto): { icon: React.ReactNode; color: string; la
 
 export function GitStatusPanel({ agentId, workspaceId }: GitStatusPanelProps) {
   const { t } = useTranslation();
-  const entry = useGitStore((s) => s.status[gitGroupKey(agentId, workspaceId)]);
+  const groupKey = gitGroupKey(agentId, workspaceId);
+  // Subscribe to the rev the group is currently viewing so a click in the
+  // bar's history dropdown swaps the panel's source data on the next
+  // render. Reading via the same `gitViewKey` the store writes keeps
+  // the panel, the cache, and the bar title coherent.
+  const viewingRev = useGitStore((s) => s.viewingRev[groupKey] ?? "");
+  const entry = useGitStore((s) => s.status[gitViewKey(groupKey, viewingRev)]);
   const menu = useContextMenu<GitChangeDto>();
 
   const data = entry?.data;
   const loading = entry?.loading ?? false;
   const error = entry?.error ?? null;
-  const changes = data?.changes ?? [];
+  const changes = data?.changes ?? EMPTY_CHANGES;
+
+  // ── Pagination (ADR-078 decision 6 follow-up) ───────────────────
+  // Clamp the page index whenever the underlying changes array
+  // changes (new fetch, switching rev via the history dropdown).
+  // `changes` reference is stable across re-renders of the same
+  // snapshot because `EMPTY_CHANGES` is a module-level const, so the
+  // effect fires on real data swaps only.
+  const totalPages = Math.max(1, Math.ceil(changes.length / PAGE_SIZE));
+  const [pageIndex, setPageIndex] = useState(0);
+  useEffect(() => {
+    // `changes.length` shift (ref change with same length is a no-op)
+    if (pageIndex > totalPages - 1) {
+      setPageIndex(Math.max(0, totalPages - 1));
+    } else if (pageIndex < 0) {
+      setPageIndex(0);
+    }
+  }, [changes, totalPages, pageIndex]);
+  const pagedChanges = useMemo(
+    () => changes.slice(pageIndex * PAGE_SIZE, (pageIndex + 1) * PAGE_SIZE),
+    [changes, pageIndex],
+  );
 
   const openDiff = useMemo(
     () => async (c: GitChangeDto) => {
       const editor = useFileEditorStore.getState();
       try {
+        // When the panel is showing files in commit X, click-row opens
+        // the diff for X vs X^ (git's first-parent shorthand; root
+        // commits have no parent and the backend will surface a 400,
+        // which the user sees as a toast). Otherwise the default is
+        // HEAD vs working tree.
+        //
+        // The backend then PROMOTES the base from `X^` (first-parent)
+        // to the file-history predecessor of X on `c.path`, so the diff
+        // banner label matches the row above X in the banner's
+        // `CommitPicker` (which lists `git log -- <path>`, also file
+        // history). This is the same semantic IDE / GitKraken use by
+        // default ("what did this file look like right before this
+        // commit?"). First-parent is only retained when `X` introduced
+        // `c.path` (no file-history predecessor exists).
+        const baseRef = viewingRev ? `${viewingRev}^` : "HEAD";
+        const headRef = viewingRev;
         const diff: GitDiffResponse = await useGitStore
           .getState()
-          .fetchDiff(agentId, workspaceId, c.path, 0);
+          .fetchDiff(agentId, workspaceId, c.path, baseRef, headRef);
         editor.openVirtualFile({
           agentId,
           workspaceId,
@@ -132,12 +201,22 @@ export function GitStatusPanel({ agentId, workspaceId }: GitStatusPanelProps) {
           original: diff.original,
           gitDiffKind: diff.kind,
           language: languageForPath(c.path),
+          // Store the server-canonicalised commit SHAs as the OpenFile's
+          // refs. The diff-side banner `slice(0, 7)` relies on these
+          // being already-canonical SHAs — the backend does the
+          // git-rev-resolution + file-history promotion so the client
+          // never has to reason about git semantics (ADR-009 v2:
+          // gateway / desktop / runtime split).
+          // Working-tree variant returns `headRev = null` so the existing
+          // `!diffHeadRef → "Working Tree"` rendering still works.
+          diffBaseRef: diff.baseRev,
+          diffHeadRef: diff.headRev ?? "",
         });
       } catch (e) {
         console.error("[GitStatusPanel] fetchDiff failed:", e);
       }
     },
-    [agentId, workspaceId],
+    [agentId, workspaceId, viewingRev],
   );
 
   const openLog = useMemo(
@@ -209,14 +288,56 @@ export function GitStatusPanel({ agentId, workspaceId }: GitStatusPanelProps) {
           }
         },
       },
+      // Reverting "files in commit X" makes no sense — the rows are
+      // historical, not uncommitted changes. Only offer it on the
+      // working-tree view (`viewingRev === ""`).
+      ...(viewingRev
+        ? []
+        : [
+            {
+              key: "revert",
+              label: t("gitStatus.revert"),
+              onClick: ({ payload }: { payload: GitChangeDto | undefined }) => {
+                if (payload) setRevertTarget(payload);
+              },
+            },
+          ]),
     ],
-    [t, openDiff, openLog, agentId, workspaceId],
+    [t, openDiff, openLog, agentId, workspaceId, viewingRev],
+  );
+
+  /** Pending revert target (null = dialog closed). */
+  const [revertTarget, setRevertTarget] = useState<GitChangeDto | null>(null);
+  const handleRevert = useMemo(
+    () => async () => {
+      const c = revertTarget;
+      if (!c) return;
+      setRevertTarget(null);
+      try {
+        await useGitStore
+          .getState()
+          .revertFile(agentId, workspaceId, c.path, c.oldPath);
+        // Discarding changes rewrites the working tree — refresh the
+        // panel's current view so the row disappears.
+        await useGitStore.getState().refresh(agentId, workspaceId);
+        showToast({ type: "success", message: t("gitStatus.revertSuccess", { path: c.path }) });
+      } catch (e) {
+        console.error("[GitStatusPanel] revert failed:", e);
+        showToast({
+          type: "error",
+          message: t("gitStatus.revertError", {
+            detail: e instanceof Error ? e.message : String(e),
+          }),
+        });
+      }
+    },
+    [agentId, workspaceId, revertTarget, t],
   );
 
   const body = (() => {
     if (loading && !data) {
       return (
-        <div className="flex h-full items-center justify-center text-xs text-zinc-400">
+        <div className="flex h-full items-center justify-center text-xs text-text-tertiary">
           {t("gitStatus.loading")}
         </div>
       );
@@ -231,7 +352,7 @@ export function GitStatusPanel({ agentId, workspaceId }: GitStatusPanelProps) {
     if (!data) return null;
     if (!data.isRepo) {
       return (
-        <div className="flex h-full items-center justify-center text-xs text-zinc-400">
+        <div className="flex h-full items-center justify-center text-xs text-text-tertiary">
           {data.error === "git_unavailable"
             ? t("gitStatus.gitUnavailable")
             : t("gitStatus.notRepo")}
@@ -240,14 +361,15 @@ export function GitStatusPanel({ agentId, workspaceId }: GitStatusPanelProps) {
     }
     if (changes.length === 0) {
       return (
-        <div className="flex h-full items-center justify-center text-xs text-zinc-400">
+        <div className="flex h-full items-center justify-center text-xs text-text-tertiary">
           {t("gitStatus.clean")}
         </div>
       );
     }
     return (
+      <>
       <ul className="flex-1 overflow-y-auto py-0.5">
-        {changes.map((c) => {
+        {pagedChanges.map((c) => {
           const meta = statusMeta(c);
           return (
             <li
@@ -257,8 +379,12 @@ export function GitStatusPanel({ agentId, workspaceId }: GitStatusPanelProps) {
                 "file-tree-row flex cursor-pointer items-center gap-1.5 py-[0.2em] pr-3 pl-4 text-xs select-none",
                 "hover:bg-zinc-100 dark:hover:bg-zinc-800",
               )}
-              onClick={() => {
-                if (c.worktree === "deleted") void openDiff(c);
+              onDoubleClick={() => {
+                // Double-click opens the file (or its diff if unavailable on
+                // disk). Unifies the gesture with the workspace working-tree
+                // list, which uses single-click to select and double-click
+                // to open (FileTreeNode.tsx).
+                if (viewingRev || c.worktree === "deleted") void openDiff(c);
                 else
                   void useFileEditorStore
                     .getState()
@@ -269,11 +395,11 @@ export function GitStatusPanel({ agentId, workspaceId }: GitStatusPanelProps) {
               <span className={cn("shrink-0", meta.color)} title={t(meta.labelKey)}>
                 {meta.icon}
               </span>
-              <span className="flex-1 truncate text-zinc-700 dark:text-zinc-300">
+              <span className="flex-1 truncate text-text-secondary ">
                 {c.path}
               </span>
               {c.oldPath && (
-                <span className="truncate text-[10px] text-zinc-400 dark:text-zinc-500">
+                <span className="truncate text-[10px] text-text-tertiary ">
                   ← {c.oldPath}
                 </span>
               )}
@@ -289,6 +415,39 @@ export function GitStatusPanel({ agentId, workspaceId }: GitStatusPanelProps) {
           );
         })}
       </ul>
+      {totalPages > 1 && (
+        <div
+          data-testid="git-status-pagination"
+          className="flex shrink-0 items-center justify-between gap-2 border-t border-zinc-200 px-2 py-1 dark:border-zinc-700"
+        >
+          <span className="text-[10px] tabular-nums text-text-tertiary ">
+            {pageIndex * PAGE_SIZE + 1}–{Math.min((pageIndex + 1) * PAGE_SIZE, changes.length)} / {changes.length}
+          </span>
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={() => setPageIndex((p) => Math.max(0, p - 1))}
+              disabled={pageIndex === 0}
+              aria-label={t("gitStatus.prevPage")}
+              title={t("gitStatus.prevPage")}
+              className={PAGINATION_BUTTON_CLASS}
+            >
+              <ChevronLeft className="h-3.5 w-3.5" />
+            </button>
+            <button
+              type="button"
+              onClick={() => setPageIndex((p) => Math.min(totalPages - 1, p + 1))}
+              disabled={pageIndex >= totalPages - 1}
+              aria-label={t("gitStatus.nextPage")}
+              title={t("gitStatus.nextPage")}
+              className={PAGINATION_BUTTON_CLASS}
+            >
+              <ChevronRight className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        </div>
+      )}
+    </>
     );
   })();
 
@@ -309,6 +468,19 @@ export function GitStatusPanel({ agentId, workspaceId }: GitStatusPanelProps) {
         selectionAtOpen={menu.selectionAtOpen}
         onClose={menu.close}
         compact
+      />
+      {/* Destructive discard of uncommitted changes — explicit consent
+          before the backend runs `git restore` (untracked → delete). */}
+      <ConfirmDialog
+        open={revertTarget !== null}
+        title={t("gitStatus.revertConfirmTitle")}
+        message={t("gitStatus.revertConfirmMessage", {
+          path: revertTarget?.path ?? "",
+        })}
+        confirmLabel={t("gitStatus.revert")}
+        destructive
+        onConfirm={handleRevert}
+        onCancel={() => setRevertTarget(null)}
       />
       {/* manual refresh affordance is on the bar; keep the panel focused */}
       <span className="sr-only">{loading ? t("gitStatus.loading") : ""}</span>

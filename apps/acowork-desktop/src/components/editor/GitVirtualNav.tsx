@@ -53,7 +53,7 @@ const LOG_MAX_LIMIT = 200;
 const LOG_STEP = 50;
 
 const BUTTON_CLASS =
-    "rounded-full bg-zinc-100 dark:bg-zinc-700 border border-zinc-200 dark:border-zinc-600 shadow-md p-1.5 opacity-40 hover:opacity-100 focus-visible:opacity-100 hover:bg-zinc-200 dark:hover:bg-zinc-600 transition-all animate-in fade-in zoom-in disabled:opacity-20 disabled:cursor-not-allowed";
+    "rounded-full bg-zinc-100 dark:bg-zinc-700 border border-zinc-200 dark:border-zinc-600 shadow-md p-1.5 opacity-90 hover:opacity-100 focus-visible:opacity-100 hover:bg-zinc-200 dark:hover:bg-zinc-600 transition-all animate-in fade-in zoom-in disabled:opacity-20 disabled:cursor-not-allowed";
 
 const CONTAINER_CLASS =
     "absolute top-3 right-4 z-10 flex items-center gap-2";
@@ -286,7 +286,7 @@ export function GitVirtualNav({ file, diffEditor }: GitVirtualNavProps) {
                 }
                 className={BUTTON_CLASS}
             >
-                <ChevronUp className="h-4 w-4 text-zinc-500 dark:text-zinc-400" />
+                <ChevronUp className="h-4 w-4 text-text-tertiary " />
             </button>
             <button
                 type="button"
@@ -304,7 +304,7 @@ export function GitVirtualNav({ file, diffEditor }: GitVirtualNavProps) {
                 }
                 className={BUTTON_CLASS}
             >
-                <ChevronDown className="h-4 w-4 text-zinc-500 dark:text-zinc-400" />
+                <ChevronDown className="h-4 w-4 text-text-tertiary " />
             </button>
         </div>
     );

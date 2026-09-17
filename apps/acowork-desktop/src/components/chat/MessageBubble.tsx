@@ -6,7 +6,6 @@ import type { ChatMessage } from "../../lib/types";
 import { useTranslation } from "../../i18n/useTranslation";
 import { useAgentStore } from "../../stores/agentStore";
 import { useChatStore } from "../../stores/chatStore";
-import { useFileEditorStore } from "../../stores/fileEditorStore";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { ThinkBlock } from "./ThinkBlock";
 import { CodeBlock } from "./CodeBlock";
@@ -15,7 +14,7 @@ import { CompactionCard } from "./CompactionCard";
 import { UserAvatar } from "../common/UserAvatar";
 import { AttachmentChipRow } from "./AttachmentChipRow";
 import { openAttachedRef } from "../../lib/openWorkspaceRef";
-import { pickOpenActionForPath } from "../editor/markdownLinkResolver";
+import { handleChatMarkdownLinkClick, markdownUrlTransform } from "../editor/markdownLinkResolver";
 import type { AttachedItem } from "../../lib/types";
 import {
   ContextMenu,
@@ -57,7 +56,11 @@ const StreamMarkdown = React.memo(function StreamMarkdown({ content }: { content
 
   if (segments.length <= 1) {
     // Fast path: no mermaid blocks at all
-    return <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{content}</ReactMarkdown>;
+    return (
+      <ReactMarkdown remarkPlugins={[remarkGfm]} urlTransform={markdownUrlTransform} components={markdownComponents}>
+        {content}
+      </ReactMarkdown>
+    );
   }
 
   return (
@@ -69,7 +72,7 @@ const StreamMarkdown = React.memo(function StreamMarkdown({ content }: { content
           return <MermaidBlock key={i} chart={code} />;
         }
         return (
-          <ReactMarkdown key={i} remarkPlugins={[remarkGfm]} components={markdownComponents}>
+          <ReactMarkdown key={i} remarkPlugins={[remarkGfm]} urlTransform={markdownUrlTransform} components={markdownComponents}>
             {seg}
           </ReactMarkdown>
         );
@@ -94,58 +97,49 @@ const markdownComponents = {
     }
     return <pre>{children}</pre>;
   },
-  /** Intercept link clicks: open in the fileTab instead of navigating the
-   *  webview (which would crash). Image extensions open in preview mode,
-   *  every other supported text/source format (including JSON, Markdown,
-   *  HTML, source code) opens in Monaco — same rule as the workspace tree
-   *  and the chat banner chip. Previously this unconditionally opened
-   *  `openPreview`, which falls through to `MarkdownPreviewView` for
-   *  non-image / non-HTML files and freezes on multi-MB JSON. */
-  a: ({ href, children, ...rest }: React.AnchorHTMLAttributes<HTMLAnchorElement>) => {
+  /** Intercept link clicks: open in a file/URL tab instead of letting the
+   *  webview navigate (which reloads or crashes the renderer). Local
+   *  paths — including the Windows drive paths agents emit (`D:/…`) —
+   *  are resolved across the agent's workspaces by
+   *  `handleChatMarkdownLinkClick`; http(s) links open in the URL
+   *  preview tab; image extensions open in preview mode, every other
+   *  supported format opens in Monaco (same rule as the workspace tree
+   *  and the attachment chips).
+   *
+   *  Two layers keep a malformed link from ever reaching the webview:
+   *    1. `urlTransform={markdownUrlTransform}` (on both ReactMarkdown
+   *       render paths) keeps drive paths and `file://` URLs alive
+   *       through react-markdown's stock URL sanitisation, which
+   *       rewrites them to `""` — and an empty href default-navigates
+   *       to the current URL, reloading the whole app.
+   *    2. Any link that still ends up without a usable href degrades to
+   *       a plain `<span>` here, so it cannot be clicked into a
+   *       navigation at all.
+   *
+   *  `node` is destructured out on purpose: react-markdown passes the raw
+   *  HAST node as a prop and spreading it onto the DOM element renders
+   *  `node="[object Object]"`. Non-left-button presses (middle-click asks
+   *  the webview to open a new window, which it cannot) and link drags
+   *  are cancelled as well. */
+  a: ({ href, children, node: _node, ...rest }: React.AnchorHTMLAttributes<HTMLAnchorElement> & { node?: unknown }) => {
+    // Degrade to plain text when no usable href survived sanitisation.
+    if (!href) return <span>{children}</span>;
     const handleClick = (e: React.MouseEvent) => {
-      if (!href) return;
-      // Always prevent default to avoid Tauri webview navigation crash
+      // preventDefault FIRST — every branch downstream must never fall
+      // through to webview navigation.
       e.preventDefault();
-      const agentId = useAgentStore.getState().selectedAgentId;
-      if (!agentId) return;
-
-      if (/^https?:\/\//i.test(href)) {
-        // Case 1: http/https URLs — open in URL preview tab
-        useFileEditorStore.getState().openUrl(agentId, href);
-      } else {
-        // Case 2: Local file paths — preview vs. Monaco decided by the
-        // shared helper. The `href` is treated as a workspace-relative or
-        // absolute path; `pickOpenActionForPath` only checks the extension.
-        //
-        // Strip a `#L42` / `#L42-L67` line-fragment before resolving: those
-        // markers are IDE conventions understood by Monaco's cursor-jump
-        // wiring, but `/workspaces/file` treats the path verbatim and a
-        // path like `src/foo.ts#L42` is NOT a valid filesystem path on the
-        // runtime side, so it would 404 every click. The fragment is
-        // preserved separately and forwarded to `openFile(..., line)` so
-        // the editor still lands on the correct line.
-        const sessionId = useChatStore.getState().getActiveSessionId(agentId);
-        if (!sessionId) return;
-        const workspaceId = useWorkspaceStore.getState().getSessionWorkspaceId(sessionId);
-        const [pathPart, fragmentPart = ""] = href.split("#", 2);
-        const relPath = pathPart.replace(/^\//, "");
-        // Match `#L42` or `#L42-L67`. Anything else (custom anchors, GitHub
-        // permalinks, etc.) is ignored — file opens with no cursor jump.
-        const lineMatch = fragmentPart.match(/^L(\d+)(?:-L(\d+))?$/);
-        const cursorLine = lineMatch ? parseInt(lineMatch[1], 10) : undefined;
-        const action = pickOpenActionForPath(relPath);
-        const store = useFileEditorStore.getState();
-        if (action === "openPreview") {
-          // Previews don't honor `cursorLine` — they have no cursor to
-          // place. Drop it silently rather than threading a no-op param.
-          void store.openPreview(agentId, workspaceId, relPath);
-        } else {
-          void store.openFile(agentId, workspaceId, relPath, cursorLine);
-        }
-      }
+      handleChatMarkdownLinkClick(href);
     };
     return (
-      <a href={href} onClick={handleClick} {...rest}>
+      <a
+        href={href}
+        {...rest}
+        onClick={handleClick}
+        onAuxClick={(e) => {
+          if (e.button !== 0) e.preventDefault();
+        }}
+        draggable={false}
+      >
         {children}
       </a>
     );
@@ -353,7 +347,7 @@ const MessageBubble = React.memo(function MessageBubble({
         <div className="flex items-start justify-end gap-2" onContextMenu={onContextMenu}>
           <div className="min-w-0 flex-1 flex flex-col items-end">
             {liveUserName && (
-              <span className="mt-[2px] text-xs text-zinc-400 dark:text-zinc-500">{liveUserName}</span>
+              <span className="mt-[2px] text-xs text-text-tertiary ">{liveUserName}</span>
             )}
             {message.content && (
               // Timestamp rendered as a sibling BELOW the bubble
@@ -374,7 +368,7 @@ const MessageBubble = React.memo(function MessageBubble({
                   </div>
                 </div>
                 {message.timestamp && (
-                  <span className="mt-1 text-[10px] text-zinc-500 dark:text-zinc-400 opacity-0 transition-opacity group-hover:opacity-100">
+                  <span className="mt-1 text-[10px] text-text-tertiary  opacity-0 transition-opacity group-hover:opacity-100">
                     {formatBubbleTime(message.timestamp)}
                   </span>
                 )}
@@ -412,11 +406,11 @@ const MessageBubble = React.memo(function MessageBubble({
              own right edge (right edge faces screen center for a
              left-aligned bubble). */}
           <div
-            className="relative group max-w-[var(--content-max-width)] rounded-md rounded-bl-sm bg-chat-bubble px-4 py-2.5 dark:text-zinc-200 select-text break-words"
+            className="relative group max-w-[var(--content-max-width)] rounded-md rounded-bl-sm bg-chat-bubble px-4 py-2.5  select-text break-words"
             style={fontSizeStyle}
           >
             {message.timestamp && (
-              <span className="pointer-events-none absolute right-0 -top-5 whitespace-nowrap text-[10px] text-zinc-500 dark:text-zinc-400 opacity-0 transition-opacity group-hover:opacity-100">
+              <span className="pointer-events-none absolute right-0 -top-5 whitespace-nowrap text-[10px] text-text-tertiary  opacity-0 transition-opacity group-hover:opacity-100">
                 {formatBubbleTime(message.timestamp)}
               </span>
             )}
@@ -442,7 +436,7 @@ const MessageBubble = React.memo(function MessageBubble({
     return (
       <>
         <div className="min-w-0 flex flex-col ml-12" onContextMenu={onContextMenu}>
-          <div className="max-w-[var(--content-max-width)] rounded-md rounded-bl-sm bg-chat-bubble px-4 py-2.5 dark:text-zinc-200 select-text break-words" style={fontSizeStyle}>
+          <div className="max-w-[var(--content-max-width)] rounded-md rounded-bl-sm bg-chat-bubble px-4 py-2.5  select-text break-words" style={fontSizeStyle}>
             <ThinkBlock
               content={message.content}
               startTime={message.startTime}
@@ -467,17 +461,17 @@ const MessageBubble = React.memo(function MessageBubble({
     return (
       <>
         <div className="min-w-0 flex flex-col ml-12" onContextMenu={onContextMenu}>
-          <div className="max-w-[var(--content-max-width)] rounded-md rounded-bl-sm bg-chat-bubble px-4 py-2.5 dark:text-zinc-200 select-text break-words overflow-hidden" style={fontSizeStyle}>
+          <div className="max-w-[var(--content-max-width)] rounded-md rounded-bl-sm bg-chat-bubble px-4 py-2.5  select-text break-words overflow-hidden" style={fontSizeStyle}>
             <div className="flex items-start gap-2 min-w-0">
               <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" />
               <div className="min-w-0 flex-1">
                 <div className="whitespace-pre-wrap break-words">{message.content}</div>
                 {message.errorDetail && (
                   <details className="mt-2">
-                    <summary className="cursor-pointer text-xs text-zinc-400 hover:text-zinc-300 dark:text-zinc-500 dark:hover:text-zinc-400 select-none">
+                    <summary className="cursor-pointer text-xs text-text-tertiary hover:text-zinc-300  dark:hover:text-zinc-400 select-none">
                       Details
                     </summary>
-                    <pre className="mt-1 max-h-40 overflow-auto rounded bg-black/5 dark:bg-white/5 p-2 text-xs text-zinc-500 dark:text-zinc-400 whitespace-pre-wrap break-all">
+                    <pre className="mt-1 max-h-40 overflow-auto rounded bg-black/5 dark:bg-white/5 p-2 text-xs text-text-tertiary  whitespace-pre-wrap break-all">
                       {message.errorDetail}
                     </pre>
                   </details>
@@ -510,7 +504,7 @@ const MessageBubble = React.memo(function MessageBubble({
       return (
         <>
           <div className="flex justify-center" onContextMenu={onContextMenu}>
-            <div className="rounded bg-chat-bubble px-3 py-1 text-xs text-zinc-500 dark:text-zinc-400 select-text">
+            <div className="rounded bg-chat-bubble px-3 py-1 text-xs text-text-tertiary  select-text">
               {message.content}
             </div>
           </div>
@@ -687,7 +681,7 @@ const MessageBubble = React.memo(function MessageBubble({
     return (
       <>
         <div className="flex justify-center" onContextMenu={onContextMenu}>
-          <div className="rounded bg-chat-bubble px-3 py-1 text-xs text-zinc-500 dark:text-zinc-400 select-text">
+          <div className="rounded bg-chat-bubble px-3 py-1 text-xs text-text-tertiary  select-text">
             {message.content}
           </div>
         </div>
@@ -730,14 +724,14 @@ const MessageBubble = React.memo(function MessageBubble({
   if (message.type === "tool_call") {
     return (
       <div className="flex justify-start">
-        <div className="flex w-full items-center gap-2 rounded-md border border-zinc-200 bg-zinc-50 px-3 py-1.5 text-left text-xs text-zinc-500 transition-colors hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800/50 dark:text-zinc-400 dark:hover:bg-zinc-800">
+        <div className="flex w-full items-center gap-2 rounded-md border border-zinc-200 bg-zinc-50 px-3 py-1.5 text-left text-xs text-text-tertiary transition-colors hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800/50  dark:hover:bg-zinc-800">
           <button
             className="flex flex-1 items-start gap-2 min-w-0"
             onClick={() => setExpanded(!expanded)}
           >
             <Wrench className="mt-0.5 h-3 w-3 shrink-0" />
             <span className="font-medium">{message.toolName}</span>
-            <span className="min-w-0 break-all text-zinc-400 dark:text-zinc-500">{message.content}</span>
+            <span className="min-w-0 break-all text-text-tertiary ">{message.content}</span>
             {expanded ? <ChevronDown className="ml-auto h-3 w-3 shrink-0" /> : <ChevronRight className="ml-auto h-3 w-3 shrink-0" />}
           </button>
         </div>
@@ -750,17 +744,17 @@ const MessageBubble = React.memo(function MessageBubble({
       <>
         <div className="flex justify-start" onContextMenu={onContextMenu}>
           <button
-            className="flex w-full items-center gap-2 rounded-md border border-zinc-200 bg-zinc-50 px-3 py-1.5 text-left text-xs text-zinc-500 transition-colors hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800/50 dark:text-zinc-400 dark:hover:bg-zinc-800"
+            className="flex w-full items-center gap-2 rounded-md border border-zinc-200 bg-zinc-50 px-3 py-1.5 text-left text-xs text-text-tertiary transition-colors hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800/50  dark:hover:bg-zinc-800"
             onClick={() => setExpanded(!expanded)}
           >
             <Wrench className="h-3 w-3 shrink-0" />
             <span className="font-medium">{message.toolName}</span>
-            <span className="text-zinc-400 dark:text-zinc-500">→ Result</span>
-            <span className="ml-auto text-[10px] text-zinc-400 dark:text-zinc-500">Click to view</span>
+            <span className="text-text-tertiary ">→ Result</span>
+            <span className="ml-auto text-[10px] text-text-tertiary ">Click to view</span>
             {expanded ? <ChevronDown className="ml-2 h-3 w-3 shrink-0" /> : <ChevronRight className="ml-2 h-3 w-3 shrink-0" />}
           </button>
           {expanded && (
-            <pre className="mt-1 max-w-full overflow-x-auto rounded-md bg-zinc-50 p-3 text-xs text-zinc-600 dark:bg-zinc-800/50 dark:text-zinc-400 select-text">
+            <pre className="mt-1 max-w-full overflow-x-auto rounded-md bg-zinc-50 p-3 text-xs text-text-secondary dark:bg-zinc-800/50  select-text">
               {message.content}
             </pre>
           )}

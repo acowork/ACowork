@@ -761,7 +761,7 @@ export function WorkspaceExplorer() {
 
     if (!selectedAgent?.alive) {
         return (
-            <div className="flex flex-1 flex-col items-center justify-center gap-2 bg-right-panel p-6 text-xs text-zinc-500 dark:text-zinc-400">
+            <div className="flex flex-1 flex-col items-center justify-center gap-2 bg-right-panel p-6 text-xs text-text-tertiary ">
                 <FolderOpen className="h-6 w-6" />
                 <span>{t("workspace.explorer.agentNotRunning")}</span>
             </div>
@@ -773,30 +773,45 @@ export function WorkspaceExplorer() {
             {/* Workspace selector + action buttons */}
             <div className="flex items-center gap-0.5 border-b border-zinc-200 px-1.5 py-1.5 dark:border-zinc-800">
                 <WorkspaceSelector dropDirection="down" />
-                <div className="ml-auto flex items-center gap-0.5">
-                    <Tooltip content={t("workspace.newFile")} variant="plain">
-                        <button
-                            onClick={handleNewFile}
-                            className="rounded p-1 text-zinc-400 hover:bg-zinc-100 hover:text-[var(--color-accent)] dark:hover:bg-zinc-800"
-                        >
-                            <FilePlus className="h-3.5 w-3.5" />
-                        </button>
-                    </Tooltip>
-                    <Tooltip content={t("workspace.newFolder")} variant="plain">
-                        <button
-                            onClick={handleNewFolder}
-                            className="rounded p-1 text-zinc-400 hover:bg-zinc-100 hover:text-yellow-600 dark:hover:bg-zinc-800 dark:hover:text-yellow-400"
-                        >
-                            <FolderPlus className="h-3.5 w-3.5" />
-                        </button>
-                    </Tooltip>
-                    <button
-                        onClick={handleRefresh}
-                        className="rounded p-0.5 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-600 dark:hover:bg-zinc-800 dark:hover:text-zinc-300"
-
-                    >
-                        <RefreshCw className="h-3 w-3" />
-                    </button>
+                <div className="ml-auto flex items-center gap-1 pr-1 shrink-0">
+                    {/* Toolbar action buttons. The class string + Tooltip
+                        wrap mirror SessionTabBar's session-history button
+                        (and the git banner's history/refresh buttons) so
+                        the three toolbar strips at the top, right, and
+                        bottom of the workspace panel read as a family.
+                        The previous per-icon accent / yellow hover colors
+                        were dropped here — visual differentiation was
+                        costing family parity for negligible gain. */}
+                    <div className="relative inline-flex">
+                        <Tooltip content={t("workspace.newFile")} variant="plain">
+                            <button
+                                onClick={handleNewFile}
+                                className="inline-flex items-center justify-center rounded h-6 w-6 transition-colors text-text-tertiary hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300"
+                            >
+                                <FilePlus className="h-3.5 w-3.5" />
+                            </button>
+                        </Tooltip>
+                    </div>
+                    <div className="relative inline-flex">
+                        <Tooltip content={t("workspace.newFolder")} variant="plain">
+                            <button
+                                onClick={handleNewFolder}
+                                className="inline-flex items-center justify-center rounded h-6 w-6 transition-colors text-text-tertiary hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300"
+                            >
+                                <FolderPlus className="h-3.5 w-3.5" />
+                            </button>
+                        </Tooltip>
+                    </div>
+                    <div className="relative inline-flex">
+                        <Tooltip content={t("workspace.refresh")} variant="plain">
+                            <button
+                                onClick={handleRefresh}
+                                className="inline-flex items-center justify-center rounded h-6 w-6 transition-colors text-text-tertiary hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300"
+                            >
+                                <RefreshCw className="h-3.5 w-3.5" />
+                            </button>
+                        </Tooltip>
+                    </div>
                 </div>
             </div>
 
@@ -807,7 +822,7 @@ export function WorkspaceExplorer() {
                 selector row visually dwarfs the search row (~40px vs ~28px). */}
             <div className="relative border-b border-zinc-200 dark:border-zinc-800">
                 <div className="flex items-center gap-1.5 px-3 py-1.5 min-h-[2.5rem]">
-                    <Search className="h-3 w-3 shrink-0 text-zinc-400" />
+                    <Search className="h-3 w-3 shrink-0 text-text-tertiary" />
                     <input
                         ref={searchInputRef}
                         type="text"
@@ -817,7 +832,7 @@ export function WorkspaceExplorer() {
                         onBlur={() => setTimeout(() => setSearchFocused(false), 150)}
                         onKeyDown={handleSearchKeyDown}
                         placeholder={t("workspace.explorer.searchPlaceholder")}
-                        className="flex-1 bg-transparent text-xs text-zinc-700 outline-none placeholder:text-zinc-400 dark:text-zinc-400 dark:placeholder:text-zinc-500"
+                        className="flex-1 bg-transparent text-xs text-text-secondary outline-none placeholder:text-text-tertiary  dark:placeholder:text-text-tertiary"
                     />
                     {searchQuery && (
                         <button
@@ -825,7 +840,7 @@ export function WorkspaceExplorer() {
                                 setSearchQuery("");
                                 searchInputRef.current?.focus();
                             }}
-                            className="text-[10px] text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300"
+                            className="text-[10px] text-text-tertiary hover:text-zinc-600 dark:hover:text-zinc-300"
                             title={t("workspace.ariaLabelClearSearch")}
                         >
                             <X className="h-3 w-3" />
@@ -837,7 +852,7 @@ export function WorkspaceExplorer() {
                 {showDropdown && (
                     <div className="absolute left-0 right-0 top-full z-50 mt-1 rounded-lg border border-zinc-200 bg-modal-surface shadow-lg dark:border-zinc-700">
                         {/* Header with count */}
-                        <div className="flex items-center justify-between border-b border-zinc-200 px-3 py-1.5 text-[11px] text-zinc-500 dark:border-zinc-700 dark:text-zinc-400">
+                        <div className="flex items-center justify-between border-b border-zinc-200 px-3 py-1.5 text-[11px] text-text-tertiary dark:border-zinc-700 ">
                             {searchLoading ? (
                                 <span>Searching…</span>
                             ) : matchingFiles.length > 0 ? (
@@ -850,7 +865,7 @@ export function WorkspaceExplorer() {
                         {/* Items */}
                         <div className="max-h-80 overflow-y-auto py-1">
                             {matchingFiles.length === 0 ? (
-                                <div className="px-3 py-4 text-center text-xs text-zinc-400 dark:text-zinc-500">
+                                <div className="px-3 py-4 text-center text-xs text-text-tertiary ">
                                     {searchLoading ? "Searching workspace…" : "No matching files"}
                                 </div>
                             ) : (
@@ -865,17 +880,17 @@ export function WorkspaceExplorer() {
                                             className={cn(
                                                 "group flex items-center gap-2 px-3 py-1.5 transition-colors cursor-pointer",
                                                 focused
-                                                    ? "bg-[var(--color-accent)]/10 text-zinc-900 dark:text-zinc-100"
+                                                    ? "bg-[var(--color-accent)]/10 text-text "
                                                     : "hover:bg-zinc-50 dark:hover:bg-zinc-700/50",
                                             )}
                                         >
                                             <div className="h-3.5 w-3.5 shrink-0 flex items-center justify-center">
                                                 <SetiIcon {...getFileIcon(f.name)} size={14} />
                                             </div>
-                                            <span className="shrink-0 text-xs text-zinc-700 dark:text-zinc-300">
+                                            <span className="shrink-0 text-xs text-text-secondary ">
                                                 {f.name}
                                             </span>
-                                            <span className="min-w-0 truncate text-[10px] text-zinc-400 dark:text-zinc-500 ml-3">
+                                            <span className="min-w-0 truncate text-[10px] text-text-tertiary  ml-3">
                                                 {abbreviatePath(f.dir)}
                                             </span>
                                         </div>

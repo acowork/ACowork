@@ -74,7 +74,7 @@ use std::sync::Arc;
 use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, Path, Query, State},
-    http::{header, StatusCode},
+    http::{StatusCode, header},
     response::IntoResponse,
     routing::{get, post, put},
 };
@@ -126,7 +126,8 @@ const GLOBAL_BODY_LIMIT: usize = 64 * 1024 * 1024;
 /// Cloned from the main MQTT dispatch channel. Runtime HTTP handlers
 /// use this to send (session_id, InboundMessage) tuples that are
 /// forwarded to the right session's AgentLoop via `send_inbound()`.
-pub type SharedDispatchSender = Arc<tokio::sync::Mutex<Option<mpsc::UnboundedSender<(String, InboundMessage)>>>>;
+pub type SharedDispatchSender =
+    Arc<tokio::sync::Mutex<Option<mpsc::UnboundedSender<(String, InboundMessage)>>>>;
 
 /// Shared handle to the Runtime's memory admin service.
 ///
@@ -137,15 +138,18 @@ pub type SharedDispatchSender = Arc<tokio::sync::Mutex<Option<mpsc::UnboundedSen
 /// ADR-051 P4: type changed from `Arc<GrafeoStore>` to
 /// `Arc<dyn MemoryAdminService>` so the Runtime does not depend on
 /// the concrete grafeo type for HTTP admin endpoints.
-pub type SharedMemoryStore = Arc<std::sync::RwLock<Option<Arc<dyn acowork_memory::admin::MemoryAdminService>>>>;
+pub type SharedMemoryStore =
+    Arc<std::sync::RwLock<Option<Arc<dyn acowork_memory::admin::MemoryAdminService>>>>;
 
 /// Shared slot for the consolidation timer (late-bind from AgentCore).
 /// Used by `GET /memory/consolidation/status` to report idle time, pending count.
-pub type SharedConsolidationTimer = Arc<std::sync::RwLock<Option<Arc<crate::memory::ConsolidationTimer>>>>;
+pub type SharedConsolidationTimer =
+    Arc<std::sync::RwLock<Option<Arc<crate::memory::ConsolidationTimer>>>>;
 
 /// Shared slot for the RAG provider (late-bind from AgentCore).
 /// Used by `GET /agents/{id}/rag/status` and `POST /agents/{id}/rag/query`.
-pub type SharedRagProvider = Arc<std::sync::RwLock<Option<Arc<dyn acowork_core::rag::RagProvider>>>>;
+pub type SharedRagProvider =
+    Arc<std::sync::RwLock<Option<Arc<dyn acowork_core::rag::RagProvider>>>>;
 
 /// Shared handle to the Runtime's `AgentCore`.
 ///
@@ -197,8 +201,9 @@ pub type SharedMqttClientSlot = Arc<tokio::sync::Mutex<Option<SharedRuntimeMqttC
 /// the slot to clone the inner `Arc<Mutex<SessionManager>>`; the
 /// exclusive write happens once at Phase B and never changes again.
 /// An `RwLock` keeps the read path lock-free.
-pub type SharedSessionManagerSlot =
-    Arc<tokio::sync::RwLock<Option<Arc<tokio::sync::Mutex<crate::agent::session::SessionManager>>>>>;
+pub type SharedSessionManagerSlot = Arc<
+    tokio::sync::RwLock<Option<Arc<tokio::sync::Mutex<crate::agent::session::SessionManager>>>>,
+>;
 
 /// State shared with HTTP handlers.
 #[derive(Clone)]
@@ -272,10 +277,23 @@ pub(crate) struct HttpState {
     /// ADR-040: late-bind usecase services. Populated by Phase B.
     /// All handlers depend solely on these traits; no direct access
     /// to memory_store or agent_core is required.
-    session_metadata: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionMetadataService>>>>,
+    session_metadata:
+        Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionMetadataService>>>>,
     memory_query: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::MemoryQueryService>>>>,
-    workspace_query: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::WorkspaceQueryService>>>>,
-    workspace_mutation: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::WorkspaceMutationService>>>>,
+    /// Live state of a background `/memory/rebuild-embeddings` run.
+    ///
+    /// The rebuild is started as a detached task (the HTTP handler
+    /// returns immediately with `{"status":"started"}`) and progress is
+    /// read back via `GET /memory/rebuild-progress`. Keeping the slot
+    /// here (not as a constructor argument) means the many test
+    /// construction sites of `HttpState` are untouched. `std::sync::Mutex`
+    /// (not tokio) because the progress callback fires from the
+    /// `spawn_blocking` migration thread — a sync context.
+    rebuild_progress: Arc<std::sync::Mutex<Option<RebuildProgress>>>,
+    workspace_query:
+        Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::WorkspaceQueryService>>>>,
+    workspace_mutation:
+        Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::WorkspaceMutationService>>>>,
     /// ADR-078: Late-bind slot for the git query service (read-only
     /// `/git/status` `/git/diff` `/git/log`). Git execution happens in
     /// the Runtime (the workspace owner, ADR-009 v2) — the Gateway only
@@ -313,7 +331,8 @@ pub(crate) struct HttpState {
     /// `None` until then; HTTP handlers return 503 with a descriptive
     /// message when this slot is still empty (same pattern as every
     /// other ADR-040 use-case slot).
-    pub(crate) debug_service: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::DebugService>>>>,
+    pub(crate) debug_service:
+        Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::DebugService>>>>,
     /// Shared `WorkspaceResolver` — the **same** `Arc` injected into
     /// `SessionManager` at Phase B (see `startup/context.rs` +
     /// `session_init.rs`). The workspace-mutation handlers reload it
@@ -419,15 +438,23 @@ impl RuntimeHttpServer {
         embed_provider_dim: SharedEmbedDimension,
         degraded_reasons: SharedDegradation,
         mqtt_client: SharedMqttClientSlot,
-        session_metadata: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionMetadataService>>>>,
+        session_metadata: Arc<
+            tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionMetadataService>>>,
+        >,
         memory_query: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::MemoryQueryService>>>>,
-        workspace_query: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::WorkspaceQueryService>>>>,
-        workspace_mutation: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::WorkspaceMutationService>>>>,
+        workspace_query: Arc<
+            tokio::sync::Mutex<Option<Arc<dyn crate::usecases::WorkspaceQueryService>>>,
+        >,
+        workspace_mutation: Arc<
+            tokio::sync::Mutex<Option<Arc<dyn crate::usecases::WorkspaceMutationService>>>,
+        >,
         git_query: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::GitQueryService>>>>,
         agent_tools: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AgentToolsService>>>>,
         agent_config: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AgentConfigService>>>>,
         attachment: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AttachmentService>>>>,
-        session_config: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionConfigService>>>>,
+        session_config: Arc<
+            tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionConfigService>>>,
+        >,
         consolidation_timer: SharedConsolidationTimer,
         rag_provider: SharedRagProvider,
         debug_service: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::DebugService>>>>,
@@ -491,15 +518,23 @@ impl RuntimeHttpServer {
         embed_provider_dim: SharedEmbedDimension,
         degraded_reasons: SharedDegradation,
         mqtt_client: SharedMqttClientSlot,
-        session_metadata: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionMetadataService>>>>,
+        session_metadata: Arc<
+            tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionMetadataService>>>,
+        >,
         memory_query: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::MemoryQueryService>>>>,
-        workspace_query: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::WorkspaceQueryService>>>>,
-        workspace_mutation: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::WorkspaceMutationService>>>>,
+        workspace_query: Arc<
+            tokio::sync::Mutex<Option<Arc<dyn crate::usecases::WorkspaceQueryService>>>,
+        >,
+        workspace_mutation: Arc<
+            tokio::sync::Mutex<Option<Arc<dyn crate::usecases::WorkspaceMutationService>>>,
+        >,
         git_query: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::GitQueryService>>>>,
         agent_tools: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AgentToolsService>>>>,
         agent_config: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AgentConfigService>>>>,
         attachment: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AttachmentService>>>>,
-        session_config: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionConfigService>>>>,
+        session_config: Arc<
+            tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionConfigService>>>,
+        >,
         consolidation_timer: SharedConsolidationTimer,
         rag_provider: SharedRagProvider,
         debug_service: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::DebugService>>>>,
@@ -514,10 +549,7 @@ impl RuntimeHttpServer {
         // touch workspace events simply ignore the field.
         let workspace_watchers: crate::workspace::SharedWorkspaceWatcherSet =
             Arc::new(tokio::sync::Mutex::new(
-                crate::workspace::WorkspaceWatcherSet::new(
-                    agent_id.clone(),
-                    mqtt_client.clone(),
-                ),
+                crate::workspace::WorkspaceWatcherSet::new(agent_id.clone(), mqtt_client.clone()),
             ));
         // ADR-069 follow-up: one shared notifier for HTTP handlers +
         // builtin MCP tools + gateway loop. Created here (rather than
@@ -527,8 +559,8 @@ impl RuntimeHttpServer {
         // and boot context.
         let mcp_notifier: crate::mcp_notify::McpNotifyRef =
             Some(Arc::new(crate::mcp_notify::McpConfigNotifier::default()));
-        let shell_risk_rules = crate::security::shell_risk::ShellRiskRules::load(&work_dir)
-            .unwrap_or_default();
+        let shell_risk_rules =
+            crate::security::shell_risk::ShellRiskRules::load(&work_dir).unwrap_or_default();
         let state = HttpState {
             work_dir,
             package_dir,
@@ -543,6 +575,7 @@ impl RuntimeHttpServer {
             mqtt_client,
             session_metadata,
             memory_query,
+            rebuild_progress: Arc::new(std::sync::Mutex::new(None)),
             workspace_query,
             workspace_mutation,
             git_query,
@@ -607,6 +640,7 @@ impl RuntimeHttpServer {
             .route("/memory/stats", get(get_memory_stats))
             .route("/memory/distill", post(post_memory_distill))
             .route("/memory/rebuild-embeddings", post(rebuild_embeddings))
+            .route("/memory/rebuild-progress", get(rebuild_progress))
             .layer(DefaultBodyLimit::max(GLOBAL_BODY_LIMIT))
             // NOTE: the legacy `GET /files/{id}` handler was removed as part
             // of the ADR-040 / ADR-009 v2 workspace consolidation. Workspace
@@ -629,22 +663,21 @@ impl RuntimeHttpServer {
             // replace semantics — the Runtime diffs against its current
             // set and watches each target NonRecursive. Empty set → no
             // scanning at all.
-            .route(
-                "/workspaces/{ws_id}/fs-watch",
-                put(set_workspace_fs_watch),
-            )
+            .route("/workspaces/{ws_id}/fs-watch", put(set_workspace_fs_watch))
             .route("/workspaces/tree", get(list_tree))
             .route("/workspaces/find", get(find_files))
             .route("/workspaces/search", get(search_files))
-            // ADR-078: read-only git endpoints for the Desktop Git Status
-            // Bar. Git executes in the Runtime (workspace owner, ADR-009
-            // v2) via the system git CLI with `GIT_OPTIONAL_LOCKS=0` —
-            // the Gateway reverse-proxies `/api/agents/{id}/git/*` here
-            // and never touches the filesystem. All three handlers are
-            // thin protocol converters over the GitQueryService trait.
+            // ADR-078: git endpoints for the Desktop Git Status Bar. Git
+            // executes in the Runtime (workspace owner, ADR-009 v2) via
+            // the system git CLI — the Gateway reverse-proxies
+            // `/api/agents/{id}/git/*` here and never touches the
+            // filesystem. All handlers are thin protocol converters over
+            // the GitQueryService trait. `/git/revert` is the single
+            // deliberate WRITE (discard uncommitted changes).
             .route("/git/status", get(git_status))
             .route("/git/diff", get(git_diff))
             .route("/git/log", get(git_log))
+            .route("/git/revert", post(git_revert))
             // 2 NEW workspace file/dir resources, REST-style (ADR-034 §11.2 #6-9).
             // One path per resource; HTTP method dispatches the operation:
             //   GET    /workspaces/file — read  → JSON {content,size,mimeType}
@@ -667,10 +700,7 @@ impl RuntimeHttpServer {
             // iframe (the Gateway reverse-proxies `/workspace-files/…`
             // here). Serves verbatim bytes + Content-Type — unlike the
             // JSON envelope above.
-            .route(
-                "/workspaces/raw/{*path}",
-                get(read_workspace_raw),
-            )
+            .route("/workspaces/raw/{*path}", get(read_workspace_raw))
             .route(
                 "/workspaces/dir",
                 post(create_workspace_dir).delete(delete_workspace_dir),
@@ -682,14 +712,8 @@ impl RuntimeHttpServer {
             // field). The runtime owns the workspace config on disk
             // (`<work_dir>/config/agent_workspaces.json`) so resolution
             // works for every workspace ID, including the agent home.
-            .route(
-                "/workspaces/copy",
-                post(copy_workspace_item),
-            )
-            .route(
-                "/workspaces/rename",
-                post(rename_workspace_item),
-            )
+            .route("/workspaces/copy", post(copy_workspace_item))
+            .route("/workspaces/rename", post(rename_workspace_item))
             // ADR-040 follow-up: agent panel endpoints now route
             // through UseCase traits (AgentConfigService +
             // AgentToolsService). Each handler is a thin protocol
@@ -746,14 +770,14 @@ impl RuntimeHttpServer {
             // acowork/global/providers retained update). The Gateway
             // proxies GET /api/agents/{id}/providers here so the
             // frontend can verify what the Runtime actually has.
-            .route(
-                "/agents/{id}/providers",
-                get(get_agent_providers),
-            )
+            .route("/agents/{id}/providers", get(get_agent_providers))
             // N1: Consolidation status - reports timer idle, pending count.
             // N2: RAG status - reports whether RAG is configured.
             // N3: RAG query - direct query bypassing LLM (for debugging).
-            .route("/memory/consolidation/status", get(get_consolidation_status))
+            .route(
+                "/memory/consolidation/status",
+                get(get_consolidation_status),
+            )
             .route("/agents/{id}/rag/status", get(get_rag_status))
             .route("/agents/{id}/rag/query", post(post_rag_query))
             // Shell risk rules — read effective content or write user override.
@@ -810,9 +834,9 @@ impl RuntimeHttpServer {
             .await
             .map_err(|e| RuntimeHttpServerError::Bind(format!("Failed to bind: {}", e)))?;
 
-        let listen_addr = listener
-            .local_addr()
-            .map_err(|e| RuntimeHttpServerError::Bind(format!("Failed to get local addr: {}", e)))?;
+        let listen_addr = listener.local_addr().map_err(|e| {
+            RuntimeHttpServerError::Bind(format!("Failed to get local addr: {}", e))
+        })?;
 
         let port = listen_addr.port();
 
@@ -848,7 +872,11 @@ struct HealthResponse {
 }
 
 async fn health(State(state): State<HttpState>) -> Json<HealthResponse> {
-    let degraded = state.degraded_reasons.read().unwrap_or_else(|e| e.into_inner()).clone();
+    let degraded = state
+        .degraded_reasons
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
     Json(HealthResponse {
         status: "ok",
         agent_id: state.agent_id,
@@ -906,8 +934,13 @@ async fn list_sessions(
 /// file-system scanning. Returns 404 if no session has been created yet.
 ///
 /// This is the backend for `GET /api/agents/{id}/latest-session` via Gateway proxy.
-async fn get_latest_session(State(state): State<HttpState>) -> Result<Json<serde_json::Value>, StatusCode> {
-    let latest = state.latest_session.read().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+async fn get_latest_session(
+    State(state): State<HttpState>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let latest = state
+        .latest_session
+        .read()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     match *latest {
         Some((ref session_id, ref title)) => Ok(Json(serde_json::json!({
             "session_id": session_id,
@@ -1183,7 +1216,10 @@ async fn get_memory_node(
     // ADR-040: usecase trait is the sole implementation path.
     let svc = state.memory_query.lock().await;
     let svc = svc.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    let val = svc.get_node(node_id).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let val = svc
+        .get_node(node_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(val))
 }
 
@@ -1200,7 +1236,10 @@ async fn get_memory_stats(
     // ADR-040: usecase trait is the sole implementation path.
     let svc = state.memory_query.lock().await;
     let svc = svc.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    let stats = svc.get_stats().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let stats = svc
+        .get_stats()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(
         serde_json::to_value(&stats).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
     ))
@@ -1216,8 +1255,12 @@ async fn delete_memory_node(
     // ADR-040: usecase trait is the sole implementation path.
     let svc = state.memory_query.lock().await;
     let svc = svc.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    svc.delete_node(node_id).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(Json(serde_json::json!({"deleted": true, "node_id": node_id})))
+    svc.delete_node(node_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(
+        serde_json::json!({"deleted": true, "node_id": node_id}),
+    ))
 }
 
 /// Request body for `POST /memory/nodes`.
@@ -1322,55 +1365,140 @@ struct RebuildEmbeddingsBody {
     dimension: usize,
 }
 
-/// `POST /memory/rebuild-embeddings` — re-embed all nodes with a new model.
+/// Live progress of a background `/memory/rebuild-embeddings` run.
+///
+/// Serialized verbatim by `GET /memory/rebuild-progress` so the Gateway
+/// can poll and forward `rebuilt/total` to the UI.
+#[derive(Debug, Clone, Serialize)]
+struct RebuildProgress {
+    rebuilt: u64,
+    total: u64,
+    /// `true` once the background task has finished (success or error).
+    done: bool,
+    /// Set when the run fails; `None` while running or on success.
+    error: Option<String>,
+}
+
+/// `POST /memory/rebuild-embeddings` — start a background re-embed and
+/// return immediately (`202`).
+///
+/// The rebuild may take minutes on a large store; the client polls
+/// `GET /memory/rebuild-progress` for `rebuilt/total` instead of holding
+/// the connection open (a single synchronous call would trip the
+/// Gateway's 30s proxy timeout and give the UI a bogus failure).
 async fn rebuild_embeddings(
     State(state): State<HttpState>,
     Json(body): Json<RebuildEmbeddingsBody>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
+) -> Result<(StatusCode, Json<serde_json::Value>), StatusCode> {
     tracing::info!(
         target: "migration_diag",
         endpoint = %body.endpoint,
         model_id = %body.model_id,
         dimension = body.dimension,
-        "rebuild_embeddings: received request"
+        "rebuild_embeddings: received start request"
     );
 
     // ADR-040: usecase trait is the sole implementation path.
-    let svc = state.memory_query.lock().await;
-    if svc.is_none() {
+    let svc = {
+        let guard = state.memory_query.lock().await;
+        guard.clone()
+    };
+    let Some(svc) = svc else {
         tracing::warn!(
             target: "migration_diag",
             "rebuild_embeddings: memory_query service not ready, returning 503"
         );
         return Err(StatusCode::SERVICE_UNAVAILABLE);
-    }
-    let svc = svc.as_ref().unwrap();
-    tracing::info!(
-        target: "migration_diag",
-        "rebuild_embeddings: invoking memory_query.rebuild_embeddings"
-    );
-    let report = svc
-        .rebuild_embeddings(&body.endpoint, &body.model_id, body.dimension)
-        .await
-        .map_err(|e| {
-            tracing::warn!(
-                target: "migration_diag",
-                error = %e,
-                "rebuild_embeddings: memory_query.rebuild_embeddings failed"
-            );
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-    tracing::info!(
-        target: "migration_diag",
-        total_scanned = report.total_scanned,
-        rebuilt = report.rebuilt,
-        skipped_no_embedding = report.skipped_no_embedding,
-        errors = report.errors,
-        "rebuild_embeddings: completed"
-    );
-    Ok(Json(
-        serde_json::to_value(report).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+    };
+
+    // Mark the slot as running so GET /memory/rebuild-progress returns a
+    // live (0/total) answer even before the first progress callback fires.
+    *state
+        .rebuild_progress
+        .lock()
+        .expect("rebuild progress mutex poisoned") = Some(RebuildProgress {
+        rebuilt: 0,
+        total: 0,
+        done: false,
+        error: None,
+    });
+
+    // Detached task: hold the service Arc and a clone of the shared state,
+    // write progress from the migration's blocking thread, flip `done`
+    // when finished. The HTTP handler returns before the work starts.
+    let state_for_task = state.clone();
+    // Clone the progress slot once; the `move` closure below consumes this
+    // clone while the outer task still needs it to write the final state.
+    let progress_slot = state_for_task.rebuild_progress.clone();
+    let endpoint = body.endpoint.clone();
+    let model_id = body.model_id.clone();
+    let dimension = body.dimension;
+    tokio::spawn(async move {
+        let progress: Arc<dyn Fn(u64, u64) + Send + Sync> = Arc::new(move |rebuilt, total| {
+            *progress_slot
+                .lock()
+                .expect("rebuild progress mutex poisoned") = Some(RebuildProgress {
+                rebuilt,
+                total,
+                done: false,
+                error: None,
+            });
+        });
+        let report = svc
+            .rebuild_embeddings_with_progress(&endpoint, &model_id, dimension, Some(progress))
+            .await;
+        let (rebuilt, total, error) = match report {
+            Ok(r) => {
+                tracing::info!(
+                    target: "migration_diag",
+                    total_scanned = r.total_scanned,
+                    rebuilt = r.rebuilt,
+                    skipped_no_embedding = r.skipped_no_embedding,
+                    errors = r.errors,
+                    "rebuild_embeddings: completed"
+                );
+                (r.rebuilt, r.total_scanned, None)
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                tracing::warn!(
+                    target: "migration_diag",
+                    error = %msg,
+                    "rebuild_embeddings: background task failed"
+                );
+                (0, 0, Some(msg))
+            }
+        };
+        *state_for_task
+            .rebuild_progress
+            .lock()
+            .expect("rebuild progress mutex poisoned") = Some(RebuildProgress {
+            rebuilt,
+            total,
+            done: true,
+            error,
+        });
+    });
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({"status": "started"})),
     ))
+}
+
+/// `GET /memory/rebuild-progress` — current state of the background
+/// rebuild started by `POST /memory/rebuild-embeddings`.
+async fn rebuild_progress(
+    State(state): State<HttpState>,
+) -> Result<Json<RebuildProgress>, StatusCode> {
+    let slot = state
+        .rebuild_progress
+        .lock()
+        .expect("rebuild progress mutex poisoned");
+    match slot.as_ref() {
+        Some(p) => Ok(Json(p.clone())),
+        None => Err(StatusCode::NOT_FOUND),
+    }
 }
 
 // ── Session detail (ADR-034 §11.2 #4 — panel 4) ──────────────
@@ -1437,11 +1565,15 @@ async fn get_session(
 /// `agent_workspaces.json`. Returns `{ agent_id, workspaces: [...] }`.
 async fn list_workspaces(
     State(state): State<HttpState>,
-) -> Result<Json<crate::usecases::workspace_query::WorkspacesListResponse>, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<
+    Json<crate::usecases::workspace_query::WorkspacesListResponse>,
+    (StatusCode, Json<serde_json::Value>),
+> {
     let svc = state.workspace_query.lock().await;
-    let svc = svc
-        .as_ref()
-        .ok_or((StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "workspace service not ready"}))))?;
+    let svc = svc.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({"error": "workspace service not ready"})),
+    ))?;
     svc.list_workspaces()
         .await
         .map(Json)
@@ -1452,11 +1584,15 @@ async fn list_workspaces(
 async fn list_tree(
     State(state): State<HttpState>,
     Query(params): Query<crate::usecases::workspace_query::ListTreeParams>,
-) -> Result<Json<crate::usecases::workspace_query::TreeResponse>, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<
+    Json<crate::usecases::workspace_query::TreeResponse>,
+    (StatusCode, Json<serde_json::Value>),
+> {
     let svc = state.workspace_query.lock().await;
-    let svc = svc
-        .as_ref()
-        .ok_or((StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "workspace service not ready"}))))?;
+    let svc = svc.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({"error": "workspace service not ready"})),
+    ))?;
     svc.list_tree(&params)
         .await
         .map(Json)
@@ -1467,11 +1603,15 @@ async fn list_tree(
 async fn read_workspace_file(
     State(state): State<HttpState>,
     Query(params): Query<crate::usecases::workspace_query::FilePathQuery>,
-) -> Result<Json<crate::usecases::workspace_query::WorkspaceFileDto>, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<
+    Json<crate::usecases::workspace_query::WorkspaceFileDto>,
+    (StatusCode, Json<serde_json::Value>),
+> {
     let svc = state.workspace_query.lock().await;
-    let svc = svc
-        .as_ref()
-        .ok_or((StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "workspace service not ready"}))))?;
+    let svc = svc.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({"error": "workspace service not ready"})),
+    ))?;
     let read_params: crate::usecases::workspace_query::ReadFileParams = (&params).into();
     svc.read_file(&read_params)
         .await
@@ -1490,9 +1630,10 @@ async fn read_workspace_raw(
     Query(q): Query<crate::usecases::workspace_query::RawFileQuery>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
     let svc = state.workspace_query.lock().await;
-    let svc = svc
-        .as_ref()
-        .ok_or((StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "workspace service not ready"}))))?;
+    let svc = svc.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({"error": "workspace service not ready"})),
+    ))?;
     let params = crate::usecases::workspace_query::ReadFileParams {
         workspace_id: q.workspace_id,
         path: file_rel_path,
@@ -1512,11 +1653,15 @@ async fn read_workspace_raw(
 async fn find_files(
     State(state): State<HttpState>,
     Query(params): Query<crate::usecases::workspace_query::FindFilesParams>,
-) -> Result<Json<crate::usecases::workspace_query::FindResponse>, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<
+    Json<crate::usecases::workspace_query::FindResponse>,
+    (StatusCode, Json<serde_json::Value>),
+> {
     let svc = state.workspace_query.lock().await;
-    let svc = svc
-        .as_ref()
-        .ok_or((StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "workspace service not ready"}))))?;
+    let svc = svc.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({"error": "workspace service not ready"})),
+    ))?;
     svc.find_files(&params)
         .await
         .map(Json)
@@ -1527,11 +1672,15 @@ async fn find_files(
 async fn search_files(
     State(state): State<HttpState>,
     Query(params): Query<crate::usecases::workspace_query::SearchFilesParams>,
-) -> Result<Json<crate::usecases::workspace_query::SearchResponse>, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<
+    Json<crate::usecases::workspace_query::SearchResponse>,
+    (StatusCode, Json<serde_json::Value>),
+> {
     let svc = state.workspace_query.lock().await;
-    let svc = svc
-        .as_ref()
-        .ok_or((StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "workspace service not ready"}))))?;
+    let svc = svc.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({"error": "workspace service not ready"})),
+    ))?;
     svc.search_files(&params)
         .await
         .map(Json)
@@ -1540,12 +1689,13 @@ async fn search_files(
 
 // ── Git Query Handlers (ADR-078) ───────────────────────────────────────────
 //
-// Read-only git operations for the Desktop Git Status Bar. All three
-// handlers route through the `GitQueryService` UseCase trait (ADR-040)
-// — the Runtime executes git with `GIT_OPTIONAL_LOCKS=0` so the
-// endpoints are strictly read-only (ADR-078 §1.3 invariant 1). The
-// Gateway reverse-proxies `/api/agents/{id}/git/*` to these routes and
-// never touches the filesystem (ADR-009 / ADR-055 red line).
+// Git operations for the Desktop Git Status Bar. All handlers route
+// through the `GitQueryService` UseCase trait (ADR-040) — the Runtime
+// executes read commands with `GIT_OPTIONAL_LOCKS=0` (strictly
+// read-only, ADR-078 §1.3 invariant 1); `/git/revert` is the single
+// user-requested write (discard uncommitted changes). The Gateway
+// reverse-proxies `/api/agents/{id}/git/*` to these routes and never
+// touches the filesystem (ADR-009 / ADR-055 red line).
 //
 // Pre-Phase-B HTTP probes receive 503 from the slot-first pattern,
 // matching every other `*Service` handler in this crate.
@@ -1553,8 +1703,7 @@ async fn search_files(
 /// Convert a [`GitError`] into the `(status, json)` tuple used by every
 /// git handler. Mirrors `workspace_error_to_response`.
 fn git_error_to_response(e: crate::usecases::GitError) -> (StatusCode, Json<serde_json::Value>) {
-    let status = StatusCode::from_u16(e.http_status())
-        .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    let status = StatusCode::from_u16(e.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     (status, Json(serde_json::json!({"error": e.to_string()})))
 }
 
@@ -1564,11 +1713,15 @@ fn git_error_to_response(e: crate::usecases::GitError) -> (StatusCode, Json<serd
 async fn git_status(
     State(state): State<HttpState>,
     Query(params): Query<crate::usecases::git_query::GitStatusParams>,
-) -> Result<Json<crate::usecases::git_query::GitStatusResponse>, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<
+    Json<crate::usecases::git_query::GitStatusResponse>,
+    (StatusCode, Json<serde_json::Value>),
+> {
     let svc = state.git_query.lock().await;
-    let svc = svc
-        .as_ref()
-        .ok_or((StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "git service not ready"}))))?;
+    let svc = svc.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({"error": "git service not ready"})),
+    ))?;
     svc.status(&params)
         .await
         .map(Json)
@@ -1580,11 +1733,13 @@ async fn git_status(
 async fn git_diff(
     State(state): State<HttpState>,
     Query(params): Query<crate::usecases::git_query::GitDiffParams>,
-) -> Result<Json<crate::usecases::git_query::GitDiffResponse>, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<Json<crate::usecases::git_query::GitDiffResponse>, (StatusCode, Json<serde_json::Value>)>
+{
     let svc = state.git_query.lock().await;
-    let svc = svc
-        .as_ref()
-        .ok_or((StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "git service not ready"}))))?;
+    let svc = svc.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({"error": "git service not ready"})),
+    ))?;
     svc.diff(&params)
         .await
         .map(Json)
@@ -1596,12 +1751,34 @@ async fn git_diff(
 async fn git_log(
     State(state): State<HttpState>,
     Query(params): Query<crate::usecases::git_query::GitLogParams>,
-) -> Result<Json<crate::usecases::git_query::GitLogResponse>, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<Json<crate::usecases::git_query::GitLogResponse>, (StatusCode, Json<serde_json::Value>)>
+{
     let svc = state.git_query.lock().await;
-    let svc = svc
-        .as_ref()
-        .ok_or((StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "git service not ready"}))))?;
+    let svc = svc.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({"error": "git service not ready"})),
+    ))?;
     svc.log(&params)
+        .await
+        .map(Json)
+        .map_err(git_error_to_response)
+}
+
+/// `POST /git/revert` — discard uncommitted changes of one path
+/// (restore to HEAD; untracked files are deleted). The only write
+/// endpoint in the git API family — the Desktop surfaces it behind a
+/// destructive confirm dialog.
+async fn git_revert(
+    State(state): State<HttpState>,
+    Json(body): Json<crate::usecases::git_query::GitRevertParams>,
+) -> Result<Json<crate::usecases::git_query::GitRevertResponse>, (StatusCode, Json<serde_json::Value>)>
+{
+    let svc = state.git_query.lock().await;
+    let svc = svc.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({"error": "git service not ready"})),
+    ))?;
+    svc.revert(&body)
         .await
         .map(Json)
         .map_err(git_error_to_response)
@@ -1616,9 +1793,10 @@ async fn create_workspace(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let result = {
         let svc = state.workspace_mutation.lock().await;
-        let svc = svc
-            .as_ref()
-            .ok_or((StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "workspace service not ready"}))))?;
+        let svc = svc.as_ref().ok_or((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "workspace service not ready"})),
+        ))?;
         svc.create_workspace(body).await
     };
     match result {
@@ -1666,7 +1844,9 @@ async fn create_workspace(
                     }
                 }
             }
-            Ok(Json(r.entry.unwrap_or(serde_json::json!({"created": r.ok}))))
+            Ok(Json(
+                r.entry.unwrap_or(serde_json::json!({"created": r.ok})),
+            ))
         }
         Err(e) => Err(workspace_error_to_response(e)),
     }
@@ -1688,9 +1868,8 @@ fn reload_workspace_resolver(state: &HttpState) {
             return;
         }
     };
-    *guard = crate::tools::workspace_resolver::WorkspaceResolver::new(
-        &state.work_dir.to_string_lossy(),
-    );
+    *guard =
+        crate::tools::workspace_resolver::WorkspaceResolver::new(&state.work_dir.to_string_lossy());
     tracing::info!(
         work_dir = %state.work_dir.display(),
         allowed = guard.allowed_dirs().len(),
@@ -1724,9 +1903,10 @@ async fn update_workspace(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let result = {
         let svc = state.workspace_mutation.lock().await;
-        let svc = svc
-            .as_ref()
-            .ok_or((StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "workspace service not ready"}))))?;
+        let svc = svc.as_ref().ok_or((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "workspace service not ready"})),
+        ))?;
         svc.update_workspace(&ws_id, body).await
     };
     match result {
@@ -1736,7 +1916,9 @@ async fn update_workspace(
             reload_workspace_resolver(&state);
             // ADR-058: a path change restarts the watcher for this id.
             sync_workspace_watchers(&state).await;
-            Ok(Json(r.entry.unwrap_or(serde_json::json!({"updated": r.ok}))))
+            Ok(Json(
+                r.entry.unwrap_or(serde_json::json!({"updated": r.ok})),
+            ))
         }
         Err(e) => Err(workspace_error_to_response(e)),
     }
@@ -1750,9 +1932,10 @@ async fn set_workspace_prompt_file(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let result = {
         let svc = state.workspace_mutation.lock().await;
-        let svc = svc
-            .as_ref()
-            .ok_or((StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "workspace service not ready"}))))?;
+        let svc = svc.as_ref().ok_or((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "workspace service not ready"})),
+        ))?;
         svc.set_prompt_file(&ws_id, body).await
     };
     match result {
@@ -1848,7 +2031,6 @@ async fn set_workspace_fs_watch(
     Ok(Json(serde_json::json!({"ok": true, "ws_id": ws_id})))
 }
 
-
 /// `DELETE /workspaces/{ws_id}` — remove a workspace entry.
 async fn delete_workspace(
     State(state): State<HttpState>,
@@ -1856,9 +2038,10 @@ async fn delete_workspace(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let result = {
         let svc = state.workspace_mutation.lock().await;
-        let svc = svc
-            .as_ref()
-            .ok_or((StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "workspace service not ready"}))))?;
+        let svc = svc.as_ref().ok_or((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "workspace service not ready"})),
+        ))?;
         svc.delete_workspace(&ws_id).await
     };
     match result {
@@ -1881,9 +2064,10 @@ async fn create_workspace_file(
     Json(body): Json<crate::usecases::workspace_mutation::CreateFileBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let svc = state.workspace_mutation.lock().await;
-    let svc = svc
-        .as_ref()
-        .ok_or((StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "workspace service not ready"}))))?;
+    let svc = svc.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({"error": "workspace service not ready"})),
+    ))?;
     svc.create_file(
         body,
         qparams.get("workspace_id").map(|s| s.as_str()),
@@ -1901,9 +2085,10 @@ async fn write_workspace_file(
     Json(body): Json<crate::usecases::workspace_mutation::WriteFileBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let svc = state.workspace_mutation.lock().await;
-    let svc = svc
-        .as_ref()
-        .ok_or((StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "workspace service not ready"}))))?;
+    let svc = svc.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({"error": "workspace service not ready"})),
+    ))?;
     let mutation_query = crate::usecases::workspace_mutation::FilePathQuery {
         workspace_id: params.workspace_id.clone(),
         path: params.path.clone(),
@@ -1921,16 +2106,14 @@ async fn delete_workspace_file(
     Json(body): Json<crate::usecases::workspace_mutation::PathOnlyBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let svc = state.workspace_mutation.lock().await;
-    let svc = svc
-        .as_ref()
-        .ok_or((StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "workspace service not ready"}))))?;
-    svc.delete_file(
-        qparams.get("workspace_id").map(|s| s.as_str()),
-        body,
-    )
-    .await
-    .map(|r| Json(r.entry.unwrap_or(serde_json::json!({"deleted": r.ok}))))
-    .map_err(workspace_error_to_response)
+    let svc = svc.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({"error": "workspace service not ready"})),
+    ))?;
+    svc.delete_file(qparams.get("workspace_id").map(|s| s.as_str()), body)
+        .await
+        .map(|r| Json(r.entry.unwrap_or(serde_json::json!({"deleted": r.ok}))))
+        .map_err(workspace_error_to_response)
 }
 
 /// `POST /workspaces/dir` — create a directory (recursive).
@@ -1940,16 +2123,14 @@ async fn create_workspace_dir(
     Json(body): Json<crate::usecases::workspace_mutation::PathOnlyBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let svc = state.workspace_mutation.lock().await;
-    let svc = svc
-        .as_ref()
-        .ok_or((StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "workspace service not ready"}))))?;
-    svc.create_dir(
-        qparams.get("workspace_id").map(|s| s.as_str()),
-        body,
-    )
-    .await
-    .map(|r| Json(r.entry.unwrap_or(serde_json::json!({"created": r.ok}))))
-    .map_err(workspace_error_to_response)
+    let svc = svc.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({"error": "workspace service not ready"})),
+    ))?;
+    svc.create_dir(qparams.get("workspace_id").map(|s| s.as_str()), body)
+        .await
+        .map(|r| Json(r.entry.unwrap_or(serde_json::json!({"created": r.ok}))))
+        .map_err(workspace_error_to_response)
 }
 
 /// `DELETE /workspaces/dir` — remove a directory recursively.
@@ -1959,16 +2140,14 @@ async fn delete_workspace_dir(
     Json(body): Json<crate::usecases::workspace_mutation::PathOnlyBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let svc = state.workspace_mutation.lock().await;
-    let svc = svc
-        .as_ref()
-        .ok_or((StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "workspace service not ready"}))))?;
-    svc.delete_dir(
-        qparams.get("workspace_id").map(|s| s.as_str()),
-        body,
-    )
-    .await
-    .map(|r| Json(r.entry.unwrap_or(serde_json::json!({"deleted": r.ok}))))
-    .map_err(workspace_error_to_response)
+    let svc = svc.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({"error": "workspace service not ready"})),
+    ))?;
+    svc.delete_dir(qparams.get("workspace_id").map(|s| s.as_str()), body)
+        .await
+        .map(|r| Json(r.entry.unwrap_or(serde_json::json!({"deleted": r.ok}))))
+        .map_err(workspace_error_to_response)
 }
 
 /// `POST /workspaces/copy` — copy a file or directory tree.
@@ -1983,9 +2162,10 @@ async fn copy_workspace_item(
     Json(body): Json<crate::usecases::workspace_mutation::CopyMoveBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let svc = state.workspace_mutation.lock().await;
-    let svc = svc
-        .as_ref()
-        .ok_or((StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "workspace service not ready"}))))?;
+    let svc = svc.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({"error": "workspace service not ready"})),
+    ))?;
     // Prefer the querystring's workspace_id (matches the desktop
     // `workspaceStore` convention) but fall back to the body if absent.
     let mut body = body;
@@ -2014,9 +2194,10 @@ async fn rename_workspace_item(
     Json(body): Json<crate::usecases::workspace_mutation::CopyMoveBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let svc = state.workspace_mutation.lock().await;
-    let svc = svc
-        .as_ref()
-        .ok_or((StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "workspace service not ready"}))))?;
+    let svc = svc.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({"error": "workspace service not ready"})),
+    ))?;
     let mut body = body;
     if let Some(qs_ws) = qparams.get("workspace_id").filter(|s| !s.is_empty())
         && body.workspace_id.as_deref().unwrap_or("").is_empty()
@@ -2035,9 +2216,10 @@ async fn rename_workspace_item(
 /// string becomes the JSON `error` field. This is the single place
 /// where usecase errors become HTTP responses — adding a new variant
 /// to `WorkspaceError` only requires touching this function.
-fn workspace_error_to_response(e: crate::usecases::WorkspaceError) -> (StatusCode, Json<serde_json::Value>) {
-    let status = StatusCode::from_u16(e.http_status())
-        .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+fn workspace_error_to_response(
+    e: crate::usecases::WorkspaceError,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let status = StatusCode::from_u16(e.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     let msg = e.to_string();
     (status, Json(serde_json::json!({"error": msg})))
 }
@@ -2058,7 +2240,9 @@ use axum::extract::Multipart;
 /// used by every attachment handler. Mirrors the shape of
 /// `workspace_error_to_response` so a future API-surface change only
 /// touches this function.
-fn attachment_error_to_response(e: crate::usecases::AttachmentError) -> (StatusCode, Json<serde_json::Value>) {
+fn attachment_error_to_response(
+    e: crate::usecases::AttachmentError,
+) -> (StatusCode, Json<serde_json::Value>) {
     use crate::usecases::AttachmentError as Ae;
     let status = match &e {
         Ae::ServiceUnavailable => StatusCode::SERVICE_UNAVAILABLE,
@@ -2088,12 +2272,9 @@ async fn upload_file(
     Path(_sid): Path<String>,
     mut multipart: Multipart,
 ) -> Result<Json<crate::usecases::UploadedFileResponse>, (StatusCode, Json<serde_json::Value>)> {
-    let svc = state
-        .attachment
-        .lock()
-        .await
-        .clone()
-        .ok_or_else(|| attachment_error_to_response(crate::usecases::AttachmentError::ServiceUnavailable))?;
+    let svc = state.attachment.lock().await.clone().ok_or_else(|| {
+        attachment_error_to_response(crate::usecases::AttachmentError::ServiceUnavailable)
+    })?;
 
     let mut filename: Option<String> = None;
     let mut format: Option<String> = None;
@@ -2115,18 +2296,20 @@ async fn upload_file(
                         .bytes()
                         .await
                         .map_err(|e| {
-                            attachment_error_to_response(crate::usecases::AttachmentError::Persistence(format!(
-                                "read bytes: {e}"
-                            )))
+                            attachment_error_to_response(
+                                crate::usecases::AttachmentError::Persistence(format!(
+                                    "read bytes: {e}"
+                                )),
+                            )
                         })?
                         .to_vec(),
                 );
             }
             "format" => {
                 format = Some(field.text().await.map_err(|e| {
-                    attachment_error_to_response(crate::usecases::AttachmentError::Persistence(format!(
-                        "read format: {e}"
-                    )))
+                    attachment_error_to_response(crate::usecases::AttachmentError::Persistence(
+                        format!("read format: {e}"),
+                    ))
                 })?);
             }
             "width" => {
@@ -2185,13 +2368,17 @@ async fn read_file(
     State(state): State<HttpState>,
     Path(document_id): Path<String>,
     Query(params): Query<std::collections::HashMap<String, String>>,
-) -> Result<(StatusCode, [(axum::http::HeaderName, &'static str); 1], Vec<u8>), (StatusCode, Json<serde_json::Value>)> {
-    let svc = state
-        .attachment
-        .lock()
-        .await
-        .clone()
-        .ok_or_else(|| attachment_error_to_response(crate::usecases::AttachmentError::ServiceUnavailable))?;
+) -> Result<
+    (
+        StatusCode,
+        [(axum::http::HeaderName, &'static str); 1],
+        Vec<u8>,
+    ),
+    (StatusCode, Json<serde_json::Value>),
+> {
+    let svc = state.attachment.lock().await.clone().ok_or_else(|| {
+        attachment_error_to_response(crate::usecases::AttachmentError::ServiceUnavailable)
+    })?;
 
     let bytes = svc
         .read_file(&document_id)
@@ -2212,9 +2399,12 @@ async fn read_file(
         _ => "application/octet-stream",
     };
 
-    Ok((StatusCode::OK, [(axum::http::header::CONTENT_TYPE, content_type)], bytes))
+    Ok((
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, content_type)],
+        bytes,
+    ))
 }
-
 
 // ── Agent panel handlers (ADR-034 §11.2 #23-25) ────────────────────────
 //
@@ -3305,16 +3495,8 @@ async fn get_agent_status(
 
     // Pull the active session + model/embedding dim from the shared
     // state so the panel can show "what is the agent doing right now?".
-    let latest_session = state
-        .latest_session
-        .read()
-        .ok()
-        .and_then(|g| g.clone());
-    let embed_dim = state
-        .embed_provider_dim
-        .read()
-        .map(|d| *d)
-        .unwrap_or(0);
+    let latest_session = state.latest_session.read().ok().and_then(|g| g.clone());
+    let embed_dim = state.embed_provider_dim.read().map(|d| *d).unwrap_or(0);
 
     Json(serde_json::json!({
         "agent_id": state.agent_id,
@@ -3344,7 +3526,9 @@ async fn get_shell_risk_rules(
     if !state.instance_matches(&id) {
         return Err((
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "instance_id mismatch: path id is not this runtime's instance id"})),
+            Json(
+                serde_json::json!({"error": "instance_id mismatch: path id is not this runtime's instance id"}),
+            ),
         ));
     }
     let config_dir = state.work_dir.join("config");
@@ -3435,7 +3619,9 @@ async fn put_shell_risk_rules(
     if !state.instance_matches(&id) {
         return Err((
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "instance_id mismatch: path id is not this runtime's instance id"})),
+            Json(
+                serde_json::json!({"error": "instance_id mismatch: path id is not this runtime's instance id"}),
+            ),
         ));
     }
     tracing::info!(
@@ -3443,13 +3629,10 @@ async fn put_shell_risk_rules(
         content_bytes = req.get("content").and_then(|v| v.as_str()).map(|s| s.len()).unwrap_or(0),
         "PUT /agents/{id}/shell-risk-rules"
     );
-    let content = req
-        .get("content")
-        .and_then(|v| v.as_str())
-        .ok_or((
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "missing or invalid 'content' field"})),
-        ))?;
+    let content = req.get("content").and_then(|v| v.as_str()).ok_or((
+        StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({"error": "missing or invalid 'content' field"})),
+    ))?;
     // Validate TOML syntax before writing — fail fast if the editor
     // contains a parse error so the user can fix it without restarting.
     //
@@ -3458,8 +3641,8 @@ async fn put_shell_risk_rules(
     // `ShellRiskRules`, NOT a bare `Vec<ShellRiskRule>` — deserializing
     // into the Vec used to fail with "invalid type: map, expected a
     // sequence" because the top-level value is a map, not an array.
-    let parsed = toml::from_str::<crate::security::shell_risk::ShellRiskRules>(content)
-        .map_err(|e| {
+    let parsed =
+        toml::from_str::<crate::security::shell_risk::ShellRiskRules>(content).map_err(|e| {
             (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({
@@ -3470,11 +3653,19 @@ async fn put_shell_risk_rules(
     // Write to disk first, then update in-memory state so GET returns
     // consistent data even if the write fails midway.
     let config_dir = state.work_dir.join("config");
-    std::fs::create_dir_all(&config_dir)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": format!("Failed to create config dir: {}", e)}))))?;
+    std::fs::create_dir_all(&config_dir).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("Failed to create config dir: {}", e)})),
+        )
+    })?;
     let path = config_dir.join("shell_risk_rules.toml");
-    std::fs::write(&path, content)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": format!("Failed to write rules: {}", e)}))))?;
+    std::fs::write(&path, content).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("Failed to write rules: {}", e)})),
+        )
+    })?;
     // Update in-memory cache atomically.
     let rule_count = parsed.rules.len();
     let mut guard = state
@@ -3497,7 +3688,8 @@ async fn put_shell_risk_rules(
 async fn get_consolidation_status(
     State(state): State<HttpState>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let timer = state.consolidation_timer
+    let timer = state
+        .consolidation_timer
         .read()
         .ok()
         .and_then(|g| g.clone())
@@ -3650,15 +3842,20 @@ async fn post_rag_query(
     body: axum::Json<RagQueryBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let _ = id;
-    let rag = state.rag_provider.read().ok().and_then(|g| g.clone()).ok_or_else(|| {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({
-                "error": "RAG provider not configured",
-                "agent_id": state.agent_id,
-            })),
-        )
-    })?;
+    let rag = state
+        .rag_provider
+        .read()
+        .ok()
+        .and_then(|g| g.clone())
+        .ok_or_else(|| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "error": "RAG provider not configured",
+                    "agent_id": state.agent_id,
+                })),
+            )
+        })?;
 
     if body.query.trim().is_empty() {
         return Err((
@@ -3668,18 +3865,25 @@ async fn post_rag_query(
     }
 
     let results = rag
-        .query_with_params(&body.query, body.top_k, body.score_threshold, body.filters.clone())
+        .query_with_params(
+            &body.query,
+            body.top_k,
+            body.score_threshold,
+            body.filters.clone(),
+        )
         .await;
 
     let items: Vec<serde_json::Value> = results
         .iter()
-        .map(|r| serde_json::json!({
-            "content": r.item.content,
-            "source_url": r.item.source_url,
-            "chunk_id": r.item.chunk_id,
-            "score": r.item.score,
-            "source_label": r.source_label,
-        }))
+        .map(|r| {
+            serde_json::json!({
+                "content": r.item.content,
+                "source_url": r.item.source_url,
+                "chunk_id": r.item.chunk_id,
+                "score": r.item.score,
+                "source_label": r.source_label,
+            })
+        })
         .collect();
 
     Ok(Json(serde_json::json!({
@@ -3724,7 +3928,10 @@ mod tests {
         memory_store: SharedMemoryStore,
         embed_dim: SharedEmbedDimension,
     ) -> Arc<dyn crate::usecases::MemoryQueryService> {
-        Arc::new(crate::usecases::GrafeoMemoryAdapter::new(memory_store, embed_dim))
+        Arc::new(crate::usecases::GrafeoMemoryAdapter::new(
+            memory_store,
+            embed_dim,
+        ))
     }
 
     /// Build a workspace-query service for the test temp dir.
@@ -3741,7 +3948,9 @@ mod tests {
     fn new_test_workspace_mutation(
         temp_dir: std::path::PathBuf,
     ) -> Arc<dyn crate::usecases::WorkspaceMutationService> {
-        Arc::new(crate::usecases::RuntimeWorkspaceMutationService::new(temp_dir))
+        Arc::new(crate::usecases::RuntimeWorkspaceMutationService::new(
+            temp_dir,
+        ))
     }
 
     /// Build a shared WorkspaceResolver for HTTP tests.
@@ -3811,17 +4020,19 @@ mod tests {
 
         let latest: SharedLatestSession = std::sync::Arc::new(std::sync::RwLock::new(None));
 
-        let dispatch_tx: SharedDispatchSender =
-            std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let dispatch_tx: SharedDispatchSender = std::sync::Arc::new(tokio::sync::Mutex::new(None));
 
         let embed_dim: SharedEmbedDimension = std::sync::Arc::new(std::sync::RwLock::new(0));
-        let degraded_reasons: SharedDegradation = std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
+        let degraded_reasons: SharedDegradation =
+            std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
         let mqtt_client: SharedMqttClientSlot = std::sync::Arc::new(tokio::sync::Mutex::new(None));
 
-        let session_metadata = new_test_session_metadata(&temp_dir, snapshots.clone(), latest.clone());
+        let session_metadata =
+            new_test_session_metadata(&temp_dir, snapshots.clone(), latest.clone());
         let memory_store: SharedMemoryStore = std::sync::Arc::new(std::sync::RwLock::new(None));
 
-        let session_manager_slot: crate::http::server::SharedSessionManagerSlot = std::sync::Arc::new(tokio::sync::RwLock::new(None));
+        let session_manager_slot: crate::http::server::SharedSessionManagerSlot =
+            std::sync::Arc::new(tokio::sync::RwLock::new(None));
 
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
@@ -3835,20 +4046,35 @@ mod tests {
             degraded_reasons,
             mqtt_client,
             Arc::new(tokio::sync::Mutex::new(Some(session_metadata))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(memory_store, embed_dim.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_git_query(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(
+                memory_store,
+                embed_dim.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_git_query(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(
+                temp_dir.clone(),
+            )))),
             Arc::new(tokio::sync::Mutex::new(None)),
-                    std::sync::Arc::new(std::sync::RwLock::new(None)),
-                    std::sync::Arc::new(std::sync::RwLock::new(None)),
-                    std::sync::Arc::new(tokio::sync::Mutex::new(None)),
-                    new_test_workspace_resolver(),
-                    session_manager_slot,
-                    std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
+            std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            new_test_workspace_resolver(),
+            session_manager_slot,
+            std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
         )
         .await
         .expect("server should start");
@@ -3861,7 +4087,10 @@ mod tests {
         assert_eq!(body["status"], "ok");
         assert_eq!(body["agent_id"], "com.test.agent");
         // degraded_reasons should be empty for a clean test start
-        assert!(body["degraded_reasons"].as_array().unwrap().is_empty(), "expected empty degraded_reasons");
+        assert!(
+            body["degraded_reasons"].as_array().unwrap().is_empty(),
+            "expected empty degraded_reasons"
+        );
 
         // Sessions (empty)
         let url = format!("http://127.0.0.1:{}/sessions", server.port);
@@ -3925,17 +4154,19 @@ mod tests {
 
         let latest: SharedLatestSession = std::sync::Arc::new(std::sync::RwLock::new(None));
 
-        let dispatch_tx: SharedDispatchSender =
-            std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let dispatch_tx: SharedDispatchSender = std::sync::Arc::new(tokio::sync::Mutex::new(None));
 
         let embed_dim: SharedEmbedDimension = std::sync::Arc::new(std::sync::RwLock::new(0));
-        let degraded_reasons: SharedDegradation = std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
+        let degraded_reasons: SharedDegradation =
+            std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
         let mqtt_client: SharedMqttClientSlot = std::sync::Arc::new(tokio::sync::Mutex::new(None));
 
-        let session_metadata = new_test_session_metadata(&temp_dir, snapshots.clone(), latest.clone());
+        let session_metadata =
+            new_test_session_metadata(&temp_dir, snapshots.clone(), latest.clone());
         let memory_store: SharedMemoryStore = std::sync::Arc::new(std::sync::RwLock::new(None));
 
-        let session_manager_slot: crate::http::server::SharedSessionManagerSlot = std::sync::Arc::new(tokio::sync::RwLock::new(None));
+        let session_manager_slot: crate::http::server::SharedSessionManagerSlot =
+            std::sync::Arc::new(tokio::sync::RwLock::new(None));
 
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
@@ -3949,20 +4180,35 @@ mod tests {
             degraded_reasons,
             mqtt_client,
             Arc::new(tokio::sync::Mutex::new(Some(session_metadata))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(memory_store, embed_dim.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_git_query(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(
+                memory_store,
+                embed_dim.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_git_query(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(
+                temp_dir.clone(),
+            )))),
             Arc::new(tokio::sync::Mutex::new(None)),
-                    std::sync::Arc::new(std::sync::RwLock::new(None)),
-                    std::sync::Arc::new(std::sync::RwLock::new(None)),
-                    std::sync::Arc::new(tokio::sync::Mutex::new(None)),
-                    new_test_workspace_resolver(),
-                    session_manager_slot,
-                    std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
+            std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            new_test_workspace_resolver(),
+            session_manager_slot,
+            std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
         )
         .await
         .unwrap();
@@ -4083,28 +4329,21 @@ mod tests {
 
         // Empty JSONL files so the sessions are discoverable.
         for sid in &["20260101_100000_aaa", "20260101_120000_bbb"] {
-            std::fs::write(
-                conversations_dir.join(format!("{}.jsonl", sid)),
-                "",
-            )
-            .unwrap();
+            std::fs::write(conversations_dir.join(format!("{}.jsonl", sid)), "").unwrap();
         }
 
         let snapshots: SharedSessionSnapshots =
             std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
-        let latest: SharedLatestSession =
-            std::sync::Arc::new(std::sync::RwLock::new(None));
-        let dispatch_tx: SharedDispatchSender =
-            std::sync::Arc::new(tokio::sync::Mutex::new(None));
-        let embed_dim: SharedEmbedDimension =
-            std::sync::Arc::new(std::sync::RwLock::new(0));
+        let latest: SharedLatestSession = std::sync::Arc::new(std::sync::RwLock::new(None));
+        let dispatch_tx: SharedDispatchSender = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let embed_dim: SharedEmbedDimension = std::sync::Arc::new(std::sync::RwLock::new(0));
         let degraded_reasons: SharedDegradation =
             std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
-        let mqtt_client: SharedMqttClientSlot =
-            std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let mqtt_client: SharedMqttClientSlot = std::sync::Arc::new(tokio::sync::Mutex::new(None));
 
         // Use in-memory token service so the ADR-028 merge semantics work.
-        let token_svc = Arc::new(crate::usecases::agent_token_impl::InMemoryAgentTokenService::new());
+        let token_svc =
+            Arc::new(crate::usecases::agent_token_impl::InMemoryAgentTokenService::new());
         let session_metadata: Arc<dyn crate::usecases::SessionMetadataService> =
             Arc::new(crate::usecases::RuntimeSessionMetadataService::new(
                 temp_dir.to_path_buf(),
@@ -4114,7 +4353,8 @@ mod tests {
             ));
         let memory_store: SharedMemoryStore = std::sync::Arc::new(std::sync::RwLock::new(None));
 
-        let session_manager_slot: crate::http::server::SharedSessionManagerSlot = std::sync::Arc::new(tokio::sync::RwLock::new(None));
+        let session_manager_slot: crate::http::server::SharedSessionManagerSlot =
+            std::sync::Arc::new(tokio::sync::RwLock::new(None));
 
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
@@ -4128,20 +4368,35 @@ mod tests {
             degraded_reasons,
             mqtt_client,
             Arc::new(tokio::sync::Mutex::new(Some(session_metadata))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(memory_store, embed_dim.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_git_query(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(
+                memory_store,
+                embed_dim.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_git_query(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(
+                temp_dir.clone(),
+            )))),
             Arc::new(tokio::sync::Mutex::new(None)),
-                    std::sync::Arc::new(std::sync::RwLock::new(None)),
-                    std::sync::Arc::new(std::sync::RwLock::new(None)),
-                    std::sync::Arc::new(tokio::sync::Mutex::new(None)),
-                    new_test_workspace_resolver(),
-                    session_manager_slot,
-                    std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
+            std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            new_test_workspace_resolver(),
+            session_manager_slot,
+            std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
         )
         .await
         .expect("server should start");
@@ -4175,15 +4430,15 @@ mod tests {
         let snapshots: SharedSessionSnapshots =
             std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
         let latest: SharedLatestSession = std::sync::Arc::new(std::sync::RwLock::new(None));
-        let dispatch_tx: SharedDispatchSender =
-            std::sync::Arc::new(tokio::sync::Mutex::new(None));
-        let memory_store: SharedMemoryStore =
-            std::sync::Arc::new(std::sync::RwLock::new(None));
+        let dispatch_tx: SharedDispatchSender = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let memory_store: SharedMemoryStore = std::sync::Arc::new(std::sync::RwLock::new(None));
         let embed_dim: SharedEmbedDimension = std::sync::Arc::new(std::sync::RwLock::new(512));
-        let degraded_reasons: SharedDegradation = std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
+        let degraded_reasons: SharedDegradation =
+            std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
         let mqtt_client: SharedMqttClientSlot = std::sync::Arc::new(tokio::sync::Mutex::new(None));
 
-        let session_manager_slot: crate::http::server::SharedSessionManagerSlot = std::sync::Arc::new(tokio::sync::RwLock::new(None));
+        let session_manager_slot: crate::http::server::SharedSessionManagerSlot =
+            std::sync::Arc::new(tokio::sync::RwLock::new(None));
 
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
@@ -4197,20 +4452,35 @@ mod tests {
             degraded_reasons,
             mqtt_client,
             Arc::new(tokio::sync::Mutex::new(None)),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(memory_store, embed_dim.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_git_query(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(
+                memory_store,
+                embed_dim.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_git_query(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(
+                temp_dir.clone(),
+            )))),
             Arc::new(tokio::sync::Mutex::new(None)),
-                    std::sync::Arc::new(std::sync::RwLock::new(None)),
-                    std::sync::Arc::new(std::sync::RwLock::new(None)),
-                    std::sync::Arc::new(tokio::sync::Mutex::new(None)),
-                    new_test_workspace_resolver(),
-                    session_manager_slot,
-                    std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
+            std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            new_test_workspace_resolver(),
+            session_manager_slot,
+            std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
         )
         .await
         .expect("server should start");
@@ -4248,11 +4518,7 @@ mod tests {
 
         // DELETE /memory/nodes/{nid} — store is None, adapter returns Ok(()) trivially.
         let url = format!("http://127.0.0.1:{}/memory/nodes/12345", server.port);
-        let response = reqwest::Client::new()
-            .delete(&url)
-            .send()
-            .await
-            .unwrap();
+        let response = reqwest::Client::new().delete(&url).send().await.unwrap();
         assert!(response.status().is_success());
         let body: serde_json::Value = response.json().await.unwrap();
         assert_eq!(body["deleted"], true);
@@ -4304,24 +4570,19 @@ mod tests {
             shell_approval_threshold: Some("medium".to_string()),
             ..Default::default()
         };
-        crate::agent_config::save_agent_config(
-            std::path::Path::new(&temp_dir),
-            &initial,
-        )
-        .unwrap();
+        crate::agent_config::save_agent_config(std::path::Path::new(&temp_dir), &initial).unwrap();
 
         let snapshots: SharedSessionSnapshots =
             std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
         let latest: SharedLatestSession = std::sync::Arc::new(std::sync::RwLock::new(None));
-        let dispatch_tx: SharedDispatchSender =
-            std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let dispatch_tx: SharedDispatchSender = std::sync::Arc::new(tokio::sync::Mutex::new(None));
         let embed_dim: SharedEmbedDimension = std::sync::Arc::new(std::sync::RwLock::new(0));
         let degraded_reasons: SharedDegradation =
             std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
-        let mqtt_client: SharedMqttClientSlot =
-            std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let mqtt_client: SharedMqttClientSlot = std::sync::Arc::new(tokio::sync::Mutex::new(None));
 
-        let session_manager_slot: crate::http::server::SharedSessionManagerSlot = std::sync::Arc::new(tokio::sync::RwLock::new(None));
+        let session_manager_slot: crate::http::server::SharedSessionManagerSlot =
+            std::sync::Arc::new(tokio::sync::RwLock::new(None));
 
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
@@ -4340,15 +4601,19 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(
+                temp_dir.clone(),
+            )))),
             Arc::new(tokio::sync::Mutex::new(None)),
-                    std::sync::Arc::new(std::sync::RwLock::new(None)),
-                    std::sync::Arc::new(std::sync::RwLock::new(None)),
-                    std::sync::Arc::new(tokio::sync::Mutex::new(None)),
-                    new_test_workspace_resolver(),
-                    session_manager_slot,
-                    std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
+            std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            new_test_workspace_resolver(),
+            session_manager_slot,
+            std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
         )
         .await
         .expect("server should start");
@@ -4380,11 +4645,9 @@ mod tests {
 
         // Verify the on-disk file carries every pushed field and that
         // the untouched field is still there.
-        let reloaded = crate::agent_config::load_agent_config(
-            std::path::Path::new(&temp_dir),
-        )
-        .unwrap()
-        .expect("agent_config.json should exist after PUT");
+        let reloaded = crate::agent_config::load_agent_config(std::path::Path::new(&temp_dir))
+            .unwrap()
+            .expect("agent_config.json should exist after PUT");
 
         assert!(
             (reloaded.temperature.unwrap_or(0.0) - 0.7).abs() < f32::EPSILON,
@@ -4409,8 +4672,8 @@ mod tests {
         // `skip_serializing_if = Option::is_none` on the struct
         // means default fields like `system_prompt_override` stay
         // out of the file).
-        let raw = std::fs::read_to_string(temp_dir.join("config").join("agent_config.json"))
-            .unwrap();
+        let raw =
+            std::fs::read_to_string(temp_dir.join("config").join("agent_config.json")).unwrap();
         assert!(
             raw.contains("\"max_output_tokens\""),
             "newly-added field must be present in the serialized JSON; raw body was: {}",
@@ -4457,21 +4720,18 @@ mod tests {
     /// including the explicit-clear (`null`) semantics on a numeric field.
     #[tokio::test]
     async fn test_put_agent_config_distiller_fields_roundtrip() {
-        let temp_dir =
-            std::env::temp_dir().join("acowork-test-runtime-http-put-config-distiller");
+        let temp_dir = std::env::temp_dir().join("acowork-test-runtime-http-put-config-distiller");
         let _ = std::fs::remove_dir_all(&temp_dir);
         std::fs::create_dir_all(temp_dir.join("config")).unwrap();
 
         let snapshots: SharedSessionSnapshots =
             std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
         let latest: SharedLatestSession = std::sync::Arc::new(std::sync::RwLock::new(None));
-        let dispatch_tx: SharedDispatchSender =
-            std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let dispatch_tx: SharedDispatchSender = std::sync::Arc::new(tokio::sync::Mutex::new(None));
         let embed_dim: SharedEmbedDimension = std::sync::Arc::new(std::sync::RwLock::new(0));
         let degraded_reasons: SharedDegradation =
             std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
-        let mqtt_client: SharedMqttClientSlot =
-            std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let mqtt_client: SharedMqttClientSlot = std::sync::Arc::new(tokio::sync::Mutex::new(None));
         let session_manager_slot: crate::http::server::SharedSessionManagerSlot =
             std::sync::Arc::new(tokio::sync::RwLock::new(None));
 
@@ -4492,8 +4752,12 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(
+                temp_dir.clone(),
+            )))),
             Arc::new(tokio::sync::Mutex::new(None)),
             std::sync::Arc::new(std::sync::RwLock::new(None)),
             std::sync::Arc::new(std::sync::RwLock::new(None)),
@@ -4532,7 +4796,10 @@ mod tests {
             .expect("config exists");
         assert_eq!(reloaded.distiller_enabled, Some(true));
         assert_eq!(
-            reloaded.distiller_model.as_ref().map(|m| m.model_id.as_str()),
+            reloaded
+                .distiller_model
+                .as_ref()
+                .map(|m| m.model_id.as_str()),
             Some("gpt-4o-mini")
         );
         assert_eq!(reloaded.distiller_interval_minutes, Some(45));
@@ -4568,7 +4835,11 @@ mod tests {
             .send()
             .await
             .expect("PUT partial");
-        assert!(resp.status().is_success(), "PUT partial got {}", resp.status());
+        assert!(
+            resp.status().is_success(),
+            "PUT partial got {}",
+            resp.status()
+        );
 
         let reloaded = crate::agent_config::load_agent_config(std::path::Path::new(&temp_dir))
             .expect("load ok")
@@ -4607,12 +4878,11 @@ mod tests {
     /// contains the just-persisted field.
     #[tokio::test]
     async fn test_put_agent_config_publishes_retained_agent_config_snapshot() {
-        use crate::mqtt::{new_shared_cache, MqttConnectConfig, RuntimeMqttClient};
+        use crate::mqtt::{MqttConnectConfig, RuntimeMqttClient, new_shared_cache};
         use rumqttc::{AsyncClient, Event, Incoming, MqttOptions, QoS};
 
         // 1. Unique broker port to avoid cross-talk with parallel tests.
-        static BROKER_PORT: std::sync::atomic::AtomicU16 =
-            std::sync::atomic::AtomicU16::new(39975);
+        static BROKER_PORT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(39975);
         let port = BROKER_PORT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let broker = acowork_gateway::mqtt::start_broker("127.0.0.1", port).expect("broker start");
 
@@ -4658,10 +4928,9 @@ mod tests {
         .await
         .expect("RuntimeMqttClient connect");
         // SharedMqttClientSlot = Arc<Mutex<Option<Arc<Mutex<RuntimeMqttClient>>>>>
-        let runtime_slot: SharedMqttClientSlot =
-            std::sync::Arc::new(tokio::sync::Mutex::new(Some(std::sync::Arc::new(
-                tokio::sync::Mutex::new(runtime),
-            ))));
+        let runtime_slot: SharedMqttClientSlot = std::sync::Arc::new(tokio::sync::Mutex::new(
+            Some(std::sync::Arc::new(tokio::sync::Mutex::new(runtime))),
+        ));
 
         // 3. Independent subscriber on the canonical topic.
         let mut sub_opts = MqttOptions::new("test:handler-sub", "127.0.0.1", port);
@@ -4682,8 +4951,7 @@ mod tests {
         let snapshots: SharedSessionSnapshots =
             std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
         let latest: SharedLatestSession = std::sync::Arc::new(std::sync::RwLock::new(None));
-        let dispatch_tx: SharedDispatchSender =
-            std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let dispatch_tx: SharedDispatchSender = std::sync::Arc::new(tokio::sync::Mutex::new(None));
         let embed_dim: SharedEmbedDimension = std::sync::Arc::new(std::sync::RwLock::new(0));
         let degraded_reasons: SharedDegradation =
             std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
@@ -4706,18 +4974,22 @@ mod tests {
             runtime_slot,
             Arc::new(tokio::sync::Mutex::new(Some(new_test_session_metadata(
                 &temp_dir,
-                std::sync::Arc::new(std::sync::RwLock::new(
-                    std::collections::HashMap::new(),
-                )),
+                std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
                 std::sync::Arc::new(std::sync::RwLock::new(None)),
             )))),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(
+                temp_dir.clone(),
+            )))),
             Arc::new(tokio::sync::Mutex::new(None)),
             std::sync::Arc::new(std::sync::RwLock::new(None)),
             std::sync::Arc::new(std::sync::RwLock::new(None)),
@@ -4739,7 +5011,11 @@ mod tests {
         );
         let client = reqwest::Client::new();
         let get_pkg = client.get(&pkg_url).send().await.unwrap();
-        assert_eq!(get_pkg.status(), 200, "package-addressed GET must still return the tolerant envelope");
+        assert_eq!(
+            get_pkg.status(),
+            200,
+            "package-addressed GET must still return the tolerant envelope"
+        );
         let pkg_body: serde_json::Value = get_pkg.json().await.unwrap();
         assert_eq!(
             pkg_body["matches"], false,
@@ -4789,12 +5065,10 @@ mod tests {
                     if p.topic != target {
                         continue;
                     }
-                    let env =
-                        acowork_core::mqtt_proto::DataEnvelope::decode(p.payload.as_ref())
-                            .expect("DataEnvelope decode");
-                    if let Some(acowork_core::mqtt_proto::data_envelope::Payload::AgentConfig(
-                        ac,
-                    )) = env.payload
+                    let env = acowork_core::mqtt_proto::DataEnvelope::decode(p.payload.as_ref())
+                        .expect("DataEnvelope decode");
+                    if let Some(acowork_core::mqtt_proto::data_envelope::Payload::AgentConfig(ac)) =
+                        env.payload
                     {
                         received_config_json = Some(ac.config_json.clone());
                     }
@@ -4860,46 +5134,48 @@ mod tests {
             local: vec![],
             active_names: None,
         };
-        crate::agent_config::save_agent_mcp_config(
-            std::path::Path::new(&temp_dir),
-            &initial_mcp,
-        )
-        .unwrap();
+        crate::agent_config::save_agent_mcp_config(std::path::Path::new(&temp_dir), &initial_mcp)
+            .unwrap();
 
         let snapshots: SharedSessionSnapshots =
             std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
         let latest: SharedLatestSession = std::sync::Arc::new(std::sync::RwLock::new(None));
-        let dispatch_tx: SharedDispatchSender =
-            std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let dispatch_tx: SharedDispatchSender = std::sync::Arc::new(tokio::sync::Mutex::new(None));
         let embed_dim: SharedEmbedDimension = std::sync::Arc::new(std::sync::RwLock::new(0));
         let degraded_reasons: SharedDegradation =
             std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
-        let mqtt_client: SharedMqttClientSlot =
-            std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let mqtt_client: SharedMqttClientSlot = std::sync::Arc::new(tokio::sync::Mutex::new(None));
 
         // ADR-040 follow-up: the mcp-servers + search-config handlers
         // route through the `AgentToolsService` trait; the slot must be
         // populated for the test to exercise the trait path. Mirrors
         // the wiring in `startup/session_init.rs` Phase B.
         let agent_tools_svc = new_test_agent_tools(temp_dir.clone());
-        let agent_tools_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AgentToolsService>>>> =
-            Arc::new(tokio::sync::Mutex::new(Some(agent_tools_svc)));
+        let agent_tools_slot: Arc<
+            tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AgentToolsService>>>,
+        > = Arc::new(tokio::sync::Mutex::new(Some(agent_tools_svc)));
 
         // AgentConfigService slot — same wiring discipline as
         // agent_tools above. Without this, /agents/{id}/config and
         // /agents/{id}/builtin-tools would 503.
         let agent_config_svc = new_test_agent_config(temp_dir.clone());
-        let agent_config_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::agent_config::AgentConfigService>>>> =
-            Arc::new(tokio::sync::Mutex::new(Some(agent_config_svc)));
+        let agent_config_slot: Arc<
+            tokio::sync::Mutex<Option<Arc<dyn crate::usecases::agent_config::AgentConfigService>>>,
+        > = Arc::new(tokio::sync::Mutex::new(Some(agent_config_svc)));
 
         // AttachmentService slot — exercises POST /sessions/{sid}/files
         // and GET /files/{document_id} through the trait path.
-        let attachment_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AttachmentService>>>> =
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(temp_dir.clone()))));
-        let session_config_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionConfigService>>>> =
-            Arc::new(tokio::sync::Mutex::new(None));
+        let attachment_slot: Arc<
+            tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AttachmentService>>>,
+        > = Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(
+            temp_dir.clone(),
+        ))));
+        let session_config_slot: Arc<
+            tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionConfigService>>>,
+        > = Arc::new(tokio::sync::Mutex::new(None));
 
-        let session_manager_slot: crate::http::server::SharedSessionManagerSlot = std::sync::Arc::new(tokio::sync::RwLock::new(None));
+        let session_manager_slot: crate::http::server::SharedSessionManagerSlot =
+            std::sync::Arc::new(tokio::sync::RwLock::new(None));
 
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
@@ -4921,12 +5197,12 @@ mod tests {
             agent_config_slot,
             attachment_slot,
             session_config_slot,
-                    std::sync::Arc::new(std::sync::RwLock::new(None)),
-                    std::sync::Arc::new(std::sync::RwLock::new(None)),
-                    std::sync::Arc::new(tokio::sync::Mutex::new(None)),
-                    new_test_workspace_resolver(),
-                    session_manager_slot,
-                    std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
+            std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            new_test_workspace_resolver(),
+            session_manager_slot,
+            std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
         )
         .await
         .expect("server should start");
@@ -5089,13 +5365,11 @@ mod tests {
         let snapshots: SharedSessionSnapshots =
             std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
         let latest: SharedLatestSession = std::sync::Arc::new(std::sync::RwLock::new(None));
-        let dispatch_tx: SharedDispatchSender =
-            std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let dispatch_tx: SharedDispatchSender = std::sync::Arc::new(tokio::sync::Mutex::new(None));
         let embed_dim: SharedEmbedDimension = std::sync::Arc::new(std::sync::RwLock::new(0));
         let degraded_reasons: SharedDegradation =
             std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
-        let mqtt_client: SharedMqttClientSlot =
-            std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let mqtt_client: SharedMqttClientSlot = std::sync::Arc::new(tokio::sync::Mutex::new(None));
 
         let session_manager_slot: crate::http::server::SharedSessionManagerSlot =
             std::sync::Arc::new(tokio::sync::RwLock::new(None));
@@ -5264,26 +5538,31 @@ mod tests {
         let snapshots: SharedSessionSnapshots =
             std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
         let latest: SharedLatestSession = std::sync::Arc::new(std::sync::RwLock::new(None));
-        let dispatch_tx: SharedDispatchSender =
-            std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let dispatch_tx: SharedDispatchSender = std::sync::Arc::new(tokio::sync::Mutex::new(None));
         let embed_dim: SharedEmbedDimension = std::sync::Arc::new(std::sync::RwLock::new(0));
         let degraded_reasons: SharedDegradation =
             std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
-        let mqtt_client: SharedMqttClientSlot =
-            std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let mqtt_client: SharedMqttClientSlot = std::sync::Arc::new(tokio::sync::Mutex::new(None));
 
         let agent_tools_svc = new_test_agent_tools(temp_dir.clone());
-        let agent_tools_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AgentToolsService>>>> =
-            Arc::new(tokio::sync::Mutex::new(Some(agent_tools_svc)));
+        let agent_tools_slot: Arc<
+            tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AgentToolsService>>>,
+        > = Arc::new(tokio::sync::Mutex::new(Some(agent_tools_svc)));
         let agent_config_svc = new_test_agent_config(temp_dir.clone());
-        let agent_config_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::agent_config::AgentConfigService>>>> =
-            Arc::new(tokio::sync::Mutex::new(Some(agent_config_svc)));
-        let attachment_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AttachmentService>>>> =
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(temp_dir.clone()))));
-        let session_config_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionConfigService>>>> =
-            Arc::new(tokio::sync::Mutex::new(None));
+        let agent_config_slot: Arc<
+            tokio::sync::Mutex<Option<Arc<dyn crate::usecases::agent_config::AgentConfigService>>>,
+        > = Arc::new(tokio::sync::Mutex::new(Some(agent_config_svc)));
+        let attachment_slot: Arc<
+            tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AttachmentService>>>,
+        > = Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(
+            temp_dir.clone(),
+        ))));
+        let session_config_slot: Arc<
+            tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionConfigService>>>,
+        > = Arc::new(tokio::sync::Mutex::new(None));
 
-        let session_manager_slot: crate::http::server::SharedSessionManagerSlot = std::sync::Arc::new(tokio::sync::RwLock::new(None));
+        let session_manager_slot: crate::http::server::SharedSessionManagerSlot =
+            std::sync::Arc::new(tokio::sync::RwLock::new(None));
 
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
@@ -5305,12 +5584,12 @@ mod tests {
             agent_config_slot,
             attachment_slot,
             session_config_slot,
-                    std::sync::Arc::new(std::sync::RwLock::new(None)),
-                    std::sync::Arc::new(std::sync::RwLock::new(None)),
-                    std::sync::Arc::new(tokio::sync::Mutex::new(None)),
-                    new_test_workspace_resolver(),
-                    session_manager_slot,
-                    std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
+            std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            new_test_workspace_resolver(),
+            session_manager_slot,
+            std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
         )
         .await
         .expect("server should start");
@@ -5652,18 +5931,17 @@ mod tests {
         let snapshots: SharedSessionSnapshots =
             std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
         let latest: SharedLatestSession = std::sync::Arc::new(std::sync::RwLock::new(None));
-        let dispatch_tx: SharedDispatchSender =
-            std::sync::Arc::new(tokio::sync::Mutex::new(None));
-        let embed_dim: SharedEmbedDimension =
-            std::sync::Arc::new(std::sync::RwLock::new(0));
+        let dispatch_tx: SharedDispatchSender = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let embed_dim: SharedEmbedDimension = std::sync::Arc::new(std::sync::RwLock::new(0));
         let degraded_reasons: SharedDegradation =
             std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
-        let mqtt_client: SharedMqttClientSlot =
-            std::sync::Arc::new(tokio::sync::Mutex::new(None));
-        let session_metadata = new_test_session_metadata(&temp_dir, snapshots.clone(), latest.clone());
+        let mqtt_client: SharedMqttClientSlot = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let session_metadata =
+            new_test_session_metadata(&temp_dir, snapshots.clone(), latest.clone());
         let memory_store: SharedMemoryStore = std::sync::Arc::new(std::sync::RwLock::new(None));
 
-        let session_manager_slot: crate::http::server::SharedSessionManagerSlot = std::sync::Arc::new(tokio::sync::RwLock::new(None));
+        let session_manager_slot: crate::http::server::SharedSessionManagerSlot =
+            std::sync::Arc::new(tokio::sync::RwLock::new(None));
 
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
@@ -5677,20 +5955,35 @@ mod tests {
             degraded_reasons,
             mqtt_client,
             Arc::new(tokio::sync::Mutex::new(Some(session_metadata))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(memory_store, embed_dim.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_git_query(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(
+                memory_store,
+                embed_dim.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_git_query(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(
+                temp_dir.clone(),
+            )))),
             Arc::new(tokio::sync::Mutex::new(None)),
-                    std::sync::Arc::new(std::sync::RwLock::new(None)),
-                    std::sync::Arc::new(std::sync::RwLock::new(None)),
-                    std::sync::Arc::new(tokio::sync::Mutex::new(None)),
-                    new_test_workspace_resolver(),
-                    session_manager_slot,
-                    std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
+            std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            new_test_workspace_resolver(),
+            session_manager_slot,
+            std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
         )
         .await
         .expect("server should start");
@@ -5762,11 +6055,7 @@ mod tests {
             .send()
             .await
             .unwrap();
-        assert_eq!(
-            resp.status(),
-            200,
-            "create-dir for assets should be 200"
-        );
+        assert_eq!(resp.status(), 200, "create-dir for assets should be 200");
         assert!(ws_dir.join("assets").is_dir(), "assets dir must exist");
 
         // 4) POST /workspaces/file?workspace_id=… — create a new file.
@@ -5828,11 +6117,7 @@ mod tests {
             .send()
             .await
             .unwrap();
-        assert_eq!(
-            resp.status(),
-            404,
-            "write-file on missing path must be 404"
-        );
+        assert_eq!(resp.status(), 404, "write-file on missing path must be 404");
 
         // 8) GET /workspaces/file — JSON envelope with mime helper
         //    exercised via a .md file (text path).
@@ -5980,7 +6265,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), 200, "copy file must be 200");
-        assert!(ws_dir.join("readme-copy.txt").exists(), "copied file exists");
+        assert!(
+            ws_dir.join("readme-copy.txt").exists(),
+            "copied file exists"
+        );
         assert_eq!(
             std::fs::read_to_string(ws_dir.join("readme-copy.txt")).unwrap(),
             "hello workspace\n",
@@ -6150,17 +6438,16 @@ mod tests {
         let snapshots: SharedSessionSnapshots =
             std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
         let latest: SharedLatestSession = std::sync::Arc::new(std::sync::RwLock::new(None));
-        let dispatch_tx: SharedDispatchSender =
-            std::sync::Arc::new(tokio::sync::Mutex::new(None));
-        let embed_dim: SharedEmbedDimension =
-            std::sync::Arc::new(std::sync::RwLock::new(0));
+        let dispatch_tx: SharedDispatchSender = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let embed_dim: SharedEmbedDimension = std::sync::Arc::new(std::sync::RwLock::new(0));
         let degraded_reasons: SharedDegradation =
             std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
-        let mqtt_client: SharedMqttClientSlot =
-            std::sync::Arc::new(tokio::sync::Mutex::new(None));
-        let session_metadata = new_test_session_metadata(&temp_dir, snapshots.clone(), latest.clone());
+        let mqtt_client: SharedMqttClientSlot = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let session_metadata =
+            new_test_session_metadata(&temp_dir, snapshots.clone(), latest.clone());
 
-        let session_manager_slot: crate::http::server::SharedSessionManagerSlot = std::sync::Arc::new(tokio::sync::RwLock::new(None));
+        let session_manager_slot: crate::http::server::SharedSessionManagerSlot =
+            std::sync::Arc::new(tokio::sync::RwLock::new(None));
 
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
@@ -6174,20 +6461,35 @@ mod tests {
             degraded_reasons,
             mqtt_client,
             Arc::new(tokio::sync::Mutex::new(Some(session_metadata))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(memory_store, embed_dim.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_git_query(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(
+                memory_store,
+                embed_dim.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_git_query(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(
+                temp_dir.clone(),
+            )))),
             Arc::new(tokio::sync::Mutex::new(None)),
-                    std::sync::Arc::new(std::sync::RwLock::new(None)),
-                    std::sync::Arc::new(std::sync::RwLock::new(None)),
-                    std::sync::Arc::new(tokio::sync::Mutex::new(None)),
-                    new_test_workspace_resolver(),
-                    session_manager_slot,
-                    std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
+            std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            new_test_workspace_resolver(),
+            session_manager_slot,
+            std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
         )
         .await
         .expect("server should start");
@@ -6278,19 +6580,17 @@ mod tests {
             std::sync::Arc::new(std::sync::RwLock::new(Some(store)));
         let snapshots: SharedSessionSnapshots =
             std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
-        let latest: SharedLatestSession =
-            std::sync::Arc::new(std::sync::RwLock::new(None));
-        let dispatch_tx: SharedDispatchSender =
-            std::sync::Arc::new(tokio::sync::Mutex::new(None));
-        let embed_dim: SharedEmbedDimension =
-            std::sync::Arc::new(std::sync::RwLock::new(0));
+        let latest: SharedLatestSession = std::sync::Arc::new(std::sync::RwLock::new(None));
+        let dispatch_tx: SharedDispatchSender = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let embed_dim: SharedEmbedDimension = std::sync::Arc::new(std::sync::RwLock::new(0));
         let degraded_reasons: SharedDegradation =
             std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
-        let mqtt_client: SharedMqttClientSlot =
-            std::sync::Arc::new(tokio::sync::Mutex::new(None));
-        let session_metadata = new_test_session_metadata(&temp_dir, snapshots.clone(), latest.clone());
+        let mqtt_client: SharedMqttClientSlot = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let session_metadata =
+            new_test_session_metadata(&temp_dir, snapshots.clone(), latest.clone());
 
-        let session_manager_slot: crate::http::server::SharedSessionManagerSlot = std::sync::Arc::new(tokio::sync::RwLock::new(None));
+        let session_manager_slot: crate::http::server::SharedSessionManagerSlot =
+            std::sync::Arc::new(tokio::sync::RwLock::new(None));
 
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
@@ -6304,20 +6604,35 @@ mod tests {
             degraded_reasons,
             mqtt_client,
             Arc::new(tokio::sync::Mutex::new(Some(session_metadata))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(memory_store, embed_dim.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_git_query(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(
+                memory_store,
+                embed_dim.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_git_query(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(
+                temp_dir.clone(),
+            )))),
             Arc::new(tokio::sync::Mutex::new(None)),
-                    std::sync::Arc::new(std::sync::RwLock::new(None)),
-                    std::sync::Arc::new(std::sync::RwLock::new(None)),
-                    std::sync::Arc::new(tokio::sync::Mutex::new(None)),
-                    new_test_workspace_resolver(),
-                    session_manager_slot,
-                    std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
+            std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            new_test_workspace_resolver(),
+            session_manager_slot,
+            std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
         )
         .await
         .expect("server should start");
@@ -6373,13 +6688,17 @@ mod tests {
             "total_nodes should be >= 5 with seeded data"
         );
         // by_type should contain at least one entry.
-        let by_type = body["by_type"].as_object().expect("by_type should be object");
+        let by_type = body["by_type"]
+            .as_object()
+            .expect("by_type should be object");
         assert!(
             !by_type.is_empty(),
             "by_type should have at least one type with seeded data"
         );
         // by_status should contain Active nodes.
-        let by_status = body["by_status"].as_object().expect("by_status should be object");
+        let by_status = body["by_status"]
+            .as_object()
+            .expect("by_status should be object");
         assert!(
             !by_status.is_empty(),
             "by_status should have at least one status with seeded data"
@@ -6403,7 +6722,10 @@ mod tests {
         let resp = client.get(&url).send().await.unwrap();
         assert_eq!(resp.status(), 200);
         let body: serde_json::Value = resp.json().await.unwrap();
-        assert_eq!(body["total"], total, "total should be the same regardless of page size");
+        assert_eq!(
+            body["total"], total,
+            "total should be the same regardless of page size"
+        );
         assert_eq!(body["size"], 2);
         assert_eq!(body["nodes"].as_array().unwrap().len(), 2);
 
@@ -6449,9 +6771,11 @@ mod tests {
         let embed_dim: SharedEmbedDimension = Arc::new(std::sync::RwLock::new(0));
         let degraded_reasons: SharedDegradation = Arc::new(std::sync::RwLock::new(Vec::new()));
         let mqtt_client: SharedMqttClientSlot = Arc::new(tokio::sync::Mutex::new(None));
-        let session_metadata = new_test_session_metadata(&temp_dir, snapshots.clone(), latest.clone());
+        let session_metadata =
+            new_test_session_metadata(&temp_dir, snapshots.clone(), latest.clone());
 
-        let session_manager_slot: crate::http::server::SharedSessionManagerSlot = std::sync::Arc::new(tokio::sync::RwLock::new(None));
+        let session_manager_slot: crate::http::server::SharedSessionManagerSlot =
+            std::sync::Arc::new(tokio::sync::RwLock::new(None));
 
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
@@ -6465,13 +6789,28 @@ mod tests {
             degraded_reasons,
             mqtt_client,
             Arc::new(tokio::sync::Mutex::new(Some(session_metadata))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(memory_store, embed_dim.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_git_query(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(
+                memory_store,
+                embed_dim.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_git_query(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(
+                temp_dir.clone(),
+            )))),
             Arc::new(tokio::sync::Mutex::new(None)),
             consolidation_timer_slot,
             Arc::new(std::sync::RwLock::new(None)),
@@ -6483,7 +6822,10 @@ mod tests {
         .await
         .expect("server should start");
 
-        let url = format!("http://127.0.0.1:{}/memory/consolidation/status", server.port);
+        let url = format!(
+            "http://127.0.0.1:{}/memory/consolidation/status",
+            server.port
+        );
         let resp = reqwest::get(&url).await.unwrap();
         assert_eq!(resp.status(), 200, "consolidation status should be 200");
         let body: serde_json::Value = resp.json().await.unwrap();
@@ -6517,9 +6859,11 @@ mod tests {
         let embed_dim: SharedEmbedDimension = Arc::new(std::sync::RwLock::new(0));
         let degraded_reasons: SharedDegradation = Arc::new(std::sync::RwLock::new(Vec::new()));
         let mqtt_client: SharedMqttClientSlot = Arc::new(tokio::sync::Mutex::new(None));
-        let session_metadata = new_test_session_metadata(&temp_dir, snapshots.clone(), latest.clone());
+        let session_metadata =
+            new_test_session_metadata(&temp_dir, snapshots.clone(), latest.clone());
 
-        let session_manager_slot: crate::http::server::SharedSessionManagerSlot = std::sync::Arc::new(tokio::sync::RwLock::new(None));
+        let session_manager_slot: crate::http::server::SharedSessionManagerSlot =
+            std::sync::Arc::new(tokio::sync::RwLock::new(None));
 
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
@@ -6533,13 +6877,28 @@ mod tests {
             degraded_reasons,
             mqtt_client,
             Arc::new(tokio::sync::Mutex::new(Some(session_metadata))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(memory_store, embed_dim.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_git_query(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(
+                memory_store,
+                embed_dim.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_git_query(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(
+                temp_dir.clone(),
+            )))),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(std::sync::RwLock::new(None)),
             Arc::new(std::sync::RwLock::new(None)),
@@ -6551,9 +6910,16 @@ mod tests {
         .await
         .expect("server should start");
 
-        let url = format!("http://127.0.0.1:{}/memory/consolidation/status", server.port);
+        let url = format!(
+            "http://127.0.0.1:{}/memory/consolidation/status",
+            server.port
+        );
         let resp = reqwest::get(&url).await.unwrap();
-        assert_eq!(resp.status(), 503, "should return 503 when no timer configured");
+        assert_eq!(
+            resp.status(),
+            503,
+            "should return 503 when no timer configured"
+        );
 
         std::fs::remove_dir_all(&temp_dir).ok();
     }
@@ -6576,9 +6942,11 @@ mod tests {
         let embed_dim: SharedEmbedDimension = Arc::new(std::sync::RwLock::new(0));
         let degraded_reasons: SharedDegradation = Arc::new(std::sync::RwLock::new(Vec::new()));
         let mqtt_client: SharedMqttClientSlot = Arc::new(tokio::sync::Mutex::new(None));
-        let session_metadata = new_test_session_metadata(&temp_dir, snapshots.clone(), latest.clone());
+        let session_metadata =
+            new_test_session_metadata(&temp_dir, snapshots.clone(), latest.clone());
 
-        let session_manager_slot: crate::http::server::SharedSessionManagerSlot = std::sync::Arc::new(tokio::sync::RwLock::new(None));
+        let session_manager_slot: crate::http::server::SharedSessionManagerSlot =
+            std::sync::Arc::new(tokio::sync::RwLock::new(None));
 
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
@@ -6592,13 +6960,28 @@ mod tests {
             degraded_reasons,
             mqtt_client,
             Arc::new(tokio::sync::Mutex::new(Some(session_metadata))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(memory_store, embed_dim.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_git_query(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(
+                memory_store,
+                embed_dim.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_git_query(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(
+                temp_dir.clone(),
+            )))),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(std::sync::RwLock::new(None)),
             Arc::new(std::sync::RwLock::new(None)),
@@ -6611,11 +6994,7 @@ mod tests {
         .expect("server should start");
 
         let url = format!("http://127.0.0.1:{}/memory/distill", server.port);
-        let resp = reqwest::Client::new()
-            .post(&url)
-            .send()
-            .await
-            .unwrap();
+        let resp = reqwest::Client::new().post(&url).send().await.unwrap();
         assert_eq!(
             resp.status(),
             503,
@@ -6633,8 +7012,12 @@ mod tests {
         struct DummyRag;
         #[async_trait::async_trait]
         impl RagProvider for DummyRag {
-            fn name(&self) -> &str { "enterprise_knowledge" }
-            async fn query(&self, _query: &str) -> Vec<AnnotatedRagResult> { Vec::new() }
+            fn name(&self) -> &str {
+                "enterprise_knowledge"
+            }
+            async fn query(&self, _query: &str) -> Vec<AnnotatedRagResult> {
+                Vec::new()
+            }
             async fn query_with_params(
                 &self,
                 _query: &str,
@@ -6661,9 +7044,11 @@ mod tests {
         let embed_dim: SharedEmbedDimension = Arc::new(std::sync::RwLock::new(0));
         let degraded_reasons: SharedDegradation = Arc::new(std::sync::RwLock::new(Vec::new()));
         let mqtt_client: SharedMqttClientSlot = Arc::new(tokio::sync::Mutex::new(None));
-        let session_metadata = new_test_session_metadata(&temp_dir, snapshots.clone(), latest.clone());
+        let session_metadata =
+            new_test_session_metadata(&temp_dir, snapshots.clone(), latest.clone());
 
-        let session_manager_slot: crate::http::server::SharedSessionManagerSlot = std::sync::Arc::new(tokio::sync::RwLock::new(None));
+        let session_manager_slot: crate::http::server::SharedSessionManagerSlot =
+            std::sync::Arc::new(tokio::sync::RwLock::new(None));
 
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
@@ -6677,13 +7062,28 @@ mod tests {
             degraded_reasons,
             mqtt_client,
             Arc::new(tokio::sync::Mutex::new(Some(session_metadata))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(memory_store, embed_dim.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_git_query(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(
+                memory_store,
+                embed_dim.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_git_query(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(
+                temp_dir.clone(),
+            )))),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(std::sync::RwLock::new(None)),
             rag_provider_slot,
@@ -6725,9 +7125,11 @@ mod tests {
         let embed_dim: SharedEmbedDimension = Arc::new(std::sync::RwLock::new(0));
         let degraded_reasons: SharedDegradation = Arc::new(std::sync::RwLock::new(Vec::new()));
         let mqtt_client: SharedMqttClientSlot = Arc::new(tokio::sync::Mutex::new(None));
-        let session_metadata = new_test_session_metadata(&temp_dir, snapshots.clone(), latest.clone());
+        let session_metadata =
+            new_test_session_metadata(&temp_dir, snapshots.clone(), latest.clone());
 
-        let session_manager_slot: crate::http::server::SharedSessionManagerSlot = std::sync::Arc::new(tokio::sync::RwLock::new(None));
+        let session_manager_slot: crate::http::server::SharedSessionManagerSlot =
+            std::sync::Arc::new(tokio::sync::RwLock::new(None));
 
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
@@ -6741,13 +7143,28 @@ mod tests {
             degraded_reasons,
             mqtt_client,
             Arc::new(tokio::sync::Mutex::new(Some(session_metadata))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(memory_store, embed_dim.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_git_query(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(
+                memory_store,
+                embed_dim.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_git_query(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(
+                temp_dir.clone(),
+            )))),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(std::sync::RwLock::new(None)),
             Arc::new(std::sync::RwLock::new(None)),
@@ -6781,7 +7198,9 @@ mod tests {
         struct MockRag;
         #[async_trait::async_trait]
         impl RagProvider for MockRag {
-            fn name(&self) -> &str { "mock_rag" }
+            fn name(&self) -> &str {
+                "mock_rag"
+            }
             async fn query(&self, query: &str) -> Vec<AnnotatedRagResult> {
                 vec![AnnotatedRagResult {
                     source_label: "[RAG:mock_rag]".to_string(),
@@ -6820,9 +7239,11 @@ mod tests {
         let embed_dim: SharedEmbedDimension = Arc::new(std::sync::RwLock::new(0));
         let degraded_reasons: SharedDegradation = Arc::new(std::sync::RwLock::new(Vec::new()));
         let mqtt_client: SharedMqttClientSlot = Arc::new(tokio::sync::Mutex::new(None));
-        let session_metadata = new_test_session_metadata(&temp_dir, snapshots.clone(), latest.clone());
+        let session_metadata =
+            new_test_session_metadata(&temp_dir, snapshots.clone(), latest.clone());
 
-        let session_manager_slot: crate::http::server::SharedSessionManagerSlot = std::sync::Arc::new(tokio::sync::RwLock::new(None));
+        let session_manager_slot: crate::http::server::SharedSessionManagerSlot =
+            std::sync::Arc::new(tokio::sync::RwLock::new(None));
 
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
@@ -6836,13 +7257,28 @@ mod tests {
             degraded_reasons,
             mqtt_client,
             Arc::new(tokio::sync::Mutex::new(Some(session_metadata))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(memory_store, embed_dim.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_git_query(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(
+                memory_store,
+                embed_dim.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_git_query(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(
+                temp_dir.clone(),
+            )))),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(std::sync::RwLock::new(None)),
             rag_provider_slot,
@@ -6903,9 +7339,11 @@ mod tests {
         let embed_dim: SharedEmbedDimension = Arc::new(std::sync::RwLock::new(0));
         let degraded_reasons: SharedDegradation = Arc::new(std::sync::RwLock::new(Vec::new()));
         let mqtt_client: SharedMqttClientSlot = Arc::new(tokio::sync::Mutex::new(None));
-        let session_metadata = new_test_session_metadata(&temp_dir, snapshots.clone(), latest.clone());
+        let session_metadata =
+            new_test_session_metadata(&temp_dir, snapshots.clone(), latest.clone());
 
-        let session_manager_slot: crate::http::server::SharedSessionManagerSlot = std::sync::Arc::new(tokio::sync::RwLock::new(None));
+        let session_manager_slot: crate::http::server::SharedSessionManagerSlot =
+            std::sync::Arc::new(tokio::sync::RwLock::new(None));
 
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
@@ -6919,13 +7357,28 @@ mod tests {
             degraded_reasons,
             mqtt_client,
             Arc::new(tokio::sync::Mutex::new(Some(session_metadata))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(memory_store, embed_dim.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_git_query(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(
+                memory_store,
+                embed_dim.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_git_query(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(
+                temp_dir.clone(),
+            )))),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(std::sync::RwLock::new(None)),
             Arc::new(std::sync::RwLock::new(None)),
@@ -6973,20 +7426,23 @@ mod tests {
         let snapshots: SharedSessionSnapshots =
             std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
         let latest: SharedLatestSession = std::sync::Arc::new(std::sync::RwLock::new(None));
-        let dispatch_tx: SharedDispatchSender =
-            std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let dispatch_tx: SharedDispatchSender = std::sync::Arc::new(tokio::sync::Mutex::new(None));
         let embed_dim: SharedEmbedDimension = std::sync::Arc::new(std::sync::RwLock::new(0));
         let degraded_reasons: SharedDegradation =
             std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
-        let mqtt_client: SharedMqttClientSlot =
-            std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let mqtt_client: SharedMqttClientSlot = std::sync::Arc::new(tokio::sync::Mutex::new(None));
 
-        let attachment_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AttachmentService>>>> =
-            std::sync::Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(temp_dir.clone()))));
-        let session_config_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionConfigService>>>> =
-            Arc::new(tokio::sync::Mutex::new(None));
+        let attachment_slot: Arc<
+            tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AttachmentService>>>,
+        > = std::sync::Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(
+            temp_dir.clone(),
+        ))));
+        let session_config_slot: Arc<
+            tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionConfigService>>>,
+        > = Arc::new(tokio::sync::Mutex::new(None));
 
-        let session_manager_slot: crate::http::server::SharedSessionManagerSlot = std::sync::Arc::new(tokio::sync::RwLock::new(None));
+        let session_manager_slot: crate::http::server::SharedSessionManagerSlot =
+            std::sync::Arc::new(tokio::sync::RwLock::new(None));
 
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
@@ -7008,12 +7464,12 @@ mod tests {
             std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             attachment_slot,
             session_config_slot,
-                    std::sync::Arc::new(std::sync::RwLock::new(None)),
-                    std::sync::Arc::new(std::sync::RwLock::new(None)),
-                    std::sync::Arc::new(tokio::sync::Mutex::new(None)),
-                    new_test_workspace_resolver(),
-                    session_manager_slot,
-                    std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
+            std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            new_test_workspace_resolver(),
+            session_manager_slot,
+            std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
         )
         .await
         .expect("server should start");
@@ -7048,15 +7504,23 @@ mod tests {
             resp.status()
         );
         let body: serde_json::Value = resp.json().await.unwrap();
-        let document_id = body["documentId"].as_str().expect("documentId present").to_string();
+        let document_id = body["documentId"]
+            .as_str()
+            .expect("documentId present")
+            .to_string();
         let format = body["format"].as_str().expect("format echoed back");
-        assert_eq!(format, "docx", "upload response must echo the requested format");
+        assert_eq!(
+            format, "docx",
+            "upload response must echo the requested format"
+        );
 
         // Step 2: The blob MUST be on disk with the real .docx extension
         // and the readable `<stem>_<id>` prefix. Pre-fix this landed as
         // `<doc_id>.bin`, which `doc_reader` would reject with
         // "Unsupported document format".
-        let suffixed = temp_dir.join("files").join(format!("report_{document_id}.docx"));
+        let suffixed = temp_dir
+            .join("files")
+            .join(format!("report_{document_id}.docx"));
         let dir_contents: Vec<_> = std::fs::read_dir(temp_dir.join("files"))
             .map(|rd| rd.flatten().map(|e| e.file_name()).collect::<Vec<_>>())
             .unwrap_or_default();
@@ -7091,12 +7555,15 @@ mod tests {
             .unwrap_or("")
             .to_string();
         assert_eq!(
-            ct,
-            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            ct, "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             "Content-Type for docx download must be the Office Word MIME, got {ct:?}"
         );
         let bytes = resp.bytes().await.unwrap();
-        assert_eq!(bytes.as_ref(), docx_bytes.as_slice(), "downloaded bytes must match upload");
+        assert_eq!(
+            bytes.as_ref(),
+            docx_bytes.as_slice(),
+            "downloaded bytes must match upload"
+        );
 
         std::fs::remove_dir_all(&temp_dir).ok();
     }
@@ -7139,7 +7606,7 @@ mod tests {
         let svc: Arc<dyn crate::usecases::SessionConfigService> =
             Arc::new(crate::usecases::RuntimeSessionConfigService::new(
                 shared_configs,
-                None, // no resolver for basic tests
+                None,                                   // no resolver for basic tests
                 Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
             ));
 
@@ -7157,13 +7624,14 @@ mod tests {
 
         let session_id = "20260101_120000_cfg";
 
-        let (config_svc, _conv) =
-            make_test_session_config_service(&temp_dir, session_id);
+        let (config_svc, _conv) = make_test_session_config_service(&temp_dir, session_id);
 
-        let session_config_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionConfigService>>>> =
-            Arc::new(tokio::sync::Mutex::new(Some(config_svc)));
+        let session_config_slot: Arc<
+            tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionConfigService>>>,
+        > = Arc::new(tokio::sync::Mutex::new(Some(config_svc)));
 
-        let session_manager_slot: crate::http::server::SharedSessionManagerSlot = std::sync::Arc::new(tokio::sync::RwLock::new(None));
+        let session_manager_slot: crate::http::server::SharedSessionManagerSlot =
+            std::sync::Arc::new(tokio::sync::RwLock::new(None));
 
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
@@ -7185,12 +7653,12 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             session_config_slot,
-                    std::sync::Arc::new(std::sync::RwLock::new(None)),
-                    std::sync::Arc::new(std::sync::RwLock::new(None)),
-                    std::sync::Arc::new(tokio::sync::Mutex::new(None)),
-                    new_test_workspace_resolver(),
-                    session_manager_slot,
-                    std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
+            std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            new_test_workspace_resolver(),
+            session_manager_slot,
+            std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
         )
         .await
         .expect("server should start");
@@ -7283,10 +7751,10 @@ mod tests {
                 None,
                 Arc::new(std::sync::RwLock::new(None)),
             ));
-        let session_config_slot =
-            Arc::new(tokio::sync::Mutex::new(Some(config_svc)));
+        let session_config_slot = Arc::new(tokio::sync::Mutex::new(Some(config_svc)));
 
-        let session_manager_slot: crate::http::server::SharedSessionManagerSlot = std::sync::Arc::new(tokio::sync::RwLock::new(None));
+        let session_manager_slot: crate::http::server::SharedSessionManagerSlot =
+            std::sync::Arc::new(tokio::sync::RwLock::new(None));
 
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
@@ -7308,12 +7776,12 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             session_config_slot,
-                    std::sync::Arc::new(std::sync::RwLock::new(None)),
-                    std::sync::Arc::new(std::sync::RwLock::new(None)),
-                    std::sync::Arc::new(tokio::sync::Mutex::new(None)),
-                    new_test_workspace_resolver(),
-                    session_manager_slot,
-                    std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
+            std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            new_test_workspace_resolver(),
+            session_manager_slot,
+            std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
         )
         .await
         .expect("server should start");
@@ -7362,9 +7830,7 @@ mod tests {
 
         // Create a resolver with an empty allowed_dirs (no workspaces)
         let resolver = Arc::new(std::sync::RwLock::new(
-            crate::tools::workspace_resolver::WorkspaceResolver::new(
-                temp_dir.to_str().unwrap(),
-            ),
+            crate::tools::workspace_resolver::WorkspaceResolver::new(temp_dir.to_str().unwrap()),
         ));
 
         let config_svc: Arc<dyn crate::usecases::SessionConfigService> =
@@ -7373,10 +7839,10 @@ mod tests {
                 Some(resolver),
                 Arc::new(std::sync::RwLock::new(None)),
             ));
-        let session_config_slot =
-            Arc::new(tokio::sync::Mutex::new(Some(config_svc)));
+        let session_config_slot = Arc::new(tokio::sync::Mutex::new(Some(config_svc)));
 
-        let session_manager_slot: crate::http::server::SharedSessionManagerSlot = std::sync::Arc::new(tokio::sync::RwLock::new(None));
+        let session_manager_slot: crate::http::server::SharedSessionManagerSlot =
+            std::sync::Arc::new(tokio::sync::RwLock::new(None));
 
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
@@ -7398,12 +7864,12 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             session_config_slot,
-                    std::sync::Arc::new(std::sync::RwLock::new(None)),
-                    std::sync::Arc::new(std::sync::RwLock::new(None)),
-                    std::sync::Arc::new(tokio::sync::Mutex::new(None)),
-                    new_test_workspace_resolver(),
-                    session_manager_slot,
-                    std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
+            std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            new_test_workspace_resolver(),
+            session_manager_slot,
+            std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
         )
         .await
         .expect("server should start");
@@ -7452,7 +7918,7 @@ mod tests {
         let session_id = "20260101_120000_ncfg";
 
         // Create a session with model set in meta
-        use crate::conversation::{write_session_meta, SessionMeta};
+        use crate::conversation::{SessionMeta, write_session_meta};
         let meta_dir = temp_dir.join("conversations").join("meta");
         std::fs::create_dir_all(&meta_dir).unwrap();
         let meta = SessionMeta {
@@ -7480,11 +7946,11 @@ mod tests {
 
         let snapshots: SharedSessionSnapshots =
             Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
-        let latest: SharedLatestSession =
-            Arc::new(std::sync::RwLock::new(None));
+        let latest: SharedLatestSession = Arc::new(std::sync::RwLock::new(None));
         let session_metadata = new_test_session_metadata(&temp_dir, snapshots, latest);
 
-        let session_manager_slot: crate::http::server::SharedSessionManagerSlot = std::sync::Arc::new(tokio::sync::RwLock::new(None));
+        let session_manager_slot: crate::http::server::SharedSessionManagerSlot =
+            std::sync::Arc::new(tokio::sync::RwLock::new(None));
 
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
@@ -7506,12 +7972,12 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
-                    std::sync::Arc::new(std::sync::RwLock::new(None)),
-                    std::sync::Arc::new(std::sync::RwLock::new(None)),
-                    std::sync::Arc::new(tokio::sync::Mutex::new(None)),
-                    new_test_workspace_resolver(),
-                    session_manager_slot,
-                    std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
+            std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            new_test_workspace_resolver(),
+            session_manager_slot,
+            std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
         )
         .await
         .expect("server should start");
@@ -7528,14 +7994,22 @@ mod tests {
         // meta should have session_id, created_at, last_active_at, message_count
         let meta_obj = &body["meta"];
         assert_eq!(meta_obj["session_id"], session_id);
-        assert!(meta_obj.get("model").is_none() || meta_obj["model"].is_null(),
-            "GET /sessions/{{sid}} meta must NOT contain model");
-        assert!(meta_obj.get("provider").is_none() || meta_obj["provider"].is_null(),
-            "GET /sessions/{{sid}} meta must NOT contain provider");
-        assert!(meta_obj.get("temperature").is_none() || meta_obj["temperature"].is_null(),
-            "GET /sessions/{{sid}} meta must NOT contain temperature");
-        assert!(meta_obj.get("workspace_id").is_none() || meta_obj["workspace_id"].is_null(),
-            "GET /sessions/{{sid}} meta must NOT contain workspace_id");
+        assert!(
+            meta_obj.get("model").is_none() || meta_obj["model"].is_null(),
+            "GET /sessions/{{sid}} meta must NOT contain model"
+        );
+        assert!(
+            meta_obj.get("provider").is_none() || meta_obj["provider"].is_null(),
+            "GET /sessions/{{sid}} meta must NOT contain provider"
+        );
+        assert!(
+            meta_obj.get("temperature").is_none() || meta_obj["temperature"].is_null(),
+            "GET /sessions/{{sid}} meta must NOT contain temperature"
+        );
+        assert!(
+            meta_obj.get("workspace_id").is_none() || meta_obj["workspace_id"].is_null(),
+            "GET /sessions/{{sid}} meta must NOT contain workspace_id"
+        );
 
         std::fs::remove_dir_all(&temp_dir).ok();
     }
@@ -7591,16 +8065,14 @@ mod tests {
         let snapshots: SharedSessionSnapshots =
             std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
         let latest: SharedLatestSession = std::sync::Arc::new(std::sync::RwLock::new(None));
-        let dispatch_tx: SharedDispatchSender =
-            std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let dispatch_tx: SharedDispatchSender = std::sync::Arc::new(tokio::sync::Mutex::new(None));
         let embed_dim: SharedEmbedDimension = std::sync::Arc::new(std::sync::RwLock::new(0));
         let degraded_reasons: SharedDegradation =
             std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
-        let mqtt_client: SharedMqttClientSlot =
-            std::sync::Arc::new(tokio::sync::Mutex::new(None));
-        let session_metadata = new_test_session_metadata(&temp_dir, snapshots.clone(), latest.clone());
-        let memory_store: SharedMemoryStore =
-            std::sync::Arc::new(std::sync::RwLock::new(None));
+        let mqtt_client: SharedMqttClientSlot = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let session_metadata =
+            new_test_session_metadata(&temp_dir, snapshots.clone(), latest.clone());
+        let memory_store: SharedMemoryStore = std::sync::Arc::new(std::sync::RwLock::new(None));
 
         // SessionManager slot populated; the real handle is the one we
         // built above (cloned — the HTTP server holds a reference, the
@@ -7620,13 +8092,28 @@ mod tests {
             degraded_reasons,
             mqtt_client,
             Arc::new(tokio::sync::Mutex::new(Some(session_metadata))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(memory_store, embed_dim.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_git_query(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(
+                memory_store,
+                embed_dim.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_git_query(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(
+                temp_dir.clone(),
+            )))),
             Arc::new(tokio::sync::Mutex::new(None)),
             std::sync::Arc::new(std::sync::RwLock::new(None)),
             std::sync::Arc::new(std::sync::RwLock::new(None)),
@@ -7714,16 +8201,14 @@ mod tests {
         let snapshots: SharedSessionSnapshots =
             std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
         let latest: SharedLatestSession = std::sync::Arc::new(std::sync::RwLock::new(None));
-        let dispatch_tx: SharedDispatchSender =
-            std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let dispatch_tx: SharedDispatchSender = std::sync::Arc::new(tokio::sync::Mutex::new(None));
         let embed_dim: SharedEmbedDimension = std::sync::Arc::new(std::sync::RwLock::new(0));
         let degraded_reasons: SharedDegradation =
             std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
-        let mqtt_client: SharedMqttClientSlot =
-            std::sync::Arc::new(tokio::sync::Mutex::new(None));
-        let session_metadata = new_test_session_metadata(&temp_dir, snapshots.clone(), latest.clone());
-        let memory_store: SharedMemoryStore =
-            std::sync::Arc::new(std::sync::RwLock::new(None));
+        let mqtt_client: SharedMqttClientSlot = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let session_metadata =
+            new_test_session_metadata(&temp_dir, snapshots.clone(), latest.clone());
+        let memory_store: SharedMemoryStore = std::sync::Arc::new(std::sync::RwLock::new(None));
 
         // SessionManager slot is empty — mimics Phase B not yet finished.
         let session_manager_slot: crate::http::server::SharedSessionManagerSlot =
@@ -7741,13 +8226,28 @@ mod tests {
             degraded_reasons,
             mqtt_client,
             Arc::new(tokio::sync::Mutex::new(Some(session_metadata))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(memory_store, embed_dim.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_git_query(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(temp_dir.clone())))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(
+                memory_store,
+                embed_dim.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_git_query(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(
+                temp_dir.clone(),
+            )))),
             Arc::new(tokio::sync::Mutex::new(None)),
             std::sync::Arc::new(std::sync::RwLock::new(None)),
             std::sync::Arc::new(std::sync::RwLock::new(None)),

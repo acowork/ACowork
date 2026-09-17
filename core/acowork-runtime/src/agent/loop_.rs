@@ -63,7 +63,6 @@ pub struct SessionChunkEvent {
 pub enum ChunkEvent {
     // ── ADR-021: Data events (Delta, ReasoningDelta, ReasoningStarted, ToolCall,
     //    ToolResult) removed — frontend polls via HTTP. Only control events remain. ──
-
     /// Context usage report (after each LLM call)
     ContextUsage(acowork_core::protocol::ContextUsageInfo),
     /// Context compaction started (emitted before auto/manual compact triggers),
@@ -299,6 +298,9 @@ pub(crate) enum IterationResult {
     Stopped(String),
     /// Agent was paused by debug panel — iteration aborted, await resume
     Paused,
+    /// Output budget exhausted with no content — an internal nudge was
+    /// injected into history, continue to the next iteration.
+    Nudged,
 }
 
 use crate::agent::session_core::SessionCore;
@@ -449,8 +451,7 @@ impl AgentLoop {
         );
         let streaming_lines: crate::conversation::StreamingStateMap =
             Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
-        let current_work_dir =
-            Arc::new(std::sync::RwLock::new(Some(config.work_dir.clone())));
+        let current_work_dir = Arc::new(std::sync::RwLock::new(Some(config.work_dir.clone())));
         let session_core = SessionCore::new(
             String::new(), // session_id set later
             chunk_tx,
@@ -579,8 +580,7 @@ impl AgentLoop {
             .clone();
 
         let work_dir = self.session_core.current_work_dir.read().unwrap().clone();
-        match tool.execute(params, work_dir.as_deref()).await
-        {
+        match tool.execute(params, work_dir.as_deref()).await {
             Ok(result) if result.ok => Ok(result.content),
             Ok(result) => Err(result
                 .error
@@ -689,8 +689,16 @@ impl AgentLoop {
         raw_user_message: Option<&str>,
         attached_items: Option<&[acowork_core::protocol::AttachedItem]>,
     ) -> Result<String> {
-        self.run_inner(user_message, context_builder, false, content_parts, message_id, raw_user_message, attached_items)
-            .await
+        self.run_inner(
+            user_message,
+            context_builder,
+            false,
+            content_parts,
+            message_id,
+            raw_user_message,
+            attached_items,
+        )
+        .await
     }
 
     /// Re-run the agent loop after a debug resume (user message already in history).
@@ -702,8 +710,16 @@ impl AgentLoop {
         context_builder: &mut ContextBuilder,
         content_parts: Option<Vec<acowork_core::providers::traits::ContentPart>>,
     ) -> Result<String> {
-        self.run_inner(user_message, context_builder, true, content_parts, None, None, None)
-            .await
+        self.run_inner(
+            user_message,
+            context_builder,
+            true,
+            content_parts,
+            None,
+            None,
+            None,
+        )
+        .await
     }
 
     /// Core agent loop shared by [`run`] and [`replay`].
@@ -784,8 +800,7 @@ impl AgentLoop {
             // clean copy. Pre-046 call sites that pass `None` for
             // `raw_user_message` fall back to `user_message` so the
             // binary contract for legacy tests stays intact.
-            let persisted_user_message: &str =
-                raw_user_message.unwrap_or(user_message);
+            let persisted_user_message: &str = raw_user_message.unwrap_or(user_message);
             if let Some(ref conversation) = self.session.conversation {
                 conversation.append_message_with_id(
                     "user",
@@ -801,9 +816,10 @@ impl AgentLoop {
             // attachment entries *after* the user message by timestamp) can
             // fold them into a single `user_with_attachments` block.
             if let Some(items) = attached_items
-                && !items.is_empty() {
-                    self.write_attached_items(items);
-                }
+                && !items.is_empty()
+            {
+                self.write_attached_items(items);
+            }
 
             // Async: generate session title from first user message using
             // the compact model. The title is pushed to the frontend via
@@ -835,7 +851,7 @@ impl AgentLoop {
                                 .and_then(|l| l.split(':').nth(1).map(|s| s.trim().to_string()))
                         })
                         .unwrap_or_else(|| "en".to_string());
-            
+
                     // Use the raw user message (before any prompt enrichment)
                     // for title generation. This is the user's original input
                     // without [Attached context:] prefix, document content,
@@ -845,7 +861,7 @@ impl AgentLoop {
                     // uploaded files without typing text), the fallback below
                     // extracts filenames from <attached_document> tags.
                     let title_input = raw_user_message.unwrap_or("");
-            
+
                     let prompt = crate::prompt::TITLE_PROMPT
                         .replace("{language}", &lang)
                         .replace("{user_message}", title_input);
@@ -855,8 +871,7 @@ impl AgentLoop {
                     // drives the title call too — never a mismatched
                     // (session provider, other-provider model) pair.
                     let resolved_distill = self.resolve_distill_model(title_input);
-                    let (provider, compact_model, _tier) =
-                        self.distill_provider(&resolved_distill);
+                    let (provider, compact_model, _tier) = self.distill_provider(&resolved_distill);
                     let session_core_title = self.session_core.title.clone();
                     let conversation_clone = self.session.conversation.clone();
                     // ADR-028: clone the AgentCore so the spawned task can
@@ -880,7 +895,7 @@ impl AgentLoop {
                     } else {
                         title_input.to_string()
                     };
-            
+
                     tokio::spawn(async move {
                         // max_tokens=120 leaves room for a 60-char Chinese title
                         // (CJK char ≈ 1.5–2 BPE tokens). 64 was tight for a 30-char
@@ -915,7 +930,8 @@ impl AgentLoop {
                                 tracing::warn!(
                                     "LLM session title generation failed (non-fatal): {e}"
                                 );
-                                let fallback = crate::prompt::truncate_title_for_display(&fallback_msg);
+                                let fallback =
+                                    crate::prompt::truncate_title_for_display(&fallback_msg);
                                 *session_core_title.write().unwrap() = Some(fallback);
                             }
                         }
@@ -975,17 +991,22 @@ impl AgentLoop {
                     reason: Some(PauseReason::IterationLimit),
                     message: Some(message.clone()),
                 });
-                let _ = self.session_core.try_send_chunk(ChunkEvent::IterationLimitPaused {
-                    iteration,
-                    max_iterations: max_iters,
-                    message,
-                });
+                let _ = self
+                    .session_core
+                    .try_send_chunk(ChunkEvent::IterationLimitPaused {
+                        iteration,
+                        max_iterations: max_iters,
+                        message,
+                    });
 
                 // Wait for ContinueExecution or Interrupt from inbound queue
                 // Also checks UserOperation variants for the unified fast channel.
                 loop {
                     match self.inbound_rx.recv().await {
-                        Some(InboundMessage::ContinueExecution { session_id: _, reason }) => {
+                        Some(InboundMessage::ContinueExecution {
+                            session_id: _,
+                            reason,
+                        }) => {
                             tracing::info!(
                                 reason = %reason,
                                 "User chose to continue, resetting iteration counter"
@@ -1021,7 +1042,9 @@ impl AgentLoop {
                                     );
                                     self.transition_status(SessionStatus::LlmAwaitingFirstChunk);
                                     iteration = 0;
-                                    if let Err(e) = self.trim_history_to_budget(&current_model).await {
+                                    if let Err(e) =
+                                        self.trim_history_to_budget(&current_model).await
+                                    {
                                         self.transition_status(SessionStatus::Idle);
                                         return Err(e);
                                     }
@@ -1074,9 +1097,7 @@ impl AgentLoop {
             // so it can be unit-tested as a pure function. The loop only owns
             // the side effects (sleeping, transitioning session status,
             // surfacing RetryPauseInfo).
-            use crate::agent::retry::{
-                decide_retry_action, RetryAction, MAX_LONG_RETRIES,
-            };
+            use crate::agent::retry::{MAX_LONG_RETRIES, RetryAction, decide_retry_action};
             let mut iteration_retries = 0u32;
             let mut long_retry_count = 0u32;
             // Consecutive persistent (post-budget) network-recovery waits.
@@ -1126,18 +1147,15 @@ impl AgentLoop {
                         });
 
                         // Send chunk event for frontend to display the continue button
-                        let _ = self.session_core.try_send_chunk(
-                            ChunkEvent::LoopDetectedPaused {
+                        let _ = self
+                            .session_core
+                            .try_send_chunk(ChunkEvent::LoopDetectedPaused {
                                 iteration,
                                 max_iterations: self.core.config.max_iterations,
                                 message: msg,
-                            },
-                        );
+                            });
 
-                        tracing::warn!(
-                            iteration,
-                            "Loop detected — pausing for user decision"
-                        );
+                        tracing::warn!(iteration, "Loop detected — pausing for user decision");
 
                         // Wait for ContinueExecution or Stop from inbound queue
                         loop {
@@ -1153,7 +1171,9 @@ impl AgentLoop {
                                     // ADR-049: HTTP request about to be sent → LlmAwaitingFirstChunk.
                                     self.transition_status(SessionStatus::LlmAwaitingFirstChunk);
                                     iteration = 0;
-                                    if let Err(e) = self.trim_history_to_budget(&current_model).await {
+                                    if let Err(e) =
+                                        self.trim_history_to_budget(&current_model).await
+                                    {
                                         self.transition_status(SessionStatus::Idle);
                                         return Err(e);
                                     }
@@ -1228,14 +1248,12 @@ impl AgentLoop {
                                 self.transition_status(SessionStatus::Paused {
                                     iteration: Some(iteration),
                                     max_iterations: Some(self.core.config.max_iterations),
-                                    retry_info: Some(
-                                        crate::agent::session_state::RetryPauseInfo {
-                                            wait_ms,
-                                            attempt,
-                                            max_attempts,
-                                            provider: current_model.clone(),
-                                        },
-                                    ),
+                                    retry_info: Some(crate::agent::session_state::RetryPauseInfo {
+                                        wait_ms,
+                                        attempt,
+                                        max_attempts,
+                                        provider: current_model.clone(),
+                                    }),
                                     reason: None,
                                     message: None,
                                 });
@@ -1262,10 +1280,7 @@ impl AgentLoop {
                                 iteration_retries = 0;
                                 continue;
                             }
-                            RetryAction::Persistent {
-                                wait_ms,
-                                attempt,
-                            } => {
+                            RetryAction::Persistent { wait_ms, attempt } => {
                                 // Bounded fast + long budgets are exhausted,
                                 // but the error is still a transient network /
                                 // transport failure. Do NOT give up and enter
@@ -1282,14 +1297,12 @@ impl AgentLoop {
                                 self.transition_status(SessionStatus::Paused {
                                     iteration: Some(iteration),
                                     max_iterations: Some(self.core.config.max_iterations),
-                                    retry_info: Some(
-                                        crate::agent::session_state::RetryPauseInfo {
-                                            wait_ms,
-                                            attempt,
-                                            max_attempts: MAX_LONG_RETRIES,
-                                            provider: current_model.clone(),
-                                        },
-                                    ),
+                                    retry_info: Some(crate::agent::session_state::RetryPauseInfo {
+                                        wait_ms,
+                                        attempt,
+                                        max_attempts: MAX_LONG_RETRIES,
+                                        provider: current_model.clone(),
+                                    }),
                                     reason: None,
                                     message: None,
                                 });
@@ -1356,6 +1369,12 @@ impl AgentLoop {
                     tracing::debug!(iteration, "Loop iteration complete, continuing");
                     continue;
                 }
+                IterationResult::Nudged => {
+                    // Output budget exhausted with no content; an internal
+                    // nudge was appended to history. Run another iteration.
+                    tracing::debug!(iteration, "Output budget exhausted — nudged, continuing");
+                    continue;
+                }
                 IterationResult::Paused => {
                     // ADR-014: Streaming → Paused (iteration aborted, await resume)
                     self.transition_status(SessionStatus::Paused {
@@ -1397,12 +1416,11 @@ impl AgentLoop {
                         ctrl_guard.state = crate::debug::controller::DebugState::Stopped;
                         drop(ctrl_guard);
                         if let Some(event_tx) = self.core.debug_observer.debug_event_tx() {
-                            let _ = event_tx.send(
-                                crate::debug::DebugEvent::ExecutionStateChanged {
+                            let _ =
+                                event_tx.send(crate::debug::DebugEvent::ExecutionStateChanged {
                                     new_state: crate::debug::controller::DebugState::Stopped,
                                     iteration,
-                                },
-                            );
+                                });
                         }
                         return Some(IterationResult::Stopped(String::new()));
                     }
@@ -1626,10 +1644,21 @@ impl AgentLoop {
 
         // ── ④ Text response → early return ──
         if !has_tool_calls {
-            // Guard: log empty response before exiting the loop.
-            // This can happen when a thinking model exhausts its token budget
-            // on reasoning and produces neither content nor tool_calls.
-            if response.content.is_empty() && response.reasoning_content.is_some() {
+            // A thinking model can spend its entire completion budget on
+            // reasoning and return `finish_reason="length"` with no content and
+            // no tool calls (MiniMax-M3, 2026-09-16: all 32768 completion
+            // tokens were reasoning tokens). Ending the turn here would
+            // silently return an empty reply, so nudge the model to wrap up
+            // first — bounded per user turn.
+            if crate::agent::loop_session::is_output_budget_exhausted(&response) {
+                return Ok(self
+                    .handle_output_budget_exhausted(&response, iteration)
+                    .await);
+            }
+            // Any other empty-content response is not actionable; keep the
+            // diagnostic. `trim()` so whitespace-only content — which used to
+            // slip past this guard and end the turn silently — is reported too.
+            if response.content.trim().is_empty() && response.reasoning_content.is_some() {
                 let reasoning_tokens = response
                     .usage
                     .as_ref()
@@ -1676,11 +1705,7 @@ impl AgentLoop {
             .on_phase_enter(crate::debug::protocol::DebugPhase::ToolExecution)
             .await;
         let (tagged_results, interrupt) = self
-            .dispatch_and_merge_tools(
-                calls_to_execute,
-                &deduped_calls,
-                &blocked_info,
-            )
+            .dispatch_and_merge_tools(calls_to_execute, &deduped_calls, &blocked_info)
             .await;
 
         // Split tagged results into content strings + transient flags
@@ -1698,7 +1723,8 @@ impl AgentLoop {
         // but compacting here keeps the results from ever landing in history
         // above the line). Failure is terminal — propagate out of the
         // iteration (GiveUp → Idle), never swallow and keep looping.
-        self.pre_trim_for_tool_results(&tool_contents, current_model).await?;
+        self.pre_trim_for_tool_results(&tool_contents, current_model)
+            .await?;
 
         // ── ⑧.25 Context-aware tool result trimming ──
         // After pre-trim removed old history, also truncate individual
@@ -1707,10 +1733,7 @@ impl AgentLoop {
         // overflowing the window when appended, which would cause the
         // FIFO/emergency trim to delete ALL messages including the
         // results themselves, crashing the session with "context depleted".
-        let truncated = self.trim_tool_results_for_context(
-            &mut tool_contents,
-            current_model,
-        );
+        let truncated = self.trim_tool_results_for_context(&mut tool_contents, current_model);
         if truncated > 0 {
             tracing::warn!(
                 truncated,
@@ -1724,8 +1747,9 @@ impl AgentLoop {
         // All tool results are permanently appended. The `is_transient`
         // field on `ToolResult` is preserved for future hypothetical
         // one-shot tools (ADR-032 C3a).
-        for (tc, (result_content, &is_transient)) in
-            deduped_calls.iter().zip(tool_contents.iter().zip(transient_flags.iter()))
+        for (tc, (result_content, &is_transient)) in deduped_calls
+            .iter()
+            .zip(tool_contents.iter().zip(transient_flags.iter()))
         {
             let msg = ChatMessage {
                 name: Some(tc.function.name.clone()),
@@ -1811,7 +1835,6 @@ impl AgentLoop {
         let mut did_work = false;
         while let Ok(cmd) = rx.try_recv() {
             match cmd {
-
                 CompressionAction::CompressSummary => {
                     // Summary compaction is handled by compact_history_if_needed
                     // (LLM-based). For now, just trigger the budget-trim path.
@@ -1865,8 +1888,10 @@ mod tests {
     use super::*;
     use crate::agent::agent_core::BuiltinToolEntry;
     use crate::agent::loop_tools::execute_single_tool;
-    use acowork_core::providers::mock::MockProvider;
-    use acowork_core::providers::traits::{FunctionCall, MessageRole, ToolCall};
+    use acowork_core::providers::mock::{MockProvider, MockResponse};
+    use acowork_core::providers::traits::{
+        ChatResponse, FunctionCall, MessageRole, ToolCall, UsageInfo,
+    };
 
     /// Simple echo tool for testing
     struct EchoTool;
@@ -1938,7 +1963,10 @@ mod tests {
     fn entries(tools: Vec<Arc<dyn Tool>>) -> Vec<BuiltinToolEntry> {
         tools
             .into_iter()
-            .map(|tool| BuiltinToolEntry { tool, enabled: true })
+            .map(|tool| BuiltinToolEntry {
+                tool,
+                enabled: true,
+            })
             .collect()
     }
 
@@ -1995,7 +2023,9 @@ mod tests {
         let (mut agent_loop, _inbound_tx) =
             AgentLoop::new(config, manifest, provider, tools, budget, None, None);
         let mut context_builder = ContextBuilder::new("You are a test agent.".to_string());
-        let result = agent_loop.run("Hi", &mut context_builder, None, None, None, None).await;
+        let result = agent_loop
+            .run("Hi", &mut context_builder, None, None, None, None)
+            .await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "Hello from standalone!");
     }
@@ -2014,7 +2044,9 @@ mod tests {
         let (mut agent_loop, _) =
             AgentLoop::new(config, manifest, provider, tools, budget, None, None);
         let mut context_builder = ContextBuilder::new("You are a test agent.".to_string());
-        let result = agent_loop.run("Hi", &mut context_builder, None, None, None, None).await;
+        let result = agent_loop
+            .run("Hi", &mut context_builder, None, None, None, None)
+            .await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "Accumulated content here");
     }
@@ -2033,7 +2065,9 @@ mod tests {
         let (mut agent_loop, _) =
             AgentLoop::new(config, manifest, provider, tools, budget, None, None);
         let mut context_builder = ContextBuilder::new("You are a test agent.".to_string());
-        let result = agent_loop.run("Hi", &mut context_builder, None, None, None, None).await;
+        let result = agent_loop
+            .run("Hi", &mut context_builder, None, None, None, None)
+            .await;
         assert!(result.is_ok());
     }
 
@@ -2048,7 +2082,9 @@ mod tests {
         let (mut agent_loop, _) =
             AgentLoop::new(config, manifest, provider, tools, budget, None, None);
         let mut context_builder = ContextBuilder::new("System".to_string());
-        let result = agent_loop.run("Hi", &mut context_builder, None, None, None, None).await;
+        let result = agent_loop
+            .run("Hi", &mut context_builder, None, None, None, None)
+            .await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "Final response");
         // Verify usage was tracked (budget guard should have been updated)
@@ -2159,7 +2195,9 @@ mod tests {
         let (mut agent_loop, _) =
             AgentLoop::new(config, manifest, provider, tools, budget, None, None);
         let mut context_builder = ContextBuilder::new("System".to_string());
-        let result = agent_loop.run("Hi", &mut context_builder, None, None, None, None).await;
+        let result = agent_loop
+            .run("Hi", &mut context_builder, None, None, None, None)
+            .await;
         assert!(result.is_err());
         // Error from chat_stream propagates as Core(AcoworkError::Provider(...))
         // because Provider trait returns acowork_core::AcoworkError
@@ -2186,7 +2224,9 @@ mod tests {
         let (mut agent_loop, _) =
             AgentLoop::new(config, manifest, provider, tools, budget, None, None);
         let mut context_builder = ContextBuilder::new("System".to_string());
-        let result = agent_loop.run("Hi", &mut context_builder, None, None, None, None).await;
+        let result = agent_loop
+            .run("Hi", &mut context_builder, None, None, None, None)
+            .await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "All done");
     }
@@ -2201,7 +2241,9 @@ mod tests {
         let (mut agent_loop, _) =
             AgentLoop::new(config, manifest, provider, tools, budget, None, None);
         let mut context_builder = ContextBuilder::new("System".to_string());
-        let result = agent_loop.run("Hi", &mut context_builder, None, None, None, None).await;
+        let result = agent_loop
+            .run("Hi", &mut context_builder, None, None, None, None)
+            .await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "");
     }
@@ -2217,7 +2259,9 @@ mod tests {
         let (mut agent_loop, _) =
             AgentLoop::new(config, manifest, provider, tools, budget, None, None);
         let mut context_builder = ContextBuilder::new("System".to_string());
-        let _ = agent_loop.run("Hi", &mut context_builder, None, None, None, None).await;
+        let _ = agent_loop
+            .run("Hi", &mut context_builder, None, None, None, None)
+            .await;
         let messages = agent_loop.history().messages();
         // Should have: user message + assistant message
         let assistant_msgs: Vec<_> = messages
@@ -2238,7 +2282,9 @@ mod tests {
         let (mut agent_loop, _) =
             AgentLoop::new(config, manifest, provider, tools, budget, None, None);
         let mut context_builder = ContextBuilder::new("System".to_string());
-        let _ = agent_loop.run("Hi", &mut context_builder, None, None, None, None).await;
+        let _ = agent_loop
+            .run("Hi", &mut context_builder, None, None, None, None)
+            .await;
         // Budget guard should have been updated with usage from the stream
         // (MockProvider returns usage with total_tokens=150)
         // We can't directly check budget_guard, but we verify no error occurred
@@ -2262,7 +2308,9 @@ mod tests {
             .try_send(InboundMessage::UserMessage("Injected question".to_string()))
             .unwrap();
 
-        let result = agent_loop.run("Hi", &mut context_builder, None, None, None, None).await;
+        let result = agent_loop
+            .run("Hi", &mut context_builder, None, None, None, None)
+            .await;
         assert!(result.is_ok());
         // Verify the injected message appeared in history
         let messages = agent_loop.history().messages();
@@ -2294,7 +2342,9 @@ mod tests {
             })
             .unwrap();
 
-        let result = agent_loop.run("Hi", &mut context_builder, None, None, None, None).await;
+        let result = agent_loop
+            .run("Hi", &mut context_builder, None, None, None, None)
+            .await;
         assert!(result.is_ok());
         let messages = agent_loop.history().messages();
         let notif: Vec<_> = messages
@@ -2326,7 +2376,9 @@ mod tests {
             })
             .unwrap();
 
-        let result = agent_loop.run("Hi", &mut context_builder, None, None, None, None).await;
+        let result = agent_loop
+            .run("Hi", &mut context_builder, None, None, None, None)
+            .await;
         assert!(result.is_ok());
         let messages = agent_loop.history().messages();
         let intent: Vec<_> = messages
@@ -2357,7 +2409,9 @@ mod tests {
                 .unwrap();
         }
 
-        let result = agent_loop.run("Hi", &mut context_builder, None, None, None, None).await;
+        let result = agent_loop
+            .run("Hi", &mut context_builder, None, None, None, None)
+            .await;
         assert!(result.is_ok());
         let messages = agent_loop.history().messages();
         let injected: Vec<_> = messages
@@ -2409,7 +2463,9 @@ mod tests {
 
         // Run without any inbound messages — drain should return immediately
         let start = std::time::Instant::now();
-        let result = agent_loop.run("Hi", &mut context_builder, None, None, None, None).await;
+        let result = agent_loop
+            .run("Hi", &mut context_builder, None, None, None, None)
+            .await;
         let elapsed = start.elapsed();
         assert!(result.is_ok());
         // Drain should not block — core path is sub-100ms, but allow up to 2s
@@ -3070,7 +3126,14 @@ mod tests {
 
         let start = std::time::Instant::now();
         let result = agent_loop
-            .run("Test iteration timeout", &mut context_builder, None, None, None, None)
+            .run(
+                "Test iteration timeout",
+                &mut context_builder,
+                None,
+                None,
+                None,
+                None,
+            )
             .await;
         let elapsed = start.elapsed();
 
@@ -3181,7 +3244,14 @@ mod tests {
 
         let start = std::time::Instant::now();
         let result = agent_loop
-            .run("Test tool timeout", &mut context_builder, None, None, None, None)
+            .run(
+                "Test tool timeout",
+                &mut context_builder,
+                None,
+                None,
+                None,
+                None,
+            )
             .await;
         let elapsed = start.elapsed();
 
@@ -3312,7 +3382,14 @@ mod tests {
         let mut context_builder = ContextBuilder::new("System".to_string());
 
         let result = agent_loop
-            .run("Test partial permission", &mut context_builder, None, None, None, None)
+            .run(
+                "Test partial permission",
+                &mut context_builder,
+                None,
+                None,
+                None,
+                None,
+            )
             .await;
         assert!(
             result.is_ok(),
@@ -3358,10 +3435,7 @@ mod tests {
         // Simulate the marker that the streaming assembler injects.
         // New API: pass the raw content as a hint (here a stub since the
         // caller doesn't know the original).
-        let incomplete_args = crate::tools::arguments::make_incomplete_marker_with_len(
-            "echo",
-            42,
-        );
+        let incomplete_args = crate::tools::arguments::make_incomplete_marker_with_len("echo", 42);
         let tc = ToolCall {
             id: "call_incomplete".to_string(),
             call_type: "function".to_string(),
@@ -3571,10 +3645,7 @@ mod tests {
             provider: None,
         };
         let (conversation, _config_rx, _state_rx) = ConversationSession::new(
-            work_dir,
-            session_id,
-            config,
-            0, // max_sessions
+            work_dir, session_id, config, 0, // max_sessions
             committed,
         )
         .unwrap();
@@ -3611,10 +3682,15 @@ mod tests {
         // JSONL writes go through the async conversation writer — await a
         // flush so the assertions below never race the writer thread under
         // full-suite parallel load (regression flake 2026-09-06).
-        conversation.flush_pending().await.expect("flush should succeed");
+        conversation
+            .flush_pending()
+            .await
+            .expect("flush should succeed");
 
         // Read the JSONL file and verify the user entry is the raw message
-        let jsonl_path = work_dir.join("conversations").join(format!("{session_id}.jsonl"));
+        let jsonl_path = work_dir
+            .join("conversations")
+            .join(format!("{session_id}.jsonl"));
         let mut content = String::new();
         std::fs::File::open(&jsonl_path)
             .unwrap()
@@ -3668,14 +3744,8 @@ mod tests {
             model: None,
             provider: None,
         };
-        let (conversation, _config_rx, _state_rx) = ConversationSession::new(
-            work_dir,
-            session_id,
-            config,
-            0,
-            committed,
-        )
-        .unwrap();
+        let (conversation, _config_rx, _state_rx) =
+            ConversationSession::new(work_dir, session_id, config, 0, committed).unwrap();
         let conversation = Arc::new(conversation);
 
         let manifest = test_manifest();
@@ -3696,21 +3766,26 @@ mod tests {
         let enriched = "帮我看看这个文件\n\n[Attached workspace files & uploads — use `read_file` / `doc_reader` on demand]\n- file: `buglist.docx` (id=abc123, format=docx)";
         let result = agent_loop
             .run(
-                enriched,           // no raw_user_message → user_message is used as-is
+                enriched, // no raw_user_message → user_message is used as-is
                 &mut context_builder,
                 None,
                 Some("msg-2".to_string()),
-                None,               // raw_user_message = None
-                None,               // attached_items = None
+                None, // raw_user_message = None
+                None, // attached_items = None
             )
             .await;
         assert!(result.is_ok(), "run() should succeed: {result:?}");
         // JSONL writes go through the async conversation writer — await a
         // flush so the assertions below never race the writer thread under
         // full-suite parallel load (regression flake 2026-09-06).
-        conversation.flush_pending().await.expect("flush should succeed");
+        conversation
+            .flush_pending()
+            .await
+            .expect("flush should succeed");
 
-        let jsonl_path = work_dir.join("conversations").join(format!("{session_id}.jsonl"));
+        let jsonl_path = work_dir
+            .join("conversations")
+            .join(format!("{session_id}.jsonl"));
         let mut content = String::new();
         std::fs::File::open(&jsonl_path)
             .unwrap()
@@ -3722,12 +3797,200 @@ mod tests {
             .filter(|l| l.contains(r#""role":"user""#))
             .collect();
 
-        assert_eq!(user_lines.len(), 1, "Expected one user entry, got: {user_lines:?}");
+        assert_eq!(
+            user_lines.len(),
+            1,
+            "Expected one user entry, got: {user_lines:?}"
+        );
         let user_entry = user_lines[0];
         // Without raw_user_message, the enriched content is used as-is (backward compat)
         assert!(
             user_entry.contains("Attached workspace files"),
             "When raw_user_message=None, JSONL should contain enriched hint, got: {user_entry}",
         );
+    }
+
+    // ── Output-budget exhaustion (think-budget runaway) ─────────────────
+
+    /// The exact 2026-09-16 MiniMax-M3 signature: `finish_reason="length"`, all
+    /// completion tokens spent on reasoning, whitespace-only content.
+    fn exhausted_response() -> ChatResponse {
+        ChatResponse {
+            content: " ".to_string(),
+            reasoning_content: Some("long internal monologue".to_string()),
+            finish_reason: Some("length".to_string()),
+            usage: Some(UsageInfo {
+                prompt_tokens: 67_712,
+                completion_tokens: 32_768,
+                total_tokens: 100_480,
+                reasoning_tokens: 32_768,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn output_budget_exhaustion_nudges_then_surfaces_error() {
+        use crate::conversation::{SessionConfig, read_messages_paginated};
+        use std::sync::atomic::AtomicUsize;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let session_id = "ob-exhaust-e2e";
+        let (conversation, _cfg_rx, _state_rx) = ConversationSession::new(
+            dir.path(),
+            session_id,
+            SessionConfig {
+                agent_id: "com.test.loop".to_string(),
+                workspace_id: None,
+                model: Some("mock-model".to_string()),
+                provider: Some("mock".to_string()),
+            },
+            0,
+            Arc::new(AtomicUsize::new(0)),
+        )
+        .unwrap();
+        let conversation = Arc::new(conversation);
+        // Pre-set the title so the async title-generation task is skipped —
+        // otherwise it would consume one of the mock's canned responses and
+        // shift the whole sequence (title gen only runs when unset).
+        conversation.set_title("pre-set");
+
+        // nudge #1 → nudge #2 → budget spent (error + empty turn).
+        let provider = Arc::new(MockProvider::new(vec![
+            MockResponse::Raw(Box::new(exhausted_response())),
+            MockResponse::Raw(Box::new(exhausted_response())),
+            MockResponse::Raw(Box::new(exhausted_response())),
+        ]));
+        let (mut agent_loop, _inbound_tx) = AgentLoop::new(
+            RuntimeConfig::default(),
+            test_manifest(),
+            provider.clone(),
+            entries(vec![]),
+            test_budget(),
+            None,
+            Some(conversation.clone()),
+        );
+
+        let mut ctx = ContextBuilder::new("System".to_string());
+        let reply = agent_loop
+            .run("please summarise the doc", &mut ctx, None, None, None, None)
+            .await
+            .expect("loop must not error");
+        assert_eq!(reply, "", "exhausted turn returns an empty reply");
+
+        // The model was re-invoked for both nudges and the final attempt.
+        assert_eq!(
+            provider.call_count(),
+            3,
+            "expected exactly 3 LLM calls (nudge, nudge, give-up)"
+        );
+
+        conversation.flush_pending().await.expect("flush");
+        let path = dir
+            .path()
+            .join("conversations")
+            .join(format!("{session_id}.jsonl"));
+        let page = read_messages_paginated(&path, 0, 500, false).unwrap();
+        let nudges: Vec<_> = page.messages.iter().filter(|e| e.is_internal()).collect();
+        assert_eq!(
+            nudges.len(),
+            2,
+            "exactly two nudges before surfacing the failure"
+        );
+        assert!(nudges.iter().all(|e| e.role == "user"));
+
+        assert!(
+            agent_loop
+                .session_core
+                .streaming_lines
+                .read()
+                .unwrap()
+                .is_empty(),
+            "no dangling streaming line at turn end"
+        );
+    }
+
+    #[tokio::test]
+    async fn output_budget_exhaustion_closes_open_streaming_line() {
+        use crate::agent::loop_session::{INTERNAL_NUDGE_NAME, MAX_OUTPUT_BUDGET_NUDGES};
+        use crate::conversation::SessionConfig;
+        use std::sync::atomic::AtomicUsize;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let session_id = "ob-exhaust-stream";
+        let (conversation, _cfg_rx, _state_rx) = ConversationSession::new(
+            dir.path(),
+            session_id,
+            SessionConfig {
+                agent_id: "com.test.loop".to_string(),
+                workspace_id: None,
+                model: None,
+                provider: None,
+            },
+            0,
+            Arc::new(AtomicUsize::new(0)),
+        )
+        .unwrap();
+        let conversation = Arc::new(conversation);
+
+        let provider = Arc::new(MockProvider::single_text("unused"));
+        let (mut agent_loop, _inbound_tx) = AgentLoop::new(
+            RuntimeConfig::default(),
+            test_manifest(),
+            provider,
+            entries(vec![]),
+            test_budget(),
+            None,
+            Some(conversation.clone()),
+        );
+
+        // Budget already spent this turn: one real user message + two nudges.
+        agent_loop
+            .session
+            .history
+            .append(ChatMessage::user("real turn"));
+        for _ in 0..MAX_OUTPUT_BUDGET_NUDGES {
+            agent_loop.session.history.append(ChatMessage {
+                role: MessageRole::User,
+                content: "nudge".to_string(),
+                name: Some(INTERNAL_NUDGE_NAME.to_string()),
+                ..Default::default()
+            });
+        }
+        // A truncated thinking response leaves a live `thought` line open.
+        agent_loop
+            .session_core
+            .append_streaming_delta("thought", "long internal monologue");
+        assert!(
+            !agent_loop
+                .session_core
+                .streaming_lines
+                .read()
+                .unwrap()
+                .is_empty(),
+            "precondition: a streaming line is open"
+        );
+
+        let _ = agent_loop
+            .handle_output_budget_exhausted(&exhausted_response(), 3)
+            .await;
+
+        assert!(
+            agent_loop
+                .session_core
+                .streaming_lines
+                .read()
+                .unwrap()
+                .is_empty(),
+            "terminal exhausted path must close the streaming line"
+        );
+        // The turn is closed in history with an empty assistant message.
+        assert!(matches!(
+            agent_loop.session.history.messages().last().map(|m| &m.role),
+            Some(MessageRole::Assistant)
+        ));
     }
 }

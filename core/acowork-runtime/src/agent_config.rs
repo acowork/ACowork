@@ -11,8 +11,9 @@
 //! Model selection is per-session (ADR-012), persisted in JSONL SessionMetadata.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+
+use indexmap::IndexMap;
 
 use acowork_core::protocol::{AgentSearchConfig, McpServerConfigDef};
 
@@ -117,8 +118,7 @@ impl AgentMcpConfig {
 /// MCP server configurations are stored separately in agent_mcp.json
 /// (see `load_agent_mcp_config` / `save_agent_mcp_config`) per the
 /// `agent_*.json` naming convention for per-agent config snapshots.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AgentConfig {
     /// Max output tokens per request (None = use global default).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -178,7 +178,6 @@ pub struct AgentConfig {
     // in `agent_config.json` would (a) make it the Gateway's business
     // again and (b) lose it on every upgrade, since `work_dir` sits
     // inside the instance dir.
-
     /// Approval timeout in seconds for loop approval. None = use system default (300).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_timeout_secs: Option<u64>,
@@ -213,7 +212,6 @@ pub struct AgentConfig {
     // "记忆蒸馏" card reads/writes these fields; `None` = fall through to
     // manifest `[memory.distiller]` → system defaults (same convention as
     // temperature / context_window above).
-
     /// Runtime switch for the EpisodicDistiller. `None` = use the manifest
     /// `[memory.distiller].enabled` initial value (default false).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -243,7 +241,6 @@ pub struct AgentConfig {
     // fields above). The forgetting mechanism is opt-in: when
     // `memory_forgetting_enabled` is false (default), the episodic
     // decay scan is a no-op and episodic nodes never age out.
-
     /// Runtime switch for episodic memory forgetting. `None` = disabled
     /// (default). When enabled, episodic nodes decay by pure time
     /// (`retention = exp(-ln2 * age_days / half_life_days)`) and are
@@ -444,10 +441,7 @@ pub fn load_agent_tools_config(work_dir: &Path) -> Result<Option<AgentToolsConfi
 
 /// Save per-agent builtin-tools config to
 /// `workspace/config/agent_tools.json`. Atomic write-tmp-rename.
-pub fn save_agent_tools_config(
-    work_dir: &Path,
-    cfg: &AgentToolsConfig,
-) -> Result<(), String> {
+pub fn save_agent_tools_config(work_dir: &Path, cfg: &AgentToolsConfig) -> Result<(), String> {
     let config_dir = work_dir.join("config");
     std::fs::create_dir_all(&config_dir).map_err(|e| {
         format!(
@@ -605,8 +599,8 @@ pub fn remove_tool_from_config(work_dir: &Path, tool_name: &str) {
 ///   `context_retrieve` / `context_abandon` tool surface; the registry
 ///   now passes entries through verbatim.
 pub fn merge_tools_config(
-    code_tool_names: &[String],          // from `all_builtin_tools()` registry
-    persisted: &[AgentToolEntry],        // from agent_tools.json
+    code_tool_names: &[String],   // from `all_builtin_tools()` registry
+    persisted: &[AgentToolEntry], // from agent_tools.json
 ) -> Vec<AgentToolEntry> {
     let persisted_map: std::collections::HashMap<&str, bool> = persisted
         .iter()
@@ -662,10 +656,7 @@ pub fn merge_tools_config(
     let mut merged: Vec<AgentToolEntry> = code_tool_names
         .iter()
         .map(|name| {
-            let user_wants = persisted_map
-                .get(name.as_str())
-                .copied()
-                .unwrap_or(false); // new tool → disabled (opt-in)
+            let user_wants = persisted_map.get(name.as_str()).copied().unwrap_or(false); // new tool → disabled (opt-in)
             AgentToolEntry::new(name, user_wants)
         })
         .collect();
@@ -678,8 +669,7 @@ pub fn merge_tools_config(
     // `enabled_entries` for tools actually in the registry, so an entry
     // for a not-yet-registered tool is inert until the tool registers.
     for entry in persisted {
-        if conditional_set.contains(entry.name.as_str())
-            && !code_set.contains(entry.name.as_str())
+        if conditional_set.contains(entry.name.as_str()) && !code_set.contains(entry.name.as_str())
         {
             merged.push(entry.clone());
         }
@@ -687,7 +677,6 @@ pub fn merge_tools_config(
 
     merged
 }
-
 
 /// Apply a partial `RuntimeConfigUpdate.builtin_tools_enabled` payload
 /// (only listed tool names are touched) onto an existing
@@ -713,18 +702,13 @@ pub fn apply_builtin_tools_patch(
     current: &[AgentToolEntry],
     patch: &[AgentToolEntry],
 ) -> Vec<AgentToolEntry> {
-    let patch_map: std::collections::HashMap<&str, bool> = patch
-        .iter()
-        .map(|e| (e.name.as_str(), e.enabled))
-        .collect();
+    let patch_map: std::collections::HashMap<&str, bool> =
+        patch.iter().map(|e| (e.name.as_str(), e.enabled)).collect();
 
     current
         .iter()
         .map(|e| {
-            let patched = patch_map
-                .get(e.name.as_str())
-                .copied()
-                .unwrap_or(e.enabled);
+            let patched = patch_map.get(e.name.as_str()).copied().unwrap_or(e.enabled);
             AgentToolEntry::new(&e.name, patched)
         })
         .collect()
@@ -1012,9 +996,7 @@ pub fn load_merged_mcp_configs(work_dir: &Path) -> Vec<McpServerConfigDef> {
 const AGENT_MCP_TOOLS_CONFIG_FILE: &str = "agent_mcp_tools.json";
 
 fn mcp_tools_config_path(work_dir: &Path) -> PathBuf {
-    work_dir
-        .join("config")
-        .join(AGENT_MCP_TOOLS_CONFIG_FILE)
+    work_dir.join("config").join(AGENT_MCP_TOOLS_CONFIG_FILE)
 }
 
 /// Backend policy: which tools in a system-injected MCP server default
@@ -1049,11 +1031,18 @@ pub fn default_enabled_tools_for(server_name: &str) -> Option<&'static [&'static
 /// (`{"pm": {"enabled_tools": [...]}}`) fails to parse rather than
 /// silently mapping to an empty config — there is no automatic
 /// migration by design (project is in active development).
+///
+/// ADR-069 follow-up: `servers` is `IndexMap`, not `HashMap`. Serde
+/// serialises the file in iteration order; `HashMap` reshuffles on
+/// every reconcile pass, making the Tools-panel tool order reshuffle
+/// whenever the user toggles a single tool. `IndexMap` preserves the
+/// order `merge_mcp_tools_config` produced (= MCP server's
+/// `tools/list` order).
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct AgentMcpToolsConfig {
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub servers: HashMap<String, Vec<AgentMcpToolItem>>,
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub servers: IndexMap<String, Vec<AgentMcpToolItem>>,
 }
 
 /// Single MCP tool row inside a server's flat list.
@@ -1089,10 +1078,7 @@ impl AgentMcpToolItem {
 
 /// Look up a single tool's `enabled` flag from the flat config.
 /// Returns `Some(enabled)` if the row exists, `None` if absent.
-pub fn tool_enabled_in(
-    tools: &[AgentMcpToolItem],
-    tool_name: &str,
-) -> Option<bool> {
+pub fn tool_enabled_in(tools: &[AgentMcpToolItem], tool_name: &str) -> Option<bool> {
     tools
         .iter()
         .find(|t| t.name == tool_name)
@@ -1115,7 +1101,7 @@ pub struct McpToolDescriptor {
 /// refreshed from the live `tools/list`.
 pub fn merge_mcp_tools_config(
     persisted: &AgentMcpToolsConfig,
-    server_tools: &HashMap<String, Vec<McpToolDescriptor>>,
+    server_tools: &IndexMap<String, Vec<McpToolDescriptor>>,
 ) -> AgentMcpToolsConfig {
     let mut merged: AgentMcpToolsConfig = AgentMcpToolsConfig::default();
 
@@ -1147,9 +1133,7 @@ pub fn merge_mcp_tools_config(
 
 /// Load per-agent MCP tools config. Returns `None` when file missing;
 /// errors when present but unparseable (no silent migration).
-pub fn load_agent_mcp_tools_config(
-    work_dir: &Path,
-) -> Result<Option<AgentMcpToolsConfig>, String> {
+pub fn load_agent_mcp_tools_config(work_dir: &Path) -> Result<Option<AgentMcpToolsConfig>, String> {
     let path = mcp_tools_config_path(work_dir);
     if !path.exists() {
         return Ok(None);
@@ -1335,8 +1319,8 @@ pub fn load_agent_provider_config(
         return Ok(None);
     }
 
-    let raw =
-        std::fs::read_to_string(&path).map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
+    let raw = std::fs::read_to_string(&path)
+        .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
 
     let cfg: acowork_core::protocol::AgentProviderConfig = serde_json::from_str(&raw)
         .map_err(|e| format!("Failed to parse {}: {}", path.display(), e))?;
@@ -1360,7 +1344,11 @@ pub fn save_agent_provider_config(
 ) -> Result<(), String> {
     let config_dir = work_dir.join("config");
     std::fs::create_dir_all(&config_dir).map_err(|e| {
-        format!("Failed to create config dir {}: {}", config_dir.display(), e)
+        format!(
+            "Failed to create config dir {}: {}",
+            config_dir.display(),
+            e
+        )
     })?;
 
     let path = provider_config_path(work_dir);
@@ -1453,8 +1441,9 @@ mod tests {
                 tool_timeout_secs: None,
                 install: None,
             }],
-        
-            active_names: None,};
+
+            active_names: None,
+        };
 
         let merged = cfg.merged();
         assert_eq!(merged.len(), 2);
@@ -1488,8 +1477,9 @@ mod tests {
                 tool_timeout_secs: None,
                 install: None,
             }],
-        
-            active_names: None,};
+
+            active_names: None,
+        };
 
         let merged = cfg.merged();
         assert_eq!(merged.len(), 1);
@@ -1522,8 +1512,9 @@ mod tests {
                 tool_timeout_secs: None,
                 install: None,
             }],
-        
-            active_names: None,};
+
+            active_names: None,
+        };
 
         assert!(cfg.contains_name("cat"));
         assert!(cfg.contains_name("loc"));
@@ -1555,8 +1546,9 @@ mod tests {
                 tool_timeout_secs: None,
                 install: None,
             }],
-        
-            active_names: None,};
+
+            active_names: None,
+        };
 
         assert!(cfg.is_catalog("cat"));
         assert!(!cfg.is_catalog("loc"));
@@ -1607,8 +1599,9 @@ mod tests {
                 tool_timeout_secs: None,
                 install: None,
             }],
-        
-            active_names: None,};
+
+            active_names: None,
+        };
 
         let json = serde_json::to_string(&cfg).unwrap();
         let restored: AgentMcpConfig = serde_json::from_str(&json).unwrap();
@@ -1680,7 +1673,8 @@ mod tests {
                 install: None,
             }],
 
-            active_names: None,};
+            active_names: None,
+        };
         save_agent_mcp_config(dir.path(), &initial).unwrap();
 
         let new_catalog = vec![McpServerConfigDef {
@@ -1954,7 +1948,10 @@ mod tests {
         };
         let active = cfg.active_merged();
         assert_eq!(active.len(), 1);
-        assert_eq!(active[0].command, "local-context7", "local must shadow catalog");
+        assert_eq!(
+            active[0].command, "local-context7",
+            "local must shadow catalog"
+        );
     }
 
     #[test]
@@ -2003,7 +2000,11 @@ mod tests {
             ..AgentConfig::default()
         };
         let json = serde_json::to_string_pretty(&cfg).unwrap();
-        assert!(json.contains("context_window"), "JSON should contain context_window: {}", json);
+        assert!(
+            json.contains("context_window"),
+            "JSON should contain context_window: {}",
+            json
+        );
 
         let restored: AgentConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.context_window, Some(150_000));
@@ -2013,7 +2014,11 @@ mod tests {
     fn agent_config_context_window_none_omitted() {
         let cfg = AgentConfig::default();
         let json = serde_json::to_string_pretty(&cfg).unwrap();
-        assert!(!json.contains("context_window"), "context_window=None should be omitted from JSON: {}", json);
+        assert!(
+            !json.contains("context_window"),
+            "context_window=None should be omitted from JSON: {}",
+            json
+        );
     }
 
     #[test]
@@ -2026,7 +2031,11 @@ mod tests {
             ..AgentConfig::default()
         };
         let json = serde_json::to_string_pretty(&cfg).unwrap();
-        assert!(json.contains("context_window"), "context_window=0 should be serialized: {}", json);
+        assert!(
+            json.contains("context_window"),
+            "context_window=0 should be serialized: {}",
+            json
+        );
 
         let restored: AgentConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.context_window, Some(0));
@@ -2088,7 +2097,10 @@ mod tests {
         let json = r#"[{"name": "memory_recall"}]"#;
         let restored: Vec<AgentToolEntry> = serde_json::from_str(json).unwrap();
         assert_eq!(restored.len(), 1);
-        assert!(restored[0].enabled, "missing enabled should default to true");
+        assert!(
+            restored[0].enabled,
+            "missing enabled should default to true"
+        );
     }
 
     #[test]
@@ -2106,8 +2118,14 @@ mod tests {
         assert!(map["memory_recall"]);
         assert!(!map["http_request"], "persisted false preserved");
         // Tools missing from persisted file are disabled (opt-in)
-        assert!(!map["memory_store"], "missing in persisted → disabled (opt-in)");
-        assert!(!map["web_fetch"], "missing in persisted → disabled (opt-in)");
+        assert!(
+            !map["memory_store"],
+            "missing in persisted → disabled (opt-in)"
+        );
+        assert!(
+            !map["web_fetch"],
+            "missing in persisted → disabled (opt-in)"
+        );
         assert!(!map["shell"], "missing in persisted → disabled (opt-in)");
         assert!(!map.contains_key("removed_tool"));
     }
@@ -2151,10 +2169,8 @@ mod tests {
             AgentToolEntry::new("codebase", false),
         ];
         let merged = merge_tools_config(&code, &persisted);
-        let entries: Vec<&AgentToolEntry> = merged
-            .iter()
-            .filter(|e| e.name == "codebase")
-            .collect();
+        let entries: Vec<&AgentToolEntry> =
+            merged.iter().filter(|e| e.name == "codebase").collect();
         assert_eq!(entries.len(), 1, "codebase must appear exactly once");
         assert!(!entries[0].enabled, "persisted disabled flag preserved");
     }
@@ -2322,7 +2338,7 @@ mod tests {
             "pm_list_my_tasks",
             "pm_reparent_task",
         ];
-        let mut server_tools: HashMap<String, Vec<McpToolDescriptor>> = HashMap::new();
+        let mut server_tools: IndexMap<String, Vec<McpToolDescriptor>> = IndexMap::new();
         let defs: Vec<McpToolDescriptor> = names
             .iter()
             .map(|n| McpToolDescriptor {
@@ -2368,10 +2384,16 @@ mod tests {
     fn merge_mcp_tools_config_enables_all_for_non_system_servers() {
         let persisted = AgentMcpToolsConfig::default();
         let defs = vec![
-            McpToolDescriptor { name: "search".into(), description: None },
-            McpToolDescriptor { name: "summarize".into(), description: None },
+            McpToolDescriptor {
+                name: "search".into(),
+                description: None,
+            },
+            McpToolDescriptor {
+                name: "summarize".into(),
+                description: None,
+            },
         ];
-        let mut server_tools: HashMap<String, Vec<McpToolDescriptor>> = HashMap::new();
+        let mut server_tools: IndexMap<String, Vec<McpToolDescriptor>> = IndexMap::new();
         server_tools.insert("user-installed".to_string(), defs);
 
         let merged = merge_mcp_tools_config(&persisted, &server_tools);
@@ -2387,17 +2409,26 @@ mod tests {
         persisted.servers.insert(
             "pm".to_string(),
             vec![
-                AgentMcpToolItem::new("pm_claim_task", false),    // user disabled
-                AgentMcpToolItem::new("pm_create_project", true),  // user enabled
+                AgentMcpToolItem::new("pm_claim_task", false), // user disabled
+                AgentMcpToolItem::new("pm_create_project", true), // user enabled
             ],
         );
-        let mut server_tools: HashMap<String, Vec<McpToolDescriptor>> = HashMap::new();
+        let mut server_tools: IndexMap<String, Vec<McpToolDescriptor>> = IndexMap::new();
         server_tools.insert(
             "pm".to_string(),
             vec![
-                McpToolDescriptor { name: "pm_claim_task".into(), description: Some("Claim".into()) },
-                McpToolDescriptor { name: "pm_create_project".into(), description: Some("Create".into()) },
-                McpToolDescriptor { name: "pm_list_my_tasks".into(), description: Some("List mine".into()) },
+                McpToolDescriptor {
+                    name: "pm_claim_task".into(),
+                    description: Some("Claim".into()),
+                },
+                McpToolDescriptor {
+                    name: "pm_create_project".into(),
+                    description: Some("Create".into()),
+                },
+                McpToolDescriptor {
+                    name: "pm_list_my_tasks".into(),
+                    description: Some("List mine".into()),
+                },
             ],
         );
 
@@ -2421,7 +2452,7 @@ mod tests {
                 Some("stale description from yesterday".into()),
             )],
         );
-        let mut server_tools: HashMap<String, Vec<McpToolDescriptor>> = HashMap::new();
+        let mut server_tools: IndexMap<String, Vec<McpToolDescriptor>> = IndexMap::new();
         server_tools.insert(
             "pm".to_string(),
             vec![McpToolDescriptor {
@@ -2447,10 +2478,13 @@ mod tests {
                 AgentMcpToolItem::new("pm_old_removed_tool", true),
             ],
         );
-        let mut server_tools: HashMap<String, Vec<McpToolDescriptor>> = HashMap::new();
+        let mut server_tools: IndexMap<String, Vec<McpToolDescriptor>> = IndexMap::new();
         server_tools.insert(
             "pm".to_string(),
-            vec![McpToolDescriptor { name: "pm_claim_task".into(), description: None }],
+            vec![McpToolDescriptor {
+                name: "pm_claim_task".into(),
+                description: None,
+            }],
         );
 
         let merged = merge_mcp_tools_config(&persisted, &server_tools);
@@ -2471,10 +2505,13 @@ mod tests {
             "docling".to_string(),
             vec![AgentMcpToolItem::new("parse_pdf", true)],
         );
-        let mut server_tools: HashMap<String, Vec<McpToolDescriptor>> = HashMap::new();
+        let mut server_tools: IndexMap<String, Vec<McpToolDescriptor>> = IndexMap::new();
         server_tools.insert(
             "pm".to_string(),
-            vec![McpToolDescriptor { name: "pm_claim_task".into(), description: None }],
+            vec![McpToolDescriptor {
+                name: "pm_claim_task".into(),
+                description: None,
+            }],
         );
 
         let merged = merge_mcp_tools_config(&persisted, &server_tools);
@@ -2487,12 +2524,18 @@ mod tests {
     fn merge_mcp_tools_config_persists_and_loads_back() {
         let dir = tempfile::tempdir().unwrap();
         let persisted = AgentMcpToolsConfig::default();
-        let mut server_tools: HashMap<String, Vec<McpToolDescriptor>> = HashMap::new();
+        let mut server_tools: IndexMap<String, Vec<McpToolDescriptor>> = IndexMap::new();
         server_tools.insert(
             "pm".to_string(),
             vec![
-                McpToolDescriptor { name: "pm_claim_task".into(), description: Some("Claim a pending task".into()) },
-                McpToolDescriptor { name: "pm_submit_task".into(), description: None },
+                McpToolDescriptor {
+                    name: "pm_claim_task".into(),
+                    description: Some("Claim a pending task".into()),
+                },
+                McpToolDescriptor {
+                    name: "pm_submit_task".into(),
+                    description: None,
+                },
             ],
         );
         let merged = merge_mcp_tools_config(&persisted, &server_tools);
@@ -2501,6 +2544,101 @@ mod tests {
             .unwrap()
             .expect("file was just created, must load");
         assert_eq!(loaded, merged);
+    }
+
+    /// ADR-069 follow-up: server ordering must be the iteration order
+    /// of the `IndexMap` input, NOT alphabetical, NOT hash-random. The
+    /// downstream `agent_mcp_tools.json` file is read back by the
+    /// desktop Tools panel verbatim — if this order reshuffles on
+    /// every reconcile (which `PUT /mcp-tools` triggers), toggling a
+    /// single tool reshuffles the entire per-MCP-server tool list in
+    /// the UI.
+    ///
+    /// This test pins the order end-to-end:
+    ///   1. `merge_mcp_tools_config` output follows the IndexMap order
+    ///   2. JSON round-trip preserves the order
+    ///   3. `IndexMap::new()` + `.insert()` (the order the runtime
+    ///      produces via `collect_server_tools_from_registry`) is the
+    ///      source of truth — alphabetical name is NOT.
+    #[test]
+    fn merge_mcp_tools_config_preserves_indexmap_iteration_order() {
+        let persisted = AgentMcpToolsConfig::default();
+        let mut server_tools: IndexMap<String, Vec<McpToolDescriptor>> = IndexMap::new();
+        // Insert in an order that is NOT alphabetical — proves we
+        // don't silently sort.
+        server_tools.insert(
+            "zeta".to_string(),
+            vec![
+                McpToolDescriptor {
+                    name: "zeta_z".into(),
+                    description: None,
+                },
+                McpToolDescriptor {
+                    name: "zeta_a".into(),
+                    description: None,
+                },
+            ],
+        );
+        server_tools.insert(
+            "alpha".to_string(),
+            vec![McpToolDescriptor {
+                name: "alpha_b".into(),
+                description: None,
+            }],
+        );
+        server_tools.insert(
+            "mu".to_string(),
+            vec![McpToolDescriptor {
+                name: "mu_x".into(),
+                description: None,
+            }],
+        );
+
+        let merged = merge_mcp_tools_config(&persisted, &server_tools);
+
+        // 1. Server order = insertion order (zeta, alpha, mu) — not
+        //    alphabetical (alpha, mu, zeta).
+        let server_order: Vec<&String> = merged.servers.keys().collect();
+        assert_eq!(
+            server_order,
+            vec![&"zeta".to_string(), &"alpha".to_string(), &"mu".to_string()],
+            "merged.servers must follow IndexMap insertion order, not hash/alphabetical"
+        );
+
+        // 2. Per-server tool order = defs insertion order.
+        assert_eq!(
+            merged.servers["zeta"].iter().map(|t| &t.name).collect::<Vec<_>>(),
+            vec!["zeta_z", "zeta_a"],
+            "per-server tool order must follow defs insertion order"
+        );
+        assert_eq!(
+            merged.servers["alpha"]
+                .iter()
+                .map(|t| &t.name)
+                .collect::<Vec<_>>(),
+            vec!["alpha_b"]
+        );
+
+        // 3. JSON round-trip preserves the order — guards against a
+        //    future regression to HashMap (which would randomise).
+        let json = serde_json::to_string(&merged).expect("serialize");
+        let json_value: serde_json::Value = serde_json::from_str(&json).expect("parse");
+        let servers_obj = json_value["servers"].as_object().expect("servers object");
+        let json_server_order: Vec<&String> = servers_obj.keys().collect();
+        assert_eq!(
+            json_server_order,
+            vec![&"zeta".to_string(), &"alpha".to_string(), &"mu".to_string()],
+            "JSON serialisation must preserve IndexMap order — HashMap would shuffle this"
+        );
+
+        let restored: AgentMcpToolsConfig =
+            serde_json::from_str(&json).expect("round-trip deserialise");
+        let restored_order: Vec<&String> = restored.servers.keys().collect();
+        assert_eq!(
+            restored_order,
+            vec![&"zeta".to_string(), &"alpha".to_string(), &"mu".to_string()],
+            "round-trip deserialise must preserve order"
+        );
     }
 
     /// Missing file -> `Ok(None)`.
@@ -2522,6 +2660,9 @@ mod tests {
         let v1_payload = r#"{ "pm": { "enabled_tools": ["pm_claim_task"] } }"#;
         std::fs::write(config_dir.join("agent_mcp_tools.json"), v1_payload).unwrap();
         let result = load_agent_mcp_tools_config(dir.path());
-        assert!(result.is_err(), "v1-shape file must not silently load as v2");
+        assert!(
+            result.is_err(),
+            "v1-shape file must not silently load as v2"
+        );
     }
 }

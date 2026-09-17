@@ -1,15 +1,18 @@
 //! Git query use case (ADR-078).
 //!
-//! Read-only git operations for the Desktop Git Status Bar: `status`,
-//! `diff`, `log`. All git execution happens in the **Runtime** (the
-//! authoritative workspace owner, ADR-009 v2) via the system git CLI —
-//! the Gateway only reverse-proxies these endpoints (ADR-033 Phase 2)
-//! and never touches the filesystem.
+//! Git operations for the Desktop Git Status Bar: `status`, `diff`,
+//! `log` (read-only) and `revert` (the single user-requested WRITE that
+//! discards uncommitted changes). All git execution happens in the
+//! **Runtime** (the authoritative workspace owner, ADR-009 v2) via the
+//! system git CLI — the Gateway only reverse-proxies these endpoints
+//! (ADR-033 Phase 2) and never touches the filesystem.
 //!
 //! Security invariants (ADR-078 §1.3):
-//! - **read-only**: every command runs with `GIT_OPTIONAL_LOCKS=0` so
-//!   git cannot take optional locks (e.g. the index stat-cache refresh
-//!   `git status` would otherwise perform);
+//! - **read-only except revert**: every read command runs with
+//!   `GIT_OPTIONAL_LOCKS=0` so git cannot take optional locks (e.g. the
+//!   index stat-cache refresh `git status` would otherwise perform);
+//!   `revert` (a write) skips that flag but is confirm-dialog guarded on
+//!   the client and validates its target like every other path;
 //! - **paths never escape the workspace**: diff/log paths are
 //!   canonicalized and must stay under the workspace root; status
 //!   output is filtered by the workspace-root prefix before it leaves
@@ -142,6 +145,10 @@ pub struct GitChangeDto {
 pub struct GitStatusResponse {
     pub is_repo: bool,
     /// Current branch name (`HEAD` when detached). None when not a repo.
+    /// When `rev` is set, this is overwritten with the commit's display
+    /// label (`"<short_sha> <subject prefix>"`) so the Git Status Bar
+    /// can render the commit the user picked from the history dropdown
+    /// without an extra round-trip.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
     /// `"not_a_repo"` | `"git_unavailable"` | null — explicit error
@@ -155,6 +162,11 @@ pub struct GitStatusResponse {
     pub truncated: bool,
     #[serde(default)]
     pub changes: Vec<GitChangeDto>,
+    /// Echo of the requested `rev` (None for working-tree status).
+    /// Lets the Desktop cache entries by `(groupKey, rev)` and still
+    /// know which view each cache slot is rendering.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rev: Option<String>,
 }
 
 /// Querystring for `GET /git/status`.
@@ -162,6 +174,16 @@ pub struct GitStatusResponse {
 pub struct GitStatusParams {
     #[serde(default)]
     pub workspace_id: Option<String>,
+    /// Optional git revision: when set, the response's `changes` lists
+    /// the files touched by that commit (parsed from
+    /// `git diff-tree --name-status -z`) instead of the current
+    /// working-tree status. The legacy working-tree semantics survive
+    /// as the default (`rev = None`). The Desktop's Git Status Bar
+    /// history dropdown uses this to render "files in commit X" without
+    /// a dedicated endpoint. Pass `""` explicitly to opt into the
+    /// working-tree semantics (same as omitting the param).
+    #[serde(default)]
+    pub rev: Option<String>,
 }
 
 // ── Diff DTOs ──────────────────────────────────────────────────────────────
@@ -178,15 +200,28 @@ pub enum GitDiffKind {
 }
 
 /// Response for `GET /git/diff` — two full texts for the DiffEditor
-/// (original = HEAD, modified = worktree or index).
+/// (original = `base_ref`, modified = `head_ref`).
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GitDiffResponse {
     pub kind: GitDiffKind,
-    /// HEAD version; `""` for untracked; full text for deleted.
+    /// `base_ref` version; `""` for untracked / missing; full text for deleted.
     pub original: String,
-    /// Worktree version (or index when cached=1); `""` for deleted.
+    /// `head_ref` version; `""` for deleted.
     pub modified: String,
+    /// Canonical SHA for `base_ref` after `git rev-parse <base_ref>^{commit}`.
+    /// `None` only when `base_ref` could not be resolved (the caller used a
+    /// non-rev like the empty string or a malformed shorthand) — in
+    /// practice this is unreachable because the `diff` handler already
+    /// rejects empty / invalid refs with `GitError::BadRequest` before
+    /// reaching this struct.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub base_rev: Option<String>,
+    /// Canonical SHA for `head_ref` after `git rev-parse <head_ref>^{commit}`.
+    /// `None` when `head_ref` was the empty string (working tree) — the
+    /// client renders this as "Working Tree" instead of a commit id.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub head_rev: Option<String>,
 }
 
 /// Querystring for `GET /git/diff`.
@@ -197,9 +232,17 @@ pub struct GitDiffParams {
     /// Workspace-root-relative path (validated, then converted to
     /// repo-root-relative before reaching git — ADR-078 decision 3).
     pub path: String,
-    /// 0 (default): worktree vs HEAD; 1: index vs HEAD (staged diff).
+    /// Base revision: any git rev (HEAD, branch, tag, full/short hash).
+    /// Default `"HEAD"`. Must not be empty.
     #[serde(default)]
-    pub cached: u8,
+    pub base_ref: Option<String>,
+    /// Compare revision: `""` (default) means the working tree on disk
+    /// (preserves the pre-existing worktree-vs-HEAD semantics including
+    /// untracked / deleted handling). Any non-empty value is treated as
+    /// a git rev resolved via `git show <rev>:<path>` (e.g. a commit
+    /// hash, branch, tag, or `:path` for the index).
+    #[serde(default)]
+    pub head_ref: Option<String>,
 }
 
 // ── Log DTOs ───────────────────────────────────────────────────────────────
@@ -218,11 +261,30 @@ pub struct GitCommitDto {
     pub subject: String,
 }
 
-/// Response for `GET /git/log`.
+/// Response for `GET /git/log` — one page of the file / repo history,
+/// plus pagination metadata so the client can render "Page X of Y" and
+/// `Prev` / `Next` controls (the diff banner's `CommitPicker`).
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GitLogResponse {
     pub commits: Vec<GitCommitDto>,
+    pub pagination: GitLogPagination,
+}
+
+/// Pagination metadata for [`GitLogResponse`]. `totalCount` is the
+/// total commits in the (filtered) history, not just the page — the
+/// client uses it to render "Showing X-Y of Z" and to decide whether
+/// to surface the search + pagination chrome (when `totalCount <=
+/// pageSize` the controls collapse, matching the session list pattern).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitLogPagination {
+    /// 1-indexed page number.
+    pub current_page: u32,
+    /// Total pages given `pageSize` and `totalCount`.
+    pub total_pages: u32,
+    pub page_size: u32,
+    pub total_count: u32,
 }
 
 /// Querystring for `GET /git/log`.
@@ -236,6 +298,42 @@ pub struct GitLogParams {
     /// Max commits. Default 50, hard cap 200 (ADR-078 decision 4).
     #[serde(default)]
     pub limit: Option<u32>,
+    /// Commits to skip from the start of the history (newest-first).
+    /// `skip = (currentPage - 1) * pageSize`. Default 0.
+    #[serde(default)]
+    pub skip: Option<u32>,
+}
+
+// ── Revert DTOs ────────────────────────────────────────────────────────────
+
+/// Body for `POST /git/revert` — discard the uncommitted changes of a
+/// single path, restoring it to HEAD (untracked files are deleted,
+/// matching IDE "Discard Changes" semantics). This is the one
+/// deliberate WRITE operation in the git API family (the read-only
+/// `GIT_OPTIONAL_LOCKS=0` convention does not apply to it); it is
+/// guarded by the same path-traversal validation as diff/log.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct GitRevertParams {
+    #[serde(default)]
+    pub workspace_id: Option<String>,
+    /// Workspace-root-relative path of the change to revert.
+    pub path: String,
+    /// Old path of a staged rename (`GitChangeDto.oldPath`), when the
+    /// row being reverted is a rename. Restored from HEAD before the
+    /// new path is discarded so both halves of the rename unwind.
+    #[serde(default)]
+    pub old_path: Option<String>,
+}
+
+/// Response for `POST /git/revert` — echoes the reverted path(s).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitRevertResponse {
+    /// Workspace-root-relative path that was reverted.
+    pub path: String,
+    /// Old path restored for renames, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub old_path: Option<String>,
 }
 
 // ── Service trait ──────────────────────────────────────────────────────────
@@ -243,9 +341,15 @@ pub struct GitLogParams {
 /// Read-only git query operations, implemented by
 /// [`crate::usecases::RuntimeGitQueryService`]. ADR-040 layering: the
 /// HTTP handlers depend on this trait, never on the concrete service.
+///
+/// [`revert`](Self::revert) is the single write operation — it discards
+/// uncommitted changes and is explicitly requested by the user via the
+/// Desktop context menu (destructive, confirm-dialog guarded on the
+/// client).
 #[async_trait]
 pub trait GitQueryService: Send + Sync {
     async fn status(&self, params: &GitStatusParams) -> Result<GitStatusResponse, GitError>;
     async fn diff(&self, params: &GitDiffParams) -> Result<GitDiffResponse, GitError>;
     async fn log(&self, params: &GitLogParams) -> Result<GitLogResponse, GitError>;
+    async fn revert(&self, params: &GitRevertParams) -> Result<GitRevertResponse, GitError>;
 }
