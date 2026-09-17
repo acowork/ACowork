@@ -34,15 +34,37 @@
 | 9 | 存储归属 | 用户聊天数据完全归属 Gateway 所在机器（`data_dir/users/...`），**不**走 Runtime HTTP 反代；明确写入 ADR-009 §5.4 例外条款 |
 | 10 | 反代身份注入（PM/Doc） | REST 反代 `X-Actor` 从硬编码 `"human"` 改为 `AuthContext.effective_user_id`（决策 3 的 token 身份）；MCP 路径 `X-MCP-Actor` 校验不变（agent 身份与 user 正交，见 §决策 10） |
 | 11 | PM 成员模型多用户化 | `ProjectMember` 新增 `kind`（`Agent`/`User`），人类操作者与 agent 成员对称；移除 `assignee = "human"` 特例，不变式收紧为 `assignee ∈ ∅ ∪ members`（见 §决策 11） |
+| 12 | 部署模式分流 | 新增 `AUTH_MODE ∈ {local, multi_user}`，由 bind 地址自动推断（`127.0.0.1` → `local`；`0.0.0.0` → `multi_user`），可显式覆盖；local 模式下 §1-§11 退化为 no-op（不引入登录页 / Argon2id / admin / session 过滤 / 用户聊天），multi_user 模式下完整启用且强制 `bootstrap_admin`（缺则拒启动） |
 
 ### 1.3 不变量（必须满足）
 
-1. **session 隔离是强制默认**：除 admin 外，所有 session 维度的读写（list / messages / state / files）必须经过 user_id 过滤；漏掉任何一处 = 数据泄漏。
+1. **multi_user 模式下 session 隔离是强制默认**：除 admin 外，所有 session 维度的读写（list / messages / state / files）必须经过 user_id 过滤；漏掉任何一处 = 数据泄漏。local 模式下不启用 session 过滤（见 §决策 12）。
 2. **admin 不能伪造 user_id**：admin 视图下"以 user A 身份看 session"通过 `?as_user=<user_id>` query 实现，但 `as_user` 不会被普通 user 使用；token 中 `role` 字段在签发时定死，不接受请求内覆盖。
 3. **账号凭据加密不依赖 Vault unlocked**：账号读路径在 Vault locked 状态下退化为 401（无法解密 → 无法登录），但**账号列表（不含密码）的元数据允许在 Vault locked 时展示**（仅元数据，如 username/role/created_at），便于锁屏场景下仍能选账号。
 4. **session.user_id 写入是 immutable**：一个 session 一旦创建绑定 user_id 后**不再修改**（迁移/导入等场景除外，且必须 admin 操作）；这保证会话历史"主人"的不可篡改性。
 5. **聊天双方对等**：用户 A → 用户 B 的消息存在 `min(a,b)/chats/max(a,b)/` 目录下，双方 GET / POST 对称，无需在 Gateway 内维护 per-user 状态机。
 6. **密码修改强制旧密码**：改密 API 接受 `old_password + new_password`，避免 token 泄漏后任意改密；admin 不能改他人密码（必须先 reset 再走首次登录改密流程）。
+
+### 1.4 部署模式行为对照表（§决策 12 速查）
+
+| 维度 | `AUTH_MODE=local`（bind `127.0.0.1`，默认） | `AUTH_MODE=multi_user`（bind `0.0.0.0`） |
+|---|---|---|
+| HTTP 认证 | 现有 bearer token（`data_dir/http_token`） | access_token(HS256, 15min) + refresh_token(30d) |
+| 登录流程 | 无（Desktop 直接用 token） | `/api/auth/login` + LoginView |
+| `UserAccount` schema | `user_profiles.json` 沿用现有 `UserProfile` 字段 | `UserAccount`（含 `password_hash` / `role` / `disabled_at`） |
+| `accounts.json`（账号权威表） | 不创建 | 创建（明文）；`vault/accounts/*.enc` 扩展可选 |
+| 首位账号 | 沿用现状（无账号概念，`user_profiles.json` 不变） | 强制 `bootstrap_admin`，**缺配拒启动** |
+| admin 角色 | 无（OS 用户即 admin） | `role = Admin`，`GET /api/users` 全量 |
+| session 隔离 | `SessionMeta.user_id` 写入但 **read 不过滤** | read 路径强制 `user_id` 过滤（admin 除外） |
+| `?as_user=` | 路由不注册 | admin-only 只读视图 |
+| `/api/auth/*` 路由 | **不注册** | 全部注册 |
+| 用户-用户聊天 | **不注册** `data_dir/users/` 不创建 | `/api/users/{self}/chats/*` 全量 |
+| PM/Doc 反代 `X-Actor` | 常量 `"human"` | `auth.effective_user_id` |
+| PM `assignee == "human"` 特例 | **保留**（无 token 身份可注入） | 移除，`assignee ∈ ∅ ∪ members` |
+| Desktop 顶栏 | "用户偏好"（现状不变） | "账号菜单"（切换 / 改密 / 注销 / 退出） |
+| Desktop 侧栏 User 分组 | 不显示 | `partitionAccounts` 折叠分组 |
+| 升级路径 | → multi_user：补 `password_hash` + `invite_token` 激活（无需数据迁移） | — |
+| 降级路径 | — | → local：`--auth-mode local`，账号文件保留但不可登录 |
 
 ---
 
@@ -149,7 +171,15 @@ pub struct UserAccount {
 pub enum Role { User, Admin }
 ```
 
-**与现有 `UserProfileListFile` 的关系**：保留 `user_profiles.json` 作为**公开元数据视图**（username、display_name、role、avatar —— 无密码），用于 agent 推送 `last_user_profile` 时只携带脱敏副本；新增 `accounts.enc` 作为**加密凭据视图**，通过 Vault master key 加密整个账号文件 `accounts/{user_id}.enc`。
+**与现有 `UserProfileListFile` 的关系**——三个文件，各司其职：
+
+| 文件 | 内容 | 加密 | 权威性 |
+|---|---|---|---|
+| `data_dir/accounts.json`（新增，`AccountListFile`） | **账号权威表**：`user_id` / `username` / `role` / `password_hash` / 生命周期 / 展示字段 | 明文 | **源**（multi_user 模式） |
+| `data_dir/user_profiles.json`（保留，`UserProfileListFile`） | `UserProfile` 公开视图（展示字段，无 username / role / 密码） | 明文 | **派生**（Runtime `last_user_profile` 推送源） |
+| `data_dir/vault/accounts/{user_id}.enc`（新增，可选） | 敏感扩展：`api_secrets` / `recovery_codes` / `encrypted_notes` | Vault master key | 扩展 |
+
+**关键点**：`password_hash` 落在**明文**的 `accounts.json`——它是一向的 Argon2id PHC 串，本身不含明文密码，可安全落盘；放明文正是为了让登录校验在 Vault locked 时也能完成（见下）。`vault/accounts/*.enc` **不含** password_hash，只装真·机密扩展字段。`user_profiles.json` 由 `accounts.json` 派生，供 Runtime `last_user_profile` 推送（脱敏副本）。
 
 **为什么 Argon2id 不走 Vault**：Vault 是对称加密（加密/解密需要同一把 master key），用于"短期可解密的机密"。密码哈希是**单向**的（无法反推明文），且需要在 Vault locked 状态下也能校验（典型场景：开机后用户第一次登录解锁 Vault 之前）。两者密码学属性不同，强行塞进 Vault 反而要让登录路径依赖 Vault unlock 状态（违反 §1.3 不变量 3）。
 
@@ -157,19 +187,20 @@ pub enum Role { User, Admin }
 
 ### 决策 2：Vault 复用 — 加密"扩展敏感字段"
 
-每个账号的**公开信息**走 `user_profiles.json`（明文），**敏感扩展字段**走 `accounts/{user_id}.enc`：
+**布局**——账号权威表 `accounts.json`（明文）、公开视图 `user_profiles.json`（派生）、加密扩展 `vault/accounts/{user_id}.enc`（可选）：
 
 ```text
 data_dir/
-├── user_profiles.json                  # 公开元数据（所有 user 平铺，无密码）
-│   └── users[] = [{user_id, username, display_name, role, avatar, ...}]
+├── accounts.json                       # 账号权威表（明文；password_hash 为单向 PHC 串）
+│   └── accounts[] = [{user_id, username, role, password_hash, display_name, ...}]
+├── user_profiles.json                  # 公开视图（派生；Runtime last_user_profile 源）
+│   └── users[] = [{user_id, display_name, avatar, ...}]   # 无 username / role / 密码
 │
 └── vault/                              # 现有 Vault 目录
     ├── salt                            # Argon2id master salt（不变）
     ├── openai.enc                      # 现有 LLM key
-    └── accounts/                       # 新增子目录
-        ├── {user_id_1}.enc             # 加密敏感扩展字段
-        ├── {user_id_2}.enc
+    └── accounts/                       # 新增子目录（可选——无扩展字段时不存在）
+        ├── {user_id_1}.enc             # 加密敏感扩展字段（api_secrets / recovery_codes）
         └── ...
 ```
 
@@ -216,7 +247,7 @@ data_dir/
                     └───────────────────────────────────────┘
 ```
 
-**Token payload（HS256 + Vault master key 派生 HMAC key）**：
+**Token payload（HS256 + 独立持久化签名密钥）**：
 
 ```json
 // access_token
@@ -237,7 +268,9 @@ data_dir/
 }
 ```
 
-**为什么 HS256 + Vault 派生**：避免引入非对称密钥管理负担；Vault master key 已经在内存里，HMAC key 复用它的 SHA256 摘要。已签发的 token **无法**在没有 Vault 的情况下伪造，符合 ADR-009 的"认证锚定在 Gateway"。
+**为什么 HS256 + 独立持久化签名密钥（非 Vault 派生）**：避免引入非对称密钥管理负担；签名密钥是首次启动生成的 32 字节随机 secret，持久化在 `data_dir/auth/secret`（Unix `0600`），**独立于 Vault master key**。
+
+> **评审修订（实施期）**：原设计写的是"HMAC key 复用 Vault master key 的 SHA256 摘要"，实测发现它会让 token 签发 / 校验依赖 Vault unlocked 状态——与 §决策 1 的"登录不要求 Vault unlocked"（§1.3 不变量 3）直接冲突：Vault 一锁，所有已签发 token 无法校验、新 token 无法签发。改为独立 secret 后，Vault relock 不会踢掉在线会话，登录路径与 Vault 状态彻底解耦。签名密钥仍是 Gateway 本机机密，token 无该 secret 无法伪造，"认证锚定在 Gateway"语义不变。
 
 **middleware 路径**：
 
@@ -345,7 +378,7 @@ GET /api/agents/{id}/sessions?as_user=<user_id>
 
 **admin 创建流程**：
 1. Gateway 首次启动时，配置文件 `gateway.toml` 含 `bootstrap_admin = { username, password }`
-2. 若 `accounts.enc` 为空 → 启动时强制创建该 admin 账号
+2. 若 `accounts.json` 为空 → 启动时强制创建该 admin 账号
 3. 后续 admin 通过 admin token 创建其他 admin（需 `username` + `display_name`，密码由被创建者首次登录时设置——首次登录流程：`POST /api/auth/login?invite_token=<xxx>`）
 
 **admin 能力清单**：
@@ -590,6 +623,56 @@ pub struct ProjectMember {
 
 **与决策 10 的关系**：决策 10 解决"Gateway 注入真实身份"（`X-Actor` = user_id）；本决策解决"PM 侧消费端对称化"。配套实施、缺一不可——只做 10 不做 11，"任意人类"仍靠 `"human"` 特例兜底；只做 11 不做 10，人类成员身份无法从 header 区分。
 
+### 决策 12：部署模式分流 — `AUTH_MODE` 由 bind 地址自动推断
+
+**核心**：避免在单机 self-hosted 场景下强制走 multi-user 完整链路。`AUTH_MODE` 由 bind 地址自动推断（也可显式覆盖），local 模式下完整 §1-§11 决策退化为 no-op。**这不是 §5.4 的"回滚开关"——是第一类配置**。
+
+**心智模型**（对应 [runbook §0](../runbooks/single-machine-remote-topology.md) "没有 local/remote 两套拓扑"）：架构始终一套，差异在"外部可达性" → "认证强度"。loopback-only = 物理 OS 用户管理兜底 = 信任域；LAN 暴露 = 不可信域 = 完整账号体系。
+
+**推断规则**：
+
+| bind 配置 | 推断 AUTH_MODE | 触发理由 |
+|---|---|---|
+| `127.0.0.1` / `::1`（默认） | `local` | 仅 loopback 可连 = 物理 OS 用户管理兜底 = 单机信任域 |
+| `0.0.0.0` / LAN IP / 域名 | `multi_user` | 跨机/跨用户可连 = 必须完整账号体系 |
+| `--auth-mode local` / `multi_user` 显式 | 覆盖推断 | 异常场景（reverse proxy 后 + 仅内网访问时强制 local；loopback 但想演示 multi_user 时强制 multi_user） |
+
+**优先级**：CLI `--auth-mode` > TOML `[multi_user].auth_mode` > bind 自动推断 > default `local`。
+
+**local 模式行为**（`AUTH_MODE=local`，**所有 §1-§11 决策退化为 no-op**）：
+- `HttpAuth` 维持现有 bearer token（`data_dir/http_token` 文件，决策 3 的 access/refresh 不引入）
+- `user_profiles.json` 维持现状（明文展示偏好），不升级为 `UserAccount` schema（user_id 字段沿用现有逻辑，不引入 password_hash / role / disabled_at）
+- `SessionMeta.user_id` 字段在 write 路径**仍写入**（保持 schema 统一），但 read 路径**不过滤**——`?user_id=` query 接受但不生效
+- 无 admin 角色、无 `bootstrap_admin`、无 `as_user`、`/api/auth/*` 路由不注册
+- Desktop 顶栏维持现有"用户偏好"入口，不显示账号切换菜单
+- 用户聊天（决策 8）不创建 `data_dir/users/` 目录；`/api/users/{self}/chats/*` 路由不注册
+- PM/Doc 反代（决策 10）`build_trusted_headers` REST 分支仍注入 `X-Actor: human`（常量路径，**不**走 token 身份）
+- PM 成员模型（决策 11）`assignee == "human"` 特例**保留**（与决策 11 移除特例的方向相反——但因 local 模式无 token 身份可注入，回退到原常量是唯一合理路径）
+
+**multi_user 模式行为**（`AUTH_MODE=multi_user`）：
+- 完整启用 §1-§11 所有决策
+- 启动检查：`bootstrap_admin` 必须配置，**否则拒绝启动**（fail-fast；与决策 5 的"漏配告警"对冲——告警可被忽略，拒启动不可绕过）
+- bind 自动调整为 `0.0.0.0`（若仍 loopback → 仅 warn，**不强制改**——便于本地演示 multi_user）
+
+**UserAccount 在 local 模式下的存在性**（YAGNI：local 模式零改动）：
+- `user_profiles.json` **维持现状**（`UserProfile` schema 不变，无 `password_hash` / `role` / `disabled_at` 字段）；凭据表 `accounts.json` **不创建**
+- `AUTH_MODE=local` = 现状不变；`DISABLED_PASSWORD_HASH` sentinel **不用于 local**——它专用于 multi_user 下"admin 已创建、owner 尚未首次登录激活"的账号
+- 升级 multi_user 时**一次性迁移**：`user_profiles.json` 的每个 `UserProfile` → `accounts.json` 的 `UserAccount`（`password_hash = DISABLED_PASSWORD_HASH`），owner 走 `invite_token` 首次登录设密码激活
+
+**回滚/降级**（与 §5.4 对齐，但层级提升）：
+- multi_user → local：设 `AUTH_MODE=local` 或 `--bind 127.0.0.1`；前端跳过 LoginView，token 验证回落 bearer，admin 路由不注册；账号文件保留但不可登录（`password_hash` 仍在但无 login UI 触发校验）
+- local → multi_user：复用决策 6 的 `invite_token` 流程——现有 user 走"首次登录设置密码"激活；admin 创建的首 user 走同样的 invite 流程
+
+**主流参照**：GitLab / Gitea / Jenkins / Outline / Wiki.js / Plausible 等自托管产品均按 bind/外部可访问性分流认证强度——本地模式信任物理访问，多用户模式要求完整账号体系。
+
+**与之前决策的联动**：
+- **决策 1**：`UserAccount` 字段全保留，local 模式下 `password_hash` 填 sentinel（schema 不分裂）
+- **决策 5**：local 模式下 `bootstrap_admin` 不强制（首位 admin = 物理 OS 用户）；multi_user 模式下从"��配告警"升级为"漏配拒启动"
+- **§5.4 回滚段**：`AUTH_MODE` 不再只是回滚段的环境变量，而是第一类配置——回滚段降级为"mode 内降级"
+- **§9 开放问题 1**：local 模式下"首位 admin"概念不存在（物理 OS 用户就是 admin），multi_user 模式下保留 bootstrap_admin；问题按模式分流消解
+
+**ponytail 标记**：bind 推断逻辑只覆盖 `127.0.0.1` vs `0.0.0.0` 二分；IPv6 link-local（`fe80::/10`）视为 multi_user（默认安全侧）。超规模场景（reverse proxy 后 + 仅内网访问）需手动 `--auth-mode local` 覆盖；bind + reverse proxy 的混合可信域判断留后续 ADR。
+
 ---
 
 ## 5. 后果
@@ -608,7 +691,7 @@ pub struct ProjectMember {
 2. **session 反代全链路过滤**：所有 `/api/agents/{id}/sessions/*` 反代需要把 user_id 注入 query + 二次校验 owner；漏一处 = 数据泄漏。需专门的 grep ceiling lint（见 §6）。
 3. **Desktop 双 store 并存过渡期**：`userProfileStore`（旧） + `authStore`（新）共存一段时间，迁移期两者数据可能不一致；需要清晰 deprecation 路径。
 4. **token 撤销的存储成本**：refresh token family 需要持久化以支持"该 family 全部撤销"语义，单独文件或 Redis；本期选文件（`data_dir/auth/revoked_families.txt`），量小可接受。
-5. **首次启动门槛**：必须通过 `bootstrap_admin` 配置创建首位 admin；漏配导致系统空跑无人能登录——需要启动检查 + 日志告警。
+5. **首次启动门槛（multi_user 模式）**：必须通过 `bootstrap_admin` 配置创建首位 admin；漏配导致系统空跑无人能登录——**fail-fast 拒启动**（决策 12 升级），而非仅告警。local 模式无此门槛（首位 user 由 `bootstrap/orchestrator.rs` 自动创建，见决策 12 "UserAccount 在 local 模式下的存在性"）。
 
 ### 5.3 边界 / 例外
 
@@ -618,12 +701,17 @@ pub struct ProjectMember {
 
 ### 5.4 回滚
 
-- `UserProfile` → `UserAccount` 是 in-place 升级（迁移脚本同表字段），回滚 = 删 `user_id` / `password_hash` 字段。
-- session.user_id 字段可选，删除后过滤失效（回到所有人共享）。
-- auth middleware 可选：保留 `HttpAuth` bearer token 兜底路径，环境变量 `AUTH_MODE = legacy | multi_user`。
-- 聊天数据独立目录，删除 `data_dir/users/*/chats/` 即视为"未启用用户聊天"。
-- PM/Doc 反代身份（决策 10）：`AUTH_MODE = legacy` 时 `build_trusted_headers` 保留 `X-Actor: human` 注入，回滚只影响 PM/Doc 的 `created_by` / reviewer 值，不影响数据文件 schema。
-- PM 成员模型（决策 11）：`ProjectMember.kind` 带 `#[serde(default)]`，回滚仅丢弃 kind 字段、数据文件 schema 兼容；`"human"` 兼容解析保留到迁移完成后再移除。
+**模式级回滚**（第一类，由 §决策 12 的 `AUTH_MODE` 控制）：
+- multi_user → local：设 `AUTH_MODE=local` 或 `--bind 127.0.0.1`；前端跳过 LoginView，token 验证回落 bearer，admin 路由不注册；账号文件保留但不可登录（密码哈希仍在但无 login UI 触发校验）；`SessionMeta.user_id` 写入但不过滤；用户聊天路由不响应；PM/Doc REST 反代回退到 `X-Actor: human` 常量注入
+- local → multi_user：复用决策 6 的 `invite_token` 流程——现有 user 走"首次登录设置密码"激活；admin 创建的首 user 走同样的 invite 流程
+
+**字段级回滚**（第二类，mode 内的细粒度退化）：
+- `UserProfile` → `UserAccount` 是 in-place 升级（迁移脚本同表字段），回滚 = 删 `user_id` / `password_hash` 字段
+- `session.user_id` 字段可选，删除后过滤失效（回到所有人共享）——**仅 multi_user 模式相关**，local 模式本就不过滤
+- auth middleware 可选：保留 `HttpAuth` bearer token 兜底路径
+- 聊天数据独立目录，删除 `data_dir/users/*/chats/` 即视为"未启用用户聊天"
+- PM/Doc 反代身份（决策 10）：multi_user 模式下 `build_trusted_headers` 注入 `auth.effective_user_id`；local 模式注入常量 `human`（决策 12 联动）
+- PM 成员模型（决策 11）：`ProjectMember.kind` 带 `#[serde(default)]`，回滚仅丢弃 kind 字段、数据文件 schema 兼容；`"human"` 兼容解析保留到迁移完成后再移除（multi_user 模式路径，local 模式保留 `"human"` 常量路径）
 
 ### 5.5 已知技术债
 
@@ -638,7 +726,7 @@ pub struct ProjectMember {
 
 ### 6.1 core/acowork-core
 
-- 新增 `src/account.rs`：`UserAccount`、`Role`、`AccountListFile`
+- 新增 `src/account.rs`（**已实现**）：`UserAccount`、`Role`、`AccountListFile`、`DISABLED_PASSWORD_HASH`；`UserAccount::to_public_profile()` 产出 `UserProfile` 公开视图
 - 修改 `src/protocol.rs`：保留 `UserProfile`（展示用），新增 `AccountPublicView`（脱敏后的 API 返回类型）
 - 修改 `Cargo.toml` 依赖（如需 jsonwebtoken crate）
 
@@ -661,20 +749,23 @@ pub struct ProjectMember {
 - `src/http/auth_api.rs`：`/api/auth/login` `/refresh` `/logout` `/change-password` `/first-login` `/me`
 - `src/http/account_api.rs`：账号 CRUD（替换并扩展现有 `users_api.rs`）
 - `src/http/chat_api.rs`：用户-用户聊天 API
-- `src/account/store.rs`：账号持久化（`accounts.enc` 经 Vault + `user_profiles.json` 明文元数据）
-- `src/auth/token.rs`：HS256 token 签发 / 校验 / refresh family 管理
-- `src/auth/revoked.rs`：`revoked_families.txt` 文件管理
+- `src/account/store.rs`（已实现）：账号权威表 `accounts.json` 读写（原子写：temp + rename）；`src/account/password.rs`（已实现）：Argon2id PHC 哈希 / 校验
+- `src/auth/token.rs`（已实现）：HS256 token 签发 / 校验 / refresh family 管理；签名密钥 `data_dir/auth/secret`（首次启动生成，`0600`）
+- `src/auth/revoked.rs`（已实现）：`revoked_families.txt` 文件管理（精确 family + `{user_id}.*` 通配，后者用于改密全杀）
 - `src/chat/persistence.rs`：`conversation.json` + `conversation.jsonl` 读写
 - `src/chat/attachments.rs`：图片 / 文档附件落盘（`data_dir/users/.../files/`）
+- `src/auth/mode.rs`：`AUTH_MODE` 推断 + bind 地址解析 + CLI flag 解析（决策 12）；`pub enum AuthMode { Local, MultiUser }`；`pub fn resolve_auth_mode(cli: &CliArgs, toml: &TomlConfig) -> AuthMode`；pub `is_loopback_bind(addr: &SocketAddr) -> bool` helper
 
 **修改**：
-- `src/http/routes.rs`：`AppState` 加 `auth_middleware`，所有 router 套上 `Router::layer(...)`；`AppState` 加 `auth_state: Arc<AuthState>`
-- `src/http/proxy.rs`：所有 `proxy_*_sessions*` 函数加 `Extension(auth)`，把 `effective_user_id` 注入 query / header；新增 `?as_user=` 处理（仅 admin + 仅 GET）
-- `src/http/pm_proxy.rs` / `src/http/doc_proxy.rs`（决策 10）：`build_trusted_headers` 签名加 `auth: &AuthContext` 参数，REST 分支从注入常量 `"human"` 改为 `auth.effective_user_id`；MCP 分支 `X-MCP-Actor` 校验逻辑不变
-- `src/http/users_api.rs`：**废弃**，合并到 `account_api.rs`（保留兼容路径 → `account_api` 的 alias）
-- `src/resource_cache.rs`：`UserProfileListFile` 改名或保留——保留 `user_profiles.json` 作为公开视图，新增 `accounts_meta.json` 不必要（account 信息全在 `accounts.enc` 解密后产出）
-- `src/bootstrap/orchestrator.rs`：启动时检查 `bootstrap_admin` 配置，若 accounts 为空则强制创建
-- `src/config.rs`：新增 `[multi_user]` 段：`registration_open`、`password_policy`、`bootstrap_admin`
+- `src/http/routes.rs`：`AppState` 加 `auth_middleware`（**仅 multi_user 模式生效**，local 模式注册 legacy `HttpAuth` bearer middleware）；`AppState` 加 `auth_state: Arc<AuthState>` + `auth_mode: AuthMode`；router 注册时分流——multi_user 模式加载 `/api/auth/*` `/api/users/*/chats/*` admin 路由，local 模式全部不注册
+- `src/http/proxy.rs`：所有 `proxy_*_sessions*` 函数加 `Extension(auth)`，把 `effective_user_id` 注入 query / header；新增 `?as_user=` 处理（仅 admin + 仅 GET）；**local 模式跳过 user_id 过滤**（query 接受但不修改 Runtime 行为）
+- `src/http/pm_proxy.rs` / `src/http/doc_proxy.rs`（决策 10）：`build_trusted_headers` 签名加 `auth: &AuthContext` 参数；multi_user 模式 REST 分支从注入常量 `"human"` 改为 `auth.effective_user_id`；**local 模式保留 `X-Actor: human` 常量注入**（决策 12 联动）；MCP 分支 `X-MCP-Actor` 校验逻辑不变（两模式一致）
+- `src/http/users_api.rs`：**废弃**，合并到 `account_api.rs`（保留兼容路径 → `account_api` 的 alias）；**local 模式下路由 alias 也不注册**
+- `src/resource_cache.rs`：`UserProfileListFile` 改名或保留——保留 `user_profiles.json` 作为公开视图；local 模式下维持现有 `UserProfile` 写入路径（不引入 `password_hash` sentinel）
+- `src/account/store.rs`（决策 2 配套）：**local 模式不创建 `accounts.json`**，不碰 `user_profiles.json`（零改动）
+- `src/bootstrap/orchestrator.rs`：**multi_user 模式**：检查 `bootstrap_admin` 配置，若 accounts 为空则强制创建首位 admin（**缺配则拒启动**——fail-fast，决策 12 升级原决策 5 的"告警"为"拒启动"）；**local 模式**：**零改动**（不碰 `accounts.json`，不创建任何 `UserAccount`）
+- `src/config.rs`：新增 `[multi_user]` 段：`registration_open`、`password_policy`、`bootstrap_admin`；新增 `auth_mode: Option<AuthMode>` 字段（`None` = bind 自动推断；`Some(Local)` / `Some(MultiUser)` = 显式覆盖）
+- `src/cli.rs`（CliArgs）：新增 `--auth-mode <local|multi_user>` flag；与现有 `--addr` 联动——若用户显式传 `--auth-mode` 与 `--bind` 冲突 → warn 但尊重 `--auth-mode`
 
 ### 6.5 apps/acowork-desktop
 
@@ -727,7 +818,7 @@ grep -rn "proxy_list_sessions\|proxy_get_messages\|proxy_get_session_state" core
 - 改密流程：alice 改密 → 旧 refresh_token 失效 → 必须重新 login
 - 注销流程：alice DELETE self → alice 无法再 login → 历史 session 仍可被 admin 读
 - 用户聊天：A → B 发文字 + 图片 + 文档 → B 收到 → unread_count 增加 → B read 后清零
-- Vault locked 流程：Vault 锁上后 alice 仍可登录（password_hash 在外），但 admin 想读 `accounts.enc` 时报错
+- Vault locked 流程：Vault 锁上后 alice 仍可登录（`password_hash` 在明文的 `accounts.json`），但 admin 想读 `vault/accounts/*.enc` 时报错
 
 ### 7.3 协议兼容性
 
@@ -741,6 +832,40 @@ grep -rn "proxy_list_sessions\|proxy_get_messages\|proxy_get_session_state" core
 - [ ] 注销账号后旧 refresh_token → revoked_families 命中 → 拒绝
 - [ ] admin 用 `as_user` 调 POST（写操作）→ 403
 - [ ] 跨用户聊天路径：`POST /api/users/{A}/chats/{B}/messages` 以 A 身份发送，从 token 拿 from 字段 → from=B 拒绝
+
+### 7.5 部署模式测试（决策 12）
+
+**单元测试**（`core/acowork-gateway/src/auth/mode.rs`）：
+
+- `resolve_auth_mode` 真值表：
+  - `bind = 127.0.0.1:19876`，无显式 flag → `Local`
+  - `bind = 0.0.0.0:19876`，无显式 flag → `MultiUser`
+  - `bind = 192.168.1.20:19876` → `MultiUser`
+  - `bind = [::1]:19876` → `Local`
+  - `bind = [fe80::1]:19876` → `MultiUser`（link-local 默认安全侧）
+  - 显式 `--auth-mode local` + `bind = 0.0.0.0` → `Local`（显式覆盖 bind）
+  - 显式 `--auth-mode multi_user` + `bind = 127.0.0.1` → `MultiUser`（显式覆盖 bind，仅 warn）
+- 优先级链：CLI > TOML > bind 推断 > default
+
+**集成测试**（`core/acowork-gateway/tests/auth_mode_e2e.rs`，新增）：
+
+- **local 模式启动**：bind `127.0.0.1` + 无 `bootstrap_admin` → 正常启动；`user_profiles.json` 含 1 条 `role = User` / `password_hash = "$disabled$"` 的记录；`GET /api/auth/login` → 404（路由未注册）；`GET /api/users/{self}/chats` → 404
+- **multi_user 模式启动**：bind `0.0.0.0` + 无 `bootstrap_admin` → **拒启动**（exit code != 0，stderr 含 `bootstrap_admin` 提示）
+- **multi_user 模式启动**：bind `0.0.0.0` + 配 `bootstrap_admin` → 正常启动；`GET /api/auth/login` 可达
+- **local 模式 session 不过滤**：创建 2 个 session 绑定不同 `user_id` → `GET /sessions` 返回全部 2 条（不过滤）
+- **multi_user 模式 session 过滤**：同上场景 → 普通 user token 只返回自己的 1 条；admin token 返回 2 条
+
+**回归防护**（`dev/ci.sh` 新增 ceiling lint）：
+
+```bash
+# 决策 12：local 模式下不得注册 auth/admin 路由——防止后续 PR 误把 multi_user 路由变成无条件注册
+grep -rn "auth_middleware\|account_api::router" core/acowork-gateway/src/http/routes.rs \
+  | grep -v "auth_mode\|AuthMode" && echo "FAIL: 路由注册未按 auth_mode 分流" && exit 1
+
+# 决策 12：local 模式下 `accounts.json` 不得创建
+grep -rn "save_accounts\|account_list_path" core/acowork-gateway/src/ | grep -v "auth_mode\|auth::mode\|AuthMode" \
+  && echo "FAIL: accounts.json 写入未按 auth_mode 分流" && exit 1
+```
 
 ---
 
@@ -762,15 +887,17 @@ grep -rn "proxy_list_sessions\|proxy_get_messages\|proxy_get_session_state" core
 
 ## 9. 开放问题（评审请重点看）
 
-> **请你 (大鱼) 评审时重点回答这几个：**
+> **状态更新**：1-7 已按主流技术路线决议（行业标准 + "做就做最好的"原则），作为设计输入纳入决策；问题 8 已在 §决策 11 决议。
+>
+> **模式分流补充（§决策 12）**：本地（bind `127.0.0.1`）部署下，**§1-§11 整套决策退化为 no-op**——问题 1（首位 admin = 物理 OS 用户）、问题 2（注销策略 = OS 账户注销）、问题 3-7（隔离/聊天/原子性/并发 = 单用户场景下不触发）按 `AUTH_MODE=local` 分流消解，不需单独决议。multi_user 模式（bind `0.0.0.0`）下问题 1-7 才进入实施路径。
 
-1. **首位 admin 创建流程**：是 `bootstrap_admin` 配置驱动，还是首次启动时强制弹交互式 modal？前者适合无人值守部署（Docker / k8s），后者更友好但打破 "Gateway 是 keep-alive 进程不应有 stdin" 的现有原则。
-2. **注销策略**：本期是只软删除（`disabled_at`），对吗？还是需要硬删除可选（带 30 天宽限期）？
-3. **群聊（group chat）**：本期确实不做？若后续需要，schema 怎么预留？建议：`conversation.json` 的 `participants` 改为 `Vec<String>`（2 个就是 DM，>2 就是 group），本期文档化但 API 只支持 2 人。
-4. **聊天附件大小限制**：图片最大多少？文档最大多少？是否需要 virus scan？建议：图片 10MB、文档 50MB、no virus scan（个人/小团队场景，trade-off 已知）。
-5. **`as_user` 是否需要写操作**？当前设计是"只读视图"。如果运营场景需要"admin 代用户发消息给 agent"，需要新增 `X-On-Behalf-Of` header + 单独的写权限策略。
-6. **Desktop 账号切换的原子性**：清空 + 重连流程若中途失败（MQTT 重连不上），是否回滚到旧账号？还是允许"已登出新账号 + 旧账号 token 已失效"的尴尬中间态？建议：保留失败时的"已登出但未登入"状态，引导用户重新登录。
-7. **多设备并发**：alice 在两台 Desktop 登录，token 是否独立？本期允许（无并发限制）；后续是否需要 device_id 概念？
+1. **✅ 已决议 — 首位 admin 创建流程**：选 **`bootstrap_admin` 配置驱动**（无人值守优先）。理由：Kubernetes / Consul / etcd / Docker 等集群系统均采配置文件 / 环境变量方式；"Gateway 是 keep-alive 进程不应有 stdin" 是既有架构原则（`AGENTS.md` 已明确）。交互式场景由**独立 CLI 子命令** `acowork-gateway admin create` 提供（独立进程，不破坏 keep-alive 边界），对应 [apps/cli/](apps/cli/) 增量。配置缺失时启动检查 + 日志告警（决策 5 已有）。
+2. **✅ 已决议 — 注销策略**：本期**只软删除**（`disabled_at`，与决策 6 一致），不提供硬删除。理由：Slack / Discord / Teams 均默认软删除保留历史；硬删除仅在 GDPR 等法律强制场景需要（会破坏 session / 聊天的引用完整性），本期 YAGNI；后续若需硬删除再立独立 ADR（带宽限期 + 异步清理任务 + 引用重映射策略）。
+3. **✅ 已决议 — 群聊（group chat）**：`conversation.json` 的 `participants` 字段类型保留 `Vec<String>`，本期运行时断言 `len() == 2`；未来 group chat 通过 "len() > 2 + group metadata（name / avatar / owner）" 扩展，**零迁移**（schema 已兼容）。理由：Slack / Discord / 微信 / Telegram 均采用 DM / Group 统一 schema；本期前端仅暴露 2 人路径，schema 留口。
+4. **✅ 已决议 — 聊天附件大小限制**：**图片 25 MB / 文档 100 MB / 不引入 virus scan**。ponytail 标记：个人 / 小团队场景下 trade-off 已知；超过此规模需引入 ClamAV（独立进程）+ 对象存储分拆（独立 ADR）。理由：Discord 25 MB（图片 / 视频）、Telegram 100 MB（任意文件）是公认的 sweet spot；virus scan 在用户量 < 100 时 ROI 为负，是 over-engineering。
+5. **✅ 已决议 — `as_user` 是否需要写操作**：本期**只读视图**（与决策 4 一致），写操作保持 token 实际身份。理由：避免 XSS / CSRF 攻击链（决策 4 已分析：身份冒用 = 横向越权入口）。若运营场景需要"admin 代用户发消息给 agent"，按 **OAuth 2.0 Token Exchange (RFC 8693)** 模式扩展——新增 `X-On-Behalf-Of` header + `act` claim + 单独 ACL 策略，**独立 ADR** 设计，不污染本期 schema。
+6. **✅ 已决议 — Desktop 账号切换的原子性**：保留 ADR 原建议——**保留失败时的"已登出但未登入"中间态**，UI 引导用户重新登录（LoginView 直接渲染）。理由：VS Code / Google 账号切换均采用此模式；事务性账号切换是过度设计，失败回滚反而引入新的不一致风险（旧 token 已撤销 / 新 token 没拿到 / MQTT 状态半连接——三者纠缠）。
+7. **✅ 已决议 — 多设备并发**：本期**允许多设备并发**（每设备独立 `token_family`），不引入 `device_id` 与并发上限。理由：Slack / Discord / Google / Microsoft 均默认支持多设备并发；OAuth 2.0 RFC 6749 本身不限制。后续若需要按 `device_id` + `max_sessions_per_user` + "新登录踢旧登录"策略扩展，立独立 ADR。
 8. **~~PM `"human"` 特例的演化~~ ✅ 已决议（选 B）**：人类操作者成员化——`ProjectMember` 新增 `kind`（`Agent`/`User`），人类与 agent 成员对称，`assignee ∈ ∅ ∪ members` 无特例。完整设计见 **§决策 11**。~~选项 A（放宽为"任意已登录用户可被指派"）~~ 已拒绝：语义模糊（A 指派的活 B 可认领），且与 ADR-073 三层身份范式不对齐。
 
 ---

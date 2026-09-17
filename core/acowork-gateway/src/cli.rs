@@ -129,6 +129,19 @@ pub struct Cli {
     )]
     pub no_spawn_local_node: bool,
 
+    /// Deployment auth mode (ADR-076 §决策 12): `local` or `multi_user`.
+    ///
+    /// Overrides the bind-address inference (loopback → `local`, anything
+    /// else → `multi_user`). Use for edge cases such as a reverse proxy
+    /// fronting a `0.0.0.0` bind that is only reachable on a trusted
+    /// subnet. TOML counterpart: `auth_mode = "local"`.
+    #[arg(
+        long,
+        value_name = "local|multi_user",
+        env = "ACOWORK_GATEWAY_AUTH_MODE"
+    )]
+    pub auth_mode: Option<String>,
+
     /// Subcommands
     #[command(subcommand)]
     pub command: Option<Commands>,

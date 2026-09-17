@@ -1757,6 +1757,7 @@ mod tests {
             pm: crate::config::PmConfig::default(),
             doc: crate::config::DocConfig::default(),
             security: crate::config::SecurityConfig::default(),
+            auth_mode: None,
         }
     }
 

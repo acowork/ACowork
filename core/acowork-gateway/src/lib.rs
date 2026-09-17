@@ -2,6 +2,8 @@
 //!
 //! Long-running system process: manages Agent lifecycle, Intent routing, key distribution, budget coordination.
 
+pub mod account;
+pub mod auth;
 pub mod bootstrap;
 pub mod budget;
 pub mod capability;

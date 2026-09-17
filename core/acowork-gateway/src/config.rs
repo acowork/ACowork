@@ -8,6 +8,7 @@
 
 use std::path::PathBuf;
 
+use crate::auth::mode::{AuthMode, resolve_auth_mode};
 use crate::cli::Cli;
 use crate::error::GatewayError;
 use acowork_core::{Timeouts, defaults};
@@ -175,6 +176,16 @@ pub struct GatewayConfig {
     /// security backstop that the Desktop UI / HTTP API can never relax.
     #[serde(default)]
     pub security: SecurityConfig,
+
+    /// Deployment auth mode (ADR-076 §决策 12): `local` or `multi_user`.
+    ///
+    /// `None` (default) = infer from the HTTP bind host at startup —
+    /// loopback → `local`, anything else → `multi_user`. An explicit value
+    /// overrides the inference. Use `effective_auth_mode()` to read the
+    /// resolved value; the raw field is the operator's explicit choice (or
+    /// `None`). CLI `--auth-mode` beats this field.
+    #[serde(default)]
+    pub auth_mode: Option<AuthMode>,
 }
 
 /// Local Node Agent configuration (ADR-055 §6.11 / §6.13).
@@ -813,10 +824,33 @@ impl GatewayConfig {
                 sec.apply_env_overrides();
                 sec
             },
+            auth_mode: {
+                // ADR-076 §决策 12: CLI `--auth-mode` > TOML `auth_mode`.
+                // The bind-address inference is applied lazily in
+                // `effective_auth_mode()` (after `http.host` is final).
+                match cli.auth_mode.as_deref() {
+                    Some(s) => Some(AuthMode::parse(s).ok_or_else(|| {
+                        GatewayError::Config(format!(
+                            "invalid --auth-mode '{s}': expected 'local' or 'multi_user'"
+                        ))
+                    })?),
+                    None => file_config.as_ref().and_then(|c| c.auth_mode),
+                }
+            },
         };
 
         config.validate()?;
         Ok(config)
+    }
+
+    /// Resolve the effective auth mode for this deployment
+    /// (ADR-076 §决策 12).
+    ///
+    /// Applies the bind-address inference when neither CLI nor TOML set the
+    /// mode explicitly: a loopback HTTP bind → [`AuthMode::Local`]; anything
+    /// else → [`AuthMode::MultiUser`].
+    pub fn effective_auth_mode(&self) -> AuthMode {
+        resolve_auth_mode(self.auth_mode, None, &self.http.host)
     }
 
     /// Load config from a TOML file
@@ -930,6 +964,7 @@ impl Default for GatewayConfig {
             pm: PmConfig::default(),
             doc: DocConfig::default(),
             security: SecurityConfig::default(),
+            auth_mode: None,
         }
     }
 }
@@ -1042,6 +1077,36 @@ mod tests {
             config.local_node.enabled,
             "default must be enabled — Gateway auto-spawns local node"
         );
+    }
+
+    /// ADR-076 §决策 12: `effective_auth_mode()` applies the bind inference
+    /// when no explicit mode is set, and honors the explicit value otherwise.
+    #[test]
+    fn test_effective_auth_mode() {
+        // Default: loopback bind, no explicit mode → Local.
+        let mut config = GatewayConfig::default();
+        assert_eq!(config.auth_mode, None);
+        assert_eq!(config.effective_auth_mode(), AuthMode::Local);
+
+        // Non-loopback bind, no explicit mode → MultiUser.
+        config.http.host = "0.0.0.0".to_string();
+        assert_eq!(config.effective_auth_mode(), AuthMode::MultiUser);
+
+        // Explicit TOML value overrides the bind inference.
+        config.http.host = "127.0.0.1".to_string();
+        config.auth_mode = Some(AuthMode::MultiUser);
+        assert_eq!(config.effective_auth_mode(), AuthMode::MultiUser);
+
+        // TOML `auth_mode = "multi_user"` deserializes to the enum.
+        let toml = r#"
+vault_dir = "/tmp/v"
+packages_dir = "/tmp/p"
+data_dir = "/tmp/d"
+auth_mode = "multi_user"
+"#;
+        let parsed: GatewayConfig = toml::from_str(toml).unwrap();
+        assert_eq!(parsed.auth_mode, Some(AuthMode::MultiUser));
+        assert_eq!(parsed.effective_auth_mode(), AuthMode::MultiUser);
     }
 
     #[test]
