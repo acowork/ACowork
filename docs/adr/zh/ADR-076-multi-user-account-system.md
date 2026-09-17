@@ -66,6 +66,13 @@
 | 升级路径 | → multi_user：补 `password_hash` + `invite_token` 激活（无需数据迁移） | — |
 | 降级路径 | — | → local：`--auth-mode local`，账号文件保留但不可登录 |
 
+> **配置通道（实施期落字）**：本文档用 `AUTH_MODE` 作为部署模式的**概念名**，不映射到某个具体环境变量。实际配置三通道（优先级 CLI > TOML > bind 推断 > 默认 `local`）：
+> - CLI：`--auth-mode <local|multi_user>`（环境变量 `ACOWORK_GATEWAY_AUTH_MODE`，见 [cli.rs](core/acowork-gateway/src/cli.rs)）
+> - TOML：顶层 `auth_mode = "local" | "multi_user"`（见 [config.rs](core/acowork-gateway/src/config.rs)）
+> - 推断：HTTP bind 地址（loopback → `local`，其余 → `multi_user`）
+>
+> 推断只看 HTTP bind 地址，不看任何 `AUTH_MODE` 字样；文档正文凡单独写 `AUTH_MODE=local/multi_user` 均指概念模式。
+
 ---
 
 ## 2. 背景与动机
@@ -625,7 +632,7 @@ pub struct ProjectMember {
 
 ### 决策 12：部署模式分流 — `AUTH_MODE` 由 bind 地址自动推断
 
-**核心**：避免在单机 self-hosted 场景下强制走 multi-user 完整链路。`AUTH_MODE` 由 bind 地址自动推断（也可显式覆盖），local 模式下完整 §1-§11 决策退化为 no-op。**这不是 §5.4 的"回滚开关"——是第一类配置**。
+**核心**：避免在单机 self-hosted 场景下强制走 multi-user 完整链路。`AUTH_MODE`（概念名，配置通道见 §1.4 注）由 bind 地址自动推断（也可显式覆盖），local 模式下完整 §1-§11 决策退化为 no-op。**这不是 §5.4 的"回滚开关"——是第一类配置**。
 
 **心智模型**（对应 [runbook §0](../runbooks/single-machine-remote-topology.md) "没有 local/remote 两套拓扑"）：架构始终一套，差异在"外部可达性" → "认证强度"。loopback-only = 物理 OS 用户管理兜底 = 信任域；LAN 暴露 = 不可信域 = 完整账号体系。
 
@@ -637,7 +644,7 @@ pub struct ProjectMember {
 | `0.0.0.0` / LAN IP / 域名 | `multi_user` | 跨机/跨用户可连 = 必须完整账号体系 |
 | `--auth-mode local` / `multi_user` 显式 | 覆盖推断 | 异常场景（reverse proxy 后 + 仅内网访问时强制 local；loopback 但想演示 multi_user 时强制 multi_user） |
 
-**优先级**：CLI `--auth-mode` > TOML `[multi_user].auth_mode` > bind 自动推断 > default `local`。
+**优先级**：CLI `--auth-mode` > TOML 顶层 `auth_mode` > bind 自动推断 > default `local`。（`auth_mode` 键在 `GatewayConfig` **顶层**，不在 `[multi_user]` 段内；`[multi_user]` 段留待 `bootstrap_admin` / `password_policy` / `registration_open`，见 §6.4。）
 
 **local 模式行为**（`AUTH_MODE=local`，**所有 §1-§11 决策退化为 no-op**）：
 - `HttpAuth` 维持现有 bearer token（`data_dir/http_token` 文件，决策 3 的 access/refresh 不引入）
@@ -724,11 +731,13 @@ pub struct ProjectMember {
 
 ## 6. 改动清单（按 crate / 文件）
 
+> **实现状态（Phase 1 基础设施 commit `fbe23126`）**：本节标注 **（已实现）** 的条目 = 基础设施 PR 交付物——core `src/account.rs`；gateway `src/account/store.rs` + `password.rs`；`src/auth/token.rs` + `revoked.rs` + `mode.rs`；config 顶层 `auth_mode` 字段 + `effective_auth_mode()`；cli `--auth-mode`。**其余条目均为 Phase 2+ 未实现**（auth_middleware / auth_api / account_api / chat_api / chat persistence / attachments / proxy 过滤 / pm_proxy + doc_proxy / users_api 合并 / resource_cache / bootstrap_orchestrator / protocol.rs `AccountPublicView` / `[multi_user]` 配置段 / `bootstrap_admin` 缺配拒启动），属后续 PR，非本节遗漏。已实现模块当前**无生产调用方**（仅自身测试），对现网启动/HTTP 路径零影响。
+
 ### 6.1 core/acowork-core
 
 - 新增 `src/account.rs`（**已实现**）：`UserAccount`、`Role`、`AccountListFile`、`DISABLED_PASSWORD_HASH`；`UserAccount::to_public_profile()` 产出 `UserProfile` 公开视图
-- 修改 `src/protocol.rs`：保留 `UserProfile`（展示用），新增 `AccountPublicView`（脱敏后的 API 返回类型）
-- 修改 `Cargo.toml` 依赖（如需 jsonwebtoken crate）
+- 修改 `src/protocol.rs`：保留 `UserProfile`（展示用），新增 `AccountPublicView`（脱敏后的 API 返回类型）——**未实现（Phase 2）**
+- 修改 `Cargo.toml` 依赖（如需 jsonwebtoken crate）——**未引入**：HS256 签名自研最小实现（固定 header + 常量时间校验），不依赖 jsonwebtoken，见 §决策 3
 
 ### 6.2 core/acowork-vault
 
@@ -754,7 +763,7 @@ pub struct ProjectMember {
 - `src/auth/revoked.rs`（已实现）：`revoked_families.txt` 文件管理（精确 family + `{user_id}.*` 通配，后者用于改密全杀）
 - `src/chat/persistence.rs`：`conversation.json` + `conversation.jsonl` 读写
 - `src/chat/attachments.rs`：图片 / 文档附件落盘（`data_dir/users/.../files/`）
-- `src/auth/mode.rs`：`AUTH_MODE` 推断 + bind 地址解析 + CLI flag 解析（决策 12）；`pub enum AuthMode { Local, MultiUser }`；`pub fn resolve_auth_mode(cli: &CliArgs, toml: &TomlConfig) -> AuthMode`；pub `is_loopback_bind(addr: &SocketAddr) -> bool` helper
+- `src/auth/mode.rs`（**已实现**）：`AUTH_MODE` 推断 + bind 地址解析 + CLI flag 解析（决策 12）；`pub enum AuthMode { Local, MultiUser }`；`pub fn resolve_auth_mode(cli: Option<AuthMode>, toml: Option<AuthMode>, bind_host: &str) -> AuthMode`；pub `is_loopback_host(host: &str) -> bool` helper（loopback 判定含 `127.0.0.0/8`、`::1`、`localhost`；`0.0.0.0` / `fe80::/10` / LAN IP / 域名 → MultiUser 安全侧）
 
 **修改**：
 - `src/http/routes.rs`：`AppState` 加 `auth_middleware`（**仅 multi_user 模式生效**，local 模式注册 legacy `HttpAuth` bearer middleware）；`AppState` 加 `auth_state: Arc<AuthState>` + `auth_mode: AuthMode`；router 注册时分流——multi_user 模式加载 `/api/auth/*` `/api/users/*/chats/*` admin 路由，local 模式全部不注册
@@ -764,8 +773,8 @@ pub struct ProjectMember {
 - `src/resource_cache.rs`：`UserProfileListFile` 改名或保留——保留 `user_profiles.json` 作为公开视图；local 模式下维持现有 `UserProfile` 写入路径（不引入 `password_hash` sentinel）
 - `src/account/store.rs`（决策 2 配套）：**local 模式不创建 `accounts.json`**，不碰 `user_profiles.json`（零改动）
 - `src/bootstrap/orchestrator.rs`：**multi_user 模式**：检查 `bootstrap_admin` 配置，若 accounts 为空则强制创建首位 admin（**缺配则拒启动**——fail-fast，决策 12 升级原决策 5 的"告警"为"拒启动"）；**local 模式**：**零改动**（不碰 `accounts.json`，不创建任何 `UserAccount`）
-- `src/config.rs`：新增 `[multi_user]` 段：`registration_open`、`password_policy`、`bootstrap_admin`；新增 `auth_mode: Option<AuthMode>` 字段（`None` = bind 自动推断；`Some(Local)` / `Some(MultiUser)` = 显式覆盖）
-- `src/cli.rs`（CliArgs）：新增 `--auth-mode <local|multi_user>` flag；与现有 `--addr` 联动——若用户显式传 `--auth-mode` 与 `--bind` 冲突 → warn 但尊重 `--auth-mode`
+- `src/config.rs`：新增顶层 `auth_mode: Option<AuthMode>` 字段（**已实现**；`None` = bind 自动推断，`Some(Local)` / `Some(MultiUser)` = 显式覆盖）+ `effective_auth_mode()` 解析入口；新增 `[multi_user]` 段：`registration_open`、`password_policy`、`bootstrap_admin`——**未实现（Phase 2）**
+- `src/cli.rs`（CliArgs）：新增 `--auth-mode <local|multi_user>` flag（**已实现**，含 env `ACOWORK_GATEWAY_AUTH_MODE`）；"显式 `--auth-mode` 与 `--bind` 冲突 → warn" 联动——**未实现（Phase 2，bind 推断当前仅作默认值，显式模式始终优先）**
 
 ### 6.5 apps/acowork-desktop
 
