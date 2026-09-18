@@ -1,13 +1,13 @@
-//! Tool compression (ADR-052) was retired. The `context_retrieve` /
-//! `context_abandon` tools are no longer registered with the LLM;
-//! their source files survive in this module as dead code for future
-//! reference. See `context_compression.rs` for the contract that used
-//! to bind the two sides.
+//! Tool compression (ADR-052) was retired. The `context_abandon` tool is
+//! no longer registered with the LLM; its source file survives in this
+//! module as dead code for future reference.
 //!
 //! `context_abandon` (originally an LLM-initiated "compress tool
 //! result" tool) is kept here so the design history is preserved and
 //! the in-place replacement mechanics can be revisited if a future
-//! ADR re-introduces automated tool-result compression.
+//! ADR re-introduces automated tool-result compression. Its sibling
+//! `context_retrieve` — and the `context_compression` module that bound
+//! the two sides — have been deleted (ADR-061 §10/§12).
 #![allow(dead_code)]
 
 //! ADR-052 context_abandon tool - replace a tool result with a placeholder.
@@ -25,7 +25,8 @@
 //! access to it). Instead, it pushed the `tool_call_id` into an
 //! `abandon_queue`; the agent loop drained the queue on the next iteration
 //! and called `HistoryManager::abandon_tool_result()` to perform the
-//! in-place replacement. Symmetric with `context_retrieve`'s `retrieve_queue`.
+//! in-place replacement. (The symmetric `retrieve_queue` belonged to
+//! `context_retrieve`, deleted along with it — see ADR-061 §12.)
 //!
 //! ## Parameters
 //!
@@ -71,10 +72,11 @@ impl ContextAbandonTool {
             name: "context_abandon".to_string(),
             description:
                 "Replace a tool result with a compact placeholder to free up context window space. \
-                 The original content is preserved in the conversation log and can be retrieved \
-                 later with context_retrieve. Call this when a tool result is no longer needed \
-                 for your current reasoning - e.g., after you've extracted the relevant \
-                 information from a large file_read or content_search output."
+                 The placeholder is NOT recallable: the original content is no longer part of the \
+                 conversation history, so re-run the tool if you need the result again. Call this \
+                 when a tool result is no longer needed for your current reasoning - e.g., after \
+                 you've extracted the relevant information from a large file_read or \
+                 content_search output."
                     .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
@@ -195,6 +197,9 @@ mod tests {
         let spec = tool.spec();
         assert_eq!(spec.name, "context_abandon");
         assert!(spec.description.contains("placeholder"));
-        assert!(spec.description.contains("context_retrieve"));
+        // The retired sibling tool must not be advertised: placeholders are
+        // not recallable (ADR-061 §10.1 v3), and `context_retrieve` itself
+        // has been deleted.
+        assert!(!spec.description.contains("context_retrieve"));
     }
 }

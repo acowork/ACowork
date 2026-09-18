@@ -20,7 +20,6 @@
 //! | content_search | filesystem:read:<path> |
 //! | intent_send | intent:send:<target> |
 //! | rag_query | rag:query + network:<rag_url> (registered in agent_init.rs) |
-//! | context_retrieve | context:read — RETIRED (dead code, not registered) |
 //! | context_abandon | context:write - RETIRED (dead code, not registered) |
 //! | ask_user_question | (no permission — LLM-initiated, always allowed) |
 
@@ -28,7 +27,6 @@ pub mod ask_user_question;
 pub mod codebase;
 pub mod content_search;
 pub mod context_abandon;
-pub mod context_retrieve;
 pub mod doc_reader;
 pub mod file_edit;
 pub mod file_read;
@@ -278,10 +276,10 @@ mod tests {
 
     #[test]
     fn test_all_builtin_tools_does_not_register_compression_tools() {
-        // Tool compression (context_retrieve / context_abandon) has been
-        // retired from the LLM-facing tool surface. Neither tool should
-        // appear in the registered builtin tools list; their source
-        // files survive as dead code for future reference.
+        // Tool compression (ADR-052) has been retired from the LLM-facing
+        // tool surface (ADR-061 §10). `context_retrieve` was deleted
+        // outright once it turned out to scan every session file instead of
+        // the current one; `context_abandon` survives as dead code.
         let (resolver, agent_id, timeout, search_kv, search_pl, mem, mcp, agent_home, lsp, mqtt) =
             make_test_deps();
 
@@ -290,11 +288,6 @@ mod tests {
         );
 
         let names = tool_names(&tools);
-        assert!(
-            !names.contains(&"context_retrieve".to_string()),
-            "context_retrieve must NOT be registered (compression retired); got: {:?}",
-            names
-        );
         assert!(
             !names.contains(&"context_abandon".to_string()),
             "context_abandon must NOT be registered (compression retired); got: {:?}",

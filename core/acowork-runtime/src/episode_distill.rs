@@ -938,7 +938,7 @@ mod tests {
         // should emit [Tool(name=my_tool, id=toolu_xxx)].
         let msg = ChatMessage {
             role: MessageRole::Tool,
-            content: "[Tool result compressed. Call context_retrieve(id=\"toolu_xyz\") to retrieve the full content.]".into(),
+            content: "[Tool result compressed. Re-invoke the tool to re-fetch the content.]".into(),
             name: Some("codebase_reader".to_string()),
             tool_call_id: Some("toolu_xyz".to_string()),
             ..Default::default()
@@ -1253,7 +1253,7 @@ mod tests {
         // content (not a role marker) — it must survive. Normal prose with
         // bracketed terms must not be mangled either.
         let raw = "此前工具结果被压缩。\n\
-                   [Tool result compressed. Call context_retrieve(id=\"toolu_abc\") to retrieve the full content.]\n\
+                   [Tool result compressed. Re-invoke the tool to re-fetch the content.]\n\
                    [重要] 下一步需要验证。";
         let cleaned = sanitize_summary_text(raw);
         assert!(
