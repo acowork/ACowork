@@ -321,7 +321,7 @@ async fn status_rev_returns_files_in_that_commit() {
         .trim()
         .to_string();
     // Second commit is `HEAD~` — also reachable.
-    let parent_hash = git_in(&dir, &["log", "--format=%H", "HEAD~"])
+    let parent_hash = git_in(&dir, &["log", "--format=%H", "-1", "HEAD~"])
         .trim()
         .to_string();
 
