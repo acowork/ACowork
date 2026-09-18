@@ -282,6 +282,11 @@ serde_json 解析               5ms（Rust 比 Python 快 3-5x）
 
 **40ms 启动开销完全可接受**——这替代了原来读 `index.json`（~5ms）+ 逐个读 JSONL 第一行（每个文件 seek + read_line）的方案，后者实际上更慢。
 
+**后续修订（ADR-076 实施期）**，现状以 `core/acowork-runtime/src/conversation.rs` 为准：
+
+- **排序加了 tie-break**：`last_active_at` 只到毫秒，同毫秒创建的两个会话会平局。现在按 `(last_active_at 降序, session_id 升序)` 排——否则"由写入维护的缓存索引（写序）"和"重新扫描（`read_dir` 序）"会在平局会话上给出**不同的分页边界**。
+- **列表改走进程内内存索引**（`META_INDEX`）：`read_dir` + 逐文件 `read + serde_json` 只做一次（首次读取时构建），之后 `scan_sessions_async` / `find_latest_session` / `prune_excess_sessions` 全部读缓存，重复列表的代价退化为一次 `read_dir().count()` 探针（实测 2000 条目 0.9 ms vs 全量扫 23 ms）。缓存靠 `write_session_meta`（写侧 upsert）与 `remove_session_meta`（删侧）保持同步——**这两个函数是 meta 文件唯一的写口和删口**，由 `dev/ci.sh` 的 `run_meta_layout_redline` 守着（除 `conversation.rs` 外，只允许测试夹具以固定上限构造 meta 路径，上限只能降）。探针只认"条目数变化"，因此**同数量的替换写**（进程外写者）要等下一次真增删才可见；进程内所有写者都走上面两个函数，所以这条路径不可达。
+
 ### 归档机制
 
 `prune_excess_sessions` 从 "删除" 变为 "迁移"：

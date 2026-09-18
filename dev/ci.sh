@@ -106,6 +106,58 @@ run_gateway_fs_redline() {
     echo "Gateway filesystem red line: OK"
 }
 
+# ADR-024 / session-listing cache: the on-disk meta layout
+# (`conversations/meta/{session_id}.json`) has exactly one owner —
+# core/acowork-runtime/src/conversation.rs — because session listings are
+# served from an in-memory cache kept in sync by `write_session_meta` and
+# `remove_session_meta`. A new place that builds or mutates a meta path can
+# silently desync that cache: list a session whose file is gone, or hide one
+# that exists.
+#
+# Ceiling, not allowlist-of-truth. These are the surviving legitimate call
+# sites: test fixtures that need a meta file whose fields the real writer
+# would refuse to emit. Counts may only go DOWN — lower a number in the same
+# commit that removes a call site, and add nothing new.
+META_LAYOUT_CEILING="
+acowork-runtime/src/agent/session/session_manager.rs:1
+acowork-runtime/src/http/server.rs:3
+acowork-runtime/tests/conversation_session_tokens.rs:3
+"
+run_meta_layout_redline() {
+    echo "Checking session meta layout-ownership red line (ADR-024)..."
+    local root="$SCRIPT_DIR/../core"
+    local hits
+    hits=$(grep -rnE 'join\("meta"\)|META_DIR' --include='*.rs' "$root" \
+        | grep -vE '/target/' \
+        | grep -vE "^$root/acowork-runtime/src/conversation\.rs:" \
+        || true)
+
+    local failed=0 rel count ceiling files f
+    files=$(printf '%s\n' "$hits" | grep -oE "^$root/[^:]+" | sort -u || true)
+    while IFS= read -r f; do
+        [ -z "$f" ] && continue
+        rel="${f#"$root"/}"
+        count=$(printf '%s\n' "$hits" | grep -cF "$f:" || true)
+        ceiling=$(printf '%s\n' "$META_LAYOUT_CEILING" | grep -E "^$rel:" | cut -d: -f2 || true)
+        if [ -z "$ceiling" ]; then
+            echo "ERROR: ${rel}: ${count} session-meta layout access(es) — not on the ADR-024 allowlist."
+            failed=1
+        elif [ "$count" -gt "$ceiling" ]; then
+            echo "ERROR: ${rel}: ${count} session-meta layout access(es), ceiling is ${ceiling}."
+            failed=1
+        fi
+    done <<< "$files"
+
+    if [ "$failed" -ne 0 ]; then
+        echo ""
+        echo "Meta files must be written and removed through conversation.rs, or the"
+        echo "cached session listing goes stale:"
+        echo "  core/acowork-runtime/src/conversation.rs  ->  write_session_meta / remove_session_meta"
+        exit 1
+    fi
+    echo "Session meta layout red line: OK"
+}
+
 run_clippy() {
     echo "Running cargo clippy..."
     cargo clippy --all-targets -- -D warnings
@@ -156,6 +208,7 @@ run_smoke() {
 case "$MODE" in
     check)
         run_gateway_fs_redline
+        run_meta_layout_redline
         run_check
         ;;
     clippy)
@@ -174,6 +227,7 @@ case "$MODE" in
         run_node_redline
         run_mqtt_redline
         run_gateway_fs_redline
+        run_meta_layout_redline
         run_check
         run_clippy
         run_test

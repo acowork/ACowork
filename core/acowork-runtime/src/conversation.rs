@@ -2252,10 +2252,8 @@ pub struct SessionInfo {
 //
 // ADR-024: the index.json + SessionIndexEntry + SessionIndex system has
 // been superseded by per-session meta files (`conversations/meta/*.json`).
-// Use `scan_sessions_from_meta()` for listing and `read_session_meta()` for
+// Use `with_meta_index()` for listing and `read_session_meta()` for
 // single-session lookup.
-
-// ── Per-session meta file I/O (ADR-024) ───────────────────────────────────
 
 // ── Per-session meta file I/O (ADR-024) ───────────────────────────────────
 
@@ -2269,9 +2267,143 @@ fn meta_path(conversations_dir: &Path, session_id: &str) -> PathBuf {
         .join(format!("{}.json", session_id))
 }
 
+/// Does `conversations/meta/{session_id}.json` exist?
+///
+/// ADR-024: the meta file, not the JSONL, is the session's existence marker.
+/// Lives here so the on-disk meta layout has exactly one owner — see the
+/// `run_meta_layout_redline` check in `dev/ci.sh`.
+pub fn session_exists(conversations_dir: &Path, session_id: &str) -> bool {
+    meta_path(conversations_dir, session_id).exists()
+}
+
+/// Cheap probe: how many entries `conversations/meta/` holds, read without
+/// opening a single file (measured 0.9 ms for 2000 entries).
+///
+/// Used as the cache validity token for [`META_INDEX`]. It changes when a
+/// meta file is added or removed, so a mismatch means the cached row set is
+/// out of date. It is a *hint*, not a correctness input: when it lies (a
+/// swapped pair of files keeps the count) the stale rows are served until
+/// the next real add or remove — see the ceiling note on
+/// [`with_meta_index`]. It also counts the `.json.tmp` file that
+/// [`write_session_meta`] renames into place, so a listing that races a
+/// write may rebuild once for nothing; that is a rebuild, not a wrong
+/// answer.
+fn count_meta_entries(conversations_dir: &Path) -> usize {
+    std::fs::read_dir(conversations_dir.join(META_DIR))
+        .map(|rd| rd.count())
+        .unwrap_or(0)
+}
+
+/// Process-wide cache of the `meta/*.json` scan.
+///
+/// Listing sessions used to re-read and re-parse every meta file on every
+/// request (measured 23 ms for 2000 sessions, and the bottleneck is the
+/// 2000 `open`/`read`/`close` syscalls, not the JSON parse). That scan is
+/// *derived* state: it changes only when a meta file is written or removed,
+/// and both of those go through [`write_session_meta`] /
+/// [`remove_session_meta`]. So the scan result is cached here and those two
+/// functions keep it in sync.
+///
+/// Keyed by conversations directory: a Runtime process hosts exactly one
+/// agent (one entry), while the unit tests share a process across many temp
+/// dirs.
+///
+/// ponytail: one global mutex, held across a rebuild (the 23 ms scan). That
+/// serializes concurrent listings instead of letting each one scan; if
+/// per-directory contention ever shows up, shard the map by directory.
+static META_INDEX: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, MetaIndex>>> =
+    std::sync::OnceLock::new();
+
+struct MetaIndex {
+    /// Every meta row, newest-`last_active_at` first (see [`sort_sessions`]).
+    rows: Vec<(String, SessionMeta)>,
+    /// What `count_meta_entries` returned when `rows` was built.
+    entries: usize,
+}
+
+/// Ordering shared by every session listing: newest `last_active_at` first,
+/// `session_id` ascending as a tie-break.
+///
+/// The tie-break is load-bearing. `last_active_at` has millisecond
+/// resolution, so two sessions created in the same millisecond tie; without
+/// it a cached index (ordered by write order) and a freshly scanned one
+/// (ordered by `read_dir`) would disagree on where the page boundary falls.
+fn sort_sessions(rows: &mut [(String, SessionMeta)]) {
+    rows.sort_by(|(a_id, a), (b_id, b)| {
+        b.last_active_at
+            .cmp(&a.last_active_at)
+            .then_with(|| a_id.cmp(b_id))
+    });
+}
+
+/// Run `f` against the cached scan of `conversations_dir`, rebuilding first
+/// if the entry-count probe says the directory changed.
+///
+/// `f` runs under the cache lock and must only touch the in-memory rows: no
+/// I/O, and no re-entry into this cache.
+///
+/// # Ceiling
+///
+/// The probe counts directory entries, so a change that preserves the count
+/// (one file replaced by another between two reads) is not detected.
+/// In-process writers all go through [`write_session_meta`], which updates
+/// the cache directly, so this is only reachable by a second process
+/// writing the same directory — which does not exist (ADR-055: one Runtime
+/// per agent, one work dir per Runtime).
+fn with_meta_index<T>(conversations_dir: &Path, f: impl FnOnce(&MetaIndex) -> T) -> T {
+    let entries = count_meta_entries(conversations_dir);
+    let mut guard = META_INDEX
+        .get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    if guard.get(conversations_dir).map(|idx| idx.entries) != Some(entries) {
+        guard.insert(
+            conversations_dir.to_path_buf(),
+            MetaIndex {
+                rows: scan_sessions_from_meta(conversations_dir),
+                entries,
+            },
+        );
+    }
+
+    f(&guard[conversations_dir])
+}
+
+/// Reflect a meta write in the cache, if this directory has one.
+///
+/// Called from inside [`write_session_meta`], so the writer and the cache
+/// updater are the same function — there is no separate "remember to
+/// invalidate" step to forget. A write that lands before the first read
+/// finds no cache and is a no-op; that first read builds from disk anyway.
+fn index_upsert(conversations_dir: &Path, meta: &SessionMeta) {
+    let Some(cache) = META_INDEX.get() else {
+        return;
+    };
+    let Ok(mut guard) = cache.lock() else {
+        return;
+    };
+    let Some(idx) = guard.get_mut(conversations_dir) else {
+        return;
+    };
+
+    match idx.rows.iter_mut().find(|(sid, _)| sid == &meta.session_id) {
+        Some((_, row)) => *row = meta.clone(),
+        None => {
+            idx.rows.push((meta.session_id.clone(), meta.clone()));
+            idx.entries += 1;
+        }
+    }
+    sort_sessions(&mut idx.rows);
+}
+
 /// Atomically write session metadata to `conversations/meta/{session_id}.json`.
 ///
 /// Uses write-to-temp + rename to prevent corruption on crash.
+///
+/// **The only writer of meta files.** It also updates the listing cache
+/// ([`META_INDEX`]) as part of the write, so a caller cannot persist a meta
+/// change that a later session listing fails to see.
 pub fn write_session_meta(conversations_dir: &Path, meta: &SessionMeta) -> std::io::Result<()> {
     let meta_dir = conversations_dir.join(META_DIR);
     std::fs::create_dir_all(&meta_dir)?;
@@ -2283,7 +2415,53 @@ pub fn write_session_meta(conversations_dir: &Path, meta: &SessionMeta) -> std::
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     std::fs::write(&temp, json)?;
     std::fs::rename(&temp, &target)?;
+
+    index_upsert(conversations_dir, meta);
     Ok(())
+}
+
+/// Delete `conversations/meta/{session_id}.json` and drop it from the
+/// listing cache.
+///
+/// The mirror of [`write_session_meta`]: **the only place a meta file may be
+/// removed.** A removal that bypassed the cache would leave the session
+/// listed with no meta file on disk — the "resume a session whose JSONL is
+/// gone" failure `SessionManager::delete_session` already guards against.
+///
+/// Only the meta side: the JSONL is the caller's business, because pruning
+/// *archives* it (rename to `.archive`) while deleting removes it.
+pub(crate) fn remove_session_meta(conversations_dir: &Path, session_id: &str) {
+    let path = meta_path(conversations_dir, session_id);
+    let removed = match std::fs::remove_file(&path) {
+        Ok(()) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(e) => {
+            tracing::warn!(
+                session_id = %session_id,
+                error = %e,
+                "Failed to delete session meta file"
+            );
+            false
+        }
+    };
+
+    let Some(cache) = META_INDEX.get() else {
+        return;
+    };
+    let Ok(mut guard) = cache.lock() else {
+        return;
+    };
+    let Some(idx) = guard.get_mut(conversations_dir) else {
+        return;
+    };
+    if let Some(pos) = idx.rows.iter().position(|(sid, _)| sid == session_id) {
+        idx.rows.remove(pos);
+        // Keep the probe token equal to the real entry count so the next
+        // listing reuses the cache instead of rescanning.
+        if removed {
+            idx.entries = idx.entries.saturating_sub(1);
+        }
+    }
 }
 
 impl SessionMeta {
@@ -2345,12 +2523,16 @@ pub fn read_session_meta(
     serde_json::from_str(&data).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
 }
 
-/// Scan all session meta files and return them sorted by `last_active_at` descending.
+/// Read every `meta/*.json` on disk and return the rows sorted for listing.
 ///
-/// Reads every `.json` file in `conversations/meta/`.  Files that fail to parse
-/// are silently skipped (the caller can detect missing sessions via the returned
-/// `Vec` length vs. the `.jsonl` file count).
-pub fn scan_sessions_from_meta(conversations_dir: &Path) -> Vec<(String, SessionMeta)> {
+/// Files that fail to parse are silently skipped (the caller can detect
+/// missing sessions via the returned `Vec` length vs. the `.jsonl` file
+/// count).
+///
+/// Crate-private on purpose: this is the expensive full scan (23 ms for
+/// 2000 sessions) and must only be reached through [`with_meta_index`],
+/// which caches the result.
+pub(crate) fn scan_sessions_from_meta(conversations_dir: &Path) -> Vec<(String, SessionMeta)> {
     let meta_dir = conversations_dir.join(META_DIR);
     let Ok(rd) = std::fs::read_dir(&meta_dir) else {
         return Vec::new();
@@ -2364,8 +2546,7 @@ pub fn scan_sessions_from_meta(conversations_dir: &Path) -> Vec<(String, Session
             Some((meta.session_id.clone(), meta))
         })
         .collect();
-    // Sort descending by last_active_at (newest first).
-    sessions.sort_by(|(_, a), (_, b)| b.last_active_at.cmp(&a.last_active_at));
+    sort_sessions(&mut sessions);
     sessions
 }
 
@@ -2395,46 +2576,43 @@ pub(crate) fn prune_excess_sessions(conversations_dir: &Path, max_sessions: usiz
         return 0;
     }
 
-    // Cheap pre-check: count directory entries without reading a single
-    // file.  A bucket can never be larger than the total, so a total at or
-    // below the cap means no bucket can exceed it.  Measured: 0.9 ms for
-    // 2000 entries vs 23 ms for a full read+parse — this runs on every
-    // session creation, and the common case is "nowhere near the cap".
-    let meta_dir = conversations_dir.join(META_DIR);
-    if std::fs::read_dir(&meta_dir).map(|rd| rd.count()).unwrap_or(0) <= max_sessions {
+    // Cheap pre-check: a bucket can never be larger than the total, so a
+    // total at or below the cap means no bucket can exceed it. 0.9 ms for
+    // 2000 entries vs 23 ms to read and parse them — this runs on every
+    // session creation and the common case is "nowhere near the cap".
+    if count_meta_entries(conversations_dir) <= max_sessions {
         return 0;
     }
 
     // ADR-076 §决策 4: bucket by owner, then apply the cap to each bucket
-    // independently.  `scan_sessions_from_meta` already paid for the read.
-    let scanned = scan_sessions_from_meta(conversations_dir);
-    let mut by_owner: HashMap<Option<String>, Vec<(&str, &str)>> = HashMap::new();
-    for (sid, meta) in scanned.iter() {
-        by_owner
-            .entry(meta.user_id.clone())
-            .or_default()
-            .push((sid.as_str(), meta.last_active_at.as_str()));
-    }
-
-    let mut doomed: Vec<&str> = Vec::new();
-    for sessions in by_owner.values_mut() {
-        if sessions.len() <= max_sessions {
-            continue;
+    // independently, over the cached scan (no extra disk read).
+    let (doomed, total) = with_meta_index(conversations_dir, |idx| {
+        let mut by_owner: HashMap<Option<String>, Vec<(&str, &str)>> = HashMap::new();
+        for (sid, meta) in idx.rows.iter() {
+            by_owner
+                .entry(meta.user_id.clone())
+                .or_default()
+                .push((sid.as_str(), meta.last_active_at.as_str()));
         }
-        // Oldest first, then drop the excess.
-        sessions.sort_by(|a, b| a.1.cmp(b.1));
-        let excess = sessions.len() - max_sessions;
-        doomed.extend(sessions.iter().take(excess).map(|(sid, _)| *sid));
-    }
+
+        let mut doomed: Vec<String> = Vec::new();
+        for sessions in by_owner.values_mut() {
+            if sessions.len() <= max_sessions {
+                continue;
+            }
+            // Oldest first, then drop the excess.
+            sessions.sort_by(|a, b| a.1.cmp(b.1));
+            let excess = sessions.len() - max_sessions;
+            doomed.extend(sessions.iter().take(excess).map(|(sid, _)| (*sid).to_string()));
+        }
+        (doomed, idx.rows.len())
+    });
 
     let mut pruned = 0usize;
 
-    for session_id in doomed {
+    for session_id in &doomed {
         let jsonl_path = conversations_dir.join(format!("{}.jsonl", session_id));
         let archive_path = conversations_dir.join(format!("{}.jsonl.archive", session_id));
-        let meta_path = conversations_dir
-            .join(META_DIR)
-            .join(format!("{}.json", session_id));
 
         // ADR-024: archive the JSONL file (rename) instead of deleting.
         match std::fs::rename(&jsonl_path, &archive_path) {
@@ -2461,22 +2639,14 @@ pub(crate) fn prune_excess_sessions(conversations_dir: &Path, max_sessions: usiz
             }
         }
 
-        // Delete the per-session meta file.
-        if let Err(e) = std::fs::remove_file(&meta_path)
-            && e.kind() != std::io::ErrorKind::NotFound
-        {
-            tracing::warn!(
-                session_id = %session_id,
-                error = %e,
-                "Failed to delete meta file during session pruning"
-            );
-        }
+        // Delete the per-session meta file (and its cached row).
+        remove_session_meta(conversations_dir, session_id);
     }
 
     if pruned > 0 {
         tracing::info!(
             pruned,
-            remaining = scanned.len() - pruned,
+            remaining = total - pruned,
             "Archived excess sessions"
         );
     }
@@ -2607,20 +2777,18 @@ pub type StreamingStateMap = Arc<RwLock<HashMap<String, StreamingLine>>>;
 
 /// Find the most recently active session.
 ///
-/// ADR-024: scans per-session meta files instead of index.json.
+/// ADR-024: reads the cached meta scan instead of index.json.
 pub fn find_latest_session(conversations_dir: &Path) -> Option<String> {
-    // ADR-024: scan per-session meta files.
-    scan_sessions_from_meta(conversations_dir)
-        .first()
-        .map(|(sid, _)| sid.clone())
+    with_meta_index(conversations_dir, |idx| {
+        idx.rows.first().map(|(sid, _)| sid.clone())
+    })
 }
 
-/// Asynchronously scan all sessions from the index file.
+/// Asynchronously list sessions, newest `last_active_at` first.
 ///
-/// Reads `conversations/index.json` and returns a paginated list of
-/// `SessionInfo` sorted by `last_active_at` descending (newest first).
-/// Falls back to a full directory scan + index rebuild if the index
-/// file is missing or corrupted.
+/// Serves the paginated [`SessionInfo`] page out of [`META_INDEX`] — the
+/// cached `meta/*.json` scan — so a listing costs one `read_dir().count()`
+/// probe instead of re-reading every meta file.
 ///
 /// ADR-028: in addition to the page slice, the join handle now also
 /// returns `(agent_total_input, agent_total_output, agent_total_cache_read,
@@ -2649,40 +2817,53 @@ pub fn scan_sessions_async(
     scope: SessionScope,
 ) -> tokio::task::JoinHandle<(Vec<SessionInfo>, usize, (u64, u64, u64, u64))> {
     tokio::task::spawn_blocking(move || {
-        // ADR-024: scan per-session meta files instead of index.json.
-        //
-        // ADR-076 §决策 4: drop sessions `scope` may not read *before*
-        // paginating, so `total` / `total_pages` describe what the caller
-        // can actually see. Filtering after the slice would hand back
-        // short pages and a page count pointing at invisible rows.
-        let sessions: Vec<(String, SessionMeta)> = scan_sessions_from_meta(&conversations_dir)
-            .into_iter()
-            .filter(|(_, meta)| meta.is_readable_by(&scope))
-            .collect();
+        // ADR-024: read the cached meta scan instead of index.json.
+        with_meta_index(&conversations_dir, |idx| {
+            build_session_page(&idx.rows, page, size, &scope)
+        })
+    })
+}
 
-        // ADR-028 / ADR-066: full-scan aggregate. Walk every meta file
-        // (not just the current page) so a single scan can rebuild the
-        // baseline even when `size` is small (e.g. title-only fetches).
-        // `None` sessions and sessions with `prompt_tokens == 0`
-        // (Provider fallback) are skipped on the input side; the output
-        // side is always accumulated (matches
-        // `ConversationSession::accumulate_llm_usage`).
-        //
-        // Cache totals sum directly — `accumulate_llm_usage` already
-        // maintains the invariant that `total_cache_read` is only
-        // incremented alongside `total_input`, so a session with
-        // `total_input == 0` cannot have `total_cache_read > 0`.  We
-        // do not need to re-check the zero-skip here.
-        //
-        // `total_cache_write` is always summed (Anthropic charges 1.25×
-        // for `cache_creation_input_tokens` regardless of the regular
-        // input count).
-        let (
-            agent_total_input,
-            agent_total_output,
-            agent_total_cache_read,
-            agent_total_cache_write,
-        ) = sessions.iter().fold(
+/// Slice one page out of an already-scanned row set, aggregating token
+/// totals across every readable row.
+///
+/// Split out of [`scan_sessions_async`] so the body reads the same whether
+/// the rows came fresh from disk or out of [`META_INDEX`].
+#[allow(clippy::type_complexity)]
+fn build_session_page(
+    rows: &[(String, SessionMeta)],
+    page: Option<u32>,
+    size: Option<u32>,
+    scope: &SessionScope,
+) -> (Vec<SessionInfo>, usize, (u64, u64, u64, u64)) {
+    // ADR-076 §决策 4: drop sessions `scope` may not read *before*
+    // paginating, so `total` / `total_pages` describe what the caller
+    // can actually see. Filtering after the slice would hand back
+    // short pages and a page count pointing at invisible rows.
+    let sessions: Vec<&(String, SessionMeta)> = rows
+        .iter()
+        .filter(|(_, meta)| meta.is_readable_by(scope))
+        .collect();
+
+    // ADR-028 / ADR-066: full-scan aggregate. Walk every meta file
+    // (not just the current page) so a single scan can rebuild the
+    // baseline even when `size` is small (e.g. title-only fetches).
+    // `None` sessions and sessions with `prompt_tokens == 0`
+    // (Provider fallback) are skipped on the input side; the output
+    // side is always accumulated (matches
+    // `ConversationSession::accumulate_llm_usage`).
+    //
+    // Cache totals sum directly — `accumulate_llm_usage` already
+    // maintains the invariant that `total_cache_read` is only
+    // incremented alongside `total_input`, so a session with
+    // `total_input == 0` cannot have `total_cache_read > 0`.  We
+    // do not need to re-check the zero-skip here.
+    //
+    // `total_cache_write` is always summed (Anthropic charges 1.25×
+    // for `cache_creation_input_tokens` regardless of the regular
+    // input count).
+    let (agent_total_input, agent_total_output, agent_total_cache_read, agent_total_cache_write) =
+        sessions.iter().fold(
             (0u64, 0u64, 0u64, 0u64),
             |(acc_in, acc_out, acc_cr, acc_cw), (_, meta)| {
                 let t = meta.tokens.as_ref();
@@ -2695,40 +2876,39 @@ pub fn scan_sessions_async(
             },
         );
 
-        let total = sessions.len();
-        let page = page.unwrap_or(1).max(1) as usize;
-        let size = size.unwrap_or(20).max(1) as usize;
-        let start = (page - 1) * size;
-        let end = (start + size).min(total);
+    let total = sessions.len();
+    let page = page.unwrap_or(1).max(1) as usize;
+    let size = size.unwrap_or(20).max(1) as usize;
+    let start = (page - 1) * size;
+    let end = (start + size).min(total);
 
-        let infos = sessions[start..end]
-            .iter()
-            .map(|(sid, meta)| SessionInfo {
-                session_id: sid.clone(),
-                created_at: meta.created_at.clone(),
-                last_active_at: meta.last_active_at.clone(),
-                message_count: meta.message_count as u32,
-                title: meta.title.clone(),
-                corrupted: meta.corrupted,
-                model: meta.model.clone(),
-                provider: meta.provider.clone(),
-                workspace_id: meta.workspace_id.clone(),
-                visibility: meta.visibility,
-                can_write: meta.is_writable_by(&scope),
-            })
-            .collect();
+    let infos = sessions[start..end]
+        .iter()
+        .map(|(sid, meta)| SessionInfo {
+            session_id: sid.clone(),
+            created_at: meta.created_at.clone(),
+            last_active_at: meta.last_active_at.clone(),
+            message_count: meta.message_count as u32,
+            title: meta.title.clone(),
+            corrupted: meta.corrupted,
+            model: meta.model.clone(),
+            provider: meta.provider.clone(),
+            workspace_id: meta.workspace_id.clone(),
+            visibility: meta.visibility,
+            can_write: meta.is_writable_by(scope),
+        })
+        .collect();
 
+    (
+        infos,
+        total,
         (
-            infos,
-            total,
-            (
-                agent_total_input,
-                agent_total_output,
-                agent_total_cache_read,
-                agent_total_cache_write,
-            ),
-        )
-    })
+            agent_total_input,
+            agent_total_output,
+            agent_total_cache_read,
+            agent_total_cache_write,
+        ),
+    )
 }
 
 /// Read messages from a JSONL file with offset-based pagination.
@@ -3473,6 +3653,88 @@ mod tests {
 
         // The cheap entry-count guard bails out before parsing anything.
         assert_eq!(prune_excess_sessions(&conv, 100), 0);
+    }
+
+    /// Session ids reachable through the listing cache, newest first — the
+    /// same `with_meta_index` an HTTP listing goes through.
+    fn listed_ids(conv: &Path) -> Vec<String> {
+        with_meta_index(conv, |idx| idx.rows.iter().map(|(sid, _)| sid.clone()).collect())
+    }
+
+    #[test]
+    fn session_index_reflects_funnel_writes_without_rescanning() {
+        // The cache is invalidated by entry *count*, so rewriting an existing
+        // meta file cannot be caught by the probe — only by the upsert inside
+        // `write_session_meta`. Drop that upsert and this listing keeps
+        // serving the pre-change row, which is exactly what this asserts
+        // against.
+        let temp_dir = TempDir::new().unwrap();
+        let conv = temp_dir.path().join("conversations");
+        seed_session(&conv, "s-1", None, "2026-01-01T00:00:00Z");
+
+        // Build the cache (one meta file on disk).
+        assert_eq!(with_meta_index(&conv, |idx| idx.entries), 1);
+
+        let mut meta = read_session_meta(&conv, "s-1").unwrap();
+        meta.title = Some("renamed".to_string());
+        meta.last_active_at = "2026-01-02T00:00:00Z".to_string();
+        write_session_meta(&conv, &meta).unwrap();
+
+        let listed = with_meta_index(&conv, |idx| {
+            idx.rows
+                .iter()
+                .map(|(sid, m)| (sid.clone(), m.title.clone()))
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(listed, vec![("s-1".to_string(), Some("renamed".to_string()))]);
+    }
+
+    #[test]
+    fn session_index_self_heals_on_out_of_band_meta_change() {
+        // A writer that bypasses `write_session_meta` — a second process, or
+        // a crash-leftover file — must not be served stale forever. The
+        // entry-count probe notices and rebuilds.
+        let temp_dir = TempDir::new().unwrap();
+        let conv = temp_dir.path().join("conversations");
+        seed_session(&conv, "s-old", None, "2026-01-01T00:00:00Z");
+        assert_eq!(find_latest_session(&conv).as_deref(), Some("s-old"));
+
+        // A newer session appears behind the cache's back.
+        let mut meta = read_session_meta(&conv, "s-old").unwrap();
+        meta.session_id = "s-new".to_string();
+        meta.last_active_at = "2026-02-01T00:00:00Z".to_string();
+        std::fs::write(
+            conv.join("meta").join("s-new.json"),
+            serde_json::to_string(&meta).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(find_latest_session(&conv).as_deref(), Some("s-new"));
+
+        // ...and vanishes the same way.
+        std::fs::remove_file(conv.join("meta").join("s-new.json")).unwrap();
+        assert_eq!(find_latest_session(&conv).as_deref(), Some("s-old"));
+    }
+
+    #[test]
+    fn remove_session_meta_drops_the_session_from_the_listing() {
+        // `delete_session` and pruning both funnel through
+        // `remove_session_meta`. Without it the row survives in the cache and
+        // the UI lists a session whose meta file is gone.
+        //
+        // This asserts the contract (file gone, session unlisted), not the
+        // cache's internal entry counter: a counter left out of sync is
+        // repaired by the next probe-triggered rebuild, so it is invisible
+        // from out here by design.
+        let temp_dir = TempDir::new().unwrap();
+        let conv = temp_dir.path().join("conversations");
+        seed_session(&conv, "s-keep", None, "2026-01-01T00:00:00Z");
+        seed_session(&conv, "s-drop", None, "2026-01-02T00:00:00Z");
+        assert_eq!(listed_ids(&conv), vec!["s-drop", "s-keep"]);
+
+        remove_session_meta(&conv, "s-drop");
+
+        assert_eq!(listed_ids(&conv), vec!["s-keep"]);
+        assert!(!conv.join("meta").join("s-drop.json").exists());
     }
 
     #[test]

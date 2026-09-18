@@ -30,7 +30,7 @@ use crate::agent::session_state::{
 use crate::agent_config::AgentConfig;
 use crate::cancellation::CancelHandle;
 use crate::config::DEFAULT_TEMPERATURE;
-use crate::conversation::{ConversationSession, read_session_meta};
+use crate::conversation::{ConversationSession, read_session_meta, session_exists};
 use crate::debug::controller::DebugController;
 use crate::error::{Result, RuntimeError};
 use crate::tools::mcp_manager::McpConnectionFailure;
@@ -1365,21 +1365,12 @@ impl SessionManager {
             tracing::info!(session_id = %session_id, "Session already evicted, skipping task close");
         }
 
-        // 2. ADR-024: remove the per-session meta file (replaces index.json update).
+        // 2. ADR-024: remove the per-session meta file (replaces index.json
+        //    update). Funnelled through `remove_session_meta` so the cached
+        //    session listing cannot keep a row whose file is gone.
         let conversations_dir =
             std::path::Path::new(&self.core.config.work_dir).join("conversations");
-        let meta_path = conversations_dir
-            .join("meta")
-            .join(format!("{}.json", session_id));
-        if let Err(e) = std::fs::remove_file(&meta_path)
-            && e.kind() != std::io::ErrorKind::NotFound
-        {
-            tracing::warn!(
-                session_id = %session_id,
-                error = %e,
-                "Failed to delete session meta file"
-            );
-        }
+        crate::conversation::remove_session_meta(&conversations_dir, session_id);
 
         // 3. Delete the JSONL file.
         let file_path = conversations_dir.join(format!("{}.jsonl", session_id));
@@ -1528,9 +1519,8 @@ impl SessionManager {
         if self.sessions.contains_key(session_id) {
             return SessionLifecycleState::Active;
         }
-        let meta_dir = work_dir.join("conversations").join("meta");
-        let meta_path = meta_dir.join(format!("{}.json", session_id));
-        if meta_path.exists() {
+        let conversations_dir = work_dir.join("conversations");
+        if session_exists(&conversations_dir, session_id) {
             return SessionLifecycleState::Closed;
         }
         SessionLifecycleState::NotFound
@@ -1604,8 +1594,7 @@ impl SessionManager {
         // Validate disk presence up-front so callers get a clear error
         // instead of a generic "Session not found on disk" buried inside the
         // resume path. ADR-024: meta file is the canonical "session exists" marker.
-        let meta_dir = work_dir.join("conversations").join("meta");
-        if !meta_dir.join(format!("{}.json", session_id)).exists() {
+        if !session_exists(&work_dir.join("conversations"), session_id) {
             return Err(RuntimeError::Config(format!(
                 "Session not found on disk: {}",
                 session_id
