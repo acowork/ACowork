@@ -84,6 +84,7 @@ use tokio::sync::mpsc;
 use crate::agent::inbound::{InboundMessage, UserOp};
 use crate::agent::session::session_manager::RuntimeConfigOverrides;
 use crate::agent::session_state::{SharedLatestSession, SharedSessionSnapshots};
+use crate::http::global_search;
 
 use crate::mqtt::client::SharedRuntimeMqttClient;
 
@@ -140,6 +141,17 @@ pub type SharedDispatchSender =
 /// the concrete grafeo type for HTTP admin endpoints.
 pub type SharedMemoryStore =
     Arc<std::sync::RwLock<Option<Arc<dyn acowork_memory::admin::MemoryAdminService>>>>;
+
+/// Shared slot for the conversation vector index (ADR-081 §4.2, P1-2).
+///
+/// Late-bind from Phase B: `ConversationIndex` is opened at
+/// `{work_dir}/conversation_index/` once the memory store is up, and a
+/// [`crate::conversation_index::ConversationIndexer`] task tails the
+/// JSONL conversation logs. `None` until then — the `/search`
+/// conversation scope reports `not_indexed` and search degrades to the
+/// other scopes.
+pub type SharedConversationIndex =
+    Arc<std::sync::RwLock<Option<Arc<crate::conversation_index::ConversationIndex>>>>;
 
 /// Shared slot for the consolidation timer (late-bind from AgentCore).
 /// Used by `GET /memory/consolidation/status` to report idle time, pending count.
@@ -279,7 +291,10 @@ pub(crate) struct HttpState {
     /// to memory_store or agent_core is required.
     session_metadata:
         Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionMetadataService>>>>,
-    memory_query: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::MemoryQueryService>>>>,
+    pub(crate) memory_query:
+        Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::MemoryQueryService>>>>,
+    /// ADR-081 §4.2: conversation vector index (late-bind slot, Phase B).
+    pub(crate) conversation_index: SharedConversationIndex,
     /// Live state of a background `/memory/rebuild-embeddings` run.
     ///
     /// The rebuild is started as a detached task (the HTTP handler
@@ -290,7 +305,7 @@ pub(crate) struct HttpState {
     /// (not tokio) because the progress callback fires from the
     /// `spawn_blocking` migration thread — a sync context.
     rebuild_progress: Arc<std::sync::Mutex<Option<RebuildProgress>>>,
-    workspace_query:
+    pub(crate) workspace_query:
         Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::WorkspaceQueryService>>>>,
     workspace_mutation:
         Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::WorkspaceMutationService>>>>,
@@ -298,7 +313,8 @@ pub(crate) struct HttpState {
     /// `/git/status` `/git/diff` `/git/log`). Git execution happens in
     /// the Runtime (the workspace owner, ADR-009 v2) — the Gateway only
     /// reverse-proxies these endpoints. Populated in Phase B.
-    git_query: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::GitQueryService>>>>,
+    pub(crate) git_query:
+        Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::GitQueryService>>>>,
     /// ADR-040 follow-up: Tools-panel persistence (MCP + search active
     /// state). The 4 new `/agents/{id}/mcp-servers` and
     /// `/agents/{id}/search-config` HTTP handlers route through this
@@ -442,6 +458,7 @@ impl RuntimeHttpServer {
             tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionMetadataService>>>,
         >,
         memory_query: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::MemoryQueryService>>>>,
+        conversation_index: SharedConversationIndex,
         workspace_query: Arc<
             tokio::sync::Mutex<Option<Arc<dyn crate::usecases::WorkspaceQueryService>>>,
         >,
@@ -477,6 +494,7 @@ impl RuntimeHttpServer {
             mqtt_client,
             session_metadata,
             memory_query,
+            conversation_index,
             workspace_query,
             workspace_mutation,
             git_query,
@@ -522,6 +540,7 @@ impl RuntimeHttpServer {
             tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionMetadataService>>>,
         >,
         memory_query: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::MemoryQueryService>>>>,
+        conversation_index: SharedConversationIndex,
         workspace_query: Arc<
             tokio::sync::Mutex<Option<Arc<dyn crate::usecases::WorkspaceQueryService>>>,
         >,
@@ -575,6 +594,7 @@ impl RuntimeHttpServer {
             mqtt_client,
             session_metadata,
             memory_query,
+            conversation_index,
             rebuild_progress: Arc::new(std::sync::Mutex::new(None)),
             workspace_query,
             workspace_mutation,
@@ -743,6 +763,14 @@ impl RuntimeHttpServer {
             .route("/git/diff", get(git_diff))
             .route("/git/log", get(git_log))
             .route("/git/revert", post(git_revert))
+            // ADR-081 §4.1: six-source global search aggregation endpoint.
+            // Scopes: conversation / memory / file / git (doc/project stay
+            // in their owner processes — Gateway stays zero-business).
+            .route("/search", get(global_search::global_search))
+            // ADR-081 §4.2 self-heal: purge + rebuild the conversation
+            // vector index from the JSONL history (no Gateway route —
+            // Runtime-internal admin endpoint, like /memory/rebuild-embeddings).
+            .route("/conversation/index/rebuild", post(rebuild_conversation_index))
             // 2 NEW workspace file/dir resources, REST-style (ADR-034 §11.2 #6-9).
             // One path per resource; HTTP method dispatches the operation:
             //   GET    /workspaces/file — read  → JSON {content,size,mimeType}
@@ -1280,6 +1308,34 @@ struct ListNodesQuery {
     /// Time-range bucket: "1h" / "1d" / "7d" / "30d" / "all".
     #[serde(default)]
     time_range: Option<String>,
+    /// Semantic search query text (ADR-081 P1-1). Only used when `mode`
+    /// is "vector" or "hybrid"; ignored otherwise.
+    #[serde(default)]
+    q: Option<String>,
+    /// Semantic search mode: "vector" / "hybrid" / "keyword" (ADR-081
+    /// P1-1). Empty string or "keyword" keeps the legacy substring path.
+    #[serde(default)]
+    mode: Option<String>,
+}
+
+/// `POST /conversation/index/rebuild` — reset the conversation vector
+/// index and let the tailer rebuild from the JSONL history (ADR-081
+/// §4.2 "索引目录独立，可删重建"). The index is append-only-derivable,
+/// so this is the self-heal path after corruption or an embedding
+/// dimension change — the next indexer sweep (≤2s) re-indexes from
+/// scratch and `/search` reports `indexing: true` until caught up.
+async fn rebuild_conversation_index(
+    State(state): State<HttpState>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let guard = state
+        .conversation_index
+        .read()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let Some(index) = guard.as_ref() else {
+        return Ok(Json(serde_json::json!({"status": "not_initialized"})));
+    };
+    index.rebuild();
+    Ok(Json(serde_json::json!({"status": "rebuilding"})))
 }
 
 /// `GET /memory/nodes` — list memory nodes (paginated, filtered, searched).
@@ -1287,6 +1343,33 @@ async fn get_memory_nodes(
     State(state): State<HttpState>,
     Query(params): Query<ListNodesQuery>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
+    // ADR-081 P1-1: `?q=&mode=vector|hybrid` switches to semantic search.
+    // `mode=keyword` (or no `q`) keeps the legacy substring path below.
+    let semantic_mode = params.mode.as_deref().unwrap_or("").trim();
+    if semantic_mode != "keyword" && !semantic_mode.is_empty() {
+        let Some(q) = params.q.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
+            return Ok(Json(serde_json::json!({"nodes": [], "total": 0, "page": 1, "size": 0, "model_dim": 0})));
+        };
+        // Clone the provider out of AgentCore first: the read guard is not
+        // Send, so it cannot be held across the async `embed` await.
+        let embedding = global_search::embed_query(&state, q).await;
+        let query = crate::usecases::memory_query::SemanticMemoryQuery {
+            query_text: q.to_string(),
+            mode: semantic_mode.to_string(),
+            limit: params.size.unwrap_or(20) as usize,
+            embedding,
+        };
+        let svc = state.memory_query.lock().await;
+        let svc = svc.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+        let resp = svc
+            .semantic_search(&query)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        return Ok(Json(
+            serde_json::to_value(resp).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+        ));
+    }
+
     // ADR-040: usecase trait is the sole implementation path.
     let svc = state.memory_query.lock().await;
     let svc = svc.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
@@ -4228,6 +4311,7 @@ mod tests {
                 memory_store,
                 embed_dim.clone(),
             )))),
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(
                 temp_dir.clone(),
             )))),
@@ -4364,6 +4448,7 @@ mod tests {
                 memory_store,
                 embed_dim.clone(),
             )))),
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(
                 temp_dir.clone(),
             )))),
@@ -4556,6 +4641,7 @@ mod tests {
                 memory_store,
                 embed_dim.clone(),
             )))),
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(
                 temp_dir.clone(),
             )))),
@@ -4640,6 +4726,7 @@ mod tests {
                 memory_store,
                 embed_dim.clone(),
             )))),
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(
                 temp_dir.clone(),
             )))),
@@ -4781,6 +4868,7 @@ mod tests {
             mqtt_client,
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
@@ -4932,6 +5020,7 @@ mod tests {
             mqtt_client,
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
@@ -5162,6 +5251,7 @@ mod tests {
                 std::sync::Arc::new(std::sync::RwLock::new(None)),
             )))),
             Arc::new(tokio::sync::Mutex::new(None)),
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
@@ -5374,6 +5464,7 @@ mod tests {
             mqtt_client,
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
@@ -5579,6 +5670,7 @@ mod tests {
             mqtt_client,
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
@@ -5761,6 +5853,7 @@ mod tests {
             mqtt_client,
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
@@ -5866,6 +5959,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             workspace_mutation_slot,
             Arc::new(tokio::sync::Mutex::new(None)),
@@ -5962,6 +6056,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             workspace_mutation_slot,
             Arc::new(tokio::sync::Mutex::new(None)),
@@ -6143,6 +6238,7 @@ mod tests {
                 memory_store,
                 embed_dim.clone(),
             )))),
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(
                 temp_dir.clone(),
             )))),
@@ -6649,6 +6745,7 @@ mod tests {
                 memory_store,
                 embed_dim.clone(),
             )))),
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(
                 temp_dir.clone(),
             )))),
@@ -6792,6 +6889,7 @@ mod tests {
                 memory_store,
                 embed_dim.clone(),
             )))),
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(
                 temp_dir.clone(),
             )))),
@@ -6977,6 +7075,7 @@ mod tests {
                 memory_store,
                 embed_dim.clone(),
             )))),
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(
                 temp_dir.clone(),
             )))),
@@ -7065,6 +7164,7 @@ mod tests {
                 memory_store,
                 embed_dim.clone(),
             )))),
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(
                 temp_dir.clone(),
             )))),
@@ -7148,6 +7248,7 @@ mod tests {
                 memory_store,
                 embed_dim.clone(),
             )))),
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(
                 temp_dir.clone(),
             )))),
@@ -7250,6 +7351,7 @@ mod tests {
                 memory_store,
                 embed_dim.clone(),
             )))),
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(
                 temp_dir.clone(),
             )))),
@@ -7331,6 +7433,7 @@ mod tests {
                 memory_store,
                 embed_dim.clone(),
             )))),
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(
                 temp_dir.clone(),
             )))),
@@ -7445,6 +7548,7 @@ mod tests {
                 memory_store,
                 embed_dim.clone(),
             )))),
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(
                 temp_dir.clone(),
             )))),
@@ -7545,6 +7649,7 @@ mod tests {
                 memory_store,
                 embed_dim.clone(),
             )))),
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(
                 temp_dir.clone(),
             )))),
@@ -7641,6 +7746,7 @@ mod tests {
             mqtt_client,
             std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
             std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             std::sync::Arc::new(tokio::sync::Mutex::new(None)),
@@ -7849,6 +7955,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
@@ -7976,6 +8083,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
@@ -8319,6 +8427,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
@@ -8429,6 +8538,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(Some(session_metadata))),
             Arc::new(tokio::sync::Mutex::new(None)),
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
@@ -8560,6 +8670,7 @@ mod tests {
                 memory_store,
                 embed_dim.clone(),
             )))),
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(
                 temp_dir.clone(),
             )))),
@@ -8694,6 +8805,7 @@ mod tests {
                 memory_store,
                 embed_dim.clone(),
             )))),
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(
                 temp_dir.clone(),
             )))),
