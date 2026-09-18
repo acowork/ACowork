@@ -2272,7 +2272,7 @@ fn meta_path(conversations_dir: &Path, session_id: &str) -> PathBuf {
 /// ADR-024: the meta file, not the JSONL, is the session's existence marker.
 /// Lives here so the on-disk meta layout has exactly one owner — see the
 /// `run_meta_layout_redline` check in `dev/ci.sh`.
-pub fn session_exists(conversations_dir: &Path, session_id: &str) -> bool {
+pub(crate) fn session_exists(conversations_dir: &Path, session_id: &str) -> bool {
     meta_path(conversations_dir, session_id).exists()
 }
 
@@ -2532,7 +2532,7 @@ pub fn read_session_meta(
 /// Crate-private on purpose: this is the expensive full scan (23 ms for
 /// 2000 sessions) and must only be reached through [`with_meta_index`],
 /// which caches the result.
-pub(crate) fn scan_sessions_from_meta(conversations_dir: &Path) -> Vec<(String, SessionMeta)> {
+fn scan_sessions_from_meta(conversations_dir: &Path) -> Vec<(String, SessionMeta)> {
     let meta_dir = conversations_dir.join(META_DIR);
     let Ok(rd) = std::fs::read_dir(&meta_dir) else {
         return Vec::new();
