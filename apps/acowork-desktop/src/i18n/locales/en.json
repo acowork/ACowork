@@ -87,6 +87,8 @@
       "reconnectNow": "Reconnect"
     },
     "selectModel": "Select model",
+    "readOnlySession": "This session is shared and read-only for you",
+    "readOnlySessionPlaceholder": "Read-only session — shared by another account",
     "selectReasoningEffort": "Reasoning effort",
     "startAgent": "Start Agent",
     "startingAgent": "Starting {{name}}…",
@@ -148,7 +150,6 @@
     },
     "compressing": "Compacting...",
     "agentRunning": "Agent running",
-    "compressContext": "compact context",
     "compressSummary": "Compress Summary",
     "contextUsedSuffix": "context used",
     "cacheHitLabel": "Cache hit rate (cumulative)",
@@ -975,6 +976,14 @@
       "installing": "Installing...",
       "docsLink": "Documentation →"
     }
+  },
+  "sessionVisibility": {
+    "public": "Public",
+    "private": "Private",
+    "hintToggle": "click to toggle",
+    "toastNowPrivate": "Session is now private",
+    "toastNowPublic": "Session is now public",
+    "toastFailed": "Could not change visibility: {{error}}"
   },
   "sessionPanel": {
     "loadingSessions": "Loading sessions...",

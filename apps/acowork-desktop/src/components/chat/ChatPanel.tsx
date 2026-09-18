@@ -14,9 +14,11 @@ import { fetchProviderModels } from "../../lib/gateway-api";
 import { startAgentAndSyncUI } from "../../lib/agent-start";
 import { toolbarButton } from "../../lib/ui-styles";
 import { AddProviderFlow } from "../harness/AddProviderFlow";
+import * as sessionControl from "../../lib/session-control";
 import { Bot, Play, Send, ChevronDown, ChevronRight, ChevronLeft, ChevronsDown, ChevronsUp, Wrench, AlertTriangle, X, Square, Plus, Layers, Loader, Pencil, Paperclip, Image, Brain, Circle, CircleDot, Clipboard, Upload } from "lucide-react";
 import type { ChatMessage, VaultKeyEntry, ModelEntry } from "../../lib/types";
 import { ContextUsageIcon } from "./ContextUsageIcon";
+import { SessionVisibilityToggle } from "./SessionVisibilityToggle";
 import { PlaceholderBar } from "./PlaceholderBar";
 import { useSessionScope } from "./useSessionScope";
 import { VirtualMessageList, type VirtualMessageListHandle } from "./VirtualMessageList";
@@ -601,6 +603,27 @@ export function ChatPanel() {
   // id.  This is the same `useChatStore` selector that used to live
   // ~310 lines lower.
   const currentSessionId = useChatStore((s) => selectedAgentId ? s.agentStates[selectedAgentId]?.activeSessionId ?? null : null);
+  /**
+   * ADR-076 §决策 4: is the active session writable by the signed-in
+   * account? The backend answers this (`can_write` on the session summary,
+   * resolved from `SessionMeta::is_writable_by`) — the frontend never
+   * re-derives it from `visibility`, because admins and `local` mode may
+   * write sessions they do not own.
+   *
+   * Session write controls (model / reasoning effort / workspace) are
+   * disabled rather than hidden: a shared read-only session still needs to
+   * *show* which model and workspace it is using.
+   *
+   * Defaults to `true` — a session that is not in the list yet (just created
+   * optimistically) and an older Runtime that omits the field both degrade
+   * to "enabled, backend rejects the write" instead of locking every control.
+   */
+  const readOnlySession = useAgentStore((s) => {
+    if (!selectedAgentId || !currentSessionId) return false;
+    const list = s.agents[selectedAgentId]?.sessions;
+    const info = list?.find((x) => x.session_id === currentSessionId);
+    return info?.can_write === false;
+  });
   const messages = useChatStore((s) => {
     if (!selectedAgentId) return EMPTY_MESSAGES;
     const agent = s.agentStates[selectedAgentId];
@@ -1834,7 +1857,13 @@ export function ChatPanel() {
     return s.agentStates[selectedAgentId]?.sessionStates[currentSessionId]?.toolProgress;
   });
 
-  // Tool approval: send decision via MQTT, then clear inline state
+  // Tool approval: send decision over the authenticated HTTP API, then clear
+  // inline state.
+  //
+  // ADR-076 §决策 4: this used to publish `approval_decision` straight to the
+  // broker, where any client could have sent `{approved: true}` into someone
+  // else's session — i.e. arbitrary command execution. The Runtime now
+  // verifies the caller owns the session before acting.
   const handleToolApprove = async (action: "allow" | "deny", approval: ToolApprovalNeededEvent) => {
     // ADR-073: the approval event carries no `agent_id` — identity is the
     // instance key from the connection context (`selectedAgentId`).
@@ -1842,17 +1871,14 @@ export function ChatPanel() {
     const requestId = String(approval.request_id ?? "");
     const sessionId = approval.session_id;
     try {
-      await invoke("mqtt_publish_control", {
-        instanceId,
-        command: "approval_decision",
-        payloadJson: {
-          session_id: sessionId ?? "",
+      if (sessionId) {
+        await sessionControl.sendApproval(instanceId, sessionId, {
           request_id: requestId,
           approved: action === "allow",
           allow_all_session: false,
           reason: "",
-        },
-      });
+        });
+      }
     } catch (err) {
       log.error("[ChatPanel] Failed to send approval:", err);
     }
@@ -1864,21 +1890,17 @@ export function ChatPanel() {
     }
   };
 
-  // Ask question answer: send answer via MQTT, then clear the answered question from the queue
+  // Ask question answer: send over the authenticated HTTP API, then clear the
+  // answered question from the queue.
+  // ADR-076 §决策 4: was MQTT `question_answer`.
   const handleQuestionAnswer = async (requestId: string, answer: string) => {
     if (!selectedAgentId) return;
     const instanceId = String(selectedAgentId);
     const sessionId = selectedAgentId ? useChatStore.getState().getActiveSessionId(selectedAgentId) : null;
     try {
-      await invoke("mqtt_publish_control", {
-        instanceId,
-        command: "question_answer",
-        payloadJson: {
-          session_id: sessionId ?? "",
-          request_id: requestId,
-          answer,
-        },
-      });
+      if (sessionId) {
+        await sessionControl.sendAnswer(instanceId, sessionId, { request_id: requestId, answer });
+      }
     } catch (err) {
       log.error("[ChatPanel] Failed to send question answer:", err);
     }
@@ -2609,10 +2631,12 @@ export function ChatPanel() {
             ref={textareaRef}
             value={session.inputValue}
             onChange={(e) => session.setInputValue(e.target.value)}
-            placeholder={t(
-              `chatPanel.${getInputPlaceholderKey(gatewayStatus, effectiveConnection, !!activeSkill)}`,
-            )}
-            disabled={inputDisabled}
+            placeholder={readOnlySession
+              ? t("chatPanel.readOnlySessionPlaceholder")
+              : t(
+                  `chatPanel.${getInputPlaceholderKey(gatewayStatus, effectiveConnection, !!activeSkill)}`,
+                )}
+            disabled={inputDisabled || readOnlySession}
             className="w-full resize-none border-0 bg-transparent p-3 pb-2 outline-none placeholder:text-text-tertiary  disabled:cursor-not-allowed disabled:opacity-50 max-h-48 overflow-y-auto min-h-[4.5rem]"
             style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}
             onKeyDown={(e) => {
@@ -2689,6 +2713,7 @@ export function ChatPanel() {
                   currentProvider={currentProvider}
                   onSelect={(m, p) => selectedAgentId && setCurrentModel(m, p, selectedAgentId)}
                   btnId="model"
+                  readOnly={readOnlySession}
                 />
               )}
               {/* Reasoning effort toggle — shown when session has a non-null reasoningEffort (null = provider doesn't support reasoning) */}
@@ -2699,16 +2724,23 @@ export function ChatPanel() {
                   effort={currentReasoningEffort}
                   onChange={(e) => selectedAgentId && setReasoningEffort(e, selectedAgentId)}
                   btnId="effort"
+                  readOnly={readOnlySession}
                 />
               )}
               {/* Workspace button */}
               <div ref={wsBtnRef} className="min-w-0">
-                <WorkspaceSelector textHidden={textHidden.ws} />
+                <WorkspaceSelector textHidden={textHidden.ws} readOnly={readOnlySession} />
               </div>
               {/* Skills dropdown */}
               <div ref={skBtnRef} className="min-w-0">
                 <SkillsPanel textHidden={textHidden.sk} />
               </div>
+              {/* ADR-076 §决策 4: per-session read visibility (owner only).
+                  Sits with the other session-scoped write controls and is
+                  disabled (not hidden) on a session shared with us. */}
+              {selectedAgentId && currentSessionId && (
+                <SessionVisibilityToggle agentId={selectedAgentId} sessionId={currentSessionId} />
+              )}
             </div>
 
             {/* Right: send/stop button + context usage icon */}
@@ -2746,11 +2778,16 @@ export function ChatPanel() {
                     }`}
                   onClick={sending ? handleStop : handleSend}
                   disabled={
-                    sending
-                      ? false
-                      : (inputDisabled
-                        || (!session.inputValue.trim() && !session.pendingAttachedItems.some((p) => p.status === "success" && p.item !== undefined))
-                        || session.pendingAttachedItems.some((p) => p.status === "uploading"))
+                    // ADR-076 §决策 4: a session shared with us is read-only
+                    // — sending is write-gated server-side (404), and so is
+                    // stopping someone else's stream.
+                    readOnlySession
+                      ? true
+                      : sending
+                        ? false
+                        : (inputDisabled
+                          || (!session.inputValue.trim() && !session.pendingAttachedItems.some((p) => p.status === "success" && p.item !== undefined))
+                          || session.pendingAttachedItems.some((p) => p.status === "uploading"))
                   }
                   aria-label={sending ? (session.inputValue.trim() ? t("chatPanel.addToQueue") : queuedMessages.length > 0 ? t("chatPanel.sendQueuedAndStop") : t("chatPanel.stop")) : t("chatPanel.sendMessage")}
                 >
@@ -2863,6 +2900,7 @@ function ModelMenu({
   textHidden,
   wrapperRef: externalRef,
   btnId,
+  readOnly,
 }: {
   models: { name: string; provider: string; tool_call?: boolean; reasoning?: boolean; input_modalities?: string[] }[];
   currentModel: string | null;
@@ -2873,6 +2911,8 @@ function ModelMenu({
   wrapperRef?: React.Ref<HTMLDivElement>;
   /** Toolbar button id used by ChatPanel's collapse observer */
   btnId?: string;
+  /** ADR-076 §决策 4: session is not writable by the signed-in account. */
+  readOnly?: boolean;
 }) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
@@ -2924,9 +2964,10 @@ function ModelMenu({
       label={modelDisplayName}
       collapseClass="tb-model-text"
       tipClass="tb-model-tip"
-      tooltip={t("chatPanel.selectModel")}
+      tooltip={readOnly ? t("chatPanel.readOnlySession") : t("chatPanel.selectModel")}
       open={open}
-      onToggle={() => setOpen(!open)}
+      onToggle={() => !readOnly && setOpen(!open)}
+      disabled={readOnly}
       wrapperRef={ref}
       textHidden={textHidden}
       btnId={btnId}
@@ -3029,6 +3070,7 @@ function ReasoningEffortMenu({
   textHidden,
   wrapperRef: externalRef,
   btnId,
+  readOnly,
 }: {
   effort: string | null;
   onChange: (effort: string) => void;
@@ -3037,6 +3079,8 @@ function ReasoningEffortMenu({
   wrapperRef?: React.Ref<HTMLDivElement>;
   /** Toolbar button id used by ChatPanel's collapse observer */
   btnId?: string;
+  /** ADR-076 §决策 4: session is not writable by the signed-in account. */
+  readOnly?: boolean;
 }) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
@@ -3073,9 +3117,10 @@ function ReasoningEffortMenu({
       label={effortLabel}
       collapseClass="tb-effort-text"
       tipClass="tb-effort-tip"
-      tooltip={t("chatPanel.selectReasoningEffort") ?? "Reasoning effort"}
+      tooltip={readOnly ? t("chatPanel.readOnlySession") : (t("chatPanel.selectReasoningEffort") ?? "Reasoning effort")}
       open={open}
-      onToggle={() => setOpen(!open)}
+      onToggle={() => !readOnly && setOpen(!open)}
+      disabled={readOnly}
       wrapperRef={ref}
       textHidden={textHidden}
       btnId={btnId}

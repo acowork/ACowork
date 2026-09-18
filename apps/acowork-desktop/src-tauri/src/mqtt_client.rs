@@ -346,10 +346,12 @@ impl DesktopMqttClient {
     /// Publish a control command to the broker.
     ///
     /// Desktop → Runtime control commands:
-    /// - `control/create_session` — create new session
-    /// - `control/delete_session` — delete session
-    /// - `control/message` — send message to agent
+    /// - `control/chat_message` — send message to agent
     /// - `control/stop` — stop current generation
+    ///
+    /// ADR-076 §决策 4: session lifecycle / per-session config no longer
+    /// travel this way (they need an authenticated caller) — see
+    /// `commands/chat_mqtt.rs`.
     pub async fn publish_control(
         &self,
         instance_id: &str,
@@ -382,34 +384,25 @@ impl DesktopMqttClient {
         };
         let payload = prost::Message::encode_to_vec(&envelope);
 
-        // Determine the sub-topic from the command type
+        // Determine the sub-topic from the command type.
+        //
+        // ADR-076 §决策 4: `active_heartbeat` is the only command the
+        // Desktop still publishes — every user-initiated action goes over
+        // the Gateway's authenticated HTTP API, and the proto variants for
+        // those commands are deleted (so they cannot reach this match).
+        // The `None` fallback is unreachable in practice: a `ControlCommand`
+        // with no `oneof` set carries no meaning.
         let command = match &envelope.payload {
             Some(data_envelope::Payload::ControlCommand(cmd)) => {
                 match &cmd.command {
-                    Some(mqtt_proto::control_command::Command::CreateSession(_)) => "create_session",
-                    Some(mqtt_proto::control_command::Command::DeleteSession(_)) => "delete_session",
-                    Some(mqtt_proto::control_command::Command::CloseSession(_)) => "close_session",
-                    Some(mqtt_proto::control_command::Command::OpenSession(_)) => "open_session",
-                    Some(mqtt_proto::control_command::Command::UpdateSessionTitle(_)) => "update_session_title",
-                    Some(mqtt_proto::control_command::Command::ChatMessage(_)) => "chat_message",
-                    Some(mqtt_proto::control_command::Command::Stop(_)) => "stop",
-                    Some(mqtt_proto::control_command::Command::ContinueExecution(_)) => "continue_execution",
-                    Some(mqtt_proto::control_command::Command::EnableNotify(_)) => "enable_notify",
-                    Some(mqtt_proto::control_command::Command::DisableNotify(_)) => "disable_notify",
-                    Some(mqtt_proto::control_command::Command::ApprovalDecision(_)) => "approval_decision",
-                    Some(mqtt_proto::control_command::Command::QuestionAnswer(_)) => "question_answer",
-                    Some(mqtt_proto::control_command::Command::CancelTool(_)) => "cancel_tool",
-                    Some(mqtt_proto::control_command::Command::ModelSwitch(_)) => "model_switch",
-                    Some(mqtt_proto::control_command::Command::ReasoningEffort(_)) => "reasoning_effort",
-                    Some(mqtt_proto::control_command::Command::WorkspaceSwitch(_)) => "workspace_switch",
-                    Some(mqtt_proto::control_command::Command::CompactContext(_)) => "compact_context",
-                    Some(mqtt_proto::control_command::Command::CompressAction(_)) => "compress_action",
+                    Some(mqtt_proto::control_command::Command::ActiveHeartbeat(_)) => {
+                        "active_heartbeat"
+                    }
                     Some(mqtt_proto::control_command::Command::Intent(_)) => "intent",
-                    Some(mqtt_proto::control_command::Command::ActiveHeartbeat(_)) => "active_heartbeat",
-                    None => "chat_message",
+                    None => "active_heartbeat",
                 }
             }
-            _ => "chat_message",
+            _ => "active_heartbeat",
         };
 
         self.publish_control(instance_id, command, &payload).await

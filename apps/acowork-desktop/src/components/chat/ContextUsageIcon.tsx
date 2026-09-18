@@ -12,6 +12,7 @@ import {
 import { cn } from "../../lib/utils";
 import { getProcessingPhase } from "../../lib/types";
 import { computeCacheHitStats, formatCacheHitRate, hasCacheData } from "../../lib/cacheHitRate";
+import { COMPRESS_SUMMARY } from "../../lib/session-control";
 
 // ADR-074: the editor mirrors the backend `is_valid_context_window`
 // bounds (CONTEXT_WINDOW_FLOOR..=CEILING) so out-of-range input is
@@ -173,8 +174,9 @@ export function ContextUsageIcon({ agentId, sessionId }: { agentId: string; sess
 
 const handleCompressSummary = () => {
     if (!canAct) return;
-    // 1 = CompressType::SUMMARY (see core/acowork-core/proto/mqtt_payload.proto).
-    sendCompressAction(agentId, sessionId, 1);
+    // ADR-076 §决策 4: over HTTP now; COMPRESS_SUMMARY is the
+    // `CompressType::SUMMARY` wire value.
+    sendCompressAction(agentId, sessionId, COMPRESS_SUMMARY);
     setOpen(false);
   };
 

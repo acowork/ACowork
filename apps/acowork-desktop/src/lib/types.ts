@@ -218,7 +218,7 @@ export interface AgentInfo {
   debug_port?: number;
   /**
    * RFC3339 timestamp of the last user-driven interaction with this agent
-   * (send_message / approval / question_answer / compact_context). Undefined
+   * (messages / approval / answer / compress). Undefined
    * for agents the user has never interacted with. The Gateway already
    * returns agents in the canonical sidebar order; this field is exposed
    * for tooltips and future "last active" UI affordances.
@@ -1229,6 +1229,22 @@ export interface SessionInfo {
   status?: SessionStatus;
   /** Per-session workspace selection ("__agent_home__" = agent home) */
   workspace_id?: string;
+  /**
+   * ADR-076 §决策 4: may the signed-in account modify this session?
+   *
+   * The backend resolves it (`SessionMeta::is_writable_by`) — `true` for the
+   * owner, and for admins / `local` mode regardless of owner. This is the
+   * single source of truth for disabling the session's write controls
+   * (model, workspace, reasoning effort, title, close, delete); the frontend
+   * must not re-derive it from `visibility`.
+   *
+   * Absent on responses from an older Runtime — treat `undefined` as `true`
+   * so a version mismatch degrades to "try it and get a 403" rather than
+   * silently locking every control.
+   */
+  can_write?: boolean;
+  /** ADR-076 §决策 4: `null`/absent = public (readable by everyone). */
+  visibility?: "public" | "private" | null;
 }
 
 /**
@@ -1420,9 +1436,9 @@ export interface SessionNotOpenedEvent {
   session_id: string;
   /**
    * The control command that was rejected (e.g. `"chat_message"`,
-   * `"model_switch"`, `"stop"`). Used only for diagnostic / logging —
-   * the Desktop doesn't branch on this when deciding to surface a toast
-   * (the rejection itself is the signal).
+   * `"stop"`). Used only for diagnostic / logging — the Desktop doesn't
+   * branch on this when deciding to surface a toast (the rejection itself
+   * is the signal).
    */
   attempted_command: string;
   /**

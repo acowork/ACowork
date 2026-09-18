@@ -194,7 +194,9 @@
     "reasoningHigh": "높음",
     "addModel": "모델 추가",
     "modelMenuTitle": "모델",
-    "reasoningMenuTitle": "思考深度"
+    "reasoningMenuTitle": "思考深度",
+    "readOnlySession": "공유된 세션이므로 읽기 전용입니다",
+    "readOnlySessionPlaceholder": "읽기 전용 세션 — 다른 계정이 공유함"
   },
   "sessionTabBar": {
     "llmReasoning": "LLM 추론 중",
@@ -230,7 +232,6 @@
     },
     "compressing": "압축 중...",
     "agentRunning": "Agent 실행 중",
-    "compressContext": "컨텍스트 압축",
     "compressSummary": "전체 컨텍스트 압축",
     "contextUsedSuffix": "컨텍스트 사용",
     "cacheHitLabel": "캐시 히트율(누적)",
@@ -792,6 +793,14 @@
       "installing": "설치 중...",
       "docsLink": "문서 →"
     }
+  },
+  "sessionVisibility": {
+    "public": "공개",
+    "private": "비공개",
+    "hintToggle": "클릭하여 전환",
+    "toastNowPrivate": "세션이 비공개로 전환되었습니다",
+    "toastNowPublic": "세션이 공개로 전환되었습니다",
+    "toastFailed": "공개 범위를 변경하지 못했습니다: {{error}}"
   },
   "sessionPanel": {
     "loadingSessions": "세션 로딩 중...",

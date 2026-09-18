@@ -242,11 +242,11 @@ describe("ADR-047: openSession includes loadSession call", () => {
     // Mock invoke for MQTT
     mockInvoke.mockResolvedValue(undefined);
 
-    // Simulate the openSession internal calls
-    await mockInvoke("mqtt_publish_control", {
-      instanceId: agentId,
-      command: "open_session",
-      payloadJson: { session_id: sessionId },
+    // openSession goes over Gateway HTTP now (ADR-076 §决策 4) — the MQTT
+    // control command is gone, so a stale `mqtt_publish_control` here would
+    // assert a path the app no longer has.
+    await fetch(`${gatewayUrl}/api/agents/${agentId}/sessions/${sessionId}/open`, {
+      method: "POST",
     });
 
     // loadSession (the P0 fix): fetches both state and config

@@ -11,6 +11,7 @@ import { useWorkspaceStore } from "./workspaceStore";
 import { useFileTreeStore } from "./fileTree";
 import { log } from "../lib/logger";
 import { with503Retry } from "../lib/httpRetry";
+import * as sessionControl from "../lib/session-control";
 
 /** System Agent ID — always auto-started by Gateway */
 export const SYSTEM_AGENT_ID = "com.acowork.system";
@@ -314,6 +315,19 @@ interface AgentStoreState {
   closeSession: (agentId: string, sessionId: string) => Promise<void>;
   /** Rename a session: optimistic local update + MQTT `update_session_title`. */
   renameSession: (agentId: string, sessionId: string, title: string) => Promise<void>;
+  /**
+   * ADR-076 §决策 4: flip a session's read visibility (owner only).
+   *
+   * Optimistic local patch of `visibility` on the session row, then
+   * `PUT /sessions/{sid}/visibility`; rolls the local value back and
+   * rethrows when the backend refuses, so the caller can toast the real
+   * error. The backend is the source of truth on the next `fetchSessions`.
+   */
+  setSessionVisibility: (
+    agentId: string,
+    sessionId: string,
+    visibility: "public" | "private",
+  ) => Promise<void>;
   /** Update a session's title locally (no API call). */
   updateSessionTitle: (sessionId: string, title: string) => void;
 
@@ -898,18 +912,14 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       const body: Record<string, string> = {};
       if (lastActiveWs) body.workspace_id = lastActiveWs;
 
-      await invoke("mqtt_publish_control", {
-        instanceId: agentId,
-        command: "create_session",
-        payloadJson: body,
-      });
+      // ADR-076 §决策 4: over HTTP, so the Gateway authenticates the
+      // caller and the Runtime records the session's owner.
+      await sessionControl.createSession(agentId, body);
 
-      // NOTE: MQTT create_session does not return a session_id synchronously.
-      // The frontend must listen for the `session_created` MQTT event (handled
-      // by the Rust backend and forwarded via Tauri event) to obtain the new
-      // session_id and proceed with activation.
-      // Session meta (workspace_id) will be applied when the session_created
-      // event arrives.
+      // The response carries the new session_id, but activation still
+      // rides on the `session_created` MQTT event (the Runtime publishes
+      // it either way), so the frontend keeps listening for it.
+      // Session meta (workspace_id) is applied when that event arrives.
     } catch (e) {
       log.error("[AgentStore] Failed to create session:", e);
     }
@@ -917,7 +927,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
 
   closeSession: async (agentId: string, sessionId: string) => {
     try {
-      // Close session list entry first; the MQTT `close_session` is fired
+      // Close session list entry first; the `close_session` call is made
       // by `chatStore.closeTab` (which we call below for UI cleanup) — no
       // double-firing.
       const storage = get().agents[agentId];
@@ -956,13 +966,9 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
         // Session was not in the open-tab strip (probably a closed-background
         // session). Still tell the backend to release its task.
         try {
-          await invoke("mqtt_publish_control", {
-            instanceId: agentId,
-            command: "close_session",
-            payloadJson: { session_id: sessionId },
-          });
+          await sessionControl.closeSession(agentId, sessionId);
         } catch (err) {
-          log.warn("[AgentStore] close_session MQTT failed:", err);
+          log.warn("[AgentStore] close_session failed:", err);
         }
       }
 
@@ -984,11 +990,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
 
   deleteSession: async (agentId: string, sessionId: string) => {
     try {
-      await invoke("mqtt_publish_control", {
-        instanceId: agentId,
-        command: "delete_session",
-        payloadJson: { session_id: sessionId },
-      });
+      await sessionControl.deleteSession(agentId, sessionId);
 
       const storage = get().agents[agentId];
       if (!storage) return;
@@ -1050,13 +1052,48 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
     });
 
     try {
-      await invoke("mqtt_publish_control", {
-        instanceId: agentId,
-        command: "update_session_title",
-        payloadJson: { session_id: sessionId, title },
-      });
+      // ADR-076 §决策 4: authenticated HTTP write (was MQTT
+      // `update_session_title`).
+      await sessionControl.patchSessionConfig(agentId, sessionId, { title });
     } catch (e) {
       log.error("[AgentStore] Failed to rename session:", e);
+    }
+  },
+
+  setSessionVisibility: async (
+    agentId: string,
+    sessionId: string,
+    visibility: "public" | "private",
+  ) => {
+    // Optimistic flip, mirroring `renameSession`: the composer toggle, the
+    // session dropdown and the AgentList sidebar all read
+    // `agents[agentId].sessions`, so patch the row before the round-trip.
+    let previous: "public" | "private" | null | undefined;
+    set((state) => {
+      const storage = state.agents[agentId];
+      if (!storage) return state;
+      const idx = storage.sessions.findIndex((s) => s.session_id === sessionId);
+      if (idx === -1) return state;
+      const sessions = [...storage.sessions];
+      previous = sessions[idx].visibility;
+      sessions[idx] = { ...sessions[idx], visibility };
+      return patchAgent(state, agentId, { sessions });
+    });
+
+    try {
+      await sessionControl.setSessionVisibility(agentId, sessionId, visibility);
+    } catch (e) {
+      set((state) => {
+        const storage = state.agents[agentId];
+        if (!storage) return state;
+        const idx = storage.sessions.findIndex((s) => s.session_id === sessionId);
+        if (idx === -1) return state;
+        const sessions = [...storage.sessions];
+        sessions[idx] = { ...sessions[idx], visibility: previous };
+        return patchAgent(state, agentId, { sessions });
+      });
+      log.error("[AgentStore] Failed to set session visibility:", e);
+      throw e;
     }
   },
 

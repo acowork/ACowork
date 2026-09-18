@@ -18,7 +18,7 @@ function workspaceDisplayName(dir: WorkspaceDir) {
   return name;
 }
 
-export function WorkspaceSelector({ dropDirection = "up", textHidden }: { dropDirection?: "up" | "down"; textHidden?: boolean }) {
+export function WorkspaceSelector({ dropDirection = "up", textHidden, readOnly }: { dropDirection?: "up" | "down"; textHidden?: boolean; readOnly?: boolean }) {
   const { t } = useTranslation();
   const { selectedAgentId } = useAgentStore();
   // Node id of the machine hosting the selected agent instance — when set,
@@ -189,12 +189,13 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden }: { dropDi
         label={currentWsName}
         collapseClass="tb-ws-text"
         tipClass="tb-ws-tip"
-        tooltip={t("workspace.selectWorkspace")}
+        tooltip={readOnly ? t("chatPanel.readOnlySession") : t("workspace.selectWorkspace")}
         open={open}
-        onToggle={() => setOpen(!open)}
+        onToggle={() => !readOnly && setOpen(!open)}
         wrapperRef={ref}
         textHidden={textHidden}
         btnId="ws"
+        disabled={readOnly}
       >
         {/* Dropdown menu */}
         {open && (

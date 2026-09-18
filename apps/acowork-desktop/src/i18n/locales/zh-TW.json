@@ -194,7 +194,9 @@
     "reasoningHigh": "高",
     "addModel": "新增模型",
     "modelMenuTitle": "模型",
-    "reasoningMenuTitle": "思考深度"
+    "reasoningMenuTitle": "思考深度",
+    "readOnlySession": "該會話已共享，你只有唯讀權限",
+    "readOnlySessionPlaceholder": "唯讀工作階段：由其他帳號共享"
   },
   "sessionTabBar": {
     "llmReasoning": "LLM 推理進行中",
@@ -230,7 +232,6 @@
     },
     "compressing": "壓縮中...",
     "agentRunning": "Agent 執行中",
-    "compressContext": "壓縮上下文",
     "compressSummary": "壓縮整個上下文",
     "contextUsedSuffix": "上下文已用",
     "cacheHitLabel": "快取命中率（累計）",
@@ -790,6 +791,14 @@
       "installing": "安裝中...",
       "docsLink": "說明文件 →"
     }
+  },
+  "sessionVisibility": {
+    "public": "公開",
+    "private": "私有",
+    "hintToggle": "點擊切換",
+    "toastNowPrivate": "已設為私有",
+    "toastNowPublic": "已設為公開",
+    "toastFailed": "修改可見性失敗：{{error}}"
   },
   "sessionPanel": {
     "loadingSessions": "載入工作階段中...",

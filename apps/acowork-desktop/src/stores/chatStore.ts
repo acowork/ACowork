@@ -14,6 +14,7 @@ import { emitAgentConfigRefresh } from "../lib/refresh";
 import { sessionConfigToPatch, type SessionConfigInput } from "../lib/sessionConfigMapper";
 import { resolveDefaultReasoningEffort } from "../lib/modelCapabilities";
 import { with503Retry } from "../lib/httpRetry";
+import * as sessionControl from "../lib/session-control";
 import { verifyAgentHealth } from "../lib/gateway-api";
 import i18n from "../i18n";
 import { showToast } from "../components/common/ToastProvider";
@@ -767,8 +768,8 @@ interface ChatStore {
   removeSessionState: (agentId: string, sessionId: string) => void;
   trimMessagesTo: (agentId: string, count: number) => void;
   setCurrentModel: (model: string, provider: string, agentId: string) => void;
-  /** ADR-033: Send workspace switch via MQTT (per-session). */
-  setSessionWorkspaceMqtt: (agentId: string, sessionId: string, workspaceId: string) => void;
+  /** ADR-076 §决策 4: switch the session's workspace over authenticated HTTP. */
+  setSessionWorkspace: (agentId: string, sessionId: string, workspaceId: string) => void;
   setAvailableModels: (models: ModelEntry[]) => void;
   /** Set per-session reasoning effort override (auto/off/low/medium/high) */
   setReasoningEffort: (effort: string, agentId: string) => void;
@@ -1431,14 +1432,20 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     // 2. Backend: tell Runtime to release the session task.  `close_session`
     // is idempotent on the Runtime side (Closed → closed no-op), so it is
     // safe to fire even if the backend has already dropped the session.
-    try {
-      await invoke("mqtt_publish_control", {
-        instanceId: agentId,
-        command: "close_session",
-        payloadJson: { session_id: sessionId },
-      });
-    } catch (err) {
-      log.warn("[chatStore] close_session MQTT failed (UI already cleaned up):", err);
+    //
+    // ADR-076 §决策 4: skip the call when this session is only shared *with*
+    // us. Closing is write-gated (a bystander must not tear down the owner's
+    // session), so the request would 404 — closing the tab is a purely local
+    // act for a viewer.
+    const canWrite = useAgentStore
+      .getState()
+      .agents[agentId]?.sessions.find((s) => s.session_id === sessionId)?.can_write;
+    if (canWrite !== false) {
+      try {
+        await sessionControl.closeSession(agentId, sessionId);
+      } catch (err) {
+        log.warn("[chatStore] close_session HTTP failed (UI already cleaned up):", err);
+      }
     }
 
     return newActiveId;
@@ -1450,13 +1457,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   },
 
   /** ADR-032 C4c: Send a user-initiated compression action to the Runtime.
-   *  ADR-034 Phase 5: dedicated compress_action command with compress_type. */
+   *  ADR-076 §决策 4: over the Gateway's authenticated HTTP API now, so the
+   *  Runtime can check that the caller owns the session. */
   sendCompressAction: (agentId: string, sessionId: string, compressType: number) => {
-    invoke("mqtt_publish_control", {
-      instanceId: agentId,
-      command: "compress_action",
-      payloadJson: { session_id: sessionId, compress_type: compressType },
-    }).catch((err: unknown) => log.warn("[ChatStore] compress_action via MQTT failed:", err));
+    sessionControl
+      .compressSession(agentId, sessionId, compressType)
+      .catch((err: unknown) => log.warn("[ChatStore] compress action failed:", err));
   },
 
   /**
@@ -1468,13 +1474,13 @@ export const useChatStore = create<ChatStore>((set, get) => ({
    * backend wants to surface it). The UI does NOT optimistically remove the
    * tool_progress entry — we wait for the matching tool_result so the chip
    * transitions through the normal lifecycle (running → cancelled → done).
+   *
+   * ADR-076 §决策 4: HTTP now (see `session-control.ts`).
    */
   cancelTool: (agentId: string, sessionId: string, toolCallId: string) => {
-    invoke("mqtt_publish_control", {
-      instanceId: agentId,
-      command: "cancel_tool",
-      payloadJson: { session_id: sessionId, tool_call_id: toolCallId },
-    }).catch((err: unknown) => log.warn("[ChatStore] cancel_tool via MQTT failed:", err));
+    sessionControl
+      .cancelTool(agentId, sessionId, toolCallId)
+      .catch((err: unknown) => log.warn("[ChatStore] cancel_tool failed:", err));
   },
 
   /**
@@ -1558,17 +1564,28 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       return updateAgentState(state, agentId, patches);
     });
 
-    // 2. Backend: tell Runtime to transition Closed → Active (or Active no-op).
-    // Best-effort — MQTT may be temporarily disconnected; the Runtime will
-    // still ack correctly when the broker reconnects.
-    try {
-      await invoke("mqtt_publish_control", {
-        instanceId: agentId,
-        command: "open_session",
-        payloadJson: { session_id: sessionId },
-      });
-    } catch (err) {
-      log.warn("[chatStore] open_session MQTT failed:", err);
+    // 2. Backend: tell Runtime to transition Closed → Active (or Active
+    // no-op). ADR-076 §决策 4: over HTTP so the Gateway can authenticate
+    // the caller. Best-effort — the Runtime treats a re-open as a no-op.
+    //
+    // A session shared *with* us (`can_write === false`) is **not**
+    // activated, and the request is not even sent. `Active` / `Closed` is
+    // per-session global state, so a viewer-activated session would be a
+    // lifecycle change nobody can undo: the viewer may not close it (that
+    // is write-gated on purpose) and the owner cannot see that anyone is
+    // holding it. Read-only viewing does not need activation anyway —
+    // history comes from `GET /messages` and events arrive via the
+    // wildcard MQTT subscription whenever the session is genuinely Active
+    // (i.e. while its owner has it open).
+    const canWrite = useAgentStore
+      .getState()
+      .agents[agentId]?.sessions.find((s) => s.session_id === sessionId)?.can_write;
+    if (canWrite !== false) {
+      try {
+        await sessionControl.openSession(agentId, sessionId);
+      } catch (err) {
+        log.warn("[chatStore] open_session failed:", err);
+      }
     }
 
     // 3. Local cache: load conversation history + session config/state.
@@ -1840,18 +1857,15 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     const optimisticIds = new Set([userMsgId, ...items.map((i) => i.clientId ?? "")]);
 
     try {
-      await invoke("mqtt_publish_control", {
-        instanceId: agentId,
-        command: "chat_message",
-        payloadJson: {
-          session_id: sessionId,
-          message_id: userMsgId,
-          content,
-          command: command ?? "",
-          params_json: paramsJson,
-        },
+      // ADR-076 §决策 4: HTTP, not MQTT — the send is a user action, so the
+      // Gateway authenticates the caller and the Runtime checks ownership.
+      await sessionControl.sendMessage(agentId, sessionId!, {
+        message_id: userMsgId,
+        content,
+        command: command ?? "",
+        params_json: paramsJson,
       });
-      log.debug("[ChatStore] Message sent via MQTT:", userMsgId);
+      log.debug("[ChatStore] Message sent via HTTP:", userMsgId);
       // Touch the user's last-interaction timestamp so the next Gateway
       // boot can pick this agent as the default (`/api/agents` sorts by
       // `last_interaction_at`). Best-effort — failure is logged but does
@@ -1869,7 +1883,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       // session was reopened.
       if (sessionId) scheduleSendReconciliation(agentId, sessionId);
     } catch (error) {
-      log.error("[ChatStore] MQTT message send failed:", error);
+      log.error("[ChatStore] HTTP message send failed:", error);
       // The backend never accepted this send — drop the optimistic entries
       // we just inserted so the user does not see a phantom message with a
       // perpetual spinner.
@@ -1901,31 +1915,28 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   stopCurrentMessage: async (agentId: string) => {
     log.debug("[ChatStore] Stopping current message for agent:", agentId);
 
-    // ADR-034 Phase 5: Send stop via MQTT with reason
+    // ADR-076 §决策 4: HTTP now (was MQTT `stop`).
     const sessionId = getAgentState(get(), agentId).activeSessionId;
-    invoke("mqtt_publish_control", {
-      instanceId: agentId,
-      command: "stop",
-      payloadJson: { session_id: sessionId, reason: "user_requested" },
-    }).catch((err: unknown) => log.warn("[ChatStore] stop via MQTT failed:", err));
+    if (sessionId) {
+      sessionControl
+        .stopSession(agentId, sessionId)
+        .catch((err: unknown) => log.warn("[ChatStore] stop failed:", err));
 
-    const activeSessionId = getAgentState(get(), agentId).activeSessionId;
-    if (activeSessionId) {
       set((state) => ({
-        ...updateSessionState(state, agentId, activeSessionId, {
+        ...updateSessionState(state, agentId, sessionId, {
           }),
       }));
     }
   },
 
   sendStop: (agentId: string) => {
-    // ADR-034 Phase 5: Send stop via MQTT with reason
+    // ADR-076 §决策 4: HTTP now (was MQTT `stop`).
     const sessionId = getAgentState(get(), agentId).activeSessionId;
-    invoke("mqtt_publish_control", {
-      instanceId: agentId,
-      command: "stop",
-      payloadJson: { session_id: sessionId, reason: "user_requested" },
-    }).catch((err: unknown) => log.warn("[ChatStore] sendStop via MQTT failed:", err));
+    if (sessionId) {
+      sessionControl
+        .stopSession(agentId, sessionId)
+        .catch((err: unknown) => log.warn("[ChatStore] sendStop failed:", err));
+    }
 
     // Optimistic: immediately mark as stopping so the UI exits "working" state
     // without waiting for the backend Stopped/SessionStateChanged event.
@@ -1975,27 +1986,24 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     // Update agent's default model (new sessions inherit this)
     set((state) => updateAgentState(state, agentId, { preferredModel: model, preferredProvider: provider }));
 
-    // ADR-033: Send model switch via MQTT.
-    // `provider_id` mirrors the gRPC/WebSocket-era payload field
-    // (`params["provider"]` extracted by `cli.rs::process_gateway_recv`).
-    // The Runtime uses it to rebuild the per-session Provider instance when
-    // the user picks a model from a different provider (e.g. switching
-    // deepseek-v4-flash → minimax-cn-coding-plan/MiniMax-M3). Without
-    // this field, the LLM call would still target the previous provider's
-    // base_url and yield 401 errors on the new model's endpoint.
-    invoke("mqtt_publish_control", {
-      instanceId: agentId,
-      command: "model_switch",
-      payloadJson: { model_id: model, session_id: sessionId, provider_id: provider },
-    }).catch((err: unknown) => log.warn("[ChatStore] model_switch via MQTT failed:", err));
+    // ADR-076 §决策 4: model switch is an authenticated HTTP write now
+    // (was MQTT `model_switch`). The MQTT path could not be authorized — it
+    // carries no identity — so any client on the broker could retarget
+    // another account's session at a different model/provider.
+    //
+    // `provider` must travel with `model`: the Runtime rebuilds the
+    // per-session Provider instance from it. Without it, switching to a
+    // model served by a different provider (e.g. deepseek → minimax) would
+    // keep the previous base_url and yield 401s.
+    sessionControl
+      .patchSessionConfig(agentId, sessionId, { model, provider })
+      .catch((err: unknown) => log.warn("[ChatStore] model switch failed:", err));
   },
 
-  setSessionWorkspaceMqtt: (agentId: string, sessionId: string, workspaceId: string) => {
-    invoke("mqtt_publish_control", {
-      instanceId: agentId,
-      command: "workspace_switch",
-      payloadJson: { workspace_id: workspaceId, session_id: sessionId },
-    }).catch((err: unknown) => log.warn("[ChatStore] workspace_switch via MQTT failed:", err));
+  setSessionWorkspace: (agentId: string, sessionId: string, workspaceId: string) => {
+    sessionControl
+      .setSessionWorkspace(agentId, sessionId, workspaceId)
+      .catch((err: unknown) => log.warn("[ChatStore] workspace switch failed:", err));
   },
   setReasoningEffort: (effort: string, agentId: string) => {
     const sessionId = getAgentState(get(), agentId).activeSessionId;
@@ -2004,12 +2012,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     // Optimistically update frontend state (Runtime will confirm)
     set((state) => updateSessionState(state, agentId, sessionId, { reasoningEffort: effort }));
 
-    // ADR-033: Send reasoning effort via MQTT
-    invoke("mqtt_publish_control", {
-      instanceId: agentId,
-      command: "reasoning_effort",
-      payloadJson: { effort, session_id: sessionId },
-    }).catch((err: unknown) => log.warn("[ChatStore] reasoning_effort via MQTT failed:", err));
+    // ADR-076 §决策 4: authenticated HTTP write (was MQTT `reasoning_effort`).
+    sessionControl
+      .patchSessionConfig(agentId, sessionId, { reasoning_effort: effort })
+      .catch((err: unknown) => log.warn("[ChatStore] reasoning effort failed:", err));
   },
   setSessionContextWindow: (window: number | null, agentId: string) => {
     const sessionId = getAgentState(get(), agentId).activeSessionId;
@@ -2051,25 +2057,21 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   continueExecution: async (agentId: string) => {
     try {
       const sessionId = getAgentState(get(), agentId).activeSessionId;
-      await invoke("mqtt_publish_control", {
-        instanceId: agentId,
-        command: "continue_execution",
-        payloadJson: {
-          session_id: sessionId ?? "",
-          reason: "user_requested",
-        },
-      });
+      if (!sessionId) return;
+      // ADR-076 §决策 4: HTTP now (was MQTT `continue_execution`).
+      await sessionControl.continueSession(agentId, sessionId);
     } catch (error) {
       log.error("[ChatStore] Failed to send continue signal:", error);
     }
   },
 
   publishUpdateSessionTitle: (agentId: string, sessionId: string, title: string) => {
-    invoke("mqtt_publish_control", {
-      instanceId: agentId,
-      command: "update_session_title",
-      payloadJson: { session_id: sessionId, title },
-    }).catch((err: unknown) => log.warn("[ChatStore] update_session_title via MQTT failed:", err));
+    // ADR-076 §决策 4: authenticated HTTP write (was MQTT
+    // `update_session_title`). The Runtime's config `title` branch does the
+    // same truncate + `title_set` + meta rewrite the MQTT handler did.
+    sessionControl
+      .patchSessionConfig(agentId, sessionId, { title })
+      .catch((err: unknown) => log.warn("[ChatStore] update session title failed:", err));
   },
 
   resolveApproval: (agentId: string) => {

@@ -169,6 +169,8 @@
     "inputParamsReconnecting": "输入参数...（正在重新连接...）",
     "inputParamsStale": "输入参数...（连接状态异常，正在恢复...）",
     "selectModel": "选择模型",
+    "readOnlySession": "该会话已共享，你只有只读权限",
+    "readOnlySessionPlaceholder": "只读会话：由其他账号共享",
     "selectReasoningEffort": "思考深度",
     "startAgent": "启动 Agent",
     "startingAgent": "正在启动 {{name}}…",
@@ -245,7 +247,6 @@
     },
     "compressing": "压缩中...",
     "agentRunning": "Agent 运行中",
-    "compressContext": "压缩上下文",
     "compressSummary": "压缩整个上下文",
     "contextUsedSuffix": "上下文已用",
     "cacheHitLabel": "缓存命中率（累计）",
@@ -847,6 +848,14 @@
       "installing": "安装中...",
       "docsLink": "文档 →"
     }
+  },
+  "sessionVisibility": {
+    "public": "公开",
+    "private": "私有",
+    "hintToggle": "点击切换",
+    "toastNowPrivate": "已设为私有",
+    "toastNowPublic": "已设为公开",
+    "toastFailed": "修改可见性失败：{{error}}"
   },
   "sessionPanel": {
     "loadingSessions": "加载会话中...",

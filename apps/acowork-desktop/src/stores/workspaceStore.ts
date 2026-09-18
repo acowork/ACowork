@@ -226,8 +226,8 @@ fetchWorkspaces: async (agentId: string) => {
     const prevWorkspaces = get().workspaces;
     const prevMap = { ...get().sessionWorkspaceMap };
     try {
-      // ADR-033: Use MQTT for workspace switch (fire-and-forget)
-      useChatStore.getState().setSessionWorkspaceMqtt(agentId, sessionId, workspaceId);
+      // ADR-076 §决策 4: authenticated HTTP write (was MQTT, fire-and-forget).
+      useChatStore.getState().setSessionWorkspace(agentId, sessionId, workspaceId);
       // Optimistically update local state (Runtime will confirm via session state event)
       if (seq !== requestSeq) return;
       set({

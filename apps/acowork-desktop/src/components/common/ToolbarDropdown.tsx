@@ -27,6 +27,7 @@ export function ToolbarDropdownTrigger({
     tooltip,
     textHidden,
     btnId,
+    disabled,
 }: {
     icon: ReactNode;
     label: string;
@@ -45,6 +46,13 @@ export function ToolbarDropdownTrigger({
     textHidden?: boolean;
     /** Unique id used by ChatPanel's ResizeObserver to identify this button */
     btnId?: string;
+    /**
+     * ADR-076 §决策 4: read-only session (the caller does not own it) — the
+     * trigger stays visible so the current value is still readable, but
+     * cannot be opened. Only the *trigger* needs this: the dropdown body is
+     * unreachable while closed.
+     */
+    disabled?: boolean;
 }) {
     return (
         <div
@@ -56,9 +64,12 @@ export function ToolbarDropdownTrigger({
                 <button
                     type="button"
                     onClick={onToggle}
+                    disabled={disabled}
+                    aria-disabled={disabled || undefined}
                     className={cn(
                         toolbarButton,
                         "min-w-0",
+                        disabled && "cursor-not-allowed opacity-50",
                         open && "bg-zinc-200 dark:bg-zinc-700 text-text ",
                         buttonClassName,
                     )}
