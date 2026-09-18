@@ -29,87 +29,87 @@ message DataEnvelope {
   uint32 version = 1;
   oneof payload {
     // ── Global resources (Gateway → all Runtimes, Retained) ──
-    AvailableProviders       available_providers       = 10;
-    AvailableMcps            available_mcps            = 11;
-    AvailableSearches        available_searches        = 12;
-    AvailableEmbeddingModels available_embedding_models = 13;
-    AvailableLsps            available_lsps            = 14;
+    AvailableProviders       available_providers       = 2;
+    AvailableMcps            available_mcps            = 3;
+    AvailableSearches        available_searches        = 4;
+    AvailableEmbeddingModels available_embedding_models = 5;
+    AvailableLsps            available_lsps            = 6;
     // ADR-042: Active user identity. Single-snapshot topic; Runtime uses
     // this to populate `identity_context` for the compact model's
     // language hint and for general per-user preferences.
-    AvailableUsers           available_users           = 15;
+    AvailableUsers           available_users           = 7;
     // ADR-059: Bootstrap capability-readiness snapshot. Single retained
     // topic (`acowork/global/bootstrap`, QoS 1) that aggregates Gateway's
     // internal subsystem readiness into a `phase` enum + `instance_id`
     // and monotonic `version`. Field number 16 is occupied and will
     // never be reused; subsequent global-snapshot messages start at 17.
-    BootstrapState           bootstrap_state           = 16;
+    BootstrapState           bootstrap_state           = 8;
 
     // ── Agent lifecycle (Runtime → subscribers, Retained) ──
-    AgentStatus              agent_status              = 20;
-    AgentMeta                agent_meta                = 21;
-    AgentConfig              agent_config              = 22;
+    AgentStatus              agent_status              = 9;
+    AgentMeta                agent_meta                = 10;
+    AgentConfig              agent_config              = 11;
 
     // ── Session lifecycle (Runtime → Desktop) ──
-    SessionCreated           session_created           = 30;
-    SessionDeleted           session_deleted           = 31;
+    SessionCreated           session_created           = 12;
+    SessionDeleted           session_deleted           = 13;
     // ADR-043: SessionMeta (field 32) removed. Split into SessionConfig
     // (field 33) for user-configurable fields and SessionState (field 37)
     // for runtime telemetry, eliminating stale-value races where Hot meta
     // updates carried outdated config field values.
-    SessionConfig            session_config            = 33;
-    SessionMessage           session_message           = 34;
-    SessionOpened            session_opened            = 35;
-    SessionNotOpened         session_not_opened        = 36;
-    SessionState             session_state             = 37;
+    SessionConfig            session_config            = 14;
+    SessionMessage           session_message           = 15;
+    SessionOpened            session_opened            = 16;
+    SessionNotOpened         session_not_opened        = 17;
+    SessionState             session_state             = 18;
     // ADR-058: Workspace filesystem change events (Runtime → Desktop,
     // QoS 1, non-retained). Topic:
     // acowork/agents/{id}/workspaces/{wid}/fs-changed
     // Field number 38 is occupied by this message and will never be
     // reused. Future workspace-related messages start at 39.
-    WorkspaceFsChangeEvent   workspace_fs_change_event = 38;
+    WorkspaceFsChangeEvent   workspace_fs_change_event = 19;
 
     // ── Control commands (Desktop → Runtime) ──
-    ControlCommand           control_command           = 40;
+    ControlCommand           control_command           = 20;
 
     // ── Memory (Runtime → subscribers) ──
-    MemoryNodeUpdate         memory_node_update        = 50;
+    MemoryNodeUpdate         memory_node_update        = 21;
 
     // ADR-048: Debug protocol events (Runtime → Desktop DevMode, QoS 0).
     // Topics: `acowork/agents/{agent_id}/debug/events/{event_type}`.
     // The Desktop App subscribes to `agents/{id}/debug/events/#` and
     // routes each event by tag. Events are best-effort — DevMode may
     // drop 1-2 events on reconnect without functional impact.
-    DebugStepEvent           debug_step_event          = 70;
-    DebugBreakpointEvent     debug_breakpoint_event    = 71;
-    DebugRecordStepEvent     debug_record_step_event   = 72;
-    DebugStateChangeEvent    debug_state_change_event  = 73;
-    DebugContextBuiltEvent   debug_context_built_event = 74;
+    DebugStepEvent           debug_step_event          = 22;
+    DebugBreakpointEvent     debug_breakpoint_event    = 23;
+    DebugRecordStepEvent     debug_record_step_event   = 24;
+    DebugStateChangeEvent    debug_state_change_event  = 25;
+    DebugContextBuiltEvent   debug_context_built_event = 26;
 
     // ── Sidecar (Sidecar → subscribers, Retained) ──
-    SidecarStatus            sidecar_status            = 60;
+    SidecarStatus            sidecar_status            = 27;
 
     // ── Node control plane (ADR-055 §6.2, Node ↔ Gateway) ──
-    NodeInfo                 node_info                 = 81;
-    NodeControlCommand       node_control_command      = 82;
-    NodeEvent                node_event                = 83;
+    NodeInfo                 node_info                 = 28;
+    NodeControlCommand       node_control_command      = 29;
+    NodeEvent                node_event                = 30;
     // ADR-055 §6.5: per-agent installed-package inventory entry
     // (Node → Gateway, Retained). The Gateway aggregates these to
     // rebuild its installed_agents view (Phase 2b.3 hard-cut).
-    InstalledAgentInfo       installed_agent_info      = 84;
+    InstalledAgentInfo       installed_agent_info      = 31;
     // ADR-055 §6.12 / Phase 5a security: node enrollment handshake
     // (Node → Gateway on `acowork/nodes/{node_id}/enroll`, Gateway →
     // Node on `acowork/nodes/{node_id}/enroll_result`). Both are
     // QoS 1 non-retained.
-    NodeEnroll               node_enroll               = 85;
-    NodeEnrollResult         node_enroll_result        = 86;
+    NodeEnroll               node_enroll               = 32;
+    NodeEnrollResult         node_enroll_result        = 33;
     // ADR-059: Node control-plane readiness (Node → Gateway, Retained).
     // Topic: acowork/nodes/{node_id}/ready (QoS 1, retained). Node
     // publishes it AFTER MQTT CONNECT succeeds AND every control
     // subscription is confirmed; Gateway re-marks `node.{id}` as
     // ready in the SubsystemReadinessRegistry on receipt. Field 87
     // is occupied and will never be reused.
-    NodeReady                node_ready                = 87;
+    NodeReady                node_ready                = 34;
 
     // ── Doc library tree changes (acowork-doc → Desktop, QoS 1) ──
     // Topic: acowork/doc/tree/changed. The standalone doc service
@@ -117,7 +117,7 @@ message DataEnvelope {
     // rename / move / delete, trash restore) so the Desktop's
     // DocTreeStore can force-refresh its visible tree layers instead
     // of waiting for the 30s poll. Field 88 occupied, never reused.
-    DocTreeChangedEvent      doc_tree_changed          = 88;
+    DocTreeChangedEvent      doc_tree_changed          = 35;
   }
 }
 
@@ -135,7 +135,7 @@ message AvailableProviders {
   //   ② provider.compact_model on the session's current provider
   //   ③ the session's current chat model
   // Absent / unset = no global override; behavior degrades to legacy chain.
-  optional CompactModelRef default_compact_model = 7;
+  optional CompactModelRef default_compact_model = 3;
 }
 
 /// ADR-056: Reference to a (provider_id, model_id) pair.
@@ -566,44 +566,44 @@ message SessionMessage {
   string agent_id = 1;
   string session_id = 2;
   oneof event {
-    ChunkPayload          chunk           = 10;
-    ToolCallPayload       tool_call       = 11;
-    ToolResultPayload     tool_result     = 12;
-    DonePayload           done            = 13;
-    ErrorPayload          error           = 14;
-    StoppedPayload        stopped         = 15;
-    AskQuestionPayload    ask_question    = 16;
-    TodoUpdatedPayload    todo_updated    = 17;
-    ReasoningPayload      reasoning_started = 18;
-    ReasoningPayload      reasoning_ended   = 19;
-    CompactingPayload     compacting_started = 20;
-    CompactingPayload     compacting_ended   = 21;
-    ContextUsagePayload   context_usage   = 22;
-    MemoryUpdatedPayload  memory_updated  = 23;
-    SkillExecutedPayload       skill_executed          = 24;
+    ChunkPayload          chunk           = 3;
+    ToolCallPayload       tool_call       = 4;
+    ToolResultPayload     tool_result     = 5;
+    DonePayload           done            = 6;
+    ErrorPayload          error           = 7;
+    StoppedPayload        stopped         = 8;
+    AskQuestionPayload    ask_question    = 9;
+    TodoUpdatedPayload    todo_updated    = 10;
+    ReasoningPayload      reasoning_started = 11;
+    ReasoningPayload      reasoning_ended   = 12;
+    CompactingPayload     compacting_started = 13;
+    CompactingPayload     compacting_ended   = 14;
+    ContextUsagePayload   context_usage   = 15;
+    MemoryUpdatedPayload  memory_updated  = 16;
+    SkillExecutedPayload       skill_executed          = 17;
     // ADR-043: SessionStateChangedPayload (field 25) removed. Its fields
     // (status, ratio, context_usage) are now carried by the
     // retained SessionState topic (sessions/{sid}/state).
-    IterationLimitPausedPayload iteration_limit_paused = 26;
-    ToolApprovalNeededPayload   tool_approval_needed    = 27;
+    IterationLimitPausedPayload iteration_limit_paused = 18;
+    ToolApprovalNeededPayload   tool_approval_needed    = 19;
     // DEPRECATED (ADR-035): superseded by `stream_delta`, which carries the
     // actual data instead of a pure signal. Kept for backward compatibility
     // during the dual-channel migration (Phase 1).
-    NewDataAvailablePayload     new_data_available      = 28;
+    NewDataAvailablePayload     new_data_available      = 20;
     // ADR-035: incremental streaming delta carrying whole new lines (QoS 0).
-    StreamDeltaPayload          stream_delta            = 29;
+    StreamDeltaPayload          stream_delta            = 21;
     // ADR-035: a record finalized (committed to JSONL) carrying COMPLETE
     // content. Wired in Phase 2; proto defined now for the contract.
-    RecordCompletePayload       record_complete         = 30;
+    RecordCompletePayload       record_complete         = 22;
     // Runtime detected a tool-call loop and paused the session. The frontend
     // displays the message and a "Continue" button so the user can decide
     // whether to let the loop proceed.
-    LoopDetectedPausedPayload   loop_detected_paused    = 31;
+    LoopDetectedPausedPayload   loop_detected_paused    = 23;
     // ADR-045: Tool execution progress heartbeat. Carries elapsed_ms and
     // timeout_ms so the frontend can render a countdown / progress bar
     // WITHOUT downloading JSONL. Published every 5 s while a tool runs.
     // Short tools (5s) never trigger this event.
-    ToolProgressPayload         tool_progress           = 32;
+    ToolProgressPayload         tool_progress           = 24;
   }
 }
 
@@ -866,44 +866,33 @@ message ControlCommand {
   // on the control path.
   string instance_id = 1;
   oneof command {
-    CreateSession       create_session        = 10;
-    DeleteSession       delete_session        = 11;
-    // 12, 13 reserved (原 MessageCommand / Stop 已迁移, 字段号保留空缺)
-    CloseSession        close_session         = 19;
-    UpdateSessionTitle  update_session_title  = 20;
+    // ADR-076 §决策 4: the MQTT control plane now carries **no
+    // user-initiated traffic at all**. Every user-triggered session action
+    // runs over the Gateway's authenticated HTTP API instead — the first
+    // wave (create / open / close / delete / visibility / workspace /
+    // config) and the second (chat / stop / continue / approval /
+    // question_answer / cancel_tool / compress). The reason is uniform:
+    // an MQTT control message carries no identity, and the broker has no
+    // per-topic ACL, so any client connected to the broker could act
+    // inside another account's session — up to and including
+    // `approval_decision{approved:true}`, i.e. arbitrary command
+    // execution in someone else's workspace.
+    //
+    // The proto fields are *deleted*, not deprecated: with no field to
+    // set, the capability is unrepresentable rather than checked.
+    // `enable_notify` / `disable_notify` were dropped earlier as dead
+    // (ADR-035 Phase 3).
+    //
+    // What remains is traffic that is *not* a user action and therefore
+    // needs no user identity:
+    //   - `Intent` — Gateway → Runtime (cron triggers, cross-agent
+    //     messaging);
+    //   - `ActiveHeartbeat` — a presence pulse, not a state transition.
 
-    // ── Chat (5) ──
-    ChatMessage         chat_message          = 21;
-    Stop                stop                  = 22;
-    ContinueExecution   continue_execution    = 23;
-    EnableNotify        enable_notify         = 24;
-    DisableNotify       disable_notify        = 25;
+    // ── System ──
+    Intent              intent                = 2;
 
-    // ── User responses to runtime prompts (2) ──
-    ApprovalDecision    approval_decision     = 26;
-    QuestionAnswer      question_answer       = 27;
-
-    // ADR-045: cancel a single in-flight tool execution (does not stop the
-    // surrounding iteration). tool_call_id matches the one the runtime
-    // emitted via RecordComplete{ role: "tool_call" }.
-    CancelTool          cancel_tool           = 30;
-
-    // ── Per-session config (3) ──
-    ModelSwitch         model_switch          = 14;
-    ReasoningEffort     reasoning_effort      = 15;
-    WorkspaceSwitch     workspace_switch      = 18;
-
-    // ── Context management (2) ──
-    CompactContext      compact_context       = 16;
-    CompressAction      compress_action       = 28;
-
-    // ── System (1) ──
-    Intent              intent                = 17;
-
-    // ── Session lifecycle (1) — ADR-038 ──
-    OpenSession         open_session          = 29;
-
-    // ── Presence (1) — frontend ↔ runtime idle heartbeat ──
+    // ── Presence — frontend ↔ runtime idle heartbeat ──
     //
     // Periodically broadcast by the Desktop frontend (~every 15s) for the
     // currently selected agent. Pure observer signal — does NOT carry any
@@ -914,7 +903,7 @@ message ControlCommand {
     // Crash-safe by construction: if the frontend exits / disconnects,
     // heartbeats simply stop arriving and the watcher falls through to
     // the normal inbound-based deadline check after `heartbeat_timeout`.
-    ActiveHeartbeat     active_heartbeat      = 32;
+    ActiveHeartbeat     active_heartbeat      = 3;
   }
 }
 
@@ -924,158 +913,17 @@ message ControlCommand {
 message ActiveHeartbeat {
 }
 
-message CreateSession {
-}
-
-message DeleteSession {
-  string session_id = 2;
-}
-
-/// Graceful close: triggers distillation, preserves JSONL history.
-/// Use Delete to also remove the file.
-message CloseSession {
-  string session_id = 2;
-}
-
-/// Explicit session activation (transitions Closed/NotFound → Active).
-///
-/// Idempotent for already-Active sessions. Triggers lazy-resume from disk for
-/// Closed sessions. New semantic in v3.x (ADR-038) — NOT the legacy
-/// "subscribe push" `activate_session` which was renamed `enable_notify` in
-/// ADR-034 and removed in ADR-035 Phase 3.
-message OpenSession {
-  string session_id = 2;
-}
-
-message UpdateSessionTitle {
-  string session_id = 2;
-  string title = 3;
-}
-
-// ── Chat ─────────────────────────────────────────────────────────────────
-
-/// User chat message with rich payload support.
-///
-/// Rich fields are carried via `params_json` (string-encoded JSON) to keep
-/// MQTT messages small and let Runtime/LLM clients evolve the rich shape
-/// independently from the proto schema. Document content is NOT inlined —
-/// clients upload via HTTP `POST /sessions/{sid}/documents` and pass the
-/// returned `doc_id` list in `params_json.document_ids` instead.
-message ChatMessage {
-  string session_id = 2;
-  string message_id = 3;
-  string content = 4;
-  /// Optional slash command prefix (e.g. "/commit", "/review-pr")
-  string command = 5;
-  /// Rich payload as JSON. Shape:
-  ///   {
-  ///     "document_ids":     ["doc-abc"],      // uploaded via HTTP POST /documents
-  ///     "content_parts":    [{type:"text",text:"..."}, {type:"image_url",image_url:{url:"..."}}],
-  ///     "attached_context": [{abs_path, type:"file"|"selection", startLine?, endLine?}]
-  ///   }
-  /// Empty string = plain text only.
-  string params_json = 6;
-}
-
-message Stop {
-  string session_id = 2;
-  /// Stop reason for logging. Free-form but conventionally:
-  /// "user_requested" | "iteration_limit" | "budget_exceeded" | "error" | ...
-  string reason = 3;
-}
-
-// ADR-045: Cancel a single in-flight tool execution. Distinct from Stop
-// (which aborts the whole iteration) — the iteration continues after the
-// cancelled tool returns a "Cancelled by user" result, and the LLM sees it
-// in history.
-message CancelTool {
-  string session_id = 2;
-  /// Tool call id as published by RecordComplete{ role: "tool_call" }.
-  /// Unknown ids are silently dropped (race vs. tool natural completion).
-  string tool_call_id = 3;
-}
-
-message ContinueExecution {
-  string session_id = 2;
-  /// "user_requested" | "auto_resume"
-  string reason = 3;
-}
-
-message EnableNotify {
-  string session_id = 2;
-}
-
-message DisableNotify {
-  string session_id = 2;
-}
-
-// ── User responses ────────────────────────────────────────────────────────
-
-message ApprovalDecision {
-  string session_id = 2;
-  string request_id = 3;
-  bool approved = 4;
-  bool allow_all_session = 5;
-  /// Optional reason (e.g. user typed "this is a typo")
-  string reason = 6;
-}
-
-message QuestionAnswer {
-  string session_id = 2;
-  string request_id = 3;
-  string answer = 4;
-}
-
-// ── Per-session config ────────────────────────────────────────────────────
-
-message ModelSwitch {
-  string session_id = 2;
-  string model_id = 3;
-  // ADR-012: per-session provider override. Mirrors the `provider` field
-  // from the gRPC/WebSocket-era model_switch payload. Empty string means
-  // "do not change the current Provider instance — only update the model name".
-  string provider_id = 4;
-}
-
-message ReasoningEffort {
-  string session_id = 2;
-  /// "low" | "medium" | "high" | "auto"
-  string effort = 3;
-}
-
-message WorkspaceSwitch {
-  string session_id = 2;
-  string workspace_id = 3;
-}
-
-// ── Context management ────────────────────────────────────────────────────
-
-message CompactContext {
-  string session_id = 2;
-}
-
-enum CompressType {
-  COMPRESS_TYPE_UNSPECIFIED  = 0;
-  COMPRESS_TYPE_SUMMARY      = 1;  // → CompressionAction::CompressSummary
-  COMPRESS_TYPE_TOOL_RESULTS = 2;  // → CompressionAction::CompressToolResults
-}
-
-message CompressAction {
-  string session_id = 2;
-  CompressType compress_type = 3;
-}
-
 // ── System ────────────────────────────────────────────────────────────────
 
 /// Intent command — Gateway pushes an IntentReceived to a Runtime agent.
 /// Used for cron triggers and cross-agent messaging via MQTT.
 message Intent {
   /// Source of the intent (e.g. "cron:<agent_id>" for cron triggers).
-  string from = 2;
+  string from = 1;
   /// Action name (e.g. "hourly_check").
-  string action = 3;
+  string action = 2;
   /// Intent parameters as JSON.
-  string params_json = 4;
+  string params_json = 3;
 }
 
 // ── Memory (§3.2) — Phase 2/3 stubs ───────────────────────────────────
@@ -1101,12 +949,16 @@ message SidecarStatus {
 
 // ── Session lifecycle events (ADR-038) ────────────────────────────────────
 
-/// Server-pushed acknowledgment of an OpenSession control command.
+/// Server-pushed acknowledgment of a session activation.
 ///
 /// Published by Runtime after it has successfully transitioned the session
 /// to the Active state (either by idempotent no-op or by lazy-resume from
 /// disk). Desktop uses this to unlock the input area and to populate the
 /// session header (model, provider, last_active_at).
+///
+/// ADR-076 §决策 4: activation is requested over HTTP (`POST
+/// /api/agents/{id}/sessions/{sid}/open`); this event is still the
+/// broadcast notification, so other Desktop windows converge.
 ///
 /// Topic: acowork/agents/{id}/sessions/{sid}/opened (Retained)
 message SessionOpened {
@@ -1120,13 +972,13 @@ message SessionOpened {
 }
 
 /// Server-pushed error when a session-level command targets a non-Active
-/// session. Published by Runtime when ChatMessage / ModelSwitch / etc.
+/// session. Published by Runtime when ChatMessage / CompressAction / etc.
 /// arrives for a session that has been closed or never existed.
 ///
 /// Topic: acowork/agents/{id}/sessions/{sid}/not_opened
 message SessionNotOpened {
   string session_id = 1;
-  /// Name of the attempted command (e.g. "chat_message", "model_switch").
+  /// Name of the attempted command (e.g. "chat_message", "compress_action").
   string attempted_command = 2;
   /// "session_not_found" | "session_closed"
   string reason = 3;
@@ -1261,34 +1113,34 @@ message NodeInfo {
   string node_id = 1;
   // (field 2 retired — ADR-075: machine_uid deleted, slot left unused;
   // node_id is now the stable UUID v4 routing key)
-  string hostname = 3;
-  string os = 4;      // std::env::consts::OS
-  string arch = 5;    // std::env::consts::ARCH
+  string hostname = 2;
+  string os = 3;      // std::env::consts::OS
+  string arch = 4;    // std::env::consts::ARCH
   /// Version of the acowork-node binary (CARGO_PKG_VERSION).
-  string node_version = 6;
+  string node_version = 5;
   /// Node control-plane protocol version spoken by this node. The
   /// Gateway rejects install/start commands when below its minimum
   /// supported version (ADR-055 §6.9 version negotiation).
-  uint32 protocol_version = 7;
+  uint32 protocol_version = 6;
   /// Capability tags — grows over the ADR-055 phases
   /// ("process", "package", "proxy", "sidecar", "fs_browse").
-  repeated string capabilities = 8;
+  repeated string capabilities = 7;
   /// Maximum concurrent Runtime processes (ADR-055 §6.18, default 16).
-  uint32 max_agents = 9;
+  uint32 max_agents = 8;
   /// Current running agent count (informational heartbeat).
-  uint32 agent_count = 10;
+  uint32 agent_count = 9;
   /// This node's reverse-proxy base URL (`http://{advertise_host}:{port}`,
   /// ADR-055 §6.3). The Gateway uses it to reach node-local HTTP services
   /// (e.g. `/fs/browse` for remote filesystem browsing, L7-1).
-  string http_endpoint = 11;
+  string http_endpoint = 10;
   /// Display name (slug, renameable, ADR-075 D2) — user-facing only,
   /// NEVER a routing key. Defaults to the hostname slug at first start.
-  string node_name = 12;
+  string node_name = 11;
   /// True when this node was spawned by the Gateway (`--gateway-managed`)
   /// and the marker was persisted into identity.json (ADR-075 D5). The
   /// Gateway uses it to recognize its own-machine node. Authority: this
   /// field on every online NodeInfo (enroll never carries it).
-  bool gateway_managed = 13;
+  bool gateway_managed = 12;
 }
 
 /// Node → Gateway installed-agent inventory entry (ADR-055 §6.5).
@@ -1338,19 +1190,19 @@ message NodeControlCommand {
   /// QoS 1 duplicates are detected by this id and not re-executed.
   string request_id = 2;
   oneof command {
-    NodePing          ping           = 10;  // node-scoped liveness probe
-    NodeStart         start          = 11;  // Phase 2b
-    NodeStop          stop           = 12;  // Phase 2b
-    NodeInstall       install        = 13;  // Phase 3 (remote package distribution)
-    NodeUninstall     uninstall      = 14;  // Phase 2b
-    NodeSkillsImport  skills_import  = 15;  // Phase 2b
+    NodePing          ping           = 3;  // node-scoped liveness probe
+    NodeStart         start          = 4;  // Phase 2b
+    NodeStop          stop           = 5;  // Phase 2b
+    NodeInstall       install        = 6;  // Phase 3 (remote package distribution)
+    NodeUninstall     uninstall      = 7;  // Phase 2b
+    NodeSkillsImport  skills_import  = 8;  // Phase 2b
     // 16 was `avatar_update` — retired in ADR-009 Phase 5: avatar / display-name
     // preferences are agent data and travel HTTP (Runtime `/avatar-config`),
     // never MQTT. Field 16 is retired and MUST NOT be reused.
-    NodeClone         clone          = 17;  // Phase 3b (node-local clone)
-    NodeUpgrade       upgrade        = 18;  // Phase 3b (package upgrade)
-    NodePublishPrepare publish_prepare = 19; // Phase 3b (publish prepare)
-    NodePublishBuild  publish_build  = 20;  // Phase 3b (publish build/sign)
+    NodeClone         clone          = 9;  // Phase 3b (node-local clone)
+    NodeUpgrade       upgrade        = 10;  // Phase 3b (package upgrade)
+    NodePublishPrepare publish_prepare = 11; // Phase 3b (publish prepare)
+    NodePublishBuild  publish_build  = 12;  // Phase 3b (publish build/sign)
   }
 }
 
@@ -1518,19 +1370,19 @@ message NodeEnroll {
   string node_id = 1;
   // (field 2 retired — ADR-075: machine_uid deleted; enrollment is
   // idempotent on node_id alone, slot left unused)
-  string os = 3;      // std::env::consts::OS
-  string arch = 4;    // std::env::consts::ARCH
+  string os = 2;      // std::env::consts::OS
+  string arch = 3;    // std::env::consts::ARCH
   /// Version of the acowork-node binary (CARGO_PKG_VERSION).
-  string node_version = 5;
+  string node_version = 4;
   /// Node control-plane protocol version (mirrors NodeInfo.
   /// protocol_version).
-  uint32 protocol_version = 6;
+  uint32 protocol_version = 5;
   /// Capability tags — mirrors NodeInfo.capabilities.
-  repeated string capabilities = 7;
+  repeated string capabilities = 6;
   /// One-time enrollment token (plaintext, only ever carried in this
   /// message). The Gateway stores only its sha256 hash and marks it
   /// consumed on success.
-  string enrollment_token = 8;
+  string enrollment_token = 7;
 }
 
 /// Gateway → Node enrollment reply (ADR-055 §6.12, Phase 5a).
@@ -1542,11 +1394,11 @@ message NodeEnrollResult {
   /// Long-lived per-node credential. Also used for HTTP-channel
   /// authentication via the `X-ACowork-Node-Token` header. The Node
   /// persists it into identity.json; present only on success.
-  string node_token = 3;
-  string status = 4;
+  string node_token = 2;
+  string status = 3;
   /// Human-readable detail ("enrolled", "token consumed", conflict
   /// explanation, etc.).
-  string message = 5;
+  string message = 4;
 }
 
 // ── ADR-059: Bootstrap capability-readiness snapshot ─────────────────────

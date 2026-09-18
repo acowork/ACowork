@@ -136,7 +136,7 @@ fn golden_node_info_envelope() {
     // Golden vector — computed from the contract above; any change to
     // field numbers/types in NodeInfo or the envelope tag must update
     // this deliberately.
-    let expected = "08 01 8a 05 68 0a 05 6c 6f 63 61 6c 1a 0b 6e 69 63 68 6f 6c 61 73 2d 70 63 22 05 6d 61 63 6f 73 2a 07 61 61 72 63 68 36 34 32 05 30 2e 31 2e 30 38 01 42 07 70 72 6f 63 65 73 73 42 07 70 61 63 6b 61 67 65 48 10 5a 16 68 74 74 70 3a 2f 2f 31 32 37 2e 30 2e 30 2e 31 3a 31 39 39 30 30 62 0b 6e 69 63 68 6f 6c 61 73 2d 70 63 68 01";
+    let expected = "08 01 e2 01 68 0a 05 6c 6f 63 61 6c 12 0b 6e 69 63 68 6f 6c 61 73 2d 70 63 1a 05 6d 61 63 6f 73 22 07 61 61 72 63 68 36 34 2a 05 30 2e 31 2e 30 30 01 3a 07 70 72 6f 63 65 73 73 3a 07 70 61 63 6b 61 67 65 40 10 52 16 68 74 74 70 3a 2f 2f 31 32 37 2e 30 2e 30 2e 31 3a 31 39 39 30 30 5a 0b 6e 69 63 68 6f 6c 61 73 2d 70 63 60 01";
     assert_eq!(hex(&bytes), expected.replace(' ', ""));
 
     // Round-trip contract: the golden bytes must decode back to the
@@ -160,7 +160,7 @@ fn golden_node_ping_command_envelope() {
         sample_ping_command(),
     ));
     let bytes = envelope.encode_to_vec();
-    let expected = "08 01 92 05 13 0a 05 6c 6f 63 61 6c 12 08 72 65 71 2d 30 30 30 31 52 00";
+    let expected = "08 01 ea 01 13 0a 05 6c 6f 63 61 6c 12 08 72 65 71 2d 30 30 30 31 1a 00";
     assert_eq!(hex(&bytes), expected.replace(' ', ""));
 
     let decoded = decode_envelope(&bytes);
@@ -179,7 +179,7 @@ fn golden_node_ping_command_envelope() {
 fn golden_node_event_envelope() {
     let envelope = envelope_with(data_envelope::Payload::NodeEvent(sample_event()));
     let bytes = envelope.encode_to_vec();
-    let expected = "08 01 9a 05 1b 0a 05 6c 6f 63 61 6c 12 08 72 65 71 2d 30 30 30 31 1a 02 6f 6b 22 04 70 6f 6e 67";
+    let expected = "08 01 f2 01 1b 0a 05 6c 6f 63 61 6c 12 08 72 65 71 2d 30 30 30 31 1a 02 6f 6b 22 04 70 6f 6e 67";
     assert_eq!(hex(&bytes), expected.replace(' ', ""));
 
     let decoded = decode_envelope(&bytes);
@@ -433,7 +433,7 @@ fn golden_node_ready_envelope() {
         },
     ));
     let bytes = envelope.encode_to_vec();
-    let expected = "08 01 ba 05 09 0a 05 6c 6f 63 61 6c 10 01";
+    let expected = "08 01 92 02 09 0a 05 6c 6f 63 61 6c 10 01";
     assert_eq!(hex(&bytes), expected.replace(' ', ""));
 
     // Round-trip contract: the golden bytes must decode back to the
@@ -455,7 +455,7 @@ fn golden_node_ready_envelope() {
 #[test]
 fn golden_bootstrap_state_envelope() {
     // ADR-059 §5.3: retained bootstrap snapshot published on
-    // `acowork/global/bootstrap` (DataEnvelope oneof field 16). Pins
+    // `acowork/global/bootstrap` (DataEnvelope oneof field 8). Pins
     // the field numbers so consumers (Desktop / runtime) cannot
     // silently drift from the Gateway's published shape.
     let envelope = envelope_with(data_envelope::Payload::BootstrapState(
@@ -488,7 +488,7 @@ fn golden_node_enroll_envelope() {
     // Gateway ↔ Node enrollment contract.
     let envelope = envelope_with(data_envelope::Payload::NodeEnroll(sample_enroll()));
     let bytes = envelope.encode_to_vec();
-    let expected = "08 01 aa 05 3c 0a 05 67 70 75 2d 31 1a 05 6d 61 63 6f 73 22 07 61 61 72 63 68 36 34 2a 05 30 2e 31 2e 30 30 01 3a 07 70 72 6f 63 65 73 73 3a 07 70 61 63 6b 61 67 65 42 08 74 6f 6b 2d 31 32 33 34";
+    let expected = "08 01 82 02 3c 0a 05 67 70 75 2d 31 12 05 6d 61 63 6f 73 1a 07 61 61 72 63 68 36 34 22 05 30 2e 31 2e 30 28 01 32 07 70 72 6f 63 65 73 73 32 07 70 61 63 6b 61 67 65 3a 08 74 6f 6b 2d 31 32 33 34";
     assert_eq!(hex(&bytes), expected.replace(' ', ""));
 
     // Round-trip contract: the golden bytes must decode back to the
@@ -509,7 +509,7 @@ fn golden_node_enroll_result_envelope() {
     // (node_token is the long-lived per-node credential).
     let envelope = envelope_with(data_envelope::Payload::NodeEnrollResult(sample_enroll_result()));
     let bytes = envelope.encode_to_vec();
-    let expected = "08 01 b2 05 24 0a 05 67 70 75 2d 31 1a 0d 74 6f 6b 2d 6e 6f 64 65 2d 30 30 30 31 22 02 6f 6b 2a 08 65 6e 72 6f 6c 6c 65 64";
+    let expected = "08 01 8a 02 24 0a 05 67 70 75 2d 31 12 0d 74 6f 6b 2d 6e 6f 64 65 2d 30 30 30 31 1a 02 6f 6b 22 08 65 6e 72 6f 6c 6c 65 64";
     assert_eq!(hex(&bytes), expected.replace(' ', ""));
 
     let decoded = decode_envelope(&bytes);

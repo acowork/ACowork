@@ -124,15 +124,28 @@ impl AgentRegistry {
         }
 
         let topic_instance_id = parts[2].to_string();
-        let payload_str = match std::str::from_utf8(payload) {
-            Ok(s) => s,
-            Err(_) => {
+        // Discriminate plaintext status from the protobuf loopback envelope
+        // by **vocabulary**, not by "is it valid UTF-8": plaintext status is
+        // a closed set ("online" / "sleeping" / "offline" / "degraded").
+        // After the ADR-076 field-number compaction a
+        // `DataEnvelope<AgentStatus>` with small field numbers and ASCII
+        // strings encodes to bytes that are *also* valid UTF-8, so a
+        // `from_utf8` test misread the envelope as plaintext and flipped a
+        // freshly-online agent back to offline within the same second.
+        let plaintext = std::str::from_utf8(payload)
+            .ok()
+            .map(str::trim)
+            .filter(|s| matches!(*s, "online" | "sleeping" | "offline" | "degraded"));
+
+        let payload_str = match plaintext {
+            Some(s) => s,
+            None => {
                 // The Gateway re-publishes plain-text status as a protobuf
                 // `DataEnvelope` on this SAME topic (`dispatch.rs`), and our
                 // own `acowork/agents/+/status` subscription receives that
-                // loopback. Decode it instead of treating a binary payload
-                // as offline — that used to flip a freshly-online agent
-                // (e.g. the auto-started System Agent) back to offline
+                // loopback. Decode it instead of treating a non-status
+                // payload as offline — that used to flip a freshly-online
+                // agent (e.g. the auto-started System Agent) back to offline
                 // within the same second, hiding `ready=true` from
                 // `/api/agents` and timing the Desktop out (Phase 5a
                 // startup report).
