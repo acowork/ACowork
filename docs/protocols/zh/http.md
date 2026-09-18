@@ -37,8 +37,9 @@
     - [5.3.3 消息条目中的 `attached_items`](#533-消息条目中的-attached_items)
   - [5.4 记忆 (Memory)](#54-记忆-memory)
   - [5.5 工作区 (Workspace)](#55-工作区-workspace)
+  - [5.6 会话控制面（ADR-076 §决策 4）](#56-会话控制面adr-076-决策-4)
 - [6. 静态文件服务（直接流式返回原始字节）](#6-静态文件服务直接流式返回原始字节)
-- [7. 已迁移到 MQTT 的交互（HTTP 端点已删除）](#7-已迁移到-mqtt-的交互http-端点已删除)
+- [7. MQTT 职责边界（ADR-076 §决策 4）](#7-mqtt-职责边界adr-076-决策-4)
 - [8. 通用错误码](#8-通用错误码)
 - [9. 典型请求示例](#9-典型请求示例)
 - [10. 注意事项](#10-注意事项)
@@ -52,11 +53,19 @@
 - **认证**：当 `[http].auth_enabled = true` 时，所有 `/api/*` 请求需带
   `Authorization: Bearer <token>`，token 文件位于 `<data_dir>/http_token`。
 - **错误格式**：`{ "error": "..." }` + 对应 HTTP 状态码
-- **流式事件通道（MQTT）**：聊天事件流不再走 WebSocket，而是客户端订阅 [MQTT](./mqtt.md)
-  topic `chat/stream/{session_id}`（Desktop App 通过其 Tauri 后端的 MQTT 客户端订阅）。
-- **命令 / 写入通道（MQTT）**：用户发起的会话控制（发消息、激活、重命名、删除、关闭、
-  继续）以及审批 / 问答的人机交互，也都改走 MQTT 主题
-  `acowork/agents/{id}/sessions/control/{cmd}`，不再走 HTTP（详见 [§7](#7-已迁移到-mqtt-的交互http-端点已删除)）。
+- **事件通道（MQTT，后端 → 前端）**：MQTT 只承载 Runtime / Gateway **主动上报**的事件，
+  前端被动订阅刷新界面：聊天事件流（`chunk` / `tool_call` / `done` …）订阅
+  `acowork/agents/{id}/sessions/{sid}/messages/#`；会话增删订阅 `sessions/created` /
+  `sessions/deleted`。MQTT **不承载任何用户主动触发的操作**。
+- **用户操作通道（HTTP）**：ADR-076 §决策 4 之后，**所有用户主动触发的会话操作一律走
+  HTTP**（经 Gateway token 鉴权 + 反代注入 `x-user-id`）。分两批迁移：**生命周期**
+  （create / open / close / delete / visibility / workspace / config）与**会话动作**
+  （发消息 / 停止 / 继续 / 审批 / 问答回答 / 取消工具 / 压缩），见
+  [§5.6](#56-会话控制面adr-076-决策-4)。理由统一：MQTT 控制消息**不携带身份**——broker
+  无法打标记，Runtime 因此记不了 session owner、也校验不了 owner，任何 broker 客户端都能
+  静默改写他人会话（甚至用 `approval_decision{approved:true}` 在他人工作区执行命令）。
+  `ControlCommand` 中除 `Intent` / `ActiveHeartbeat`（均非用户动作）外的字段**已全部删除**
+  （见 [mqtt.md](./mqtt.md) §3）——是**发不出去**，而非"发出去被拒收"。
 - **全局资源主动拉取（HTTP）**：Runtime 在 mqtt client + available_cache 就绪后（phase_a）
   会主动 `GET /api/global-resources` 并执行 **503 重试循环**（30s 总预算），作为 MQTT retained 推送**免受 
   retained-delivery 竞态的兜底**。与 retained 推送共用同一个 
@@ -86,11 +95,16 @@ sequenceDiagram
         G-->>C: 200 + JSON（verbatim 透传）
     else 静态文件（Gateway 直返字节流）
         G-->>C: 200 + raw bytes（HTML / 图片 / 视频）
-    else 用户命令 / 流式事件（已迁 MQTT）
-        C->>B: PUB acowork/agents/{id}/sessions/control/{cmd}
-        B-->>RT: control/{cmd}
-        RT-->>B: PUB chunk / tool_call / done
-        B-->>C: 订阅 chat/stream/{session_id} 收到事件
+    else 用户操作（HTTP，ADR-076 §决策 4）
+        C->>G: POST /api/agents/{id}/sessions（create / open / close、DELETE .../{sid}）
+        C->>G: POST .../sessions/{sid}/messages | stop | continue | approval | answer | cancel-tool | compress
+        G->>RT: 反代 + x-user-id（Gateway 已鉴权）
+        RT->>RT: 记录 / 校验 session owner
+        RT-->>G: JSON（含新建 session_id）
+        G-->>C: 200 + JSON
+    else 事件回流（MQTT，后端 → 前端）
+        RT->>B: PUB chunk / tool_call / done / sessions/created …
+        B-->>C: 订阅 messages/# 收到事件（前端被动刷新）
     end
 ```
 
@@ -101,12 +115,12 @@ sequenceDiagram
 | Gateway 原生 | Gateway 单点处理 | **否** |
 | Gateway → Runtime 反代 | Gateway 透传到 Runtime localhost HTTP | **是**（503 if offline） |
 | 静态文件 | Gateway 直接读盘返回字节流 | **否**（仅要求文件存在） |
-| MQTT 命令 / 流 | rumqttd Broker 中转 | 是（Runtime 通过 MQTT 订阅响应） |
+| MQTT 事件流（后端 → 前端上报） | rumqttd Broker 中转 | 是（Runtime 发布事件，前端订阅） |
 | 全局资源主动拉取（`GET /api/global-resources`） | Gateway 单点响应 Runtime 主动拉取 | **否**（见 [§4.13](#413-全局资源快照runtime-主动拉取入口)） |
 
 Gateway **不持久化业务数据**：Memory、Skill、Agent 运行时配置、Session 状态等真实数据存于
-Runtime 本地文件 / Grafeo；Gateway 通过 HTTP 反向代理拉取快照或透传请求，
-命令 / 写入则通过 MQTT 控制主题。
+Runtime 本地文件 / Grafeo；Gateway 通过 HTTP 反向代理拉取快照、透传用户操作（并注入身份），
+MQTT 仅用于 Runtime / Gateway → 前端的事件上报。
 
 ---
 
@@ -198,7 +212,8 @@ ACOWORK_GATEWAY_ALLOWED_NODE_IPS="192.168.1.20,192.168.1.0/24"
 ### 4.3 Agent 生命周期控制
 
 子进程级控制：start / stop / restart-debug / 模型与搜索 provider 探测。
-**模型与 provider 的切换**通过 MQTT `sessions/control/model_switch` 推送，而非 HTTP。
+**模型与 provider 的切换是 per-session 配置**，走 HTTP `PUT /api/agents/{id}/sessions/{sid}/config`
+（`{model, provider}`，见 [§5.6.1](#561-生命周期第一批)），不再走 MQTT。
 
 | 方法 | 路径 | 用途 |
 |---|---|---|
@@ -522,24 +537,166 @@ Gateway 不解析 Runtime 响应的 body，所有读写都 verbatim 透传。这
 
 ### 5.2 会话只读查询
 
-> **会话的写操作（创建 / 激活 / 重命名 / 删除 / 关闭 / 继续）已全部迁到 MQTT**
-> `acowork/agents/{id}/sessions/control/{cmd}`，详见 [§7](#7-已迁移到-mqtt-的交互http-端点已删除)。
-> 此处仅保留**只读**反代。
+> **所有会话控制（生命周期 + 动作）都走 HTTP** —— 见
+> [§5.6](#56-会话控制面adr-076-决策-4)。MQTT 不再承载任何用户主动触发的操作
+> （ADR-076 §决策 4），只承载 Runtime → 前端的事件上报。
+
+**认证与隔离（ADR-076 §决策 4）**：`multi_user` 模式下 Gateway 鉴权后把调用者的身份
+scope 写入 `x-user-id` 头再反代给 Runtime；Runtime 据此过滤列表、并校验单会话的读权限。
+`local` 模式（bind `127.0.0.1`）不注入该头，Runtime 视为不过滤——与 ADR-076 之前行为一致。
+
+| 头 | 含义 | Runtime 行为 |
+|---|---|---|
+| `x-user-id: <uuid>` | 普通用户的 `user_id` | 只返回该用户的 public session + 自己的 private session |
+| `x-user-id: *` | admin（或无 `as_user` 的 admin 视图） | 不过滤 |
+| 无 `x-user-id` | local 模式 | 不过滤 |
+
+**`as_user`（admin 只读视图）**：admin 可在**只读**请求上加 `?as_user=<user_id>`，
+Gateway 会校验并把它当作 scope 注入（等同于以该用户身份读）。**写方法（POST / DELETE）
+携带 `as_user` 一律 403**——否则审计日志会把操作记在被冒充的用户名下。
 
 | 方法 | 路径 | 用途 | Runtime 路径 |
 |---|---|---|---|
-| GET | `/api/agents/{id}/sessions` | 会话列表（运行时视角，token 统计合并） | `/sessions` |
-| GET | `/api/agents/{id}/latest-session` | 最新会话（启动时快速定位） | `/sessions/latest` |
+| GET | `/api/agents/{id}/sessions` | 会话列表（运行时视角，token 统计合并；**按调用者 scope 过滤**） | `/sessions` |
+| GET | `/api/agents/{id}/latest-session` | 最新会话（启动时快速定位；**不可读时 404**） | `/sessions/latest` |
 | GET | `/api/agents/{id}/conversations/latest` | 最新会话消息（ADR-034 唯一保留的 conversations 端点） | `/sessions/latest` |
 | GET | `/api/agents/{id}/sessions/{sid}` | 单会话完整状态（合并 meta + state） | `/sessions/{sid}` |
 | GET | `/api/agents/{id}/sessions/{sid}/state` | **legacy 别名**：转发到 `/sessions/{sid}`（保留以兼容旧调用方） | `/sessions/{sid}` |
 | GET | `/api/agents/{id}/sessions/{sid}/messages` | 拉取消息历史（支持 cursor 分页） | `/sessions/{sid}/messages` |
+| GET | `/api/agents/{id}/sessions/{sid}/config` | 读取会话 config 快照（ADR-047） | `/sessions/{sid}/config` |
+| PUT | `/api/agents/{id}/sessions/{sid}/config` | 写会话 config（**owner 或 admin**） | `/sessions/{sid}/config` |
+
+> **不可读 = 404，不是 403**。403 会把端点变成"某 session 是否存在"的探测器，正是列表
+> 过滤要藏起来的信息。因此**不存在**与**无权限**返回同一个状态码。
+>
+> **公开 ≠ 可改**：`visibility = public`（或缺省）的 session 任何人可读，但只有 owner /
+> admin 可写（open / close / delete / 改 config / 设可见性）。
+
+### 5.6 会话控制面（ADR-076 §决策 4）
+
+⚠️ 这十四条是 **HTTP 控制接口**，与 [§5.2](#52-会话只读查询) 同属会话域，但**不是**只读反代：
+Gateway 必须鉴权，Runtime 必须校验 owner。ADR-076 §决策 4 把**所有用户主动触发的会话操作**
+从 MQTT 搬到 HTTP，分两批：**5.6.1 生命周期**（第一批）与 **5.6.2 会话动作**（第二批）。
+`open` 也是**写**授权：它把会话激活进 Runtime 内存，属于生命周期变更，只有 owner / admin 可调（见下）。
+
+#### 5.6.1 生命周期（第一批）
+
+| 方法 | 路径 | 用途 | Runtime 路径 | 权限 |
+|---|---|---|---|---|
+| POST | `/api/agents/{id}/sessions` | 创建会话（**owner = 调用者**） | `/sessions` | 任意已登录用户 |
+| POST | `/api/agents/{id}/sessions/{sid}/open` | 激活（ADR-038，Closed/NotFound → Active，幂等） | `/sessions/{sid}/open` | owner / admin |
+| POST | `/api/agents/{id}/sessions/{sid}/close` | 优雅关闭（触发蒸馏，保留 JSONL） | `/sessions/{sid}/close` | owner / admin |
+| DELETE | `/api/agents/{id}/sessions/{sid}` | 删除会话及其文件 | `/sessions/{sid}` | owner / admin |
+| PUT | `/api/agents/{id}/sessions/{sid}/visibility` | 分享 / 取消分享 | `/sessions/{sid}/visibility` | owner / admin |
+| PUT | `/api/agents/{id}/sessions/{sid}/workspace` | 切换工作区 | `/sessions/{sid}/workspace` | owner / admin |
+| PUT | `/api/agents/{id}/sessions/{sid}/config` | 切模型 / 思考深度 / 标题（见下） | `/sessions/{sid}/config` | owner / admin |
+
+> **`open` 与 `close` 都是写授权**：`open` 会把会话**激活**进 Runtime 内存，而 `Active` /
+> `Closed` 是 per-session **全局**状态（不是 per-connection）。所以公开会话的非 owner **不激活**
+> ——前端在 `can_write === false` 时根本不发 `POST .../open`（见 §5.2 的只读会话说明）。
+> 若让观众激活，就会造出一个"观众无权关（`close` 是写授权，旁观者不能拆掉 owner 的会话）、
+> owner 也不知道被谁占着"的常驻会话：生命周期失去责任人，而 Runtime 目前**没有** per-session
+> GC（`evict_idle_sessions` 无调用者，只有 agent 级自动休眠），回收它需要观察者引用计数。
+>
+> **公开会话的只读表现**：非 owner 打开他人 public 会话时，`GET /sessions` 下发的
+> `can_write: false` 驱动前端禁用输入框与模型 / 工作区 / 可见性开关，并在 `openSession` /
+> `closeTab` 里分别跳过 `POST .../open` / `POST .../close`（只本地开合 tab）；历史仍由
+> `GET .../messages`（读授权）加载，事件流由通配 MQTT 订阅接收。发送、停止等写操作即使绕过
+> 前端也会被 Runtime 以 404 拒绝（`is_writable_by`）。
+>
+> **`PUT .../visibility` 的 UI**：Desktop 输入框工具行（composer）的 🌐 / 🔒 图标，仅
+> `can_write === true` 可点，点击即乐观翻转 + 上述 PUT（不弹二次确认，可逆）。
+
+#### 5.6.2 会话动作（第二批）
+
+第二批把"作用在已打开会话上"的用户操作也搬到 HTTP。这些操作**不承载归属决策**（它们改的是
+会话内容而非归属），搬到 HTTP 换不到授权收益，但换来**统一的分工**：用户主动触发 → HTTP；
+后端上报 → MQTT 事件。这样 multi-user 下每条用户操作都必然携带身份，没有例外路径。
+
+| 方法 | 路径 | 用途 | Runtime 路径 | 权限 |
+|---|---|---|---|---|
+| POST | `/api/agents/{id}/sessions/{sid}/messages` | 发消息（原 mqtt `chat_message`） | `/sessions/{sid}/messages` | owner（写） |
+| POST | `/api/agents/{id}/sessions/{sid}/stop` | 停止当前轮（原 mqtt `stop`） | `/sessions/{sid}/stop` | owner |
+| POST | `/api/agents/{id}/sessions/{sid}/continue` | 暂停后恢复（原 mqtt `continue_execution`） | `/sessions/{sid}/continue` | owner |
+| POST | `/api/agents/{id}/sessions/{sid}/approval` | 工具审批允许 / 拒绝（原 mqtt `approval_decision`） | `/sessions/{sid}/approval` | owner |
+| POST | `/api/agents/{id}/sessions/{sid}/answer` | 回答 `ask_user_question`（原 mqtt `question_answer`） | `/sessions/{sid}/answer` | owner |
+| POST | `/api/agents/{id}/sessions/{sid}/cancel-tool` | 取消单个在跑工具（原 mqtt `cancel_tool`，ADR-045） | `/sessions/{sid}/cancel-tool` | owner |
+| POST | `/api/agents/{id}/sessions/{sid}/compress` | 上下文压缩（原 mqtt `compress_action`；`compact_context` 是重复命令，一并删除） | `/sessions/{sid}/compress` | owner |
+
+**动作请求体**（字段与 Runtime handler 一一对应；除注明外均可省略）：
+
+```json
+// POST .../messages — 等价原 mqtt ChatMessage（params_json 是**字符串**，
+// Runtime 自行从中解析 attached_items / content_parts）
+{ "content": "...", "message_id": "...", "command": "", "params_json": "{}" }
+
+// POST .../stop  &  POST .../continue —— reason 缺省/空串归一为 "user_requested"
+{ "reason": "user_requested" }
+// POST .../approval
+{ "request_id": "...", "approved": true, "allow_all_session": false, "reason": null }
+// POST .../answer
+{ "request_id": "...", "answer": "..." }
+// POST .../cancel-tool
+{ "tool_call_id": "..." }
+// POST .../compress —— compress_type：0=UNSPECIFIED 1=SUMMARY 2=TOOL_RESULTS
+// （Desktop 输入框 usage 菜单发 1）
+{ "compress_type": 1 }
+```
+
+**返回与执行结果**：鉴权 + 入队成功 → `202 Accepted`；无权 / 非 owner → `403`；
+会话不存在或不可读 → `404`。真正的执行结果仍走 MQTT 事件
+（`messages/{chunk,tool_call,done,stopped,…}`）——**事件面是唯一的结果来源**，与迁移前一致。
+
+**创建请求体**（字段全可选；`visibility` 省略或 `null` = 公开）：
+
+```json
+{ "workspace_id": "...", "model": "...", "provider": "...", "visibility": "private" }
+```
+
+**写请求体**：
+
+```json
+// PUT .../workspace — 必须走这个端点，不能走 /config：/config 的 workspace_id
+// 分支只改 meta，不重推 workspace context / prompt 文件，工具会在旧目录里干活。
+{ "workspace_id": "ws-123" }
+
+// PUT .../config — 已从 MQTT 删除的三条写命令改走这里（字段名 = SessionConfigDelta）
+{ "model": "gpt-5", "provider": "openai" }   // 原 mqtt model_switch
+{ "reasoning_effort": "high" }               // 原 mqtt reasoning_effort
+{ "title": "新标题" }                         // 原 mqtt update_session_title
+```
+
+**可见性开关**（`SessionVisibility`）：`None`（字段缺失）与 `"public"` 等价——**默认公开**。
+这是 opt-out 而非 opt-in：ADR-076 之前创建的 session 没有该字段、本来就对所有人可见，
+默认 `private` 会在升级瞬间把历史会话全部变成私有（静默的数据丢失）。
+
+| `visibility` | 非 owner 能否读 | 非 owner 能否写 |
+|---|---|---|
+| 缺失 / `"public"` | ✅ | ❌（404） |
+| `"private"` | ❌（404） | ❌（404） |
+
+**`can_write` 字段**：`GET /api/agents/{id}/sessions` 的每一项都带 `can_write: bool`
+（`SessionMeta::is_writable_by(scope)` 的结果）。**前端禁用写控件的唯一依据**——不要从
+`visibility` 反推：public 只表示"别人能读"，而 admin / local 模式还能写自己没有的会话。
+字段缺失（老 Runtime）按 `true` 处理。
+
+**MQTT 侧已全部删除**：上述两批共十四条命令曾以 `sessions/control/{cmd}` 发布
+（`create_session` / `open_session` / `close_session` / `delete_session` / `model_switch` /
+`reasoning_effort` / `update_session_title` / `workspace_switch` / `chat_message` / `stop` /
+`continue_execution` / `approval_decision` / `question_answer` / `cancel_tool` /
+`compress_action`；`compact_context` 是 `compress_action` 的重复命令，一并删除）。它们的
+proto 字段已从 `ControlCommand` 中**移除**（字段号随后整体重排为连续，见
+[mqtt.md](./mqtt.md) §4），`ControlAction` / `InboundMessage` 的对应变体、以及 Gateway /
+Tauri 的命令名映射表也一并删除 —— 也就是说这不是"发出去被拒收"，而是**根本发不出去**：
+任何 broker 客户端都无法借此静默改写他人会话。
+`ControlCommand` 现只余 `Intent`（Gateway → Runtime）与 `ActiveHeartbeat`（存在性心跳），
+**均非用户动作**。新代码请用上表 HTTP 接口：只有 HTTP 路径携带身份，MQTT 控制消息不携带。
 
 ### 5.3 附件（Attachment）
 
 附件 blob 落盘到 Runtime `<work_dir>/files/<document_id>`（无扩展名）；元数据经
-MQTT PUB `acowork/agents/{id}/sessions/control/chat_message` 的 `attached_items`
-字段传给 Runtime 写 JSONL 消息条目（详见 [mqtt.md §会话写操作](./mqtt.md) 与
+`POST /api/agents/{id}/sessions/{sid}/messages` 的 `params_json`
+（其中的 `attached_items` 字段）传给 Runtime 写 JSONL 消息条目（详见 [§5.6.2](#562-会话动作第二批) 与
 [ADR-046](../../adr/zh/ADR-046-unified-attachment-entries.md)）。
 
 | 方法 | 路径 | 用途 | Runtime 路径 |
@@ -709,28 +866,47 @@ snake_case：`document_id` / `size_bytes` / `abs_path` / `start_line` / `end_lin
 
 ---
 
-## 7. 已迁移到 MQTT 的交互（HTTP 端点已删除）
+## 7. MQTT 职责边界（ADR-076 §决策 4）
 
-> **ADR-033 + ADR-034**：以下交互改走 MQTT，**HTTP 不再提供对应端点**。
-> Gateway HTTP 层注册这些路径会与 `proxy_routes` / `chat_routes` 冲突，启动时 panic。
-> 调用方应订阅 / 发布到对应 MQTT topic。完整协议见 [mqtt.md](./mqtt.md)。
+> **ADR-033 + ADR-034 曾把用户交互从 HTTP 迁到 MQTT**；**ADR-076 §决策 4 全部迁回 HTTP**。
+> 结论固化如下：
+>
+> 1. **用户主动触发的操作一律走 HTTP** —— 经 Gateway token 鉴权 + 反代注入 `x-user-id`，
+>    Runtime 校验 owner。两批：**生命周期**（create / open / close / delete / visibility /
+>    workspace / config）与**会话动作**（messages / stop / continue / approval / answer /
+>    cancel-tool / compress），见 [§5.6](#56-会话控制面adr-076-决策-4)。
+> 2. **MQTT 只承载后端主动上报的事件** —— 前端订阅、被动刷新界面：`sessions/created` /
+>    `sessions/deleted`、`sessions/{sid}/messages/#`（chunk / tool_call / done / …）、
+>    `sessions/{sid}/meta` / `config`（retained 快照）。`ControlCommand` 中只剩
+>    `Intent`（Gateway → Runtime）与 `ActiveHeartbeat`（存在性心跳）——**均非用户动作**。
+> 3. **为什么**：MQTT 控制消息不携带身份，broker 无法打标记，Runtime 既记不了 session owner
+>    也校验不了 owner；任何能连上 broker 的客户端都能静默改写 / 删除他人会话（极端情形：
+>    `approval_decision{approved:true}` = 在他人工作区执行任意命令）。proto 字段**已删除**
+>    而非 deprecated —— 能力在类型层面不可表达，是**发不出去**而不是"发出去被拒收"。
 
-| 已删除的 HTTP 端点 | 替代 MQTT 通道 | 备注 |
+下表保留 ADR-033/034 时代的端点对照，**第三列标注 ADR-076 §决策 4 的最终归属**：
+
+| 历史 HTTP 端点 | 曾迁往的 MQTT 通道 | 现状（ADR-076 §决策 4） |
 |---|---|---|
-| `POST /api/agents/{id}/message` | `PUB acowork/agents/{id}/sessions/control/chat_message` | 发消息（含 message_id、content、session_id、command、attached_items、content_parts）— ADR-046 删除了 `document_ids` / `attached_context`，统一通过 `attached_items` 表达（wire 字段 camelCase，见 §5.3.3） |
-| `GET /api/agents/{id}/stream` | `SUB acowork/agents/{id}/sessions/{sid}/messages/#`（或 chat/stream/{session_id}） | 流式聊天事件：chunk / tool_call / done / approval_needed / question_pending |
-| `POST /api/agents/{id}/sessions/{sid}/activate` | `PUB sessions/control/open_session` | ADR-038：Closed / NotFound → Active |
-| `PUT /api/agents/{id}/sessions/{sid}/title` | `PUB sessions/control/update_title` | |
-| `DELETE /api/agents/{id}/sessions/{sid}` | `PUB sessions/control/delete_session` | |
-| `POST /api/agents/{id}/sessions/{sid}/close` | `PUB sessions/control/close_session` | 触发蒸馏，保留 JSONL |
-| `POST /api/agents/{id}/continue` | `PUB sessions/control/continue_execution` | 暂停后恢复（如 iteration_limit） |
-| `POST /api/agents/{id}/approval` | `PUB inbound` ApprovalDecision | 用户对工具调用的允许/拒绝 |
-| `POST /api/agents/{id}/question` | `PUB inbound` QuestionAnswer | 用户回答 `ask_user_question` 提示 |
-| `POST /api/agents/{id}/model-switch`（如有） | `PUB sessions/control/model_switch` | 切换模型 + 可选 provider |
+| `POST /api/agents/{id}/message` | `PUB sessions/control/chat_message` | ⚠️ 回到 HTTP：`POST .../sessions/{sid}/messages`，见 §5.6.2 |
+| `GET /api/agents/{id}/stream` | `SUB sessions/{sid}/messages/#` | ✅ 保持 MQTT（事件面本就是后端上报） |
+| `POST /api/agents/{id}/continue` | `PUB sessions/control/continue_execution` | ⚠️ 回到 HTTP：`POST .../sessions/{sid}/continue` |
+| `POST /api/agents/{id}/approval` | `PUB ... ApprovalDecision` | ⚠️ 回到 HTTP：`POST .../sessions/{sid}/approval`（**关闭审批伪造漏洞**） |
+| `POST /api/agents/{id}/question` | `PUB ... QuestionAnswer` | ⚠️ 回到 HTTP：`POST .../sessions/{sid}/answer` |
+| `POST .../sessions/{sid}/open` | `PUB sessions/control/open_session` | ⚠️ 回到 HTTP，见 §5.6.1 |
+| `PUT .../sessions/{sid}/title` | `PUB sessions/control/update_session_title` | ⚠️ 回到 HTTP：`PUT .../sessions/{sid}/config`（`{title}`） |
+| `DELETE /api/agents/{id}/sessions/{sid}` | `PUB sessions/control/delete_session` | ⚠️ 回到 HTTP，见 §5.6.1 |
+| `POST .../sessions/{sid}/close` | `PUB sessions/control/close_session` | ⚠️ 回到 HTTP，见 §5.6.1 |
+| `POST /api/agents/{id}/model-switch` | `PUB sessions/control/model_switch` | ⚠️ 回到 HTTP：`PUT .../sessions/{sid}/config`（`{model, provider}`） |
+| `PUT .../sessions/{sid}/reasoning-effort` | `PUB sessions/control/reasoning_effort` | ⚠️ 回到 HTTP：`PUT .../sessions/{sid}/config`（`{reasoning_effort}`） |
+| `PUT .../sessions/{sid}/workspace` | `PUB sessions/control/workspace_switch` | ⚠️ 回到 HTTP（**不能**走 `/config`：那条分支只改 meta），见 §5.6.1 |
+| （新增）`POST /api/agents/{id}/sessions` | — | ⚠️ HTTP：创建会话，owner = 调用者，见 §5.6.1 |
+| （新增）`PUT .../sessions/{sid}/visibility` | — | ⚠️ HTTP：分享 / 取消分享，见 §5.6.1 |
+| （新增）`POST .../sessions/{sid}/{stop,cancel-tool,compress}` | 曾为 `PUB sessions/control/{stop,cancel_tool,compress_action}` | ⚠️ HTTP，见 §5.6.2（`compact_context` 为重复命令，一并删除） |
 
-**Runtime 侧处理入口**：所有上述命令都通过
-[`core/acowork-runtime/src/mqtt/control_handler.rs`](../../../core/acowork-runtime/src/mqtt/control_handler.rs)
-的 `ControlAction` enum 反序列化与分发。
+**MQTT 侧 proto 字段、`ControlAction` 变体、命令名映射表**（Gateway `mqtt/client.rs`、Tauri
+`chat_mqtt.rs` / `mqtt_client.rs`）**已全部删除**；字段号随后整体重排为连续
+（开发期无兼容需求，见 [mqtt.md](./mqtt.md) §4）。
 
 ---
 
@@ -766,32 +942,34 @@ Content-Type: application/octet-stream
 ------abc--
 ```
 
-### 9.2 启动 Agent 并发送消息（MQTT）
+### 9.2 启动 Agent 并发送消息（HTTP）
 
 ```http
 POST /api/agents/{id}/start HTTP/1.1
 Authorization: Bearer <token>
 ```
 
-```text
-# 旧版 HTTP POST /api/agents/{id}/message 已删除，改用 MQTT：
-PUB acowork/agents/{id}/sessions/control/chat_message
+```http
+POST /api/agents/{id}/sessions/sess-active/messages HTTP/1.1
+Authorization: Bearer <token>
+Content-Type: application/json
+
 {
-  "session_id": "sess-active",
   "message_id": "msg-11111111",
   "content": "你好",
-  "params_json": "{\"document_ids\":[]}"
+  "params_json": "{}"
 }
 ```
 
-响应（在 SUB 端 `chat/stream/{session_id}`）：
+响应（`202 Accepted`；真正的回复在 MQTT 事件流
+`SUB acowork/agents/{id}/sessions/sess-active/messages/#`）：
 
 ```json
 { "message_id": "msg-11111111", "type": "chunk", "text": "..." }
 { "type": "done" }
 ```
 
-### 9.3 上传附件 + 在消息中引用（HTTP → MQTT）
+### 9.3 上传附件 + 在消息中引用（HTTP → HTTP）
 
 ```http
 POST /api/agents/com.acowork.senior-engineer/sessions/sess-active/files HTTP/1.1
@@ -821,12 +999,14 @@ pdf
 }
 ```
 
-随后 MQTT 发消息时通过 `params_json.attached_items`（**5 种 type 见 §5.3.3**）引用：
+随后发消息时通过 `params_json.attached_items`（**5 种 type 见 §5.3.3**）引用：
 
-```text
-PUB acowork/agents/com.acowork.senior-engineer/sessions/control/chat_message
+```http
+POST /api/agents/com.acowork.senior-engineer/sessions/sess-active/messages HTTP/1.1
+Authorization: Bearer <token>
+Content-Type: application/json
+
 {
-  "session_id": "sess-active",
   "message_id": "msg-22222222",
   "content": "总结这份 Q3 报告",
   "params_json": "{\"attached_items\":[{\"type\":\"file_upload\",\"documentId\":\"a1b2c3d4…_8f7e\",\"filename\":\"Q3-report.pdf\",\"format\":\"pdf\",\"sizeBytes\":482301}]}"
@@ -1049,8 +1229,11 @@ if body["instance_id"] != cache.bootstrap_instance_id().unwrap_or("") {
    Gateway 不发 Set-Cookie，浏览器默认 `credentials: 'same-origin'` 不会带上 cookie。
 5. **静态文件服务**：`/workspace-files`、`/ws-files` 路径由 Axum router 直接返回文件流，
    供前端 `<img>` / 视频等直接引用（命名保留历史，不变更）。
-6. **会话的写操作均已迁移到 MQTT**（见 §7）：不要尝试通过 HTTP POST `/message` /
-   `/activate` / `/continue` 等 — 这些路径在 Gateway HTTP 层**不存在**，调用将返回 404。
+6. **会话的所有用户操作都走 HTTP**（ADR-076 §决策 4，见 §5.6）：生命周期四条
+   （create / open / close / delete）+ 可见性 / workspace / config，以及会话动作七条
+   （messages / stop / continue / approval / answer / cancel-tool / compress）。
+   MQTT 侧对应命令**已从 proto 删除**，不再有任何控制主题可发布；MQTT 只承载 Runtime →
+   前端的事件上报（见 §7）。这些操作必须携带身份，只有 HTTP 路径能带上 `x-user-id`。
 7. **Runtime 启动期主动拉取全局资源**：每次 Runtime 启动，会在 phase_a（mqtt client + 
    available_cache 就绪后）主动 `GET /api/global-resources` 一次。这是 MQTT retained 推送
    之外的**免受 retained-delivery 竞态的兜底**，用来修复 Bug B（清除 `.acowork` 后首次

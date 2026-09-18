@@ -80,7 +80,6 @@ graph LR
 | `rag_query` | `rag_query.rs` | 企业知识库 RAG 深度查询 |
 | `memory_recall` | `memory_recall.rs` | 长期记忆检索（keyword / time-only / 两者） |
 | `memory_store` | `memory_store.rs` | 5 类 category + 6 种 autobiographical aspect 使用指引 |
-| `context_retrieve` / `context_abandon` | `context_*.rs` | 上下文主动召回 / 主动放弃 |
 | `todo_write` | `todo_write.rs` | "Only one todo list per session — replace or merge" |
 | `mcp_install` / `mcp_uninstall` | `mcp_*.rs` | 安装流程 / 仅本地可卸载 |
 | `intent_send` | `intent_send.rs` | 跨 Agent Intent 路由 + permission 要求 |

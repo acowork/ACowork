@@ -476,10 +476,10 @@ match compact_via_llm(...).await {
 | ADR-052 提供 | 本 ADR 使用 |
 |---|---|
 | `context_abandon` 工具（LLM 自主触发） | **废弃**：不再注册，避免 LLM 自主压缩破坏 cache 连续性（§10） |
-| `context_retrieve` 工具（LLM 取回） | **保留**：压缩后 LLM 仍可显式取回被压缩的历史，走 ADR-060 Block B append-only |
+| `context_retrieve` 工具（LLM 取回） | **废弃**：不再注册，实现**已删除**（见 §10.1 / §20.8）。占位符不可召回，唯一的取回路径是重新执行工具 |
 | `tool_compression_enabled: bool` 开关 | **移除**：注册门控拆分，abandon 不再注册（§10.2） |
 
-**关键决策**：ADR-052 的"LLM 自主触发压缩"模式**不再采用**——工具压缩由 8 级策略统一调度（级 1-7 把工具调用保留作为可调维度），`context_retrieve` 作为取回通道保留。
+**关键决策**：ADR-052 的"LLM 自主触发压缩"模式**不再采用**——工具压缩由 8 级策略统一调度（级 1-7 把工具调用保留作为可调维度），`context_retrieve` 作为取回通道**同样废弃**（v3 修正，见 §10.1）。
 
 ---
 
@@ -1016,6 +1016,6 @@ graph TB
 - [x] PR2 落地（`clear_round` / `recall_todo_round` / `fix_round` 三原子 + 13 个单测，2026-09-05）
 - [x] PR3 算法落地（5 级 round 原子折叠 + 删除 v2 dangling sweep + `v3_*` E2E 测试，2026-09-05；生产灰度 1 周观察待办）
 - [ ] `sanitize_messages` 在生产中触发孤立清扫的次数降为 0（或仅在流式异常路径出现）
-- [ ] ADR-052 §12 关键决策中"context_retrieve 保留"的描述同步修订为"context_retrieve 废弃"
-- [ ] `examples/` 6 个包的 `manifest.toml` 注释中若引用 `context_retrieve`，同步移除
+- [x] "`context_retrieve` 保留"的描述同步修订为"废弃"（2026-09-18）。注：原 TODO 指向"ADR-052 §12"，但 ADR-052 只到 §10、并无 §12——真正的矛盾在本 ADR §12 表格（同一节里 §10.1 说废弃、§12 说保留），已按 §10.1 统一。后续又把 `context_retrieve` 的**实现整个删除**：它扫的是 `conversations/` 下**全部** session 文件（`read_dir` + 每个文件 `read_to_string` 后逐行解析），与自身 doc"扫当前 session 文件"矛盾；匹配又只比 `tool_call_id` 字符串、不校验归属，multi_user 下会把**别人**的工具结果注入你的 prompt。ADR-052 的"保留实现供参考"因此比删除更危险——源码留在 git 历史里即可
+- [x] `examples/` 各包 `manifest.toml` 注释中若引用 `context_retrieve`，同步移除（2026-09-18 核查：`examples/` 全目录零命中，无需改动）
 

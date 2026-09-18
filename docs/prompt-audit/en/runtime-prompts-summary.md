@@ -80,7 +80,6 @@ Every LLM call carries tool schemas, whose `description` field is read by the mo
 | `rag_query` | `rag_query.rs` | Enterprise knowledge-base RAG deep query |
 | `memory_recall` | `memory_recall.rs` | Long-term memory search (keyword / time-only / both) |
 | `memory_store` | `memory_store.rs` | 5 `category` values + 6 autobiographical `aspect` values, usage guide |
-| `context_retrieve` / `context_abandon` | `context_*.rs` | Proactive context retrieval / abandonment |
 | `todo_write` | `todo_write.rs` | "Only one todo list per session — replace or merge" |
 | `mcp_install` / `mcp_uninstall` | `mcp_*.rs` | Install flow / local-only uninstall |
 | `intent_send` | `intent_send.rs` | Cross-Agent Intent routing + permission requirement |

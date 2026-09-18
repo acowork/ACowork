@@ -17,7 +17,7 @@
 
 ### 1.1 一句话
 
-**把"用户"从纯展示偏好提升为一等身份维度**：`UserProfile` 升级为 `UserAccount`（带账号/密码/角色/admin flag），账号凭据通过现有 Vault 的 master key 加密落盘；session 元数据增加 `user_id` 字段，Runtime `GET /sessions` 接受 `?user_id=` 过滤参数实现 session 级隔离；新增"系统管理员"角色绕过所有 session 隔离；Agent 列表侧栏并排新增"User List"折叠分组（复用 `partitionAgentsByNode` 的分组范式）；Gateway 侧新增用户-用户聊天持久化（conversion.json / jsonl 双文件，参考 ADR-024 拆分）。
+**把"用户"从纯展示偏好提升为一等身份维度**：`UserProfile` 升级为 `UserAccount`（带账号/密码/角色/admin flag），账号凭据通过现有 Vault 的 master key 加密落盘；session 元数据增加 `user_id` 字段 + `visibility` 可见性开关，Runtime 从 Gateway 注入的 `x-user-id` 头解析调用者 scope，在**分页前**过滤 `GET /sessions` 并校验每个 session 维度的读写；会话控制面（create / open / close / delete）从 MQTT 迁到 HTTP，因为 MQTT 控制消息不携带身份；新增"系统管理员"角色绕过所有 session 隔离；Agent 列表侧栏并排新增"User List"折叠分组（复用 `partitionAgentsByNode` 的分组范式）；Gateway 侧新增用户-用户聊天持久化（conversion.json / jsonl 双文件，参考 ADR-024 拆分）。
 
 ### 1.2 关键决策表（详细理由见 §4）
 
@@ -26,7 +26,7 @@
 | 1 | 账号数据模型 | 升级 `UserProfile` → `UserAccount`，新增 `password_hash`(Argon2id)、`password_salt`、`role`(`user`/`admin`)、`created_at`、`disabled_at?`；display_name / language / avatar 等展示字段保留 |
 | 2 | 凭据存储 | **复用现有 Vault 的 master key**，account 文件以 `vault://accounts/{user_id}.enc` 形式加密落盘；账号创建/改密均要求 Vault unlocked；**不引入第二套密码** |
 | 3 | HTTP 认证 | 单一 bearer token 改为 **登录令牌**（短期 access_token + 长效 refresh_token），token payload 含 `user_id` + `role`；middleware 解析后注入 `AuthContext` 到 `AppState`；admin token 通过额外 flag 区分 |
-| 4 | Session 隔离 | `SessionMeta` 新增 `user_id: Option<String>` 字段；Runtime `/sessions` 接受 `?user_id=` 过滤；admin 看到全部，普通 user 只看到自己的（admin 时强制忽略过滤） |
+| 4 | Session 隔离 | `SessionMeta` 新增 `user_id: Option<String>` + `visibility: Option<SessionVisibility>`（`None` = 公开，缺省不改变旧数据行为）；身份由 Gateway 注入 `x-user-id` 头（`*` = admin 不过滤），Runtime 解析为 `SessionScope` 并在**分页前**过滤；读走 `is_readable_by`（不可读 → 404），写走 `is_writable_by`（仅 owner / admin）；**会话控制面从 MQTT 迁到 HTTP**（见本节实施记录） |
 | 5 | 管理员角色 | `role = "admin"` 用户绕过 `user_id` 过滤，且 `GET /api/users` 看到全部账号（含密码哈希元数据但不含明文）；普通用户只能 `GET /api/users/{self}` |
 | 6 | Desktop 账号切换 | 顶栏新增"当前用户"菜单，下拉含"切换账号 / 修改密码 / 注销 / 退出登录 / 注册新账号(若允许)";账号切换等价于"清空本地缓存 + 重连 Gateway + 重新拉取 agent列表 + 重连 MQTT" |
 | 7 | Sidebar User 折叠分组 | 在 AgentList 同级渲染 `partitionAccountsByAccountType` 折叠项——单独 item "Users (N)" 默认折叠，点击展开列出全部账号；admin 视图下点击账号名进入该 user 的 session 列表过滤模式 |
@@ -38,7 +38,7 @@
 
 ### 1.3 不变量（必须满足）
 
-1. **multi_user 模式下 session 隔离是强制默认**：除 admin 外，所有 session 维度的读写（list / messages / state / files）必须经过 user_id 过滤；漏掉任何一处 = 数据泄漏。local 模式下不启用 session 过滤（见 §决策 12）。
+1. **multi_user 模式下 session 隔离是强制默认**：除 admin 外，所有 session 维度的读写（list / messages / state / files）必须经过 user_id 过滤；漏掉任何一处 = 数据泄漏。local 模式下不启用 session 过滤（见 §决策 12）。**（当前状态：✅ 已满足——Runtime 读路径过滤 + 写路径 owner 校验 + 控制面 HTTP 化均已落地，见 §决策 4 Phase D 实施记录。）**
 2. **admin 不能伪造 user_id**：admin 视图下"以 user A 身份看 session"通过 `?as_user=<user_id>` query 实现，但 `as_user` 不会被普通 user 使用；token 中 `role` 字段在签发时定死，不接受请求内覆盖。
 3. **账号凭据加密不依赖 Vault unlocked**：账号读路径在 Vault locked 状态下退化为 401（无法解密 → 无法登录），但**账号列表（不含密码）的元数据允许在 Vault locked 时展示**（仅元数据，如 username/role/created_at），便于锁屏场景下仍能选账号。
 4. **session.user_id 写入是 immutable**：一个 session 一旦创建绑定 user_id 后**不再修改**（迁移/导入等场景除外，且必须 admin 操作）；这保证会话历史"主人"的不可篡改性。
@@ -55,7 +55,9 @@
 | `accounts.json`（账号权威表） | 不创建 | 创建（明文）；`vault/accounts/*.enc` 扩展可选 |
 | 首位账号 | 沿用现状（无账号概念，`user_profiles.json` 不变） | 强制 `bootstrap_admin`，**缺配拒启动** |
 | admin 角色 | 无（OS 用户即 admin） | `role = Admin`，`GET /api/users` 全量 |
-| session 隔离 | `SessionMeta.user_id` 写入但 **read 不过滤** | read 路径强制 `user_id` 过滤（admin 除外） |
+| session 隔离 | `SessionMeta.user_id` 写入但 **read 不过滤**（无 `x-user-id` 头 → `Unfiltered`） | read 路径强制过滤（admin 除外）；`visibility = Private` 时非 owner 视为不存在（404） |
+| session 控制面 | 同一条 HTTP 路由（Runtime 视为 `Unfiltered`） | HTTP + token 鉴权；create 记录 owner |
+| session `visibility` 默认 | `None`（公开，不过滤） | `None`（公开，不过滤）—— 升级不改变既有会话可见性，见 §决策 4 |
 | `?as_user=` | 路由不注册 | admin-only 只读视图 |
 | `/api/auth/*` 路由 | **不注册** | 全部注册 |
 | 用户-用户聊天 | **不注册** `data_dir/users/` 不创建 | `/api/users/{self}/chats/*` 全量 |
@@ -119,7 +121,7 @@
 ### 2.3 已尝试 / 已拒绝的方案（避免重蹈覆辙）
 
 - **新建第二套密码系统（与 Vault 解耦）**：❌ 用户被迫记两个密码；salt/迭代参数分裂两份；运维成本翻倍。
-- **账号信息塞进 `UserProfileListFile`**（现有 json）：❌ 该文件路径 `data_dir/user_profiles.json` 当前明文��盘，把账号凭据混进来会破坏 ADR-059 §7.3 的"非敏感展示元数据"语义。
+- **账号信息塞进 `UserProfileListFile`**（现有 json）：❌ 该文件路径 `data_dir/user_profiles.json` 当前明文落盘，把账号凭据混进来会破坏 ADR-059 §7.3 的"非敏感展示元数据"语义。
 - **让 Runtime 内置 user store**：❌ Runtime 是无主进程，跨 Node 上同一个 agent instance 的 user 视图无法合并；且 ADR-009 §5.4 禁止 Gateway 直读 Runtime 私有数据，方向反了。
 - **session 过滤在 Gateway 侧用 `instance_id` 索引文件实现**：❌ 引入第二索引源（与 Runtime scan_sessions 并存），维护两套真相；session 持久化路径全在 Runtime，重复造轮子。
 
@@ -296,6 +298,14 @@ pub async fn auth_middleware(
 }
 ```
 
+**实施记录（Phase C-2 已完成）**：
+
+- **中间件位置**：`auth_middleware` 作为**全局层**挂在 `build_router` 的 CORS 内层、路由外层——不在 CORS 内层则 401 响应缺 `Access-Control-Allow-Origin`（浏览器读不到错误体）；不在路由外层则新增 handler 可能漏过鉴权。`state.auth_service == None` 时直接 `next.run(req)`（local 模式 no-op）。
+- **白名单**（实测路径，注意实际 liveness 端点是 `/health` 而非 ADR 早期写的 `/api/health`）：`/health`、`/api/status`、`/api/bootstrap`、`/api/auth/login`、`/api/auth/refresh`、`/api/auth/logout`、`/api/auth/first-login`。`OPTIONS`（CORS preflight）无条件放行——浏览器不会带 `Authorization`。
+- **`AuthContext`**：`{ user_id, role: Role, as_user: Option<String> }`，`effective_user_id()` 仅在 `is_admin()` 为真时才吃 `as_user`。`as_user` 的校验前移到**中间件**：非 admin 携带 `as_user` 直接 403（而非静默忽略），杜绝"看起来生效了"的错觉。
+- **access token 校验是无状态的**（仅验签 + `exp`，不读 `accounts.json`）：这个选择把"账号被禁用后 token 还能用"的窗口上界钉死在 `ACCESS_TTL_SECS`（15 分钟），换掉每个反代请求一次磁盘解析。**refresh 是强一致执行点**：`AuthService::refresh` 每次都重读 `accounts.json` 并校验 `is_login_capable()`，所以禁用账号最多苟活 15 分钟。
+- **refresh 轮换 + 复用检测（RFC 9700 §4.14.2）**：refresh token **单次使用**——每次刷新把"呈现的 family"标记为 `rotated`（`revoked_families.txt` 里 `r:{family}` 前缀）并铸造新 family。若再收到一个已 `rotated` 的 family，即判定为**泄漏或客户端重放**，**撤销该 user 的全部 family**（`{user_id}.*`），让"先刷新的窃贼"也会在受害者下一次刷新时被踢下线。`x:{family}` 前缀表示**显式撤销**（登出）——重放它只返回 401，**不**连坐该 user 的其他设备（登出手机不该杀死桌面端）。两种前缀必须区分，这是"登出"与"轮换"语义的分水岭。
+
 **`AuthContext` 注入后下游 handler 的写法**：
 
 ```rust
@@ -313,62 +323,119 @@ pub async fn list_sessions(
 }
 ```
 
-### 决策 4：Session 隔离 — `SessionMeta.user_id` + Runtime `?user_id=` 过滤
+### 决策 4：Session 隔离 — `SessionMeta.user_id` + `visibility` 开关 + Runtime 侧 owner 校验
 
-**Runtime 侧改动**（最小改动）：
+**职责划分**：归属与可见性由 **Runtime** 判定（`meta.json` 在它手里），身份由 **Gateway** 提供（token 在它手里）。Gateway 只做一件事——反代前把调用者 scope 写进 `x-user-id` 头；Runtime 读该头做过滤与鉴权。**Runtime 是唯一的授权决策点**，因为它是决策所需数据（`user_id` / `visibility`）的唯一持有方；Gateway 侧再加一层 owner 校验只会制造第二份真相（要读同一份 meta，还要处理"meta 刚被删"的竞态）。这取代了原稿"Gateway 反代时 verify owner"的设计。
+
+**schema**（`core/acowork-runtime/src/conversation.rs`）：
 
 ```rust
-// core/acowork-runtime/src/conversation.rs (现有文件)
 pub struct SessionMeta {
     // ... 现有字段 ...
-    /// ADR-076: 创建该 session 的 user_id。None = 旧数据/系统消息（仅 admin 可见）。
-    /// Immutable: 创建后不修改；admin 迁移工具可以后改，但写入路径只此一处。
+    /// ADR-076: 创建该 session 的 user_id。None = 旧数据 / 无账号模式。
+    /// 创建后不改（write-once）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_id: Option<String>,
+    /// ADR-076: 可见性开关。None 与 `Public` 等价 —— 缺省即公开。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visibility: Option<SessionVisibility>,
 }
+
+pub enum SessionVisibility { Public, Private }
 ```
+
+**两个判定谓词**（`SessionMeta::is_readable_by` / `is_writable_by`）：
+
+| scope \ session | public（含 `visibility = None`） | private |
+|---|---|---|
+| admin（`x-user-id: *`） | 可读可写 | 可读可写 |
+| owner | 可读可写 | 可读可写 |
+| 其他 user | 可读 | **404**（不可读、不可写） |
+| local（无头） | 可读可写 | 可读可写 |
+
+- **读**（`GET /sessions`、`/sessions/{sid}`、`/sessions/{sid}/messages`、`/sessions/latest`、`/sessions/{sid}/config`）：走 `is_readable_by`。不可读一律 **404**，不用 403——403 会把这个端点变成"某 session 是否存在"的探测器，正是列表过滤要藏起来的信息。
+- **写**（`open` / `close` / `DELETE` / `visibility` / `workspace` / `config` / 全部会话动作）：走 `is_writable_by`，**仅 owner 或 admin**。公开 ≠ 可改：把 session 设为 public 是"让别人能读"，不是"让别人能删"。旧数据 `user_id = None` 的会话（ADR-076 之前创建）**仅** admin / local 可写——不能因为"没有主人"就人人可删。
+- **观众读公开会话时「不激活」后端会话**（见 §决策 4「观众不激活」与本节末「会话内存回收」）：`POST .../open` 是**写**操作，前端在 `can_write === false` 时**根本不发**。原因不是省一次请求，而是 `Active` / `Closed` 是 **per-session 全局状态**（不是 per-connection）：观众若能激活，它就制造了一个"自己无权关闭（close 是写授权，刻意不让旁观者拆掉 owner 的会话）、owner 也不知道被谁占着"的常驻会话——生命周期失去责任人。只读浏览**不需要**激活：历史走 `GET /messages`（读授权），事件流走 Desktop 的通配 MQTT 订阅，owner 在用（=Active）时天然能收到，owner 关了（=Closed）本来也没有东西在跑。
+
+
+**`visibility` 为什么是 opt-out 而不是 opt-in**（用户决策）：`None` = 公开是**旧数据的自然语义**——ADR-076 之前创建的 session 没有 `visibility` 字段，它们本来就对所有人可见。默认 Private 会在升级瞬间把全部历史会话变成私有，那是一次**静默的数据丢失**。opt-out 让升级前后行为一致，且"设为私有"是一个明确的用户动作。若某个部署真要从"全公开"迁到"全私有"，那是一次数据迁移，不该由字段默认值顺手完成。
+
+**过滤必须在分页之前**：`scan_sessions_async` 先按 scope 过滤，再分页——否则 `total_count` / `total_pages` 会把调用者看不见的行算进去，等于用分页元数据泄漏"你还有 N 个别人的 session"。
 
 ```rust
-// core/acowork-runtime/src/usecases/session_metadata_impl.rs (现有文件)
-#[async_trait]
-impl SessionMetadataService for RuntimeSessionMetadataService {
-    async fn list_sessions(&self, page: u32, size: u32, user_id: Option<&str>) -> Result<...> {
-        // scan_sessions_from_meta 接受可选 user_id filter
-        // admin 视图 (user_id == "__admin__" sentinel) 不过滤
-        ...
-    }
-}
+// 调用者的身份范围，由 Gateway 注入的 x-user-id 头解析
+pub enum SessionScope { Unfiltered, User(String) }
+// "*" → Unfiltered（admin）; 具体 id → User(id); 头缺失 → Unfiltered（local 模式）
 ```
 
-**HTTP 路径**：
+`Unfiltered` 同时覆盖"admin 看全部"与"local 模式无账号系统"——两者在数据面完全同构，不必分成两个变体（多一个变体就多一处忘了处理的分支）。
 
-```text
-GET /sessions?user_id=<uuid>&page=1&size=20
-# 普通 user: user_id 强制 = self（请求里若传别的 user_id 视为 400）
-# admin:     user_id 不传 = 全部; 传特定值 = 仅该 user
-```
+**会话控制面从 MQTT 迁到 HTTP**（对 ADR-034 §11.2 的反转）：
 
-**create_session 路径**：
+原稿假设的链路 `POST /api/agents/{id}/sessions` → Gateway 反代 → Runtime 读 `X-User-Id` **当时并不存在**：Desktop 建 session 走的是 MQTT 控制面——直接向 broker 发一条 `CreateSession`（消息体为空），不经过 Gateway HTTP，没有反代 hop 可以挂头；而 MQTT ACL 是空壳（`can_publish` 丢弃 topic 参数），broker 无法给消息打身份标记。**身份进不了 MQTT 控制面，所以把控制面搬到能带身份的地方。**
 
-```rust
-// core/acowork-runtime/src/agent/session/session_manager.rs
-pub async fn create_session_with_id_and_conversation(
-    &mut self,
-    session_id: String,
-    conv: Option<PathBuf>,
-    committed_lines: Option<Arc<AtomicUsize>>,
-    user_id: Option<String>,  // ← 新参数，从 HTTP header X-User-Id 传入
-) -> Result<String> { ... }
-```
+create / open / close / delete 四条操作迁到 HTTP（usecase 全部现成，只换接口层）：
 
-HTTP 调用链：`POST /api/agents/{id}/sessions` → Gateway middleware 注入 `AuthContext` → 反代时附加 `X-User-Id` header → Runtime `create_session` 读 header 写入 meta。
+| 操作 | HTTP 路由（Gateway 反代 → Runtime） | Runtime usecase |
+|---|---|---|
+| create | `POST /api/agents/{id}/sessions` | `create_frontend_session` + `set_user_id` + `set_visibility` |
+| open | `POST /api/agents/{id}/sessions/{sid}/open` | `resume_session`（ADR-038 激活状态机） |
+| close | `POST /api/agents/{id}/sessions/{sid}/close` | `close_session` |
+| delete | `DELETE /api/agents/{id}/sessions/{sid}` | `delete_session` |
+| switch workspace | `PUT /api/agents/{id}/sessions/{sid}/workspace` | `route_workspace_switch` |
+| share / unshare | `PUT /api/agents/{id}/sessions/{sid}/visibility` | `set_visibility` + `write_meta` |
+| switch model | `PUT /api/agents/{id}/sessions/{sid}/config`（`{model, provider}`） | `apply_config` |
+| reasoning effort | `PUT /api/agents/{id}/sessions/{sid}/config`（`{reasoning_effort}`） | `apply_config` |
+| rename title | `PUT /api/agents/{id}/sessions/{sid}/config`（`{title}`） | `apply_config` 的 `title` 分支 |
 
-**关键安全检查点**（grep 必须覆盖的清单）：
-- `proxy_list_sessions`：必须把 `user_id` 注入 query
-- `proxy_get_messages`：必须先 verify session.user_id == auth.effective_user_id（需要 Runtime 暴露 `GET /sessions/{sid}/owner`）
-- `proxy_get_session_state` / `proxy_delete_session`：同上
-- `proxy_files`：同上
-- `Gateway → Runtime` 的所有 `/api/agents/{id}/sessions/*` 反代：必须经过 AuthContext 校验
+**为什么只有 workspace 需要新端点，另外三条复用 `PUT .../config`**：MQTT 那 4 条写命令在 Runtime 里本来就落在这两条路径上（`gateway_loop` 的 `ModelSwitchAction` / `ReasoningEffortAction` 先试 `svc.apply_config`，`WorkspaceSwitchAction` 直接调 `route_workspace_switch`）。`apply_config` 的 `title` 分支与 `update_title_force` 行为等价（截断 + `title_set` + `write_meta` + `notify_config_change` + `config_version++`）。但 **`apply_config` 的 `workspace_id` 分支只做内存赋值 + `write_meta`**，不更新 `current_work_dir`、不重推 per-session workspace context / prompt 文件——把它当等价物用会让工具在旧目录里干活而 meta 声称已切换，所以 workspace 单独走 `route_workspace_switch`。
+
+**关键：MQTT 侧的用户操作命令已全部"删除"，不是 deprecated、也不是拒收。** 分两批：
+**第一批** 8 条会话作用域写命令（`create_session` / `delete_session` / `close_session` /
+`open_session` / `update_session_title` / `model_switch` / `reasoning_effort` /
+`workspace_switch`）；**第二批** 8 条会话动作（`chat_message` / `stop` /
+`continue_execution` / `approval_decision` / `question_answer` / `cancel_tool` /
+`compress_action`，以及 `compress_action` 的重复命令 `compact_context`）。
+`ControlCommand` 的对应 proto 字段已移除并**整体重排为连续**（开发期无兼容需求，不留空号），
+`ControlAction` / `InboundMessage` 的对应变体、`control_action_to_inbound` 的映射臂、
+Gateway `mqtt/client.rs` 与 Tauri `chat_mqtt.rs` / `mqtt_client.rs` 的命令名映射表全部删除。
+项目仍在开发期、无兼容需求，所以连"发出去被拒收"这一步都不需要——**能力在类型层面不可表达**：
+
+| 已删除的 MQTT 命令 | 为什么不能留在 MQTT |
+|---|---|
+| `create_session` | 消息不带身份 → 建出来的 session 无主（`user_id: None`），而 ownerless session 是"任何登录账号可写"（见 §决策 4 的 `is_writable_by`），等于公开可删 |
+| `delete_session` / `close_session` | 无身份 → 无法校验 owner，任何 broker 客户端可删掉别人的会话，且 MQTT 是 fire-and-forget，受害者连错误都看不到 |
+| `open_session` | 同上（可激活他人会话） |
+| `update_session_title` / `model_switch` / `reasoning_effort` / `workspace_switch` | 同上：可静默改写他人会话的标题 / 模型 / 思考深度 / 工作区（工作区还包括让工具在攻击者指定目录里读写） |
+
+**第二批（会话动作）为什么也搬**：第一版曾判断这些命令"作用在已经打开的那个会话上，不承载归属决策，留在 MQTT 延迟更低，换不到授权收益"——但**身份缺失的代价被低估了**：它们作用在"哪个会话"完全由消息自己声明，broker 上任何客户端都能把 `approval_decision{approved:true}` 投进别人的会话（= 在他人工作区执行任意命令），或把 `chat_message` 投进别人的会话。搬走之后分工彻底清晰：**HTTP = 用户主动触发（必然带身份），MQTT = 后端主动上报**。延迟上并不吃亏——HTTP handler 只做"鉴权 + 入队"立即返回 `202`，真正的 token 流仍走 MQTT 事件。对应的 HTTP 端点：
+`messages` / `stop` / `continue` / `approval` / `answer` / `cancel-tool` / `compress`
+（见 [http.md §5.6](../../protocols/zh/http.md)）。
+
+留在 MQTT 的只剩**非用户动作**：`intent`（Runtime → Runtime，cron / 跨 agent）与
+`active_heartbeat`（Desktop → Runtime 存在性心跳）——它们不携带任何归属决策，也没有
+"投进别人会话"的语义。第一版那道"反过度迁移"护栏单测
+`gateway_loop.rs::chat_traffic_still_maps_over_mqtt` 因此**已删除**：它守护的正是这批被搬走的
+命令；留下的两条不需要护栏——`ControlAction` 只剩 `IntentReceived` + `ActiveHeartbeat`，
+编译器就是边界。
+
+**MQTT 侧的身份传递**本期暂缓（原计划 ADR-077 的课题）——控制面搬走之后，MQTT 上已没有任何**需要按账号授权的命令**（只剩 `intent` / `active_heartbeat`），所以它不再是**写侧**阻塞项；但**读侧的 per-user 订阅授权**（事件面保密性）仍是已知缺口，见 §5.5 与 [mqtt.md §10](../../protocols/zh/mqtt.md)。
+
+**`can_write` 下发（前端 UI 禁用的唯一依据）**：`SessionSummary`（Runtime）与 `SessionInfo`（TS）新增 `can_write = SessionMeta::is_writable_by(&scope)`。前端**不从 `visibility` 反推**权限：public 是"别人能读"，admin / local 模式还能写自己没有的会话。字段缺省时前端按 `true` 处理（老 Runtime 退化为"先试，后端 403"，而不是把全部控件锁死）。
+
+`create` 顺带解决了另一个老问题：MQTT 命令无法返回新 session id，HTTP 响应可以。Desktop 仍等 `session_created` MQTT 事件取 sid，所以下游逻辑零改动——`ponytail:` 这次迁移**刻意**没顺手改这个（改动面越大越难回滚）；想省掉那一次事件往返时，改为直接用 POST 响应体即可。
+
+**关键安全检查点**（grep 必须覆盖的清单）——已全部落地：
+
+- `Runtime::GET /sessions`：`scope` 入参 + **分页前**过滤
+- `Runtime::GET /sessions/{sid}` / `.../messages` / `.../latest` / `.../config`：`authorize_read`（**受 `visibility` 控制** —— private 且非 owner → 404）
+- `Runtime::POST .../open`：`authorize_write`（**不受 `visibility` 控制** —— `open` 是写操作：它把会话激活进内存。公开会话的非 owner **不激活**，前端在 `can_write === false` 时根本不发这个请求，因此这里刻意不接受"只读观众"。见 §决策 4 的「观众不激活」）
+- `Runtime::POST .../close` / `DELETE /sessions/{sid}` / `PUT .../visibility` / `PUT .../workspace` / `PUT .../config` / `POST .../files` / 第二批 7 条会话动作：`authorize_write`（**不受 `visibility` 控制** —— 见下）
+- **`visibility` 只影响读，不影响写**：`is_writable_by` 完全不看该字段。public 的语义是"让别人能读"，不是"让别人能改"——否则把 session 设为公开就等于交出 close / delete / 改 config 的按钮。所有写路径恒定为 owner 或 admin。
+- `GET /files/{document_id}` **是唯一的例外，且目前无校验**：blob 按 `document_id` 全局存储（`<work_dir>/files/`），读路径拿不到 sid，无法反查归属。**这是已知 ceiling，见 §5.5。**
+- `Runtime::POST /sessions`（create）：owner 从 `x-user-id` 头写入，**不接受 body 指定 owner**（body 只接受 `workspace_id` / `model` / `provider` / `visibility`）
+- `Runtime::GET /sessions/latest`：缓存是 agent 级的（启动时写入），可能指向调用者读不到的 session → 走 `authorize_read`，失败 404 让前端回落列表（`ponytail:` 非 owner 多一次往返，换来的是"不泄漏 id"；替代方案是每次启动调用做一次全量扫描）
+- `Gateway → Runtime` 的所有 `/api/agents/{id}/sessions/*` 反代：必须经过 `auth_middleware`（全局层）
 
 **Admin `as_user` 机制**（"以 user X 视角看"，但**不是身份冒用**）：
 
@@ -381,12 +448,53 @@ GET /api/agents/{id}/sessions?as_user=<user_id>
 
 **为什么 `as_user` 不做成"临时切换身份"**：避免 XSS / CSRF 攻击链——若前端可任意切换身份执行写操作，cookie/header 注入就能横着走。`as_user` 只用于**只读视图**（list / get_messages / get_state），写操作（POST / DELETE）永远用 token 实际身份。
 
+#### Phase D 实施记录（已落地）
+
+**已落地**：
+
+1. **Runtime schema（向后兼容）**：`SessionMeta.user_id: Option<String>` + `SessionMeta.visibility: Option<SessionVisibility>`（均 `#[serde(default, skip_serializing_if = "Option::is_none")]`），无该字段的旧 `meta.json` 加载为 `None`（= 公开、无主人）；`ConversationSession::set_user_id`（**write-once**：首次写入生效，之后试图**改成别的值**会被拒绝并打 warn，幂等重写同值不报错——meta 的 `user_id` 是不可变事实）+ `set_visibility` / `is_private`。测试：`session_meta_user_id_is_backward_compatible`、`set_user_id_is_write_once`。
+2. **Gateway 头部卫生（安全不变量）**：反代**逐字转发**入站头（`proxy_to_runtime_with_method` 只过滤 hop-by-hop），所以客户端自带的 `x-user-id` 会先于 Gateway 抵达 Runtime 并冒充他人 session。中间件因此在**每个**请求上先 `remove(x-user-id)`，鉴权通过后再按 token 重新注入：
+
+   | 身份 | 注入的 `x-user-id` |
+   |---|---|
+   | 普通 user | 自己的 `user_id` |
+   | admin，无 `as_user` | `*`（不过滤） |
+   | admin + `as_user=<id>` | 该 `id`（非 admin 携带 `as_user` → 403；非法形态的 id 也 403，绝不退化成"不过滤"） |
+   | local 模式 | 只删不注（账号系统整体 no-op，Runtime 侧 = `Unfiltered`） |
+
+   `x-user-id` 因此**只有 Gateway 一个可信写入方**。测试：`middleware_strips_client_scope_and_injects_the_token_scope`（走真实 `build_router` 层：伪造头被剥、无 token 401、admin 拿到 `*`、`as_user` 收窄、非法 `as_user` 403）。
+3. **Runtime scope-aware 读路径**：`SessionScope::from_header_value`（`*` → `Unfiltered`，具体 id → `User`，头缺失 → `Unfiltered`）；`scan_sessions_async` 加 `scope` 入参并在**分页前**过滤（`total_count` / `total_pages` 反映调用者可见行数）；`SessionInfo` 加 `visibility` 字段；`SessionMetadataService::list_sessions` 加 `scope` 参数；`GET /sessions/{sid}` / `/messages` / `/latest` 走 `authorize_read`（不可读 → 404）。测试：scope 判定 + visibility 三态 + 分页计数。
+4. **HTTP 会话控制面**（取代 MQTT，第一批）：新建 `core/acowork-runtime/src/http/session_control.rs`（第一批 7 个 handler + `authorize_read` / `authorize_write` 辅助 + `PUT .../visibility` + `PUT .../workspace`），`SessionManager::create_frontend_session` 加 `user_id` / `visibility` 入参，新增 `SessionManager::resume_session`（封装 ADR-038 激活状态机，`gateway_loop` 的 MQTT `open_session` 改为调它）；Gateway 侧 `proxy.rs` 加 6 条反代路由（含 body / method 透传），Desktop 侧新建 `src/lib/session-control.ts` 封装 HTTP 调用替换 `invoke("mqtt_publish_control")`——`create` / `open` / `close` / `delete` / `visibility` / `workspace` / `patchSessionConfig`（model / reasoning / title 三合一），共替换 5 个调用点，并删掉 `setSessionWorkspaceMqtt` 这个已经名不副实的旧名。测试：`conversation.rs` 的 `visibility_and_ownership_gate_read_and_write` / `session_scope_from_header_value` / `scan_filters_by_scope_before_paginating`（含 `can_write` 下发断言：owner 可写、他人 public 会话可读不可写、ownerless 依旧可写、admin 全可写）；handler 接线由既有 HTTP server 测试证明（`test_session_config_get_unknown_session` 现在返回 404、`test_http_upload_file_docx_lands_with_real_extension` 要求 session 先存在）+ Desktop `chatStore.test.ts`。
+
+5. **MQTT 写路径删除（两批）**：第一批 8 条生命周期写命令 + 第二批 8 条会话动作（`chat_message` / `stop` / `continue_execution` / `approval_decision` / `question_answer` / `cancel_tool` / `compress_action` / `compact_context`）的 proto 字段、`ControlAction` / `InboundMessage` 变体、命令名映射表全部删除；`ControlCommand` 字段号整体重排为连续，现只余 `Intent` + `ActiveHeartbeat` 两条非用户动作。原护栏单测 `gateway_loop.rs::chat_traffic_still_maps_over_mqtt` 随第二批迁移一并删除（它守护的正是被搬走的命令）；边界改由类型系统承担——`ControlAction` 只剩 `IntentReceived` + `ActiveHeartbeat`。
+
+6. **前端读权限并禁用写控件**：`SessionInfo.can_write` → `ChatPanel` 派生 `readOnlySession` → `ModelMenu` / `ReasoningEffortMenu` / `WorkspaceSelector` 传入 `readOnly`；`ToolbarDropdownTrigger` 新增 `disabled`（`disabled` + `aria-disabled` + `cursor-not-allowed opacity-50`），一处改动覆盖三个控件。控件是**禁用而非隐藏**——共享的只读会话仍需显示"当前用的是哪个模型 / 哪个工作区"。i18n 键 `chatPanel.readOnlySession` 五种语言齐全。
+
+7. **第二批会话动作迁移（ADR-076 §决策 4 收官）**：`core/acowork-runtime/src/http/session_control.rs` 追加 7 个 action handler（`messages` / `stop` / `continue` / `approval` / `answer` / `cancel-tool` / `compress`）+ 共享的 `dispatch_session_action` 辅助——同步只做"鉴权 + 入队"（`202` / `403` / `404`），执行结果仍走 MQTT 事件回流；Gateway `proxy.rs` 加 7 条反代路由；Desktop `session-control.ts` 加 7 个函数，`chatStore.ts` / `ChatPanel.tsx` / `ContextUsageIcon.tsx` 共 8 个调用点从 `invoke("mqtt_publish_control")` 改为 `fetch`。`idle_watcher.record_inbound()` 从 MQTT 控制回环挪到 HTTP→MQTT 共享转发点，修复 HTTP 发起的动作不刷新 session 活跃度导致的"自睡"。`compact_context` 作为 `compress_action` 的重复命令（SessionTask 分支逐字节同构、无调用者）一并删除。测试：`session_actions_are_owner_gated_and_keep_their_payload`（owner 门禁 + payload 保留）+ 3 个 e2e 改 HTTP 驱动；协议字段号重排后 `node_proto_golden.rs` 的 6 组 golden hex 重算。
+
+8. **公开会话的只读浏览（观众不激活）**：`ChatPanel` 输入框在 `readOnlySession` 时禁用 + 专用 placeholder；`SessionVisibilityToggle`（composer 工具行 🌐/🔒）接线 `PUT .../visibility`；`chatStore.closeTab` / `openSession` 在 `can_write === false` 时**分别跳过** `POST /close` 与 `POST /open`。第 8 条的关键决定是"观众不激活"——理由见上文「观众读公开会话时『不激活』后端会话」：`Active`/`Closed` 是 per-session **全局**状态，观众激活会造出一个"自己无权关、owner 也不知道被谁占着"的常驻会话，而要正确回收它就必须引入观察者引用计数。只读浏览不需要激活（历史走 `GET /messages`，事件走通配 MQTT 订阅，owner 在用即 Active 即实时）。测试：Desktop `src/stores/sessionSharing.test.ts`（可见性乐观翻转 + 回滚；`can_write === false` 时 open / close 零请求）。
+
+**`ponytail:` 有意留下的 ceilings**：
+
+- **MQTT 控制命令已删（此项已结清）**：全部用户操作命令（生命周期 8 条 + 会话动作 8 条）的 proto 字段、Runtime 变体与映射表已全部删除，字段号随后**整体重排为连续**（开发期无兼容需求，不留空号）。`ControlCommand` 现只余 `Intent` + `ActiveHeartbeat` 两条非用户动作。
+- **`PUT .../config` 不做 `route_*` 回退**：MQTT 时代的 `ModelSwitchAction` / `ReasoningEffortAction` 在 `apply_config` 报错时会回退到 `SessionManager::route_model_switch` / `route_reasoning_effort`（覆盖"会话不在 config service 内存表里"这种场景）。HTTP `PUT .../config` 没有这条回退，直接 500。实际不可达：这三个控件都绑定 `activeSessionId`，而活跃会话必在表里；且迁移前 `setSessionContextWindow` 就已经是无回退的裸 `PUT .../config`，与邻居保持一致优于与死掉的 MQTT 路径保持一致。
+- **`GET /sessions/latest` 对非 owner 多一次往返**：见上文安全检查点。缓存值不解 scope，因为解 scope 需要一次全量扫描。
+- **`visibility` 开关已有 UI（此项已结清）**：`SessionVisibilityToggle` 挂在输入框工具行，仅 owner 可点（`can_write === false` 渲染为 disabled）。**per-agent 默认可见性仍未做且刻意留白**——agent 是 Gateway 级共享对象，per-agent 默认值 = 影响所有账号新建会话的策略，与"我自己的新会话默认私有"（用户级偏好）不同层级，需先决定层级。
+- **会话内存回收与会话生命周期解耦（未解决，独立议题）**：`SessionManager::evict_idle_sessions` 定义了但**全仓无调用者**（死代码）；实际回收只有 agent 级自动休眠（`process::exit`），而它的续期含**全局** `ActiveHeartbeat`（任何 Desktop 选中该 agent 都续期，不带 user 身份）。因此"观众不该激活会话"是与该缺口直接相关的设计约束：不再给这个没有 per-session GC 的系统增加参与者。详见 §5.5。
+
 ### 决策 5：管理员角色 — `role = "admin"` 绕过过滤 + 特殊权限
 
 **admin 创建流程**：
 1. Gateway 首次启动时，配置文件 `gateway.toml` 含 `bootstrap_admin = { username, password }`
 2. 若 `accounts.json` 为空 → 启动时强制创建该 admin 账号
 3. 后续 admin 通过 admin token 创建其他 admin（需 `username` + `display_name`，密码由被创建者首次登录时设置——首次登录流程：`POST /api/auth/login?invite_token=<xxx>`）
+
+> **评审修订（实施期）**：`bootstrap_admin` 是**仅首次启动有效**（first-boot-only）的引导凭据，不是"永远必须配置"的常驻项。实施时明确为：
+> - `accounts.json` **为空** + `AUTH_MODE=multi_user` → 必须配 `bootstrap_admin`，**否则拒绝启动**（fail-fast）；
+> - `accounts.json` **非空** → `bootstrap_admin` **被忽略**（仍配置则打 warn 日志）。
+>
+> 理由：若每次启动都强制要求配置，等于把引导密码变成**常驻的第二组 admin 凭据**——它躺在明文 `gateway.toml` 里、绕过改密流程、且无法吊销，是一个长期敞口。Gitea / Jenkins / GitLab 的引导凭据同样是首启专用。创建之后该账号完全由正常的改密 / 禁用流程管辖。
+> 检查点落在 `Gateway::new`（构造期 `Result`），所以是真正的"拒绝启动"，而非"启动后打日志"。
 
 **admin 能力清单**：
 - ✅ `GET /api/users` 看到全部账号（含 `last_login_at`、`disabled_at`、但不含 `password_hash`）
@@ -644,7 +752,23 @@ pub struct ProjectMember {
 | `0.0.0.0` / LAN IP / 域名 | `multi_user` | 跨机/跨用户可连 = 必须完整账号体系 |
 | `--auth-mode local` / `multi_user` 显式 | 覆盖推断 | 异常场景（reverse proxy 后 + 仅内网访问时强制 local；loopback 但想演示 multi_user 时强制 multi_user） |
 
-**优先级**：CLI `--auth-mode` > TOML 顶层 `auth_mode` > bind 自动推断 > default `local`。（`auth_mode` 键在 `GatewayConfig` **顶层**，不在 `[multi_user]` 段内；`[multi_user]` 段留待 `bootstrap_admin` / `password_policy` / `registration_open`，见 §6.4。）
+**优先级**：CLI `--auth-mode` > TOML 顶层 `auth_mode` > bind 自动推断 > default `local`。（`auth_mode` 键在 `GatewayConfig` **顶层**，不在 `[multi_user]` 段内；`[multi_user]` 段承载 `bootstrap_admin` / `password_policy` / `registration_open`，**已实现**，见 §6.4。）
+
+**multi_user 最小配置**（首次启动，`accounts.json` 为空时必需）：
+
+```toml
+auth_mode = "multi_user"          # 或 bind 到非 loopback 让系统自动推断
+
+[multi_user]
+bootstrap_admin = { username = "root", password = "change-me-1", display_name = "管理员" }
+
+[multi_user.password_policy]      # 缺省即下面三个值
+min_length = 8
+require_digit = true
+require_mixed_case = false
+```
+
+首启后 `bootstrap_admin` 即可从配置里删掉——账号已经建好，它只在 `accounts.json` 为空时有意义（见决策 5 实施修订）。
 
 **local 模式行为**（`AUTH_MODE=local`，**所有 §1-§11 决策退化为 no-op**）：
 - `HttpAuth` 维持现有 bearer token（`data_dir/http_token` 文件，决策 3 的 access/refresh 不引入）
@@ -674,7 +798,7 @@ pub struct ProjectMember {
 
 **与之前决策的联动**：
 - **决策 1**：`UserAccount` 字段全保留，local 模式下 `password_hash` 填 sentinel（schema 不分裂）
-- **决策 5**：local 模式下 `bootstrap_admin` 不强制（首位 admin = 物理 OS 用户）；multi_user 模式下从"��配告警"升级为"漏配拒启动"
+- **决策 5**：local 模式下 `bootstrap_admin` 不强制（首位 admin = 物理 OS 用户）；multi_user 模式下从"漏配告警"升级为"漏配拒启动"
 - **§5.4 回滚段**：`AUTH_MODE` 不再只是回滚段的环境变量，而是第一类配置——回滚段降级为"mode 内降级"
 - **§9 开放问题 1**：local 模式下"首位 admin"概念不存在（物理 OS 用户就是 admin），multi_user 模式下保留 bootstrap_admin；问题按模式分流消解
 
@@ -695,7 +819,8 @@ pub struct ProjectMember {
 ### 5.2 负面 / 成本
 
 1. **登录态中间件全栈改造**：所有现有 handler 必须经过 auth_middleware，handler 函数签名要加 `Extension(auth): Extension<AuthContext>`。约 30+ handler 要 touch。
-2. **session 反代全链路过滤**：所有 `/api/agents/{id}/sessions/*` 反代需要把 user_id 注入 query + 二次校验 owner；漏一处 = 数据泄漏。需专门的 grep ceiling lint（见 §6）。
+   > **实施修订（Phase C-2）**：中间件做成**全局层**后，handler **不必**逐个改签名——`auth_middleware` 已经挡住所有未带 token 的请求，只有**需要用到身份**的 handler（反代注入、`/me`、`/change-password`）才按需加 `Extension<AuthContext>`。实际改造成本从"30+ handler"降到"少数几个 handler + 一条 layer"，这是挂全局层而非逐路由 `route_layer` 的直接收益。
+2. **session 隔离散布在 Runtime 的多个 handler**：过滤与 owner 校验必须覆盖 list / get / messages / latest / open / close / delete / visibility 全部入口；漏一处 = 数据泄漏。已收敛到两个共享谓词（`is_readable_by` / `is_writable_by`）+ 两个共享辅助（`authorize_read` / `authorize_write`），新增 handler 只需调辅助即可，但仍需 grep ceiling lint 兜底（见 §6.6）。
 3. **Desktop 双 store 并存过渡期**：`userProfileStore`（旧） + `authStore`（新）共存一段时间，迁移期两者数据可能不一致；需要清晰 deprecation 路径。
 4. **token 撤销的存储成本**：refresh token family 需要持久化以支持"该 family 全部撤销"语义，单独文件或 Redis；本期选文件（`data_dir/auth/revoked_families.txt`），量小可接受。
 5. **首次启动门槛（multi_user 模式）**：必须通过 `bootstrap_admin` 配置创建首位 admin；漏配导致系统空跑无人能登录——**fail-fast 拒启动**（决策 12 升级），而非仅告警。local 模式无此门槛（首位 user 由 `bootstrap/orchestrator.rs` 自动创建，见决策 12 "UserAccount 在 local 模式下的存在性"）。
@@ -722,17 +847,26 @@ pub struct ProjectMember {
 
 ### 5.5 已知技术债
 
-- **ponytail: HS256 token 校验是 CPU 同步操作**，无状态撤销，黑名单靠家族检测。下一步：迁移到 RS256 + Redis 黑名单（用户量 > 100 时）。
+- **ponytail: access token 校验无状态**（只验签 + `exp`，不读 `accounts.json`），所以"账号被禁用后 token 仍可用"的窗口 = `ACCESS_TTL_SECS`（15 分钟）。这是**有意的上界**，不是遗漏：代价是每请求一次磁盘解析，收益只有 15 分钟。真正的强一致点在 `refresh`（每次重读 store）。要即时生效 → 加一个内存 `user_id → revoked_at` 集合在 `verify_access` 里查（无磁盘 I/O）。用户量 > 100 或需要即时踢人时再上 RS256 + 撤销名单。
+- **ponytail: refresh token 单次使用 + 复用检测会误伤重试**。若客户端发出 refresh、服务端处理成功、但响应在网络上丢失，客户端重试同一 token 会被判为"复用"→ 整个用户全线下线。RFC 9700 认可这种严格模式；主流实现多给一个几秒的宽限窗口（grace window）。本期不实现宽限窗口（YAGNI，Desktop 单客户端场景重试窗口极窄），升级路径 = 在 `revoked_families.txt` 的 `r:` 条目上加时间戳 + 宽限判定。
+- **ponytail: `revoked_families.txt` 是扁平文件、无 GC**，每次 refresh 追加一行。目标规模（< 100 用户）无问题；超过需要 SQLite 表 + 过期列。
 - **ponytail: 用户聊天列表是 fs 扫描**，O(n) on `data_dir/users/`。n < 1000 时可接受；超过需要 SQLite 索引。
 - **ponytail: `as_user` query 在反代链路上是字符串透传**，未来如果引入 proto 升级需要结构化字段。
-- **未实现**：多设备登录并发 session 限制、密码过期强制改密（本期仅记录 `password_expires_at` 不强制）、账号 lockout（5 次失败 → 15 分钟锁定）——这些放后续 ADR。
+- **未实现**：`/api/auth/first-login`（invite_token 存储）、账号自注册（`registration_open` 字段已就位未接线）、多设备登录并发 session 限制、密码过期强制改密（本期仅记录 `password_expires_at` 不强制）、账号 lockout（5 次失败 → 15 分钟锁定）——`first-login` / 自注册随 Phase E 账号 CRUD 一起做，其余放后续 ADR。
+- **ponytail: 公开 session 的分页计数是"可见行数"而非"总行数"**：过滤发生在分页前，所以 `total_count` / `total_pages` 只数调用者能看见的 session。这是有意的——按总数分页会泄漏"别人还有 N 个 session"——但代价是不同用户看到的同一页边界不同，前端**不能**缓存跨用户的分页结果。
+- **已结清：会话控制面的 MQTT 命令已全部删除**（proto 字段 + Runtime 变体 + Gateway/Tauri 映射表），字段号整体重排为连续。协议文档（`mqtt.md` / `http.md` / ADR-034 §11.2.B）已同步为"已删除 + 迁 HTTP"。**仍未结清**：MQTT 事件面的读侧保密性（无 per-user topic ACL，`mqtt.md` §10 已标注为暂缓 / 已知缺口）。
+- **ponytail: `meta/` 目录的每次使用都是全量扫**（`scan_sessions_from_meta` = `read_dir` + 逐文件 `read + serde_json`）。实测（2000 个 meta / 1.5 MB，本机 APFS 热缓存）：release **23 ms**、debug **42 ms**，而 `read_dir().count()` 只要 **0.9 ms**——release 仅比 debug 快 1.8×，说明瓶颈是 **2000 次 `open`/`read`/`close` 系统调用（~11 µs/文件），不是 JSON 解析**。真实规模（本机各 agent 1–17 个会话）单次约 0.2 ms，所以这是**形状**问题（随历史线性增长）而非当下问题。本轮的减免：`prune_excess_sessions` 先用 `read_dir().count()` 兜底（距上限尚远时零解析）。**仍未解决**：`GET /sessions` 仍全量扫——它需要全部行做排序 / 分页，加上 ADR-028/066 的 token 聚合（且聚合必须是**过滤后可见会话**的完整集合，见 `scan_sessions_async`），无法部分读取。升级路径 = Runtime 进程内维护 `meta/` 的**内存索引**（Runtime 是该目录唯一写者，ADR-009）：写入时 upsert、读取零系统调用；**不要**落盘成索引文件——那是第二真相源，已在本 ADR §决策 2 否决。触发条件：列表接口实测变热，或单 agent 会话数逼近 2000。
+- **已结清：会话数量上限按 owner 分桶**（`prune_excess_sessions`）：原先按 `last_active_at` **全局**排序裁剪，multi_user 下一个账号新建会话会把**另一个账号**最老的会话归档（`.jsonl` → `.jsonl.archive` + 删 meta → 在该账号列表里消失且无恢复入口）。现按 `SessionMeta::user_id` 分桶、每桶**各自**应用 `max_sessions`；`user_id = None`（ADR-076 之前的数据 / local 模式）自成一组，保持旧语义。回归测试 `prune_excess_sessions_is_per_owner_not_per_agent`：alice 2 / bob 3 / 无主 3、上限 2 → 只裁两个超限桶各 1 个；**alice 的时间戳故意最老**，所以旧实现必然失败。
+- **已结清：`visibility` 开关已有 UI**。per-session 开关在输入框（composer）工具行：🌐 / 🔒 图标调 `PUT /api/agents/{id}/sessions/{sid}/visibility`，仅 owner（`can_write === true`）可点，非 owner 渲染为 disabled（而不是隐藏，让旁观者知道自己在看什么）；乐观更新 + 失败回滚。**per-agent 默认可见性仍未做**——刻意留白：agent 是 Gateway 级共享对象（侧栏 `Agent (N)` 与 `Users (N)` 正交），per-agent 默认值等于"影响所有账号新建会话"的策略，与"我自己的新会话默认私有"（用户级偏好）不是一个层级，需先决定要哪一层再动手。详见本节末「per-agent 默认可见性」。
+- **已结清：公开会话的"只读打开"**。做法是**观众不激活**（而不是给观众开 `open` 权限）：Desktop `can_write === false` 时输入框禁用 + placeholder 提示"只读会话"，且 `openSession` / `closeTab` 分别跳过 `POST /open` / `POST /close`；历史仍由 `GET /messages`（读授权）加载，事件流由通配 MQTT 订阅在会话真正 Active 时送达。**为什么不开 `open` 读授权**（曾实现又被撤回）：`Active` / `Closed` 是 per-session **全局**状态，观众激活会产生一个"观众无权关（close 是写授权，刻意不让旁观者拆会话）、owner 也不知道被谁占着"的常驻会话——正确回收它需要观察者引用计数，而当前 Runtime 恰好**没有** per-session GC（见上一条）。回归防护：Desktop `src/stores/sessionSharing.test.ts`（可见性乐观翻转 + 回滚；`can_write === false` 时 open / close 零请求）。
+
+- **ponytail: MQTT 事件面没有 per-user 订阅隔离**（读侧保密性缺口）。`session 隔离`只覆盖**写侧**与 **HTTP 读侧**：任何能连上 broker 的客户端理论上可以 SUBSCRIBE 任意 `agents/{id}/sessions/{sid}/messages/#` 看到他人会话的事件流。这是 ceiling——`rumqttd` 0.20 没有 per-topic ACL 能力，**无法在现有 broker 上修复**（用户决策：MQTT 用户身份验证先暂缓）。缓解：broker 默认只 bind `127.0.0.1`（攻击者须先能访问本机回路）。升级路径 = 换 mosquitto（Phase 5b 评估）或给事件面加 token 化订阅代理。已在 [mqtt.md §10](../../protocols/zh/mqtt.md) 标注为"暂缓 / 已知缺口"。
 
 ---
 
 ## 6. 改动清单（按 crate / 文件）
 
-> **实现状态（Phase 1 基础设施 commit `fbe23126`）**：本节标注 **（已实现）** 的条目 = 基础设施 PR 交付物——core `src/account.rs`；gateway `src/account/store.rs` + `password.rs`；`src/auth/token.rs` + `revoked.rs` + `mode.rs`；config 顶层 `auth_mode` 字段 + `effective_auth_mode()`；cli `--auth-mode`。**其余条目均为 Phase 2+ 未实现**（auth_middleware / auth_api / account_api / chat_api / chat persistence / attachments / proxy 过滤 / pm_proxy + doc_proxy / users_api 合并 / resource_cache / bootstrap_orchestrator / protocol.rs `AccountPublicView` / `[multi_user]` 配置段 / `bootstrap_admin` 缺配拒启动），属后续 PR，非本节遗漏。已实现模块当前**无生产调用方**（仅自身测试），对现网启动/HTTP 路径零影响。
-
+> **实现状态（截至 Phase D 数据面落地）**：本节标注 **（已实现）** 的条目已合并并测试通过——core `src/account.rs`；gateway `src/account/store.rs` / `password.rs` / `auth/{mode,token,revoked,service}.rs` / `http/{auth_middleware,auth_api}.rs` / config `auth_mode` + `[multi_user]` + `effective_auth_mode()` / cli `--auth-mode` / `Gateway::new` 的 bootstrap_admin fail-fast / `proxy.rs` 的 14 条会话控制路由（生命周期 7 + 会话动作 7）；runtime `src/http/session_control.rs` + `conversation.rs` 的 scope/visibility + `agent/session/session_manager.rs` 的 `create_frontend_session` / `resume_session`。**未实现**的条目 = 后续 PR（account_api / chat_api / chat persistence / attachments / pm_proxy + doc_proxy / users_api 合并 / resource_cache / protocol.rs `AccountPublicView` / Desktop `authStore`），属计划范围，非本节遗漏。
 ### 6.1 core/acowork-core
 
 - 新增 `src/account.rs`（**已实现**）：`UserAccount`、`Role`、`AccountListFile`、`DISABLED_PASSWORD_HASH`；`UserAccount::to_public_profile()` 产出 `UserProfile` 公开视图
@@ -745,36 +879,45 @@ pub struct ProjectMember {
 
 ### 6.3 core/acowork-runtime
 
-- 修改 `src/conversation.rs`：`SessionMeta` 加 `user_id: Option<String>` 字段
-- 修改 `src/usecases/session_metadata_impl.rs`：`list_sessions` 接受 `user_id: Option<&str>` filter；admin 时（sentinel `"__admin__"`）不过滤
-- 修改 `src/http/server.rs`：`/sessions` 接受 `?user_id=` query
-- 修改 `src/agent/session/session_manager.rs`：`create_session_with_id_and_conversation` 接受 `user_id` 参数，从 HTTP header `X-User-Id` 读
-- 修改 `src/agent/session/restorer.rs`：恢复历史 session 时保留 `user_id` 字段
+> **Phase D 状态**：全部**已落地**（见 §决策 4 的 Phase D 实施记录）。
+
+- ✅ 修改 `src/conversation.rs`：`SessionMeta` 加 `user_id` + `visibility`（均 `serde(default)` + `skip_serializing_if`，向后兼容）；`SessionScope` 枚举 + `from_header_value`；`is_readable_by` / `is_writable_by` 谓词；`ConversationSession::set_user_id`（write-once）/ `set_visibility` / `is_private`；`scan_sessions_async` 加 `scope` 入参并在**分页前**过滤；`SessionInfo` 加 `visibility`
+- ✅ 修改 `src/usecases/session_metadata.rs` + `session_metadata_impl.rs`：`list_sessions` 加 `scope: &SessionScope` 参数并透传（原稿的 `user_id: Option<&str>` + `"__admin__"` sentinel 被 `SessionScope` 取代——sentinel 是字符串魔法值，多一个变体表达不了"local 不过滤"）
+- ✅ 修改 `src/http/server.rs`：`/sessions` / `/sessions/{sid}` / `.../messages` / `.../latest` 从 `x-user-id` 头解析 scope 并校验（不是 `?user_id=` query——身份由 Gateway 注入的头承载，客户端无法伪造）；注册 **14 条控制面路由**（生命周期 7 + 会话动作 7）；反转 ADR-034 §11.2 的"控制面不在 HTTP"注释
+- ✅ 新增 `src/http/session_control.rs`：**14 个 handler**（第一批生命周期 7 个：create / open / close / delete / visibility / workspace / config；第二批会话动作 7 个：messages / stop / continue / approval / answer / cancel-tool / compress）+ `dispatch_session_action` 共享辅助 + `authorize_read` / `authorize_write` / `scope_from_headers`（被 `server.rs` 的读路径共用）
+- ✅ 修改 `src/agent/session/session_manager.rs`：`create_frontend_session` 加 `user_id` / `visibility` 入参；新增 `resume_session`（封装 ADR-038 激活状态机，返回 `Option<SessionOpenOutcome>`，`None` = not found）——原稿的 `create_session_with_id_and_conversation` 名字是猜的，实际入口是 `create_frontend_session`
+- ✅ 修改 `src/startup/gateway_loop.rs`：MQTT `open_session` 命令改为调 `resume_session`（同一份状态机，不再重复实现）
+- ✅ 修改 `src/startup/session_init.rs` + `tests/conversation_session_tokens.rs`：`SessionMeta` 构造点补 `user_id: None, visibility: None`
+- ✅ 修改 `src/http/server.rs`（读/写守卫补齐）：`GET`/`PUT /sessions/{sid}/config` 与 `POST /sessions/{sid}/files` 此前**未做任何 scope 校验**（能读改他人 session 的 model / workspace / title，也能往他人会话上传附件），现补 `authorize_read` / `authorize_write`
 
 ### 6.4 core/acowork-gateway
 
 **新增**：
-- `src/http/auth_middleware.rs`：token 校验 + `AuthContext` 注入
-- `src/http/auth_api.rs`：`/api/auth/login` `/refresh` `/logout` `/change-password` `/first-login` `/me`
+- `src/http/auth_middleware.rs`（**已实现**）：token 校验 + `AuthContext { user_id, role, as_user }` 注入 + `effective_user_id()`；局部白名单 + `OPTIONS` 放行；`as_user` 非 admin → 403
+- `src/http/auth_api.rs`（**已实现**）：`/api/auth/login` `/refresh` `/logout` `/change-password` `/me`（`/first-login` 依赖 invite_token 存储，随账号 CRUD 一并做，见 Phase E）；Argon2 调用全部走 `spawn_blocking`
+- `src/auth/service.rs`（**已实现**）：`AuthService` —— 登录 / 刷新（轮换 + 复用检测）/ 登出 / 改密 / `verify_access` / `ensure_bootstrap_admin`；`PasswordPolicy`、`BootstrapAdmin`、`AuthError`、`TokenPair`、`AuthPrincipal` 的定义处
 - `src/http/account_api.rs`：账号 CRUD（替换并扩展现有 `users_api.rs`）
 - `src/http/chat_api.rs`：用户-用户聊天 API
 - `src/account/store.rs`（已实现）：账号权威表 `accounts.json` 读写（原子写：temp + rename）；`src/account/password.rs`（已实现）：Argon2id PHC 哈希 / 校验
 - `src/auth/token.rs`（已实现）：HS256 token 签发 / 校验 / refresh family 管理；签名密钥 `data_dir/auth/secret`（首次启动生成，`0600`）
-- `src/auth/revoked.rs`（已实现）：`revoked_families.txt` 文件管理（精确 family + `{user_id}.*` 通配，后者用于改密全杀）
+- `src/auth/revoked.rs`（已实现）：`revoked_families.txt` 文件管理（`r:{family}` 轮换 / `x:{family}` 显式撤销 / `{user_id}.*` 通配，见决策 3 实施记录）
 - `src/chat/persistence.rs`：`conversation.json` + `conversation.jsonl` 读写
 - `src/chat/attachments.rs`：图片 / 文档附件落盘（`data_dir/users/.../files/`）
 - `src/auth/mode.rs`（**已实现**）：`AUTH_MODE` 推断 + bind 地址解析 + CLI flag 解析（决策 12）；`pub enum AuthMode { Local, MultiUser }`；`pub fn resolve_auth_mode(cli: Option<AuthMode>, toml: Option<AuthMode>, bind_host: &str) -> AuthMode`；pub `is_loopback_host(host: &str) -> bool` helper（loopback 判定含 `127.0.0.0/8`、`::1`、`localhost`；`0.0.0.0` / `fe80::/10` / LAN IP / 域名 → MultiUser 安全侧）
 
 **修改**：
-- `src/http/routes.rs`：`AppState` 加 `auth_middleware`（**仅 multi_user 模式生效**，local 模式注册 legacy `HttpAuth` bearer middleware）；`AppState` 加 `auth_state: Arc<AuthState>` + `auth_mode: AuthMode`；router 注册时分流——multi_user 模式加载 `/api/auth/*` `/api/users/*/chats/*` admin 路由，local 模式全部不注册
-- `src/http/proxy.rs`：所有 `proxy_*_sessions*` 函数加 `Extension(auth)`，把 `effective_user_id` 注入 query / header；新增 `?as_user=` 处理（仅 admin + 仅 GET）；**local 模式跳过 user_id 过滤**（query 接受但不修改 Runtime 行为）
-- `src/http/pm_proxy.rs` / `src/http/doc_proxy.rs`（决策 10）：`build_trusted_headers` 签名加 `auth: &AuthContext` 参数；multi_user 模式 REST 分支从注入常量 `"human"` 改为 `auth.effective_user_id`；**local 模式保留 `X-Actor: human` 常量注入**（决策 12 联动）；MCP 分支 `X-MCP-Actor` 校验逻辑不变（两模式一致）
-- `src/http/users_api.rs`：**废弃**，合并到 `account_api.rs`（保留兼容路径 → `account_api` 的 alias）；**local 模式下路由 alias 也不注册**
+- `src/http/routes.rs`（**已实现**）：`AppState` 加 `auth_mode: AuthMode` + `auth_service: Option<Arc<AuthService>>`（**`Some` 仅在 multi_user**）；`/api/auth/*` 仅在 `auth_service.is_some()` 时 `merge`（local 模式**不注册**，返回 404 而非 403）；`auth_middleware` 作为全局层挂在 CORS 内层、路由外层，`auth_service == None` 时 no-op
+- `src/http/server.rs`（**已实现**）：`start_http_server` 增加 `auth_mode` + `auth_service` 两个参数，写入 `AppState`
+- `src/gateway/mod.rs`（**已实现**）：`Gateway::new` 解析 `effective_auth_mode()`；multi_user 时构造 `AuthService` 并调用 `ensure_bootstrap_admin()`（**构造函数期 fail-fast**）
+- `src/http/proxy.rs`（**已实现**）：加 5 条 session 控制面反代路由（`POST /sessions`、`POST .../{sid}/open`、`POST .../{sid}/close`、`DELETE .../{sid}`、`PUT .../{sid}/visibility`，含 body / method 透传）。**注意：反代层不做 owner 校验、不注入 user_id**——`x-user-id` 由 `auth_middleware`（全局层）统一剥/注，owner 判定由 Runtime 做（见 §决策 4 职责划分）。原稿"代理层加 `Extension(auth)` 注入 query + 二次校验 owner"因此**未采用**：那会在 Gateway 造第二份真相，还要处理"meta 刚被删"的竞态
+- `src/http/auth_middleware.rs`（**已实现**）：`as_user` 仅 admin 且**仅只读方法**（GET / HEAD）——写请求携带 `as_user` 直接 403（§9 开放问题 5 的强制点）
+- `src/http/pm_proxy.rs` / `src/http/doc_proxy.rs`（决策 10）：`build_trusted_headers` 签名加 `auth: &AuthContext` 参数；multi_user 模式 REST 分支从注入常量 `"human"` 改为 `auth.effective_user_id`；**local 模式保留 `X-Actor: human` 常量注入**（决策 12 联动）；MCP 分支 `X-MCP-Actor` 校验逻辑不变（两模式一致）——**未实现（Phase D）**
+- `src/http/users_api.rs`：**废弃**，合并到 `account_api.rs`（保留兼容路径 → `account_api` 的 alias）；**local 模式下路由 alias 也不注册**——**未实现（Phase E）**
 - `src/resource_cache.rs`：`UserProfileListFile` 改名或保留——保留 `user_profiles.json` 作为公开视图；local 模式下维持现有 `UserProfile` 写入路径（不引入 `password_hash` sentinel）
 - `src/account/store.rs`（决策 2 配套）：**local 模式不创建 `accounts.json`**，不碰 `user_profiles.json`（零改动）
-- `src/bootstrap/orchestrator.rs`：**multi_user 模式**：检查 `bootstrap_admin` 配置，若 accounts 为空则强制创建首位 admin（**缺配则拒启动**——fail-fast，决策 12 升级原决策 5 的"告警"为"拒启动"）；**local 模式**：**零改动**（不碰 `accounts.json`，不创建任何 `UserAccount`）
-- `src/config.rs`：新增顶层 `auth_mode: Option<AuthMode>` 字段（**已实现**；`None` = bind 自动推断，`Some(Local)` / `Some(MultiUser)` = 显式覆盖）+ `effective_auth_mode()` 解析入口；新增 `[multi_user]` 段：`registration_open`、`password_policy`、`bootstrap_admin`——**未实现（Phase 2）**
-- `src/cli.rs`（CliArgs）：新增 `--auth-mode <local|multi_user>` flag（**已实现**，含 env `ACOWORK_GATEWAY_AUTH_MODE`）；"显式 `--auth-mode` 与 `--bind` 冲突 → warn" 联动——**未实现（Phase 2，bind 推断当前仅作默认值，显式模式始终优先）**
+- `src/bootstrap/orchestrator.rs`：**未采用**——启动检查改落 `Gateway::new`（构造期 `Result` 才能真正拒绝启动；orchestrator 是运行时子系统，那里报错只会打日志）
+- `src/config.rs`（**已实现**）：顶层 `auth_mode: Option<AuthMode>`（`None` = bind 自动推断）+ `effective_auth_mode()`；新增 `[multi_user]` 段：`bootstrap_admin: Option<BootstrapAdmin>`、`password_policy: PasswordPolicy`、`registration_open: bool`（字段已就位；`registration_open` **尚未接线**到路由，账号自注册属 Phase E）
+- `src/cli.rs`（CliArgs）：`--auth-mode <local|multi_user>`（**已实现**，含 env `ACOWORK_GATEWAY_AUTH_MODE`）；"显式 `--auth-mode` 与 `--bind` 冲突 → warn" 联动——**未实现（Phase 2，bind 推断当前仅作默认值，显式模式始终优先）**
 
 ### 6.5 apps/acowork-desktop
 
@@ -792,14 +935,28 @@ pub struct ProjectMember {
 - `src/lib/types.ts`：新增 `UserAccount`、`AuthState`、`Role` 类型
 - `src/i18n/`：新增 `account.*` / `userList.*` / `chat.*` 文案键
 
+**已实现（Phase D 收尾，session 隔离的 Desktop 侧）**：
+- 新增 `src/lib/session-control.ts`：会话控制面 HTTP 封装（取代 `invoke("mqtt_publish_control")`）
+- 新增 `src/components/chat/SessionVisibilityToggle.tsx`：输入框工具行的 per-session 可见性开关（🌐 / 🔒，仅 owner 可点）
+- 修改 `src/stores/agentStore.ts`：`setSessionVisibility`（乐观翻转 + PUT + 失败回滚）
+- 修改 `src/stores/chatStore.ts`：8 个控制调用点 MQTT → HTTP；`closeTab` 在 `can_write === false` 时跳过 `POST /close`
+- 修改 `src/components/chat/ChatPanel.tsx`：`can_write === false` 时禁用输入框 + 只读 placeholder；挂载可见性开关
+- 修改 `src/lib/types.ts`：`SessionInfo` 增加 `visibility` / `can_write`
+
 ### 6.6 dev/ci.sh 新增 ceiling lint
 
 ```bash
-# 防止遗漏 auth_middleware 的 handler
-grep -rn "Extension(auth)" core/acowork-gateway/src/http/ | wc -l
-# 防止 proxy 反代遗漏 user_id 注入
-grep -rn "proxy_list_sessions\|proxy_get_messages\|proxy_get_session_state" core/acowork-gateway/src/http/proxy.rs
+# 防止 auth_middleware 被绕开：身份注入只应发生在这一处
+grep -rn "USER_SCOPE_HEADER" core/acowork-gateway/src/ | grep -v auth_middleware
+# 期望：只出现在常量定义与测试里；proxy.rs 里出现即说明有人在反代层自行注入身份
+
+# 防止 Runtime 侧新增 session 路由时漏掉授权（见 §7.5 的清单式检查）
+grep -nE '"/sessions' core/acowork-runtime/src/http/server.rs
+# 期望 9 行；每行 handler 要么在 session_control:: 内（自带校验），
+# 要么自己调用 authorize_read / authorize_write
 ```
+
+> **为什么不 lint "proxy 是否注入 user_id"**：原稿的这条 lint 基于"Gateway 反代时注入 + 校验 owner"的设计，而实现把 owner 判定放在 Runtime（§决策 4 职责划分）。Gateway 反代层**本来就该看不到 `user_id`**——lint 应当反过来断言它**不出现**在那里。
 
 ### 6.7 core/acowork-pm（决策 10 + 11 联动）
 
@@ -817,13 +974,21 @@ grep -rn "proxy_list_sessions\|proxy_get_messages\|proxy_get_session_state" core
 
 - `core/acowork-gateway/src/account/`: 账号创建 / 改密 / 注销 round-trip；Vault locked 状态下元数据可见
 - `core/acowork-gateway/src/auth/token.rs`: HS256 签发 / 校验；refresh family rotation；篡改 token 拒绝
-- `core/acowork-gateway/src/auth/revoked.rs`: revoke family 后旧 refresh_token 失效
-- `core/acowork-runtime/src/conversation.rs`: `SessionMeta` 序列化含/不含 `user_id` 兼容（无字段的旧 jsonl 仍可加载）
-- `core/acowork-runtime/src/usecases/session_metadata_impl.rs`: `list_sessions(user_id=Some(x))` 只返该 user 的 session；admin 时返全部
+- `core/acowork-gateway/src/auth/revoked.rs`: revoke family 后旧 refresh_token 失效；`r:` 轮换与 `x:` 显式撤销可区分
+- `core/acowork-gateway/src/auth/service.rs`（**已实现，15 项**）：登录成功 / 大小写不敏感 / 错密码 / 未知用户 / `$disabled$` / `disabled_at` 全部 401 且不可区分；access/refresh 不可互换；access 过期；篡改签名；refresh 轮换 + 复用检测连坐；登出只杀本设备、不连坐；改密需旧密码 + 杀全部 family；签名密钥跨重启复用；bootstrap 空表必配 / 配置一次后忽略 / 密码策略校验
+- `core/acowork-gateway/src/http/auth_api.rs`（**已实现，4 项，走真实 `build_router`**）：local 模式 `/api/auth/login` → 404（未注册）；multi_user 无 token 访问 `/api/agents` → 401、`/health` 放行；登录 → `/me` 脱敏（无 `password_hash`）→ 非 admin `as_user` → 403 → refresh 轮换 → 改密后旧 refresh 失效；bootstrap admin 可登录
+- ✅ `core/acowork-runtime/src/conversation.rs`: `SessionMeta` 序列化含/不含 `user_id` 兼容（无字段的旧 jsonl 仍可加载）；`set_user_id` write-once
+- ✅ `core/acowork-gateway/src/http/auth_middleware.rs`（**已实现，1 项，走真实 `build_router` 层**）：客户端伪造 `x-user-id` 被剥；无 token 401；admin 得到 `*`；`as_user` 收窄 scope；非法 `as_user` → 403
+- ✅ `core/acowork-runtime/src/conversation.rs`（**已实现**）：`SessionScope::from_header_value` 三态（`*` → `Unfiltered`、具体 id → `User`、空/缺失 → `Unfiltered`）；`is_readable_by` / `is_writable_by` 在 `(user_id 归属 × visibility 三态 × scope)` 组合矩阵上的判定；`visibility` 缺省为公开 + 向后兼容
+- ✅ `core/acowork-runtime/src/conversation.rs`（**已实现**）：`visibility_and_ownership_gate_read_and_write`（private 非 owner 读/写均拒；public 非 owner 可读不可写）、`session_scope_from_header_value`（`*` / 具体 id / 缺失三态）、`scan_filters_by_scope_before_paginating`（过滤先于分页，`total_count` 反映可见行数）、`session_meta_visibility_is_absent_by_default_and_means_public`、`set_visibility_persists_and_clears_back_to_public`
+- ✅ 不可读 / 不可写一律 **404 而非 403**（`session_control::not_found` 这一处共享映射）：handler 接线由既有 HTTP server 测试覆盖——`test_session_config_unknown_session_and_visibility_gate`、`test_http_upload_file_docx_lands_with_real_extension`（上传先要 session 存在）
+- ✅ `core/acowork-runtime/src/usecases/session_metadata_impl.rs`：`list_sessions(page, size, scope)` 只返 scope 可见的 session，**且在分页前过滤**（`total_count` 反映可见行数）
 
 ### 7.2 集成测试（e2e）
 
-- 完整流程：admin 创建 → alice 创建 → alice 创建 session → bob 看不到 alice 的 session → admin 用 `?as_user=alice` 看到
+> 第 1 条的**单元级**覆盖已落地（见 §7.1）；进程级端到端依赖 Phase H。后 3 条依赖 Phase E/F（**未落地**）。
+
+- ◐ 完整流程：admin 创建 → alice 创建 → alice 创建 session → bob 看不到 alice 的 session → admin 用 `?as_user=alice` 看到（scope 解析 / 过滤 / owner 校验已有单测；跨进程 e2e 待 Phase H）
 - 改密流程：alice 改密 → 旧 refresh_token 失效 → 必须重新 login
 - 注销流程：alice DELETE self → alice 无法再 login → 历史 session 仍可被 admin 读
 - 用户聊天：A → B 发文字 + 图片 + 文档 → B 收到 → unread_count 增加 → B read 后清零
@@ -836,8 +1001,11 @@ grep -rn "proxy_list_sessions\|proxy_get_messages\|proxy_get_session_state" core
 
 ### 7.4 安全测试（手动 checklist）
 
-- [ ] 普通 user 用 `?as_user=<admin>` 访问 → 403
-- [ ] 普通 user 改 `X-User-Id` header → Runtime 侧与 token 不一致 → 拒绝
+- [x] 普通 user 用 `?as_user=<admin>` 访问 → 403（已单测）
+- [x] admin 用 `?as_user` 调**写**方法（POST / DELETE）→ 403（已单测；强制点在 `auth_middleware`，见 §6.4）
+- [x] 普通 user 改 `X-User-Id` header → **Gateway 中间件直接剥除**并注入 token 派生值（local 模式只剥不注），客户端值永远到不了 Runtime（已单测）
+- [x] 非 owner 读 private session → 404（不是 403，不泄漏存在性）；非 owner 写公开 session → 404（公开 ≠ 可改）（已单测）
+- [x] `visibility` 开关对 **config** 同样生效（走同一个 `authorize_read`）：`test_session_config_unknown_session_and_visibility_gate` 断言 private 时非 owner 读 config → 404、同 owner 翻成 public 后非 owner 读 → 200、且 public 不放开写（PUT → 404）
 - [ ] 注销账号后旧 refresh_token → revoked_families 命中 → 拒绝
 - [ ] admin 用 `as_user` 调 POST（写操作）→ 403
 - [ ] 跨用户聊天路径：`POST /api/users/{A}/chats/{B}/messages` 以 A 身份发送，从 token 拿 from 字段 → from=B 拒绝
@@ -856,15 +1024,18 @@ grep -rn "proxy_list_sessions\|proxy_get_messages\|proxy_get_session_state" core
   - 显式 `--auth-mode multi_user` + `bind = 127.0.0.1` → `MultiUser`（显式覆盖 bind，仅 warn）
 - 优先级链：CLI > TOML > bind 推断 > default
 
-**集成测试**（`core/acowork-gateway/tests/auth_mode_e2e.rs`，新增）：
+**集成测试**（`core/acowork-gateway/tests/auth_mode_e2e.rs`，**计划中，Phase H**）：
 
-- **local 模式启动**：bind `127.0.0.1` + 无 `bootstrap_admin` → 正常启动；`user_profiles.json` 含 1 条 `role = User` / `password_hash = "$disabled$"` 的记录；`GET /api/auth/login` → 404（路由未注册）；`GET /api/users/{self}/chats` → 404
-- **multi_user 模式启动**：bind `0.0.0.0` + 无 `bootstrap_admin` → **拒启动**（exit code != 0，stderr 含 `bootstrap_admin` 提示）
-- **multi_user 模式启动**：bind `0.0.0.0` + 配 `bootstrap_admin` → 正常启动；`GET /api/auth/login` 可达
-- **local 模式 session 不过滤**：创建 2 个 session 绑定不同 `user_id` → `GET /sessions` 返回全部 2 条（不过滤）
-- **multi_user 模式 session 过滤**：同上场景 → 普通 user token 只返回自己的 1 条；admin token 返回 2 条
+- **local 模式启动**：bind `127.0.0.1` + 无 `bootstrap_admin` → 正常启动；`user_profiles.json` **保持现状**（不升级 schema、不写 sentinel）；`accounts.json` **不存在**；`data_dir/auth/` **不存在**；`GET /api/auth/login` → 404（路由未注册）；`GET /api/users/{self}/chats` → 404
+- **multi_user 模式启动**：bind `0.0.0.0` + 无 `bootstrap_admin` + `accounts.json` 为空 → **拒启动**（`Gateway::new` 返回 `Err`，退出码 != 0，stderr 含 `bootstrap_admin` 提示）
+- **multi_user 模式启动**：bind `0.0.0.0` + 配 `bootstrap_admin` → 正常启动；`GET /api/auth/login` 可达且能拿到 token
+- ◐ **local 模式 session 不过滤**：创建 2 个 session 绑定不同 `user_id` → `GET /sessions` 返回全部 2 条（无 `x-user-id` 头 → `Unfiltered`）——scope 判定已单测，进程级 e2e 待 Phase H
+- ◐ **multi_user 模式 session 过滤**：同上场景 → 普通 user token 只返回自己的 1 条；admin token（`x-user-id: *`）返回 2 条——scope 判定 + 分页前过滤已单测，进程级 e2e 待 Phase H
 
-**回归防护**（`dev/ci.sh` 新增 ceiling lint）：
+**已落地的替代覆盖**（Phase C-2，走真实 `build_router`，见 `core/acowork-gateway/src/http/auth_api.rs` 的 `tests`）：
+local 模式 `/api/auth/login` → 404；multi_user 无 token `/api/agents` → 401 而 `/health` 放行；登录 → `/me` 脱敏 → 非 admin `as_user` → 403 → refresh 轮换 → 改密后旧 refresh 失效；bootstrap admin 可登录。**尚未覆盖**：`Gateway::new` 拒启动的真实进程级验证、session 过滤的**进程级** e2e（判据逻辑已有单测）。
+
+**回归防护**（`dev/ci.sh` 新增 ceiling lint，**未实现，Phase H**）：
 
 ```bash
 # 决策 12：local 模式下不得注册 auth/admin 路由——防止后续 PR 误把 multi_user 路由变成无条件注册
@@ -874,21 +1045,35 @@ grep -rn "auth_middleware\|account_api::router" core/acowork-gateway/src/http/ro
 # 决策 12：local 模式下 `accounts.json` 不得创建
 grep -rn "save_accounts\|account_list_path" core/acowork-gateway/src/ | grep -v "auth_mode\|auth::mode\|AuthMode" \
   && echo "FAIL: accounts.json 写入未按 auth_mode 分流" && exit 1
+
+# 决策 4：session 路由必须逐个显式列出——新增路由时强制人工确认校验路径
+# 期望：8 行，且每行的 handler 要么在 session_control:: 内（自带校验），
+#        要么自己调用 authorize_read（get_session / get_messages / /latest）
+grep -nE '"/sessions' core/acowork-runtime/src/http/server.rs
 ```
+
+### 7.6 Phase D 数据面落地后的验证结果
+
+- `cargo test`：core **216** / gateway **531** / runtime **1486** 全过（含 scope / visibility / `session_control` / `as_user` 只读守卫 / `can_write` 下发 / MQTT 写路径拒绝边界测试）
+- `cargo clippy -p acowork-core -p acowork-gateway -p acowork-runtime --all-targets -- -D warnings`：三 crate 干净
+- Desktop：`chatStore.test.ts` **60 passed**；`vitest` 全套 695 passed / 1 failed；`tsc --noEmit` 在我改动的文件上零错误
+- 4 个预存失败与本次改动无关：`git_api_e2e` 2 个 case（git 环境差异）、`formatTime.test.ts` 的时区骨架断言、`DocRichEditor.test.tsx`（缺 `@tiptap/react` 模块）；另有 `doc_supervisor_integration`（缺 `acowork-doc` 二进制）、`acowork-embed`（缺 ONNX 运行时）不在本次跑的范围内
 
 ---
 
 ## 8. 实施里程碑（建议）
 
-| Phase | 内容 | 估时 |
-|---|---|---|
-| 1 | `UserAccount` 数据模型 + Argon2id password_hash + Vault 加密扩展字段 | 1 周 |
-| 2 | `/api/auth/*` + token middleware + `authStore` + 顶栏账号菜单（登录 / 改密 / 注销） | 1 周 |
-| 3 | `SessionMeta.user_id` + Runtime `?user_id=` 过滤 + 反代全链路注入 | 1.5 周（含 grep ceiling lint） |
-| 4 | admin 角色 + `as_user` + bootstrap_admin + 首位 admin 创建 | 0.5 周 |
-| 5 | Sidebar User 折叠分组（`partitionAccounts` + UserList.tsx） | 0.5 周 |
-| 6 | 用户-用户聊天（persistence + API + Desktop UI + 附件上传） | 2 周 |
-| 7 | ceiling lint + 集成测试 + 文档（README / 用户手册） | 1 周 |
+> **进度（本次实施）**：Phase 1-3 的**后端全部完成并测试通过**——`UserAccount` 模型 + Argon2id + `accounts.json` + `/api/auth/*` + token 中间件 + bootstrap_admin fail-fast（Phase 1-2）；`SessionMeta.user_id` + `visibility` 开关 + Runtime scope 过滤 + owner 校验 + **会话写路径全量 MQTT→HTTP 迁移**（Phase 3，见 §决策 4 Phase D 实施记录），MQTT 侧**全部用户操作命令**（两批共 16 条：生命周期 8 + 会话动作 8）的 proto 字段 / Runtime 变体 / 命令名映射表已**删除**并重排为连续，`can_write` 下发到前端用于禁用写控件。Phase 4-7 未动。剩余项在各处标了 ⬜ / `**未实现（Phase X）**`。
+
+| Phase | 内容 | 估时 | 状态 |
+|---|---|---|---|
+| 1 | `UserAccount` 数据模型 + Argon2id password_hash + Vault 加密扩展字段 | 1 周 | ✅ 模型 / Argon2id / store 完成；Vault 加密扩展字段未做（Vault locked 登录已可用，扩展字段非阻塞） |
+| 2 | `/api/auth/*` + token middleware + `authStore` + 顶栏账号菜单（登录 / 改密 / 注销） | 1 周 | ✅ 后端完成（`AuthService` + 5 条路由 + 中间件 + bootstrap_admin）；Desktop `authStore` / 账号菜单未做 |
+| 3 | `SessionMeta.user_id` + `visibility` + Runtime scope 过滤 + owner 校验 + 控制面 HTTP 化 | 1.5 周（含 grep ceiling lint） | ✅ schema（`user_id` write-once + `visibility`）+ Gateway 头部卫生（剥/注 `x-user-id`）+ Runtime scope 过滤（分页前）+ 读/写 owner 校验 + **14 条 HTTP 控制路由**（生命周期 7 含 `PUT .../workspace`，会话动作 7）+ `can_write` 下发 + **MQTT 全部用户操作命令删除**（两批共 16 条；proto 字段一并移除并重排为连续）+ Desktop `session-control.ts` + 前端写控件禁用。grep ceiling lint 仍属 Phase 7 |
+| 4 | admin 角色 + `as_user` + bootstrap_admin + 首位 admin 创建 | 0.5 周 | ◐ `as_user` **校验 + 只读守卫**已在中间件（写方法携带 `as_user` → 403）；`as_user` **数据面**随 Phase 3 一起落地（`x-user-id` 解析 + scope 过滤）；bootstrap_admin / 首位 admin 已完成；账号 CRUD 未做 |
+| 5 | Sidebar User 折叠分组（`partitionAccounts` + UserList.tsx） | 0.5 周 | ⬜ 未开始 |
+| 6 | 用户-用户聊天（persistence + API + Desktop UI + 附件上传） | 2 周 | ⬜ 未开始 |
+| 7 | ceiling lint + 集成测试 + 文档（README / 用户手册） | 1 周 | ◐ 单元测试 + router 集成测试已就位；协议文档（`mqtt.md` 命令树 + `http.md` §5.6 控制面 + ADR-034 §11.2.B）已更新为"MQTT 控制面清空 + 全部迁 HTTP + 字段号重排"；`node_proto_golden.rs` golden 已重算；grep ceiling lint / 端到端 e2e / 用户手册未做 |
 
 总计 ~7.5 周。建议分两个 PR 合并：**PR1 = Phase 1-4**（账号 + 隔离 + admin），**PR2 = Phase 5-6**（UI + 聊天），**PR3 = Phase 7**（lint + 文档）。
 
@@ -900,7 +1085,7 @@ grep -rn "save_accounts\|account_list_path" core/acowork-gateway/src/ | grep -v 
 >
 > **模式分流补充（§决策 12）**：本地（bind `127.0.0.1`）部署下，**§1-§11 整套决策退化为 no-op**——问题 1（首位 admin = 物理 OS 用户）、问题 2（注销策略 = OS 账户注销）、问题 3-7（隔离/聊天/原子性/并发 = 单用户场景下不触发）按 `AUTH_MODE=local` 分流消解，不需单独决议。multi_user 模式（bind `0.0.0.0`）下问题 1-7 才进入实施路径。
 
-1. **✅ 已决议 — 首位 admin 创建流程**：选 **`bootstrap_admin` 配置驱动**（无人值守优先）。理由：Kubernetes / Consul / etcd / Docker 等集群系统均采配置文件 / 环境变量方式；"Gateway 是 keep-alive 进程不应有 stdin" 是既有架构原则（`AGENTS.md` 已明确）。交互式场景由**独立 CLI 子命令** `acowork-gateway admin create` 提供（独立进程，不破坏 keep-alive 边界），对应 [apps/cli/](apps/cli/) 增量。配置缺失时启动检查 + 日志告警（决策 5 已有）。
+1. **✅ 已决议 — 首位 admin 创建流程**：选 **`bootstrap_admin` 配置驱动**（无人值守优先）。理由：Kubernetes / Consul / etcd / Docker 等集群系统均采配置文件 / 环境变量方式；"Gateway 是 keep-alive 进程不应有 stdin" 是既有架构原则（`AGENTS.md` 已明确）。交互式场景由**独立 CLI 子命令** `acowork-gateway admin create` 提供（独立进程，不破坏 keep-alive 边界），对应 [apps/cli/](apps/cli/) 增量。配置缺失时：`accounts.json` 为空 → **拒启动**（fail-fast，非告警）；非空 → 忽略（见决策 5 实施修订）。
 2. **✅ 已决议 — 注销策略**：本期**只软删除**（`disabled_at`，与决策 6 一致），不提供硬删除。理由：Slack / Discord / Teams 均默认软删除保留历史；硬删除仅在 GDPR 等法律强制场景需要（会破坏 session / 聊天的引用完整性），本期 YAGNI；后续若需硬删除再立独立 ADR（带宽限期 + 异步清理任务 + 引用重映射策略）。
 3. **✅ 已决议 — 群聊（group chat）**：`conversation.json` 的 `participants` 字段类型保留 `Vec<String>`，本期运行时断言 `len() == 2`；未来 group chat 通过 "len() > 2 + group metadata（name / avatar / owner）" 扩展，**零迁移**（schema 已兼容）。理由：Slack / Discord / 微信 / Telegram 均采用 DM / Group 统一 schema；本期前端仅暴露 2 人路径，schema 留口。
 4. **✅ 已决议 — 聊天附件大小限制**：**图片 25 MB / 文档 100 MB / 不引入 virus scan**。ponytail 标记：个人 / 小团队场景下 trade-off 已知；超过此规模需引入 ClamAV（独立进程）+ 对象存储分拆（独立 ADR）。理由：Discord 25 MB（图片 / 视频）、Telegram 100 MB（任意文件）是公认的 sweet spot；virus scan 在用户量 < 100 时 ROI 为负，是 over-engineering。

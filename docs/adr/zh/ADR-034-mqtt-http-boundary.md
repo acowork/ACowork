@@ -206,7 +206,17 @@ gRPC 时代 `process_gateway_recv` 处理 **17 个 control action**，逐一映�
 
 ### 3.2 完整 proto schema
 
-> **字段编号偏移规约**（必读）：原 proto 各子命令 `agent_id` 占字段 1。本 ADR 删除子命令 `agent_id` 后，**字段 1 保留空缺**（proto3 字段号不重用规约）。各子命令实际生成字段从 2 开始，**新加字段从 5/6/7+ 起占新编号**。下表 schema 中“逻辑字段名”与实际生成的“proto 字段编号”之间可能偏移 1（取决于原字段是否被占）。
+> ⚠️ **本节的 schema 是 ADR-034 当时的原始设计（历史记录）**，**已被 ADR-076 §决策 4 整体反转**：
+> 下表中除 `intent` 外的所有命令**已从 `ControlCommand` 中删除**（用户操作全部改走 HTTP）。
+> 当前实际 schema 以 `core/acowork-core/proto/mqtt_payload.proto` 为准——`ControlCommand`
+> 顶层仅 `instance_id = 1`，oneof 仅 `intent = 2` + `active_heartbeat = 3`（字段号连续）。
+>
+> ⚠️ **字段编号规约已多次变更，以下为当前唯一有效版本**：本 ADR 早期要求删除子命令
+> `agent_id`（原占字段 1）后**保留空缺**、新字段从 2+/5+ 起占号；ADR-076 §决策 4 之后该规约
+> **作废** —— 开发期无任何向后兼容需求，整个 `mqtt_payload.proto` 的字段号已**统一重排为连续**，
+> 不留空号（发版后才冻结编号）。因此下表 schema 中的“逻辑字段名”与“proto 字段编号”存在任意偏移，
+> 实际编号以 `core/acowork-core/proto/mqtt_payload.proto` 为准；详见
+> [ADR-076 §决策 4](./ADR-076-multi-user-account-system.md)。
 >
 > 实际生成的 proto 字段编号完整详表见 `core/acowork-core/proto/mqtt_payload.proto`。
 
@@ -787,7 +797,7 @@ agent_tools.json 、agent_mcp.json 、agent_search.json 是三种不同主语语
 - [x] **新增** `QuestionAnswer { session_id, request_id, answer }`（oneof 编号 25）
 - [x] **新增** `CompressAction { session_id, compress_type }` + `CompressType` enum（`UNSPECIFIED` / `SUMMARY` / `TOOL_RESULTS`）（oneof 编号 26）
 - [x] **删除所有子命令的 `agent_id` 字段**（CreateSession / DeleteSession / ChatMessage（原 Message）/ Stop / ModelSwitch / ReasoningEffort / WorkspaceSwitch / CompactContext / Intent 全部删）—— 统一放 `ControlCommand` 顶层
-- [x] proto3 字段号不重用规约：删除的字段号（子命令 agent_id = 1）保留空缺，新字段只能占 2+ / 3+ / 4+ / 5+
+- [x] proto3 字段号不重用规约：删除的字段号（子命令 agent_id = 1）保留空缺，新字段只能占 2+ / 3+ / 4+ / 5+ —— ⚠️ **此规约已被 ADR-076 §决策 4 作废**（开发期统一重排为连续，不留空号）
 
 #### Phase 1B：prost 重新生成
 
@@ -1185,6 +1195,11 @@ ADR-034  控制面/数据面分层规约 + HTTP 端点治理  (本 ADR v2.0,补�
 
 #### A. 数据面（33 条 = 25 保留 + 8 新增；其中面板端点 6 个）
 
+> ⚠️ **计数已过时**：ADR-076 §决策 4 之后另有 5 条会话控制端点（见下方 B 节），
+> 故实际条数 = 38。下表其余部分未受影响。
+> 另：`GET /sessions` / `/sessions/{sid}` / `/sessions/{sid}/messages` / `/sessions/latest`
+> 自 ADR-076 §决策 4 起从 `x-user-id` 头解析调用者 scope 并做权限校验。
+
 > 8 个新增 = §11.2 22a-22h（workspace 文件系统读写：file/dir CRUD + copy + rename）。
 > 每个都通过 `WorkspaceMutationService` trait 走 UseCase 层（ADR-040），不直接
 > 摸文件系统；路径安全统一由 `resolve_within_static` 的 canonicalize-contains 守卫保证。
@@ -1228,9 +1243,40 @@ ADR-034  控制面/数据面分层规约 + HTTP 端点治理  (本 ADR v2.0,补�
 > ****删除**（本 ADR 决断、§7.6.4 记骤）：
 > - ~~`GET /sessions/{sid}/state`~~ （被 `GET /sessions/{sid}` 吸收，本不再存在独立端点）
 
-#### B. 控制面（**无任何端点**）
+#### B. 控制面（ADR-076 §决策 4 反转）
 
-所有用户操作触发的状态变更走 `acowork/agents/{id}/sessions/control/{cmd}` MQTT 主题。Runtime localhost HTTP server **不暴露任何 `POST /sessions/{sid}/{action}` 类控制端点**。
+> **原决断**：所有用户操作触发的状态变更走 `acowork/agents/{id}/sessions/control/{cmd}`
+> MQTT 主题。Runtime localhost HTTP server **不暴露任何 `POST /sessions/{sid}/{action}`
+> 类控制端点**。
+>
+> **修订（ADR-076 §决策 4）**：**会话作用域写操作**回到 HTTP——6 条端点：
+> `POST /sessions`、`POST /sessions/{sid}/open`、`POST /sessions/{sid}/close`、
+> `DELETE /sessions/{sid}`、`PUT /sessions/{sid}/visibility`、`PUT /sessions/{sid}/workspace`；
+> 另外 3 条写命令（切模型 / 思考深度 / 改标题）经 `PUT /sessions/{sid}/config` 走 HTTP。
+>
+> **为什么反转**：MQTT 控制消息**不携带身份**——broker 无法给消息打标记
+> （`can_publish` 丢弃 topic 参数，ACL 是空壳），因此 `create` 记不了 session owner、
+> 其余命令也校验不了 owner。多用户模式下这等于没有隔离。HTTP 路径上
+> Gateway 已完成 token 鉴权，并把调用者 scope 注入 `x-user-id` 反代给 Runtime。
+>
+> **不是 deprecated，是删除**：这些命令**已从 `ControlCommand` proto 中移除**
+> （字段号随后**整体重排为连续**——开发期无兼容需求，不留空号），`ControlAction` /
+> `InboundMessage` 的对应变体、`control_action_to_inbound` 的映射臂、Gateway 与 Tauri
+> 的命令名映射表全部删除。项目仍在开发期、无兼容需求，因此"拒收"这一步也省掉了——
+> 能力在类型层面不可表达，任何 broker 客户端都无法再走这条通道。
+>
+> **第二批迁移（同一决策的延续）**：不承载归属决策但同样**不携带身份**的会话动作也一并搬到
+> HTTP——`chat_message` → `POST .../sessions/{sid}/messages`、`stop` → `/stop`、
+> `continue_execution` → `/continue`、`approval_decision` → `/approval`、
+> `question_answer` → `/answer`、`cancel_tool` → `/cancel-tool`、`compress_action` → `/compress`
+> （`compact_context` 是 `compress_action` 的重复命令，一并删除；它当年的 SessionTask 分支与
+> `CompressAction(CompressSummary)` 逐字节同构且无调用者）。
+> 因此**本 ADR §3 的"12 条命令留在 MQTT"结论整体失效**：`ControlCommand` 现只余
+> `Intent`（Runtime → Runtime）与 `ActiveHeartbeat`（Desktop 存在性心跳）两条**非用户动作**。
+> 原护栏单测 `chat_traffic_still_maps_over_mqtt` 已删除——它守护的正是这批被搬走的命令。
+>
+> 详见 [ADR-076 §决策 4](./ADR-076-multi-user-account-system.md) 与
+> [protocols/zh/http.md §5.6](../../protocols/zh/http.md)。
 
 ### 11.3 Gateway 端点完整清单
 
@@ -1531,7 +1577,19 @@ Desktop App 全部 53 处 fetch 调用去重后分布如下, 分为 **A 面板 (
 
 ### 13.2 Desktop → Runtime MQTT 控制面调用全量查表
 
-Desktop 通过 Tauri `invoke("mqtt_publish_control", ...)` 发出, 8 个调用点全部检查:
+> ⚠️ **本文档是迁移 TO MQTT 时的历史审计快照，行号已失效。**
+> **ADR-076 §决策 4 之后的现状**：下表中的**全部**会话控制命令都已迁回 HTTP——
+> `model_switch` / `workspace_switch` / `reasoning_effort` / `update_session_title` 走
+> `PUT .../sessions/{sid}/config` 与 `.../workspace`；`message` / `stop` / `continue_execution` /
+> `approval_decision` / `question_answer` / `cancel_tool` / `compress_action` 走
+> `POST .../sessions/{sid}/{messages,stop,continue,approval,answer,cancel-tool,compress}`
+> （`compact_context` 是 `compress_action` 的重复命令，已随之一并删除）。
+> MQTT 侧对应命令**已全部删除**（proto 字段移除并重排为连续，不是拒收）；
+> `sessions/control/#` 只剩 `intent` + `active_heartbeat` 两条非用户动作。
+> 当前有效的边界见 [§11.2.B](#b-控制面adr-076-决策-4-反转) 与
+> [ADR-076 §决策 4](./ADR-076-multi-user-account-system.md)。
+
+Desktop 通过 Tauri `invoke("mqtt_publish_control", ...)` 发出, 8 个调用点全部检查（快照时点）:
 
 | # | 命令字符串 | 语义 | proto 字段 | 一致? | 来源文件 |
 |---|------------|------|------------|--------|----------|

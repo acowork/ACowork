@@ -1,6 +1,6 @@
 # ADR-052：工具压缩 LLM 自主化 - context_retrieve + context_abandon 双工具替代硬编码触发
 
-**状态**：已定案
+**状态**：已定案，**部分被取代**
 **日期**：2026-08-10
 **决策者**：大鱼
 **前置**：
@@ -10,6 +10,8 @@
 - [ADR-014](./ADR-014-loop-module-decomposition.md)（Loop 模块分解）
 
 ---
+
+> **取代说明（2026-09-18）**：[ADR-061](./ADR-061-context-compression-byte-budget.md) §10 关闭了"LLM 自主工具压缩"，本 ADR 的两个工具均**不再注册**（`tool_compression_enabled` 门控已移除，见 ADR-061 §11/§12）。其中 `context_retrieve` 的实现**已整个删除**：它扫的是 `conversations/` 下**全部** session 文件（与自身 doc"扫当前 session 文件"矛盾），且只按 `tool_call_id` 字符串匹配、不校验归属，multi_user 下会把别的账号的工具结果注入当前 prompt。`context_abandon` 的源文件作为死代码保留。本文档余下内容保留为设计历史，**不要**据此恢复实现。
 
 ## 1. 决策摘要
 

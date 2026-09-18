@@ -50,13 +50,13 @@ graph LR
    - **broker 宿主**：管理 MQTT 连接、ACL、retained 存储。
    - **HTTP server**：CRUD、Desktop 全量列表拉取（Settings）、Runtime 启动期注册。
    - **Global Resources Publisher**：发布 `acowork/global/{kind}`(单主题,Retained)——Gateway 后台 health-check 后重新计算出的“已就绪”资源列表（**不区分 agent**，所有 Runtime 共享同一份）。
-2. **Runtime 是 MQTT 客户端 + localhost HTTP server**：`rumqttc` 直连 Broker，只 PUBLISH 自己拥有的数据源（`agents/{id}/*` 下所有主题），SUBSCRIBE 自己关心的资源（`acowork/global/#` + `agents/{id}/sessions/control/#`）。同时启动 localhost-only HTTP server，供 Gateway 反向代理大数据查询（全量 session 列表、message 列表、memory graph、文件内容）。
+2. **Runtime 是 MQTT 客户端 + localhost HTTP server**：`rumqttc` 直连 Broker，只 PUBLISH 自己拥有的数据源（`agents/{id}/*` 下所有主题），SUBSCRIBE 自己关心的资源（`acowork/global/#` + `agents/{id}/sessions/control/#`，后者现在只剩 `intent` + `active_heartbeat`）。同时启动 localhost-only HTTP server，供 Gateway 反向代理大数据查询（全量 session 列表、message 列表、memory graph、文件内容），以及接收用户操作（ADR-076 §决策 4）。
 3. **Desktop 是纯 MQTT 客户端**：通过 Tauri Rust backend 用 `rumqttc` 直连 Broker，SUBSCRIBE 数据源主题（`agents/{id}/*`）。**不经过 Gateway 转发**。
 4. **全局资源三层分离**（详见 §3.1）：
    - **全量原始列表**：HTTP only（`GET/POST/PUT/DELETE /api/global/{kind}`），Desktop Settings 用。
    - **已就绪可用状态**：MQTT pub/sub（`acowork/global/{kind}` 单主题,Retained），所有 Runtime 共享。Gateway 是唯一权威。
    - **Runtime per-agent 运行时数据**（agent_config.json / agent_mcp.json / agent_search.json）：Runtime 本地文件，通过 `agents/{id}/config` MQTT retained 同步给 Desktop（无需 HTTP GET）。
-5. **Gateway 不再转发业务事件**。Runtime 发布的 session 事件由 Desktop **直接订阅** `agents/{id}/sessions/{sid}/messages/...`；Desktop 发布的 control 指令**直接 PUB** `agents/{id}/sessions/control/...`（sid 在 payload 中），Runtime 自己 SUBSCRIBE `agents/{id}/sessions/control/#` 即可。
+5. **Gateway 不在 Runtime 与 Desktop 之间转发事件**。Runtime 发布的 session 事件由 Desktop **直接订阅** `agents/{id}/sessions/{sid}/messages/...`；而 **Desktop 触发的一切用户操作都走 HTTP**（Gateway 鉴权 + 反代注入 `x-user-id`，ADR-076 §决策 4）——MQTT 上不再有任何 Desktop → Runtime 的用户操作命令，见 §5.3 与 http.md。`sessions/control/#` 现仅剩 `intent`（Runtime → Runtime）与 `active_heartbeat`（Desktop 存在性心跳）两条非用户动作。
 
 ---
 
@@ -259,19 +259,44 @@ acowork/agents/{agent_id}/
     │                                 #   sid 在 payload 中，不出现在 topic 路径中
     ├── control/                      # 【控制指令】Desktop PUB → Runtime SUB
     │                                 #   Runtime 接收后处理，控制某个具体 session 的生命周期或行为
-    │                                 #   create_session / delete_session 不需带 sid（sid 在 payload 中）
-    │   ├── create_session            # Desktop PUB：发起创建动作
-    │   │                             #   payload = CreateSessionCommand { agent_id }
-    │   │                             #   （sid 由 Runtime 分配后写入 created 事件的 payload）
-    │   ├── delete_session            # Desktop PUB：发起删除动作
-    │   │                             #   payload = DeleteSessionCommand { agent_id, sid }
-    │   ├── message                   # payload = { agent_id, sid, message_id, content }
-    │   ├── stop                      # payload = { agent_id, sid }
-│   ├── cancel_tool               # ADR-045 payload = { agent_id, sid, tool_call_id }
-│   │                             #   取消单工具（区别于 stop 整轮），到达即终止对应工具进程
-    │   ├── model_switch              # payload = { agent_id, sid, model_id }
-    │   ├── reasoning_effort          # payload = { agent_id, sid, effort }
-    │   └── compact_context           # payload = { agent_id, sid }
+    │                                 #
+    │                                 #   ⚠️ ADR-076 §决策 4：以下命令【已删除】，
+    │                                 #   不再存在于 `ControlCommand` proto 中，
+    │                                 #   Desktop 无法发送、Runtime 无法解析——
+    │                                 #   改走 Gateway 认证的 HTTP 接口（见 http.md）。
+    │                                 #   理由是授权边界：MQTT 控制消息不携带身份——
+    │                                 #   broker 无法打标记，故 create 记不了 owner、
+    │                                 #   其余命令校验不了 owner，任何 broker 客户端
+    │                                 #   都能静默改写/删除他人会话。
+    │                                 #   字段号随后整体重排为连续（开发期无兼容
+    │                                 #   需求，见 §4 / §10）。
+    │   # ✗ create_session            → POST /api/agents/{id}/sessions
+    │   │                                 #      （无需 sid；sid 由 Runtime 分配后写入
+    │   │                                 #        created 事件，HTTP 响应体也带）
+    │   # ✗ open_session              → POST .../sessions/{sid}/open
+    │   # ✗ close_session             → POST .../sessions/{sid}/close
+    │   # ✗ delete_session            → DELETE .../sessions/{sid}
+    │   # ✗ model_switch              → PUT .../sessions/{sid}/config
+    │   │                                 #      body = { model, provider }
+    │   # ✗ reasoning_effort          → PUT .../sessions/{sid}/config
+    │   │                                 #      body = { reasoning_effort }
+    │   # ✗ update_session_title      → PUT .../sessions/{sid}/config
+    │   │                                 #      body = { title }
+    │   # ✗ workspace_switch          → PUT .../sessions/{sid}/workspace
+    │   │                                 #      body = { workspace_id }
+    │   │                                 #      （不能复用 /config：那条分支只改 meta，
+    │   │                                 #        不重推 workspace context / prompt 文件）
+    │   │                                 # ✗ enable_notify / disable_notify：ADR-035
+    │   │                                 #   Phase 3 起即无 handler，一并删除。
+    │   │
+    │   │                             #   ⚠️ ADR-076 §决策 4：以下命令也已删除，
+    │   │                             #   改走 Gateway 认证的 HTTP 接口——
+    │   │                             #   ✗ message / stop / continue_execution
+    │   │                             #   ✗ cancel_tool / approval_decision
+    │   │                             #   ✗ question_answer / compress_action
+    │   │                             #   （compact_context 是重复命令，一并删除）
+    │   │                             #   → 至此 `sessions/control/*` 已无任何命令；
+    │   │                             #   ControlCommand 只余 Intent + ActiveHeartbeat。
     └── {sid}/                        # session 内部状态（sid 在路径中定位具体 session）
         ├── meta                      # [Retained] session meta：usage、state、title、...
         │                             #   （payload 始终是最新完整 meta）
@@ -302,9 +327,9 @@ acowork/agents/{agent_id}/
 ```
 
 - **Owner**：Runtime。
-- **Session list**：**不走 MQTT**。客户端通过 HTTP `GET /api/agents/{id}/sessions` 拉取全量；列表变化通过订阅 `agents/{id}/sessions/created` 与 `agents/{id}/sessions/deleted` 收到事件通知后增量更新（sid 在 payload 中）。所有 session 生命周期（创建/删除）由 Desktop 通过 `sessions/control/create_session` / `sessions/control/delete_session` 触发 Runtime 执行；sid、title 由 Runtime 分配/生成后写入 `created` 事件的 payload 供 Desktop 识别（详见 §5.3）。Runtime 不主动创建 session。
+- **Session list**：**不走 MQTT**。客户端通过 HTTP `GET /api/agents/{id}/sessions` 拉取（ADR-076 §决策 4 起按调用者 scope 过滤）；列表变化通过订阅 `agents/{id}/sessions/created` 与 `agents/{id}/sessions/deleted` 收到事件通知后增量更新（sid 在 payload 中）。所有 session 生命周期（创建/打开/关闭/删除）由 Desktop 通过 **HTTP** 触发 Runtime 执行——这些命令**曾经**走 `sessions/control/*`，ADR-076 §决策 4 迁到 HTTP 以携带身份；sid、title 仍由 Runtime 分配/生成后写入 `created` 事件的 payload 供 Desktop 识别（详见 §5.3）。Runtime 不主动创建 session。
 - **Session 内状态**：按 sid 定位 `sessions/{sid}/meta` / `sessions/{sid}/config`（单主题 + Retained，参见下文）。sid 由 Runtime 分配后写入事件 payload，订阅者拿到 created 事件后可用 sid 订阅这些状态主题。
-- **Control 指令**：`sessions/control/{cmd}` 是 Desktop → Runtime 单向控制流（Runtime 不需要回 ack）。`create_session` 不带 sid（Runtime 创建后自行分配并通过 created 事件告知）；`delete_session` / `message` 等带 sid（Runtime 需要知道操作哪个 session）。
+- **Control 指令**：`sessions/control/{cmd}` 上**已无任何用户操作命令**（ADR-076 §决策 4 全部迁 HTTP，见上）；只剩 `intent` 与 `active_heartbeat` 两条非用户动作，均不承载 sid 路由。
 - **Session messages 全量 vs 增量**：
   - 全量：`GET /api/agents/{id}/sessions/{sid}/messages`（HTTP 拉）
   - 增量：订阅 `agents/{id}/sessions/{sid}/messages/#`，收到 `chunk` / `tool_call` / `done` 等事件
@@ -331,7 +356,9 @@ acowork/users/{user_id}/
         └── {notification_id}/update
 ```
 
-- 当前阶段不启用；多用户阶段配合 ACL 限制仅本人可订阅。
+- 当前阶段不启用。⚠️ **MQTT 用户身份验证已暂缓**（原 ADR-077 课题）：多用户隔离目前完全靠
+  HTTP 侧的 owner 校验，MQTT 事件面**没有** per-user topic ACL（rumqttd 0.20 无该能力，见
+  §10）。所以本主题与 ACL 一起留待后续。
 
 ### 3.5 设计原则（精炼）
 
@@ -342,7 +369,7 @@ acowork/users/{user_id}/
 5. **snapshot 走 HTTP、增量走 MQTT**：session messages / memory nodes 这类**会被大量读且会持续增长**的资源，全量走 HTTP，**增量事件**走 MQTT（payload 本身就是最新数据，无需订阅者回拉）。
 6. **Gateway 只透传不转发**:Gateway 是 broker 宿主 + `acowork/global/*`(可用状态)数据源权威 + HTTP server。**不**作为 session 事件的"中转站",**不**维护 session 状态视图——session 权威在 Runtime,Desktop 直连即可。
 7. **变化 payload 总是包含最新值**：订阅 `meta` / `agents/{id}/config` / `acowork/global/{kind}` / `sessions/{sid}/meta` / `sessions/{sid}/config` 时，payload 总是完整最新数据，订阅者无需回 HTTP 拉快照。其中 `agents/{id}/config` 是 Runtime 当前生效的完整 agent_config.json（合并 manifest 默认值后的有效配置）—— Gateway 完全不参与 config 同步，Runtime 启动时从本地 `<work_dir>/config/agent_config.json` 加载，Desktop 改 config 通过 `PUT /api/agents/{id}/config` → Gateway 透传 → Runtime 内部 IPC 写入本地文件 + PUBLISH 新值。
-8. **Gateway 不在 Runtime 与 Desktop 之间做转发**：Runtime 发布的 session 事件由 Desktop **直接订阅** `agents/{id}/sessions/{sid}/messages/...`；Desktop 发布的 control 指令**直接 PUB** `agents/{id}/sessions/control/...`。Runtime 是 session 权威，Gateway 不维护 session 状态视图。
+8. **Gateway 不在 Runtime 与 Desktop 之间做事件转发**：Runtime 发布的 session 事件由 Desktop **直接订阅** `agents/{id}/sessions/{sid}/messages/...`；而 **Desktop 触发的一切用户操作都走 HTTP**（经 Gateway 鉴权 + 反代注入 `x-user-id`，ADR-076 §决策 4）——MQTT 上**不再有任何 Desktop → Runtime 的控制指令**。Runtime 是 session 权威，Gateway 不维护 session 状态视图。
 9. **全局资源三层分离**:
    - **第 1 层 - 全量原始列表**(用户在 Desktop Settings 里管理的原始配置):HTTP only,不走 MQTT。Desktop Settings 拉取后表单渲染,提交修改走 HTTP POST。
    - **第 2 层 - 已就绪可用状态**(Gateway health-check 后的可用资源):MQTT pub/sub,主题为 `acowork/global/{kind}`(单主题,Retained)。**不区分 agent**,所有 Runtime 共享同一份,因为"资源是否就绪"是全局事实。
@@ -418,7 +445,8 @@ mqtt_client.publish(
 **选择 Protobuf 而非 JSON** 的理由：
 
 - 编译期类型检查（改 proto → 编译不过 → 立即发现不兼容）
-- 向后兼容保证（field number 永不重用，新增字段不影响旧版）
+- 字段号维护策略：**开发期保持连续、可自由重排**（无兼容需求时不留空号）；**发版后冻结、
+  永不重用**，新增字段一律追加到最大号之后
 - 二进制编码效率高于 JSON
 - 独立定义 `mqtt_payload.proto`，独立命名空间，不与其他任何 proto 共享 `service` 声明、不共享 `message` 定义。新增数据资源只需在该文件内扩展 `DataEnvelope.payload` oneof，不影响其他文件。
 
@@ -431,6 +459,14 @@ mqtt_client.publish(
 > **`SessionConfig` 消息（`agents/{id}/sessions/{sid}/config` retained，即 `SessionConfigDelta` 的持久化投影，字段号见 `core/acowork-core/proto/mqtt_payload.proto`）**：
 > - `title = 3` / `provider_id = 4` / `model_id = 5` / `reasoning_effort = 6` / `temperature = 7` / `workspace_id = 8` / `llm_availability = 9`：per-session 覆盖，`null` / 字段缺失 = 继承 per-agent 链。
 > - `context_window = 10`（`optional uint64`，ADR-074）：per-session 上下文窗口覆盖，**presence 语义**——字段缺失 = 继承；`0` = 清除覆盖（落盘归一为字段不存在）；合法区间 `FLOOR=8_192 ..= CEILING=4_194_304`，越界由 HTTP `PUT /api/agents/{id}/sessions/{sid}/config` 返回 400。覆盖生效于该会话 trim / compaction 阈值与 `messages/context_usage` 推送，清除后回退 per-agent 链。详见 [ADR-074](../../adr/zh/ADR-074-per-session-context-window-override.md)。
+>
+> **`ControlCommand` 消息（`agents/{id}/sessions/control/{cmd}`）——ADR-076 §决策 4 后**：
+> 顶层仅 `instance_id = 1`；oneof `command` 仅 `Intent intent = 2` + `ActiveHeartbeat active_heartbeat = 3`。
+> 所有用户操作命令（生命周期 create/open/close/delete + model_switch / reasoning_effort /
+> update_session_title / workspace_switch + chat_message / stop / continue_execution /
+> approval_decision / question_answer / cancel_tool / compress_action，以及重复的
+> compact_context）的字段**已删除**并**整体重排为连续**——开发期无兼容需求，不留空号
+> （见本节上方的字段号维护策略）。
 
 ---
 
@@ -549,34 +585,37 @@ sequenceDiagram
 - `ready` 由 Runtime **主动**在 Phase A–C 完成后发布，Gateway 据此翻转 `running_agents[id].ready`，从而保证 Desktop 看到的 `ready=true` 与 Runtime 实际可响应业务请求之间不存在窗口期。
 - Desktop ChatPanel 在 `running=true && ready=false` 期间显示转圈占位（"startingAgent"），不发任何 `/api/agents/{id}/sessions/...` 业务请求，避免误中 503。
 
-### 5.2 正常通信：用户发消息（直连，无 gateway 转发）
+### 5.2 正常通信：用户发消息（HTTP 触发 → MQTT 事件回流）
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant DA as Desktop (React)
     participant TB as Desktop (Tauri Backend)
+    participant GW as Gateway (Axum)
     participant BROKER as rumqttd
     participant RT as Runtime
 
-    Note over DA,RT: 关键：Gateway 不在中间做转发
+    Note over DA,RT: 用户操作走 HTTP（携带身份）；事件回流走 MQTT（Desktop 直连 broker）
 
-    DA->>TB: invoke('send_message', {agent_id, sid, content: "你好"})
-    TB->>BROKER: PUBLISH acowork/agents/{id}/sessions/control/message (payload: ControlCommand{instance_id, sid, message_id, content})
-    BROKER->>RT: (Runtime 已 SUB sessions/control/#)
+    DA->>TB: 发消息
+    TB->>GW: POST /api/agents/{id}/sessions/{sid}/messages（Bearer token）
+    GW->>GW: 鉴权 → 注入 x-user-id
+    GW->>RT: 反代（Runtime 校验 session owner）
+    RT-->>GW: 202 Accepted（执行结果异步回流）
+    GW-->>TB: 202 Accepted
 
     Note over RT: Runtime 开始 LLM 推理
-    RT->>BROKER: PUBLISH acowork/agents/{id}/sessions/{sid}/messages/chunk (payload: SessionMessage::Chunk)
+    RT->>BROKER: PUBLISH acowork/agents/{id}/sessions/{sid}/messages/chunk
     BROKER->>TB: (TB 已 SUB 该 session 的 messages/#)
     TB->>DA: emit('agent_event') → React 渲染 delta
 
-    RT->>BROKER: PUBLISH acowork/agents/{id}/sessions/{sid}/messages/tool_call
-    RT->>BROKER: PUBLISH acowork/agents/{id}/sessions/{sid}/messages/tool_result
-    RT->>BROKER: PUBLISH acowork/agents/{id}/sessions/{sid}/meta (payload: 最新完整 meta,含 usage)
+    RT->>BROKER: PUBLISH .../messages/tool_call、.../messages/tool_result
+    RT->>BROKER: PUBLISH .../sessions/{sid}/meta (payload: 最新完整 meta,含 usage)
 
-    Note over RT,TB: 注意：上述消息 TB 直连 broker 收到,Gateway 不参与
+    Note over RT,TB: 上述事件 TB 直连 broker 收到,Gateway 不参与
 
-    RT->>BROKER: PUBLISH acowork/agents/{id}/sessions/{sid}/messages/done
+    RT->>BROKER: PUBLISH .../messages/done
     BROKER->>TB: 投递
     TB->>DA: emit('done')
 ```
@@ -591,13 +630,16 @@ sequenceDiagram
 
 **流程**：
 
-1. 用户在 Desktop 列表点 `+` 按钮 → 调用 `invoke('create_session', { agent_id })`。
-2. Tauri Backend 通过 control 指令发起创建动作（不带 sid/title）：
+> ⚠️ **ADR-076 §决策 4**：创建动作已从 MQTT 控制指令**改为 HTTP**（`POST /api/agents/{id}/sessions`），MQTT 的 `sessions/control/create_session` **已删除**（proto 字段一并删除，不是 deprecate）。下方时序图即为当前实际路径；sid 生成、`created` 事件、增量订阅均不变。
+
+1. 用户在 Desktop 列表点 `+` 按钮 → `createSession(agentId)` 发 HTTP 请求到 Gateway。
+2. Gateway 鉴权后反代到 Runtime（`x-user-id` 头携带调用者 scope，Runtime 据此记录 session owner）：
    ```text
-   PUBLISH acowork/agents/{id}/sessions/control/create_session
-   payload: CreateSessionCommand { agent_id }
+   POST /api/agents/{id}/sessions
+   body: { workspace_id?, model?, provider?, visibility? }
+   ← 响应体含新建的 session_id
    ```
-3. Runtime 收到 control 指令：
+3. Runtime 收到请求：
    - **Runtime 内部生成 sid**（UUID v7）作为该 session 的唯一标识
    - **Runtime 内部生成初始 title**（默认占位 "New Session"，后续可在首轮交互后由 LLM 优化）
    - 初始化 session_meta（usage、state、title、created_at 等）
@@ -616,13 +658,15 @@ sequenceDiagram
     participant U as 用户
     participant DA as Desktop (React)
     participant TB as Desktop (Tauri Backend)
+    participant GW as Gateway (HTTP)
     participant BROKER as rumqttd
     participant RT as Runtime
 
     U->>DA: 点击 "+" 新建 session 按钮
-    DA->>TB: invoke('create_session', {agent_id})
-    TB->>BROKER: PUBLISH acowork/agents/{id}/sessions/control/create_session<br/>(payload: { agent_id }，不含 sid/title)
-    BROKER->>RT: (RT 已 SUB sessions/control/#)
+    DA->>TB: createSession(agentId) → fetch POST
+    TB->>GW: POST /api/agents/{id}/sessions
+    Note over GW: ADR-076 §决策 4<br/>鉴权后剥/注 x-user-id
+    GW->>RT: 反代（+ x-user-id 头）
 
     Note over RT: Runtime 生成 sid (UUID v7)<br/>生成初始 title (默认 "New Session")<br/>初始化 session_meta<br/>持久化到本地
     RT->>BROKER: PUBLISH acowork/agents/{id}/sessions/{sid-new}/meta (Retained, 初始 meta)
@@ -700,18 +744,19 @@ Runtime 异常断开时（包括 `kill -9`、崩溃、网络断开），Broker �
 |--------|---------------|-----------|
 | **Gateway Publisher** | `gateway:publisher` | （仅 PUBLISH `acowork/global/#` Retained，不 SUBSCRIBE 业务主题） |
 | **Gateway Subscriber** | `gateway:subscriber` | `acowork/agents/+/status`<br/>`acowork/agents/+/ready` |
-| **Runtime** | `agent:{agent_id}` | `acowork/global/#`<br/>`acowork/agents/{id}/sessions/control/#` |
+| **Runtime** | `agent:{agent_id}` | `acowork/global/#`<br/>`acowork/agents/{id}/sessions/control/#`（**仅剩** `intent` + `active_heartbeat` 两条非用户动作；其余控制命令已删除，用户操作走 HTTP） |
 | **Desktop (Tauri Rust) — 始终订阅** | `user:{user_id}:desktop:{pid}` | `acowork/agents/+/status`<br/>`acowork/agents/+/ready`<br/>`acowork/agents/+/meta`<br/>`acowork/agents/+/config`<br/>`acowork/agents/+/sessions/created`<br/>`acowork/agents/+/sessions/deleted`<br/>`acowork/global/#`（可选，Settings 页用） |
 | **Desktop (Tauri Rust) — 进入具体 session 时动态订阅** | 同上 | `acowork/agents/{id}/sessions/{sid}/meta`<br/>`acowork/agents/{id}/sessions/{sid}/config`<br/>`acowork/agents/{id}/sessions/{sid}/messages/#` |
-| **Desktop (Tauri Rust) — PUBLISH（控制指令）** | 同上 | `acowork/agents/{id}/sessions/control/#`（payload 带 sid） |
+| **Desktop (Tauri Rust) — PUBLISH** | 同上 | `acowork/agents/{id}/sessions/control/active_heartbeat`（**仅存在性心跳**，非用户动作；其余控制命令已全部删除，用户操作改走 HTTP） |
 
 > **Desktop 不应在前端直接连 MQTT Broker**：
 > 1. 浏览器 JS 不能连原生 TCP MQTT
 > 2. Tauri Rust backend 已经有完整系统权限，用 `rumqttc` 直连 TCP broker 更简单可靠
 > 3. 安全：MQTT 连接在 Rust 层管理，前端通过 Tauri `invoke()` / `emit()` 间接收发
 >
-> - **前端 → MQTT**：用户操作（发消息、停止生成等）→ Tauri `invoke()` → Rust backend 通过 `rumqttc` PUBLISH
-> - **MQTT → 前端**：Rust backend `rumqttc` 收到消息 → Tauri `emit()` → React 前端渲染
+> - **前端 → MQTT**：仅存在性心跳 `active_heartbeat`（Tauri `invoke()` → Rust backend `rumqttc` PUBLISH，~15s 一次）
+> - **MQTT → 前端**：Rust backend `rumqttc` 收到事件 → Tauri `emit()` → React 前端渲染
+> - **前端 → 后端操作**：一律走 **HTTP**（`fetch` → Gateway，携带 Bearer token），不再经 MQTT——见 [http.md §5.6](./http.md)
 
 **整个项目 MQTT 依赖仅两个 Rust crate**：`rumqttd`（broker，Gateway 嵌入）+ `rumqttc`（client，Runtime / Desktop / Gateway publisher 统一使用），`Cargo.toml` 各一行，npm 零新增。
 
@@ -731,13 +776,14 @@ Runtime 异常断开时（包括 `kill -9`、崩溃、网络断开），Broker �
 | **Session 内 provider/model/embedding 选择**（per-session） | 已包含在 `sessions/{sid}/meta` 中 | `GET /api/agents/{id}/sessions/{sid}/state` |
 | **Agent 状态**（status + meta） | `status` Retained+LWT（在线/离线） + `meta` Retained（单主题） | `GET /api/agents/{id}` 详情 |
 | **Agent config**（Runtime 当前生效的 agent_config.json，合并 manifest 默认值） | `config` Retained（单主题，Runtime 自己 PUBLISH） | —（Runtime 启动时本地加载，Desktop 改走 `PUT /api/agents/{id}/config`） |
-| **Session 列表** | ❌ 不走（变化频繁，仅操作时点查询） | ✅ `GET /api/agents/{id}/sessions`（全量唯一通道） |
-| **Session 列表增量通知** | `sessions/created` + `sessions/deleted`（sid 在 payload 中；由 `sessions/control/create_session` / `sessions/control/delete_session` 触发，Runtime 执行后 PUBLISH） | — |
+| **Session 列表** | ❌ 不走（变化频繁，仅操作时点查询） | ✅ `GET /api/agents/{id}/sessions`（全量唯一通道；ADR-076 §决策 4 起按调用者 scope 过滤） |
+| **Session 列表增量通知** | `sessions/created` + `sessions/deleted`（sid 在 payload 中；由**已迁 HTTP 的** create/delete 触发，Runtime 执行后 PUBLISH） | — |
+| **Session 生命周期控制**（create / open / close / delete） | ❌ **已迁出并删除**（ADR-076 §决策 4；proto 字段已移除） | ✅ `POST|DELETE /api/agents/{id}/sessions...`（携带身份，Runtime 校验 owner） |
 | **Session meta**（usage/state） | `meta` Retained（单主题,payload 始终含最新值） | `GET /api/agents/{id}/sessions/{sid}/state`（兜底） |
 | **Session config** | `config` Retained（单主题） | `GET /api/agents/{id}/sessions/{sid}/config`（全量兜底） |
 | **Session messages 增量** | `messages/chunk` `tool_call` `done` `error` ... | — |
 | **Session messages 全量** | ❌ 不走（大数据） | ✅ `GET /api/agents/{id}/sessions/{sid}/messages` |
-| **Control 指令** | `sessions/control/{cmd}`（Desktop → Runtime 直发，sid 在 payload 中），`cmd` ∈ {`create_session`, `delete_session`, `message`, `stop`, `cancel_tool`, `model_switch`, `reasoning_effort`, `compact_context`} | `POST /api/agents/{id}/control`（需明确 ack 时用） |
+| **Control 指令** | ⚠️ **已全部迁出 HTTP**（ADR-076 §决策 4）：`sessions/control/*` 上**已无任何用户操作命令**。proto 字段与 Runtime handler **已删除**——不是拒收，是发不出去。仅余 `intent`（Runtime → Runtime）与 `active_heartbeat`（Desktop → Runtime 存在性心跳）两条**非用户动作** | ✅ [http.md §5.6](./http.md)：生命周期 7 条 + 会话动作 7 条 |
 | **Memory 单 node 变更** | `agents/{id}/memory/nodes/{nid}/update`（payload = 最新 node） | `GET /api/agents/{id}/memory/nodes/{nid}`（兜底） |
 | **Memory graph 全量** | ❌ 不走（MB+） | ✅ `GET /api/agents/{id}/memory/graph` |
 | **Sidecar 端点** | `sidecar/{kind}/status` Retained | `GET /api/sidecar/{kind}` |
@@ -799,7 +845,7 @@ Runtime 异常断开时（包括 `kill -9`、崩溃、网络断开），Broker �
 | Session messages 全量 | Runtime | MB+ | ❌ | ✅ `GET /api/agents/{id}/sessions/{sid}/messages`（Gateway 反向代理） |
 | Session meta | Runtime | KB | `agents/{id}/sessions/{sid}/meta` (R, 单主题) | —（Desktop 进入 session 时 SUB retained） |
 | Session config | Runtime | KB | `agents/{id}/sessions/{sid}/config` (R, 单主题) | `GET /api/agents/{id}/sessions/{sid}/config` |
-| Control 指令 | Desktop | B | `agents/{id}/sessions/control/{cmd}` (QoS 1,sid 在 payload) | `POST /api/agents/{id}/control` (需 ack) |
+| Control 指令（用户操作） | Desktop | — | ⚠️ **已全部迁 HTTP**（ADR-076 §决策 4）；MQTT 上已无用户操作命令，仅余 `intent` + `active_heartbeat` 两条非用户动作 | ✅ [http.md §5.6](./http.md)（生命周期 7 条 + 会话动作 7 条） |
 | Sidecar 端点 | Sidecar | B | `sidecar/{kind}/status` (R) | `GET /api/sidecar/{kind}` |
 | Memory node 变更 | Runtime | KB | `agents/{id}/memory/nodes/{nid}/update` | `GET /api/agents/{id}/memory/nodes/{nid}` |
 | Memory graph 全量 | Runtime | MB+ | ❌ | ✅ `GET /api/agents/{id}/memory/graph`（Gateway 反向代理） |
@@ -969,6 +1015,7 @@ client.publish(
 - 凭据比较为常量时间（`constant_time_eq`）；enrollment token 只存 sha256 哈希（`{data_dir}/enrollment_tokens.json`），一次性消费。
 - Node 签发的长期凭据明文存 `{data_dir}/node_tokens.json`（node_id → {token, created_at}）——这是节点凭据的信任锚，保护级别等同 `http_token`。Gateway 重启后已注册 node 用 node_token 自动重连（持久化验证）。
 - **topic 级 ACL 偏差**：rumqttd 0.20 无 per-topic ACL 能力，Phase 5a 仅落地 CONNECT 层鉴权；mosquitto 切换评估列入 Phase 5b（ADR-055 §6.8）。
+- **MQTT 用户身份验证已暂缓**（ADR-076 §决策 4）：CONNECT 层确实能识别 `user:{uid}:desktop:{pid}`，但**订阅授权没有 per-user 约束**——所以多用户隔离只能靠 HTTP 侧的 owner 校验，事件面读侧保密性是已知缺口，见 §10。
 - **HTTP 通道鉴权**：Node 拉取 package（`GET /api/packages/{id}/download`）与 Node 入站反代校验使用 `X-ACowork-Node-Token` header（详见 [http.md](./http.md)）；Gateway 出站反代请求自动注入该 header（按 agent → 宿主 Node 解析）。
 
 **一键接入流程**（开启鉴权后）：
@@ -987,44 +1034,42 @@ local node（Gateway 本机）由 Gateway 预签发 node_token 注入 spawn 参�
 
 ---
 
-## 9. Control 指令路径
+## 9. Control 指令路径（ADR-076 §决策 4 后：只有 HTTP）
 
-控制指令按需 ack 走不同通道：
+> **最终形态**：**用户主动触发的控制指令一律走 HTTP**，MQTT 上不再有任何用户操作命令。
+> 理由：MQTT 控制消息不携带身份，broker 无法打标记 ⇒ 记不了 / 校验不了 session owner。
+> HTTP 路径由 Gateway 完成 token 鉴权并反代注入 `x-user-id`。
 
-### 9.1 无 ack 需求（fire-and-forget）—— 直发 MQTT
-
-```text
-Desktop PUB acowork/agents/{id}/sessions/control/{cmd} (payload 带 sid)
-  → Broker 路由
-  → Runtime SUB acowork/agents/{id}/sessions/control/# 收到
-  → Runtime 处理（从 payload 读 sid 路由到具体 session,停止当前执行等）
-```
-
-**无 gateway 转发环节**。Desktop 与 Runtime 通过 broker 直连。
-
-### 9.2 有 ack 需求（明确成功/失败）——HTTP POST
+### 9.1 统一路径：HTTP → Gateway 鉴权 + 反代
 
 ```text
-Desktop POST /api/agents/{id}/control {agent_id, sid, cmd: "switch_model", model: "..."}
-  → Gateway 转发到 Runtime（HTTP，内部端点）
-  → Runtime 处理
-  → 返回 200 OK {ok: true, model: "..."}
+Desktop fetch POST /api/agents/{id}/sessions/{sid}/{action} (Bearer token)
+  → Gateway auth middleware：验 token → 注入 x-user-id
+  → 反代到 Runtime localhost HTTP
+  → Runtime authorize_write(owner 校验)；通过则入队并返回 202 Accepted
+  → 结果异步回流：Runtime PUBLISH 事件到 MQTT，Desktop 订阅渲染
 ```
 
-### 9.3 常见控制指令分类
+**不再有"无 ack 需求就走 MQTT"的分支** —— 那条规则的前提是 MQTT 控制面没有身份概念；
+现在所有用户操作都必须带身份，所以统一 HTTP。异步性由"202 + MQTT 事件回流"保证，不牺牲 UX。
+（`intent` 与 `active_heartbeat` 是**非用户动作**，仍留在 MQTT，见 §3.2 / §6。）
+
+### 9.2 指令 → 通道对照（最终归属）
 
 | 指令 | 通道 | 备注 |
 |------|------|------|
-| 发送消息 | MQTT `control/message` | 无需 ack（chunk/done 自带反馈） |
-| 取消执行 / 中断生成 | MQTT `control/stop` | 无需 ack（后续 `messages/stopped` 事件反馈） |
-| 取消单工具（ADR-045） | MQTT `control/cancel_tool` | 无需 ack（tool_result 在 ~ms 内到达，error=`Cancelled by user`） |
-| 切换模型 | HTTP | 需 ack（要确认切换结果） |
-| 推理强度调整 | HTTP | 需 ack |
-| 上下文压缩 | HTTP | 需 ack |
-| 启用 debug 模式 | HTTP | 需 ack |
-| 工具审批 / 问答回答 | HTTP | 需 ack |
+| 发送消息 | HTTP `POST .../sessions/{sid}/messages` | 结果经 `messages/chunk` / `done` 事件回流 |
+| 停止 / 继续 | HTTP `POST .../sessions/{sid}/stop` / `continue` | 结果经 `messages/stopped` / 后续事件回流 |
+| 取消单工具（ADR-045） | HTTP `POST .../sessions/{sid}/cancel-tool` | tool_result 在 ~ms 内到达，error=`Cancelled by user` |
+| 工具审批 / 问答回答 | HTTP `POST .../sessions/{sid}/approval` / `answer` | **关闭审批伪造漏洞**：MQTT 时代任何 broker 客户端可伪造 `approved:true` |
+| 上下文压缩 | HTTP `POST .../sessions/{sid}/compress` | `compact_context` 是 `compress_action` 的重复命令，一并删除 |
+| 切换模型 / 推理强度 / 标题 | HTTP `PUT .../sessions/{sid}/config` | — |
+| 切换工作区 | HTTP `PUT .../sessions/{sid}/workspace` | — |
+| 会话生命周期（create / open / close / delete / visibility） | HTTP | — |
+| 存在性心跳 | MQTT `control/active_heartbeat` | Desktop → Runtime，**非用户动作**，留在 MQTT |
+| 跨 agent 意图 | MQTT `control/intent` | Runtime → Runtime，**非用户动作**，留在 MQTT |
 
-### 9.4 单工具取消（ADR-045）
+### 9.3 单工具取消（ADR-045）
 
 `cancel_tool` 是 `stop` 的**细粒度版本**——只中止当前正在执行的某一个工具，而不影响 iteration 整体：
 
@@ -1033,18 +1078,17 @@ Desktop POST /api/agents/{id}/control {agent_id, sid, cmd: "switch_model", model
 | 中止范围 | 整个 iteration（含后续 tool_call） | 仅当前正在执行的 tool |
 | LLM 后续行为 | 收到 `stopped` 事件 → 等用户新指令 | 收到 `tool_result { error: "Cancelled by user" }` → 继续推理 |
 | 典型场景 | 用户突然不想继续 / 输入了新指令 | 长命令卡住，用户只想换工具或换参数 |
-| 协议载荷 | `{ agent_id, sid }` | `{ agent_id, sid, tool_call_id }` |
+| 请求体 | `{ reason? }` | `{ tool_call_id }` |
 
 **Runtime 取消路径**：
 
 ```text
-Desktop PUBLISH acowork/agents/{id}/sessions/control/cancel_tool
-  payload = { agent_id, sid, tool_call_id }
+Desktop POST /api/agents/{id}/sessions/{sid}/cancel-tool   body = { tool_call_id }
         ↓
-Broker 路由
+Gateway 鉴权 → 注入 x-user-id → 反代到 Runtime
         ↓
-Runtime gateway_loop.rs:parse_control_payload → ControlAction::CancelTool
-        ↓ control_action_to_inbound
+Runtime authorize_write(owner) → dispatch_session_action("cancel_tool")
+        ↓
 InboundMessage::UserOperation(UserOp::CancelTool { tool_call_id })
         ↓ session_task inbox
 AgentLoop.apply_user_op → pending_tool_cancels[tool_call_id].send(true)
@@ -1068,9 +1112,24 @@ Runtime 在工具运行 ≥5s 后开始每 5s 发一次心跳，**不带任何 s
 
 > **设计意图**：5s 阈值让短命令（`ls`/`grep`/`cat`）保持原 UX（仅呼吸灰点），长命令（`cargo build` / `npm install`）从第 5s 起获得完整计时器+进度条+取消按钮——见 [ADR-045 §3.2](../../adr/zh/ADR-045-tool-progress-and-cancel.md)。
 
-## 10. 多用户扩展（基于 ACL）
+## 10. 多用户扩展（基于 ACL）—— ⚠️ 已暂缓，非当前实现
 
-主题树**不**按 user_id 分前缀（避免主题数量爆炸、ACL 复杂）。多用户隔离完全依赖 **rumqttd 内置 ACL**，按 `client_id` 限制每个客户端的 publish / subscribe 权限。
+> **状态：未实现（ADR-076 §决策 4 明确暂缓 MQTT 用户身份验证）**
+>
+> 多用户隔离的**当前**实现完全在 **HTTP 侧**：Gateway 鉴权后注入 `x-user-id`，Runtime 按
+> session owner 做 `authorize_read` / `authorize_write`（见 [http.md §5.6](./http.md)）。
+> **MQTT 事件面没有 per-user 隔离**：
+>
+> - `rumqttd` 0.20 **没有 per-topic ACL 能力**（`can_publish` 丢弃 topic 参数，见 §8.7），
+>   所以本节描述的"按 `client_id` 限制 subscribe"**当前无法实现**；
+> - 因此**读侧保密性存在已知缺口**：任何能连上 broker 的客户端理论上可以订阅任意
+>   `agents/{id}/sessions/{sid}/messages/#`，看到他人会话的事件流。
+>   本期接受该缺口（broker 默认只 bind `127.0.0.1`，攻击者须先能访问本机回路）；
+>   真正的修复路径 = 换 mosquitto（Phase 5b 评估）或给事件面加一层 token 化的订阅代理。
+>
+> 下面的 ACL 设计**保留为未来蓝图**，不描述当前行为。
+
+主题树**不**按 user_id 分前缀（避免主题数量爆炸、ACL 复杂）。多用户隔离设计上依赖 **rumqttd 内置 ACL**，按 `client_id` 限制每个客户端的 publish / subscribe 权限。
 
 ### 10.1 ACL 设计原则
 
@@ -1197,7 +1256,7 @@ graph TB
 1. **Desktop 不应在前端直接连 MQTT Broker**：浏览器 JS 无法走原生 TCP，统一由 Tauri Rust backend 用 `rumqttc` 直连更可靠安全。
 2. **MQTT payload ≤ 100KB 阈值**：单条消息超过此阈值必须改走 HTTP（通过 Gateway 反向代理到 Runtime HTTP）；超过 `max_packet_size`（10MB）Broker 直接断开连接。Retained 消息占用 Broker 内存，全量大数据（message 列表、memory graph）不应走 MQTT retained。
 3. **顺序保证**：MQTT 协议保证同一 topic 内消息有序（RFC）。Session messages 全部走 `agents/{id}/sessions/{sid}/messages/*` 下各子主题，同一子主题内顺序天然保证；不同子主题之间不保证顺序（chunk / tool_call 间无需严格有序）。
-4. **多用户 ACL**：单用户阶段用最宽松 ACL（所有 desktop 订阅所有 agent）；多用户阶段按 user → agent 授权关系动态生成 ACL 规则。
+4. **多用户 ACL（已暂缓）**：设计上按 user → agent 授权关系动态生成 ACL，但 rumqttd 0.20 无 per-topic ACL 能力，故**当前未实现**；多用户隔离目前只靠 HTTP 侧 owner 校验（见 §10）。
 5. **Gateway 单点**：当前架构 Gateway 已是单点（Agent 子进程管理、本地文件系统访问）；MQTT 不改变这一点。
 6. **消息丢失检测**：QoS 0 的流式事件丢一帧由下一帧覆盖；QoS 1 的状态变更由 retained message + HTTP `GET` 拉取快照修正。
 7. **LWT 与 retained status 共用同一 topic**：`agents/{id}/status` 既作为 retained message 传递当前状态，也作为 Will Message 的目标 topic。Broker 在 TCP 断开后用 retained flag 重新发布 LWT payload。

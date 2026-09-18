@@ -145,14 +145,13 @@ The developer toolchain is complete: `acowork-sign` (with `keygen / sign / verif
 | 15 | `todo_write` | core | (none) | Structured TODO list maintenance |
 | 16 | `mcp_install` / `mcp_uninstall` | core | (subject to manifest declarations) | Dynamic MCP Server mounting (ADR‑029) |
 | 17 | `rag_query` | conditional | `rag:query + network:<rag_url>` | Enterprise RAG access, registered only when manifest declares `[[tools]] type = "rag"` (ADR‑051 / Phase 4) |
-| 18 | `context_retrieve` | conditional | `context:read` | Platform‑protected, registered based on `tool_compression_enabled` config (ADR‑052) |
-| 19 | `context_abandon` | conditional | `context:write` | Platform‑protected, same as above |
-| 20 | `codebase` | conditional | `filesystem:read:<path>` | LSP index query, registered only when LSP Relay is reachable |
+| 18 | `context_abandon` | — | `context:write` | **No longer registered** (deprecated; source kept as dead code — ADR-061 §10.1) |
+| 19 | `codebase` | conditional | `filesystem:read:<path>` | LSP index query, registered only when LSP Relay is reachable |
 
 **Key points**:
 
 - Identity management is not exposed as a standalone tool API: identity is served via Gateway's `UserProfile` (`/api/users`), `acowork-system` exposes it through ordinary `memory_recall`/`memory_store`.
-- Actual tool count varies by configuration: core 16 + `web_search` + `rag_query` + `context_retrieve`/`context_abandon` + `codebase` = 16 ~ 22.
+- Actual tool count varies by configuration: core 16 + `web_search` + `rag_query` + `codebase` = 16 ~ 20. (`context_retrieve` / `context_abandon` are both retired and unregistered: the former's implementation has been deleted, the latter's source is kept as dead code — ADR-061 §10.1.)
 - WASM tools not in this list: module code exists (`core/acowork-runtime/src/tools/wasm/`) but `wasm-tools` feature is off by default, **no Agent uses WASM tools** – TOL‑02~04/TOL‑08~09 are effectively unavailable before Phase 6.
 
 ### 1.6 Skill System

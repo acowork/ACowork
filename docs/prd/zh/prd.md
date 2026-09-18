@@ -145,14 +145,13 @@ ACowork 是一个"**Agent as APP**"平台。核心隐喻借鉴 Android：Agent �
 | 15 | `todo_write` | core | （无） | 结构化 TODO 列表维护 |
 | 16 | `mcp_install` / `mcp_uninstall` | core | （受 manifest 声明） | MCP Server 动态挂载（ADR-029） |
 | 17 | `rag_query` | conditional | `rag:query + network:<rag_url>` | 企业 RAG 接入，仅当 manifest 声明 `[[tools]] type = "rag"` 时注册（ADR-051 / Phase 4） |
-| 18 | `context_retrieve` | core | `context:read` | 平台受保护，**固定注册**（压缩后手动取回通道，ADR-061 §10.2） |
-| 19 | `context_abandon` | conditional | `context:write` | 平台受保护，**不再注册**（deprecated 保留，ADR-061 §10.2） |
-| 20 | `codebase` | conditional | `filesystem:read:<path>` | LSP 索引查询，仅当 LSP Relay 可达时注册 |
+| 18 | `context_abandon` | — | `context:write` | **不再注册**（deprecated，源文件作为死代码保留；ADR-061 §10.1） |
+| 19 | `codebase` | conditional | `filesystem:read:<path>` | LSP 索引查询，仅当 LSP Relay 可达时注册 |
 
 **要点**：
 
 - 身份管理不暴露为独立工具 API：身份查询由 Gateway 的 `UserProfile`（`/api/users`）承载，`acowork-system` 通过普通 `memory_recall` / `memory_store` 暴露。
-- 实际工具数随配置变化：核心 16 + `web_search` + `rag_query` + `context_retrieve`/`context_abandon` + `codebase` = 16 ~ 22。
+- 实际工具数随配置变化：核心 16 + `web_search` + `rag_query` + `codebase` = 16 ~ 20。（`context_retrieve` / `context_abandon` 均已退役、不注册：前者实现已删除，后者源码作为死代码保留，见 ADR-061 §10.1。）
 - WASM 工具不在此清单：模块代码已实现（`core/acowork-runtime/src/tools/wasm/`），但 `wasm-tools` feature 默认未开启，**没有任何 Agent 使用 WASM 工具**——TOL-02~04 / TOL-08~09 在 Phase 6 之前实际不可用。
 
 ### 1.6 Skill 系统
