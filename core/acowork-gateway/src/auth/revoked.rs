@@ -1,22 +1,34 @@
 //! Revoked refresh-token families (ADR-076 §决策 3, §5.2).
 //!
-//! Two revocation scopes share one flat file:
-//! - an **exact** family id — revokes one device's refresh chain (logout);
-//! - a **`{user_id}.*` wildcard** — revokes every family for a user
-//!   (password change, account disable).
+//! Three entry scopes share one flat file:
+//! - `r:{family}` — the family was **rotated** (spent by a successful
+//!   refresh). Presenting it again is either a replay of a stolen token
+//!   or a client retry; `AuthService::refresh` treats it as a leak and
+//!   kills the whole user's chain (RFC 9700 §4.14.2 reuse detection).
+//! - `x:{family}` — the family was **explicitly revoked** (logout,
+//!   change-password, disable). A replay is just a dead session.
+//! - `{user_id}.*` — every family for a user (password change, disable).
 //!
-//! A family id is minted as `{user_id}.{random}` at login, so the wildcard
-//! prefix is a plain string match.
+//! The two scopes must stay distinct: a logged-out token being replayed
+//! must not nuke the user's *other* sessions, while a rotated token being
+//! replayed must.
+//!
+//! A family id is minted as `{user_id}.{random}` at login, so the
+//! wildcard prefix is a plain string match.
 //!
 //! ponytail: the file grows without bound and is never GC'd. Fine for the
-//! small-team scale this ADR targets (< 100 users); past that, move to a
-//! SQLite table with an expiry column.
+//! small-team scale this ADR targets (< 100 users, one entry per refresh);
+//! past that, move to a SQLite table with an expiry column.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 /// Suffix marking a per-user wildcard entry.
 const USER_WILDCARD: &str = ".*";
+/// Prefix marking a family spent by rotation.
+const ROTATED: &str = "r:";
+/// Prefix marking a family revoked outright.
+const REVOKED: &str = "x:";
 
 pub struct RevokedFamilies {
     path: PathBuf,
@@ -54,14 +66,28 @@ impl RevokedFamilies {
         &self.path
     }
 
-    /// Whether `family` (belonging to `user_id`) has been revoked.
+    /// Whether `family` (belonging to `user_id`) has been revoked,
+    /// either outright or by rotation.
     pub fn is_revoked(&self, user_id: &str, family: &str) -> bool {
-        self.entries.contains(family) || self.entries.contains(&format!("{user_id}{USER_WILDCARD}"))
+        self.entries.contains(family)
+            || self.entries.contains(&format!("{ROTATED}{family}"))
+            || self.entries.contains(&format!("{REVOKED}{family}"))
+            || self.entries.contains(&format!("{user_id}{USER_WILDCARD}"))
     }
 
-    /// Revoke a single family (logout on one device).
+    /// Whether this family was already spent by a refresh (reuse signal).
+    pub fn is_rotated(&self, family: &str) -> bool {
+        self.entries.contains(&format!("{ROTATED}{family}"))
+    }
+
+    /// Record a family as spent by rotation (single-use refresh token).
+    pub fn mark_rotated(&mut self, family: &str) -> Result<(), String> {
+        self.insert(format!("{ROTATED}{family}"))
+    }
+
+    /// Revoke a single family outright (logout on one device).
     pub fn revoke_family(&mut self, family: &str) -> Result<(), String> {
-        self.insert(family.to_string())
+        self.insert(format!("{REVOKED}{family}"))
     }
 
     /// Revoke every family for a user (password change / disable).
@@ -142,6 +168,24 @@ mod tests {
         // A different user is untouched, even with a similar id.
         assert!(!r.is_revoked("u-10", "u-10.abc"));
         assert!(!r.is_revoked("u-2", "u-2.abc"));
+    }
+
+    #[test]
+    fn rotation_and_explicit_revocation_are_distinguishable() {
+        let p = tmp_path("rotate");
+        let mut r = RevokedFamilies::load(&p);
+        r.mark_rotated("u-1.spent").unwrap();
+        r.revoke_family("u-1.loggedout").unwrap();
+
+        // Both block the token...
+        assert!(r.is_revoked("u-1", "u-1.spent"));
+        assert!(r.is_revoked("u-1", "u-1.loggedout"));
+        // ...but only rotation is a reuse signal.
+        assert!(r.is_rotated("u-1.spent"));
+        assert!(!r.is_rotated("u-1.loggedout"));
+        // An untouched family is neither.
+        assert!(!r.is_revoked("u-1", "u-1.fresh"));
+        assert!(!r.is_rotated("u-1.fresh"));
     }
 
     #[test]

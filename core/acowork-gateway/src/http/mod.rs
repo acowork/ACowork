@@ -6,6 +6,8 @@
 pub mod agent_config;
 pub mod agents;
 pub mod auth;
+pub mod auth_api;
+pub mod auth_middleware;
 pub mod bootstrap_api;
 pub mod chat;
 pub mod config_api;

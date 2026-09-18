@@ -7,6 +7,7 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+use crate::conversation::{SessionScope, SessionVisibility};
 use crate::error::Result;
 
 /// Summary of a single session for list responses (ADR-024 / ADR-028).
@@ -20,6 +21,13 @@ pub struct SessionSummary {
     pub workspace_id: Option<String>,
     pub model: Option<String>,
     pub provider: Option<String>,
+    /// ADR-076 §决策 4: `None` = public (the default).
+    pub visibility: Option<SessionVisibility>,
+    /// ADR-076 §决策 4: may the caller modify this session?
+    ///
+    /// Not an ownership flag: admins and `local`-mode callers may write
+    /// sessions they do not own (see `SessionInfo::can_write`).
+    pub can_write: bool,
 }
 
 /// Response for `list_sessions` — paginated session list with
@@ -85,7 +93,16 @@ pub struct MessagesResponse {
 #[async_trait]
 pub trait SessionMetadataService: Send + Sync {
     /// List sessions with pagination and agent-level token totals (ADR-028).
-    async fn list_sessions(&self, page: u32, size: u32) -> Result<SessionsListResponse>;
+    ///
+    /// ADR-076 §决策 4: `scope` filters the list *before* pagination, so
+    /// `total_count` / `total_pages` count only what the caller may read.
+    /// Agent-level token totals are summed over the same filtered set.
+    async fn list_sessions(
+        &self,
+        page: u32,
+        size: u32,
+        scope: &SessionScope,
+    ) -> Result<SessionsListResponse>;
 
     /// Return the most recently active session, if any.
     async fn get_latest_session(&self) -> Result<Option<(String, Option<String>)>>;

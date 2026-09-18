@@ -266,18 +266,6 @@ impl super::loop_::AgentLoop {
         self.session.conversation.as_ref().map(|c| c.session_id())
     }
 
-    /// Update the title of the currently active conversation session.
-    ///
-    /// Returns `Some(true)` if the title was actually written (different from current),
-    /// `Some(false)` if the title was already the same (no-op),
-    /// or `None` if no active session exists.
-    pub fn update_session_title(&mut self, title: &str) -> Option<bool> {
-        self.session
-            .conversation
-            .as_ref()
-            .map(|conv| conv.update_title_force(title))
-    }
-
     /// Lazy-persist any async-generated session title to the conversation
     /// JSONL metadata and index.json.
     ///

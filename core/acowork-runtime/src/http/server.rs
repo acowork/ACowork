@@ -74,7 +74,7 @@ use std::sync::Arc;
 use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, Path, Query, State},
-    http::{StatusCode, header},
+    http::{HeaderMap, StatusCode, header},
     response::IntoResponse,
     routing::{get, post, put},
 };
@@ -593,15 +593,80 @@ impl RuntimeHttpServer {
             mcp_notifier: mcp_notifier.clone(),
         };
 
-        // ADR-034 §11.2 — 25 routes total. Control plane is intentionally
-        // absent: user-initiated state changes go through MQTT, not HTTP.
+        // ADR-076 §决策 4: the session **control** plane lives here now,
+        // not on MQTT. It moved because an MQTT control message carries no
+        // identity — the broker cannot stamp one — so `create` could not
+        // record an owner and `close`/`delete` could not check one. Over
+        // HTTP the Gateway authenticates first and forwards the resolved
+        // scope as `x-user-id`.
+        //
+        // This deliberately reverses ADR-034 §11.2 ("control plane
+        // intentionally absent from HTTP"). The remaining MQTT control
+        // commands (chat, model switch, …) stay on MQTT: they carry no
+        // ownership decision, and ADR-076 defers MQTT-side identity
+        // (ADR-077).
         let app = Router::new()
             .route("/health", get(health))
-            .route("/sessions", get(list_sessions))
+            .route(
+                "/sessions",
+                get(list_sessions).post(crate::http::session_control::post_create_session),
+            )
+            .route(
+                "/sessions/{sid}/open",
+                post(crate::http::session_control::post_open_session),
+            )
+            .route(
+                "/sessions/{sid}/close",
+                post(crate::http::session_control::post_close_session),
+            )
+            .route(
+                "/sessions/{sid}/visibility",
+                put(crate::http::session_control::put_session_visibility),
+            )
+            // ADR-076 §决策 4: workspace switch gets its own endpoint
+            // rather than riding `PUT .../config` — only
+            // `route_workspace_switch` updates `current_work_dir` and the
+            // workspace context (see the handler's doc comment).
+            .route(
+                "/sessions/{sid}/workspace",
+                put(crate::http::session_control::put_session_workspace),
+            )
             .route("/sessions/latest", get(get_latest_session))
             // NEW: panel-4 endpoint, merges meta.json + live state snapshot.
-            .route("/sessions/{sid}", get(get_session))
-            .route("/sessions/{sid}/messages", get(get_messages))
+            .route(
+                "/sessions/{sid}",
+                get(get_session).delete(crate::http::session_control::delete_session),
+            )
+            .route("/sessions/{sid}/messages", get(get_messages).post(crate::http::session_control::post_send_message))
+            // ADR-076 §决策 4 (second wave): user-triggered session actions.
+            // These carried no ownership decision, but they carried no
+            // *identity* either, so over MQTT they could be replayed into
+            // any session on the broker. Routing them through the Gateway's
+            // authenticated API is what makes `authorize_write` possible.
+            .route(
+                "/sessions/{sid}/stop",
+                post(crate::http::session_control::post_stop_session),
+            )
+            .route(
+                "/sessions/{sid}/continue",
+                post(crate::http::session_control::post_continue_execution),
+            )
+            .route(
+                "/sessions/{sid}/approval",
+                post(crate::http::session_control::post_approval_decision),
+            )
+            .route(
+                "/sessions/{sid}/answer",
+                post(crate::http::session_control::post_question_answer),
+            )
+            .route(
+                "/sessions/{sid}/cancel-tool",
+                post(crate::http::session_control::post_cancel_tool),
+            )
+            .route(
+                "/sessions/{sid}/compress",
+                post(crate::http::session_control::post_compress_action),
+            )
             // ADR-047: session config endpoint - read/write config
             // without going through the serial inference queue.
             .route(
@@ -910,16 +975,18 @@ struct ListSessionsQuery {
 /// Gateway reverse proxy.
 async fn list_sessions(
     State(state): State<HttpState>,
+    headers: HeaderMap,
     Query(query): Query<ListSessionsQuery>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let page = query.page.unwrap_or(1).max(1);
     let size = query.size.unwrap_or(20).clamp(1, 200);
+    let scope = crate::http::session_control::scope_from_headers(&headers);
 
     // ADR-040: usecase trait is the sole implementation path.
     let svc = state.session_metadata.lock().await;
     let svc = svc.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
     let resp = svc
-        .list_sessions(page, size)
+        .list_sessions(page, size, &scope)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(
@@ -936,18 +1003,32 @@ async fn list_sessions(
 /// This is the backend for `GET /api/agents/{id}/latest-session` via Gateway proxy.
 async fn get_latest_session(
     State(state): State<HttpState>,
+    headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
+    let scope = crate::http::session_control::scope_from_headers(&headers);
+
     let latest = state
         .latest_session
         .read()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    match *latest {
-        Some((ref session_id, ref title)) => Ok(Json(serde_json::json!({
-            "session_id": session_id,
-            "title": title,
-        }))),
-        None => Err(StatusCode::NOT_FOUND),
-    }
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .clone();
+
+    let Some((session_id, title)) = latest else {
+        return Err(StatusCode::NOT_FOUND);
+    };
+
+    // ADR-076 §决策 4: the cached value is agent-wide (written at startup),
+    // so it can name a session this caller may not read. Answer 404 and let
+    // the client fall back to the filtered list rather than leak the id —
+    // ponytail: for a non-owner this costs one extra round trip; the
+    // alternative is a full scan on every startup call.
+    crate::http::session_control::authorize_read(&state, &session_id, &scope)
+        .map_err(|(status, _)| status)?;
+
+    Ok(Json(serde_json::json!({
+        "session_id": session_id,
+        "title": title,
+    })))
 }
 
 /// Query parameters for `GET /sessions/{sid}/messages`.
@@ -981,7 +1062,16 @@ struct GetMessagesQuery {
 async fn get_session_config(
     State(state): State<HttpState>,
     Path(sid): Path<String>,
+    headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    // ADR-076 §决策 4: config exposes model / provider / workspace_id /
+    // title — as much a leak as the messages themselves.
+    crate::http::session_control::authorize_read(
+        &state,
+        &sid,
+        &crate::http::session_control::scope_from_headers(&headers),
+    )?;
+
     let svc = state.session_config.lock().await;
     let svc = svc.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
@@ -1009,8 +1099,17 @@ async fn get_session_config(
 async fn put_session_config(
     State(state): State<HttpState>,
     Path(sid): Path<String>,
+    headers: HeaderMap,
     Json(delta): Json<crate::agent::session_config::SessionConfigDelta>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    // ADR-076 §决策 4: writing config is a write — a public session is
+    // readable by all but switchable (model / workspace) only by its owner.
+    crate::http::session_control::authorize_write(
+        &state,
+        &sid,
+        &crate::http::session_control::scope_from_headers(&headers),
+    )?;
+
     // ADR-074 D6: out-of-range `context_window` → 400 (no silent clamp).
     // `0` is legal (clear); validity is judged by the single
     // `is_valid_context_window` point shared with the resolution chain.
@@ -1057,8 +1156,16 @@ async fn put_session_config(
 async fn get_messages(
     State(state): State<HttpState>,
     Path(sid): Path<String>,
+    headers: HeaderMap,
     Query(query): Query<GetMessagesQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    // ADR-076 §决策 4: reading a private session you do not own is a 404,
+    // not a 403 — a distinct status would confirm the session exists.
+    crate::http::session_control::authorize_read(
+        &state,
+        &sid,
+        &crate::http::session_control::scope_from_headers(&headers),
+    )?;
     let svc = state.session_metadata.lock().await;
     let svc = svc.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
@@ -1513,7 +1620,14 @@ async fn rebuild_progress(
 async fn get_session(
     State(state): State<HttpState>,
     Path(sid): Path<String>,
+    headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    // ADR-076 §决策 4: same hidden-404 rule as `get_messages`.
+    crate::http::session_control::authorize_read(
+        &state,
+        &sid,
+        &crate::http::session_control::scope_from_headers(&headers),
+    )?;
     let svc = state.session_metadata.lock().await;
     let svc = svc.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
@@ -2269,9 +2383,21 @@ fn attachment_error_to_response(
 /// `document_ids` MQTT param.
 async fn upload_file(
     State(state): State<HttpState>,
-    Path(_sid): Path<String>,
+    Path(sid): Path<String>,
+    headers: HeaderMap,
     mut multipart: Multipart,
 ) -> Result<Json<crate::usecases::UploadedFileResponse>, (StatusCode, Json<serde_json::Value>)> {
+    // ADR-076 §决策 4. The blob itself is stored agent-wide (see the note
+    // above), so `sid` only gates *who may attach to this session* — enough
+    // to stop a stranger uploading into someone else's conversation. The
+    // matching read path has no session id to check against; see the
+    // ceiling in ADR-076 §5.5.
+    crate::http::session_control::authorize_write(
+        &state,
+        &sid,
+        &crate::http::session_control::scope_from_headers(&headers),
+    )?;
+
     let svc = state.attachment.lock().await.clone().ok_or_else(|| {
         attachment_error_to_response(crate::usecases::AttachmentError::ServiceUnavailable)
     })?;
@@ -2820,6 +2946,58 @@ pub(crate) async fn dispatch_agent_level_config(
             label,
             "agent-level config dispatch failed: dispatch channel closed (on-disk file is authoritative)"
         ),
+    }
+}
+
+/// Push a session-scoped inbound message onto the Runtime's dispatch
+/// channel from an HTTP handler.
+///
+/// ADR-076 §决策 4: user-triggered session actions arrive over HTTP now,
+/// but they must reach `dispatch_inbound` — which is where the real work
+/// lives — by the exact route the MQTT control path used
+/// (`http_dispatch_rx` → `mqtt_dispatch_tx`). This helper is that
+/// hand-off: HTTP does authorization and routing, the message keeps its
+/// original semantics.
+///
+/// Returns `false` only when the channel is not up yet (Phase A → D
+/// startup race), which the handler surfaces as 503. A `SessionNotOpened`
+/// or similar execution failure is *not* reported here — it is published
+/// on the MQTT event plane, which the Desktop already listens to.
+pub(crate) async fn dispatch_session_action(
+    state: &HttpState,
+    label: &str,
+    session_id: &str,
+    msg: InboundMessage,
+) -> bool {
+    let tx_opt = state.dispatch_tx.lock().await.clone();
+    let Some(tx) = tx_opt else {
+        tracing::warn!(
+            agent_id = %state.agent_id,
+            session_id,
+            label,
+            "session action dispatch skipped: dispatch channel not ready"
+        );
+        return false;
+    };
+    match tx.send((session_id.to_string(), msg)) {
+        Ok(()) => {
+            tracing::info!(
+                agent_id = %state.agent_id,
+                session_id,
+                label,
+                "session action dispatched via HTTP"
+            );
+            true
+        }
+        Err(_) => {
+            tracing::warn!(
+                agent_id = %state.agent_id,
+                session_id,
+                label,
+                "session action dispatch failed: dispatch channel closed"
+            );
+            false
+        }
     }
 }
 
@@ -4121,6 +4299,8 @@ mod tests {
             session_id: session_id.to_string(),
             agent_id: "com.test.agent".to_string(),
             created_at: "2026-01-01T12:00:00Z".to_string(),
+            user_id: None,
+            visibility: None,
             title: Some("Test Session".to_string()),
             workspace_id: None,
             model: None,
@@ -4267,6 +4447,8 @@ mod tests {
             session_id: "20260101_100000_aaa".to_string(),
             agent_id: "com.test.agent".to_string(),
             created_at: "2026-01-01T10:00:00Z".to_string(),
+            user_id: None,
+            visibility: None,
             title: Some("Session 1".to_string()),
             workspace_id: None,
             model: None,
@@ -4300,6 +4482,8 @@ mod tests {
             session_id: "20260101_120000_bbb".to_string(),
             agent_id: "com.test.agent".to_string(),
             created_at: "2026-01-01T12:00:00Z".to_string(),
+            user_id: None,
+            visibility: None,
             title: Some("Session 2".to_string()),
             workspace_id: None,
             model: None,
@@ -7478,6 +7662,25 @@ mod tests {
         let client = reqwest::Client::new();
         let session_id = "s-upload-docx";
 
+        // ADR-076 §决策 4: the upload path authorizes against the session,
+        // so the session has to exist. (Unauthorized uploads are covered by
+        // `session_control`'s own tests.)
+        let meta_dir = temp_dir.join("conversations").join("meta");
+        std::fs::create_dir_all(&meta_dir).unwrap();
+        std::fs::write(
+            meta_dir.join(format!("{session_id}.json")),
+            serde_json::json!({
+                "version": 1,
+                "session_id": session_id,
+                "agent_id": "com.test.agent",
+                "created_at": "2026-01-01T00:00:00Z",
+                "message_count": 0,
+                "last_active_at": "2026-01-01T00:00:00Z",
+            })
+            .to_string(),
+        )
+        .unwrap();
+
         // Step 1: Upload a docx blob. The multipart body mirrors what
         // `apps/acowork-desktop/src-tauri/src/gateway_client.rs` sends:
         //   - `file` field carrying the raw bytes (the file_name on the
@@ -7736,21 +7939,25 @@ mod tests {
         std::fs::remove_dir_all(&temp_dir).ok();
     }
 
-    /// ADR-047: GET /sessions/{sid}/config returns 500 for unknown session.
+    /// ADR-047 + ADR-076 §决策 4: GET /sessions/{sid}/config answers 404
+    /// for an unknown session, and the `visibility` switch governs the
+    /// config read exactly as it governs the session/message reads —
+    /// because all three go through the same `authorize_read`.
     #[tokio::test]
-    async fn test_session_config_get_unknown_session() {
+    async fn test_session_config_unknown_session_and_visibility_gate() {
         let temp_dir = std::env::temp_dir().join("acowork-test-runtime-config-unknown");
         let _ = std::fs::remove_dir_all(&temp_dir);
         std::fs::create_dir_all(&temp_dir).unwrap();
 
-        let shared_configs: crate::usecases::SharedSessionConfigs =
-            Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
-        let config_svc: Arc<dyn crate::usecases::SessionConfigService> =
-            Arc::new(crate::usecases::RuntimeSessionConfigService::new(
-                shared_configs,
-                None,
-                Arc::new(std::sync::RwLock::new(None)),
-            ));
+        // A live session, so the config service can serve / accept a read
+        // or write once the guard lets the request through.
+        let sid = "20260101_120000_cfgvis";
+        let (config_svc, conv) = make_test_session_config_service(&temp_dir, sid);
+        // Drive the live session rather than hand-writing meta.json: the
+        // in-memory `ConversationSession` is the writer for meta on any
+        // config change, so a file-only edit would be clobbered by the
+        // next `write_meta()`.
+        conv.set_user_id(Some("u-owner".to_string()));
         let session_config_slot = Arc::new(tokio::sync::Mutex::new(Some(config_svc)));
 
         let session_manager_slot: crate::http::server::SharedSessionManagerSlot =
@@ -7790,7 +7997,262 @@ mod tests {
         let resp = reqwest::get(format!("{}/sessions/nonexistent/config", base))
             .await
             .unwrap();
-        assert_eq!(resp.status(), reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+        // ADR-076 §决策 4: the config handler authorizes first, so a
+        // missing session is a 404 (it used to fall through to the config
+        // service and surface as a 500).
+        assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+
+        // ADR-076 §决策 4: the config endpoint has no visibility rule of
+        // its own — it calls the same `authorize_read` the session/message
+        // endpoints use, which is why the `visibility` switch governs config
+        // too. These requests are that whole contract.
+        let set_visibility = |v: Option<crate::conversation::SessionVisibility>| {
+            conv.set_visibility(v);
+        };
+        let get_config_as = |who: Option<&str>| {
+            let client = reqwest::Client::new();
+            let req = client.get(format!("{base}/sessions/{sid}/config"));
+            let req = match who {
+                Some(u) => req.header("x-user-id", u),
+                None => req,
+            };
+            async move { req.send().await.unwrap().status() }
+        };
+
+        // Private + owned. The owner writes first so the config store has
+        // an entry to read back (the store is separate from meta.json and
+        // starts empty in this harness).
+        set_visibility(Some(crate::conversation::SessionVisibility::Private));
+        let put_config_as = |who: &str, body: serde_json::Value| {
+            let client = reqwest::Client::new();
+            let req = client
+                .put(format!("{base}/sessions/{sid}/config"))
+                .header("x-user-id", who)
+                .json(&body);
+            async move { req.send().await.unwrap().status() }
+        };
+        assert_eq!(
+            put_config_as("u-owner", serde_json::json!({ "model": "gpt-4o" })).await,
+            reqwest::StatusCode::OK,
+            "the owner must be able to write their own session's config"
+        );
+        assert_eq!(
+            get_config_as(Some("u-owner")).await,
+            reqwest::StatusCode::OK,
+            "the owner must be able to read their own session's config"
+        );
+        // ...a stranger gets 404, not 403 (no existence oracle)...
+        assert_eq!(
+            get_config_as(Some("u-other")).await,
+            reqwest::StatusCode::NOT_FOUND,
+            "a private session's config must be invisible to a non-owner"
+        );
+        // ...and an unfiltered caller (admin / local mode) is unaffected.
+        assert_eq!(get_config_as(None).await, reqwest::StatusCode::OK);
+
+        // Same owner, switch flipped to public: the stranger now gets in.
+        // This is what makes it the *switch* talking, not mere ownership.
+        set_visibility(Some(crate::conversation::SessionVisibility::Public));
+        assert_eq!(
+            get_config_as(Some("u-other")).await,
+            reqwest::StatusCode::OK,
+            "a public session's config must be readable by any account"
+        );
+
+        // Writing stays owner-only even when the session is public —
+        // sharing is not handing over the config.
+        let resp = reqwest::Client::new()
+            .put(format!("{base}/sessions/{sid}/config"))
+            .header("x-user-id", "u-other")
+            .json(&serde_json::json!({ "model": "gpt-4o" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            reqwest::StatusCode::NOT_FOUND,
+            "public != writable: a non-owner must not be able to PUT config"
+        );
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    /// ADR-076 §决策 4 (second wave): the seven user-triggered session
+    /// actions moved from MQTT to HTTP. This test is that boundary, end to
+    /// end through the real router:
+    ///
+    ///   1. a non-owner is refused (404 — identical to "no such session", so
+    ///      the endpoint is not an existence oracle for other accounts),
+    ///   2. the owner is accepted (202), and
+    ///   3. the body each endpoint produces is the *same* `InboundMessage`
+    ///      the MQTT command used to produce — the migration changed the
+    ///      transport, not the dispatch.
+    ///
+    /// Step 3 is why the dispatch channel is real here: with a `None` channel
+    /// every accepted request would collapse to 503 and a wrong body would
+    /// go unnoticed.
+    #[tokio::test]
+    async fn session_actions_are_owner_gated_and_keep_their_payload() {
+        let temp_dir = std::env::temp_dir().join("acowork-test-runtime-session-actions");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let sid = "20260101_120000_actions";
+        let (_config_svc, conv) = make_test_session_config_service(&temp_dir, sid);
+        conv.set_user_id(Some("u-owner".to_string()));
+        conv.set_visibility(Some(crate::conversation::SessionVisibility::Private));
+
+        // Real dispatch channel, so we can read back what each handler queued.
+        let (dispatch_tx, mut dispatch_rx) =
+            tokio::sync::mpsc::unbounded_channel::<(String, InboundMessage)>();
+
+        let server = RuntimeHttpServer::start(
+            temp_dir.clone(),
+            temp_dir.clone(),
+            "com.test.agent".to_string(),
+            TEST_INSTANCE_ID.to_string(), // ADR-073: URL paths address the runtime's UUID instance, not the package name
+            Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
+            Arc::new(std::sync::RwLock::new(None)),
+            Arc::new(tokio::sync::Mutex::new(Some(dispatch_tx))),
+            Arc::new(std::sync::RwLock::new(0)),
+            Arc::new(std::sync::RwLock::new(Vec::new())),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
+            std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            new_test_workspace_resolver(),
+            std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+            std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
+        )
+        .await
+        .expect("server should start");
+
+        let base = format!("http://127.0.0.1:{}", server.port);
+        let post = |action: &str, who: &str, body: serde_json::Value| {
+            let url = format!("{base}/sessions/{sid}/{action}");
+            let who = who.to_string();
+            async move {
+                reqwest::Client::new()
+                    .post(url)
+                    .header("x-user-id", who)
+                    .json(&body)
+                    .send()
+                    .await
+                    .unwrap()
+                    .status()
+            }
+        };
+
+        let cases = [
+            (
+                "messages",
+                serde_json::json!({
+                    "content": "hi",
+                    "message_id": "m1",
+                    "command": "",
+                    "params_json": "{\"a\":1}",
+                }),
+            ),
+            ("stop", serde_json::json!({ "reason": "user_requested" })),
+            ("continue", serde_json::json!({ "reason": "user_requested" })),
+            (
+                "approval",
+                serde_json::json!({
+                    "request_id": "r1",
+                    "approved": true,
+                    "allow_all_session": false,
+                    "reason": "",
+                }),
+            ),
+            ("answer", serde_json::json!({ "request_id": "r2", "answer": "yes" })),
+            ("cancel-tool", serde_json::json!({ "tool_call_id": "t1" })),
+            ("compress", serde_json::json!({ "compress_type": 1 })),
+        ];
+
+        for (action, body) in cases {
+            // 1. A non-owner cannot even reach the action...
+            assert_eq!(
+                post(action, "u-other", body.clone()).await,
+                reqwest::StatusCode::NOT_FOUND,
+                "non-owner must be refused on /{action}"
+            );
+            assert!(
+                dispatch_rx.try_recv().is_err(),
+                "a refused {action} must not reach the dispatch channel"
+            );
+
+            // 2. ...the owner is accepted...
+            assert_eq!(
+                post(action, "u-owner", body.clone()).await,
+                reqwest::StatusCode::ACCEPTED,
+                "owner must be able to POST /{action}"
+            );
+
+            // 3. ...and the queued message is the pre-migration one.
+            let (queued_sid, msg) = dispatch_rx.try_recv().expect("owner request must dispatch");
+            assert_eq!(queued_sid, sid, "/{action} must route to its session");
+
+            let ok = match (action, &msg) {
+                (
+                    "messages",
+                    InboundMessage::ChatMessage {
+                        content,
+                        message_id,
+                        params_json,
+                        ..
+                    },
+                ) => content == "hi" && message_id == "m1" && params_json == r#"{"a":1}"#,
+                ("stop", InboundMessage::Stop { reason }) => reason == "user_requested",
+                ("continue", InboundMessage::ContinueExecution { session_id, reason }) => {
+                    session_id == sid && reason == "user_requested"
+                }
+                (
+                    "approval",
+                    InboundMessage::ApprovalDecision {
+                        session_id,
+                        request_id,
+                        approved,
+                        allow_all_session,
+                        ..
+                    },
+                ) => {
+                    session_id == sid
+                        && request_id == "r1"
+                        && *approved
+                        && !*allow_all_session
+                }
+                (
+                    "answer",
+                    InboundMessage::QuestionAnswer {
+                        session_id,
+                        request_id,
+                        answer,
+                    },
+                ) => session_id == sid && request_id == "r2" && answer == "yes",
+                (
+                    "cancel-tool",
+                    InboundMessage::UserOperation(UserOp::CancelTool { tool_call_id }),
+                ) => tool_call_id == "t1",
+                (
+                    "compress",
+                    InboundMessage::CompressAction {
+                        session_id,
+                        compress_type,
+                    },
+                ) => session_id == sid && *compress_type == 1,
+                (a, other) => panic!("{a} dispatched the wrong message: {other:?}"),
+            };
+            assert!(ok, "{action} lost payload fields in transport");
+        }
 
         std::fs::remove_dir_all(&temp_dir).ok();
     }
@@ -7926,6 +8388,8 @@ mod tests {
             session_id: session_id.to_string(),
             agent_id: "com.test.agent".to_string(),
             created_at: "2026-01-01T12:00:00Z".to_string(),
+            user_id: None,
+            visibility: None,
             title: Some("Test".to_string()),
             workspace_id: Some("ws-1".to_string()),
             model: Some("gpt-4o".to_string()),

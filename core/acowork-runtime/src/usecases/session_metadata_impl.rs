@@ -9,7 +9,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::agent::session_state::{SharedLatestSession, SharedSessionSnapshots};
-use crate::conversation;
+use crate::conversation::{self, SessionScope};
 use crate::error::{Result, RuntimeError};
 use crate::usecases::agent_token::AgentTokenService;
 use crate::usecases::session_metadata::{
@@ -41,9 +41,15 @@ impl RuntimeSessionMetadataService {
 
 #[async_trait]
 impl SessionMetadataService for RuntimeSessionMetadataService {
-    async fn list_sessions(&self, page: u32, size: u32) -> Result<SessionsListResponse> {
+    async fn list_sessions(
+        &self,
+        page: u32,
+        size: u32,
+        scope: &SessionScope,
+    ) -> Result<SessionsListResponse> {
         let conversations = self.work_dir.join("conversations");
-        let join = conversation::scan_sessions_async(conversations, Some(page), Some(size));
+        let join =
+            conversation::scan_sessions_async(conversations, Some(page), Some(size), scope.clone());
         // ADR-066: scan_sessions_async returns a 4-tuple
         // (input, output, cache_read, cache_write) — feed all four into
         // the AgentTokenService merge so the in-process counters
@@ -75,6 +81,8 @@ impl SessionMetadataService for RuntimeSessionMetadataService {
                 workspace_id: s.workspace_id,
                 model: s.model,
                 provider: s.provider,
+                visibility: s.visibility,
+                can_write: s.can_write,
             })
             .collect();
 

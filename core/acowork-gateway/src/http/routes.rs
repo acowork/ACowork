@@ -18,6 +18,8 @@ use tokio::sync::RwLock;
 
 use crate::gateway::state::GatewayState;
 use crate::http::auth::HttpAuth;
+use crate::auth::AuthMode;
+use crate::auth::service::AuthService;
 use acowork_core::operation::{OperationId, OperationRecord, OperationState};
 use acowork_core::StructuredErrorBody;
 
@@ -71,6 +73,13 @@ pub struct AppState {
     /// Enforced by the `ip_allowlist_middleware` for requests that carry a
     /// real `ConnectInfo` (i.e. every request that arrived over TCP).
     pub ip_allowlist: crate::security::IpAllowlist,
+    /// ADR-076 §决策 12: the resolved deployment auth mode. `Local` =
+    /// legacy bearer token, no account system.
+    pub auth_mode: AuthMode,
+    /// ADR-076 §决策 3: the account system. `Some` only under
+    /// `AUTH_MODE=multi_user` — its presence is what enables the
+    /// `/api/auth/*` routes and the bearer middleware.
+    pub auth_service: Option<Arc<AuthService>>,
 }
 
 impl AppState {
@@ -92,6 +101,8 @@ impl AppState {
             bootstrap_registry: None,
             operation_store: None,
             ip_allowlist: crate::security::IpAllowlist::default(),
+            auth_mode: AuthMode::Local,
+            auth_service: None,
         }
     }
 }
@@ -180,6 +191,8 @@ pub fn build_router(state: AppState) -> Router {
     // Peer-IP allowlist middleware needs the state again after
     // `.with_state(state)` moves it — clone up front.
     let allowlist_state = state.clone();
+    // Same reason for the auth middleware (ADR-076 §决策 3).
+    let auth_layer_state = state.clone();
 
     // CORS — permissive for all deployments.
     //
@@ -249,6 +262,14 @@ pub fn build_router(state: AppState) -> Router {
         .merge(crate::http::doc_proxy::doc_proxy_routes())
         .merge(crate::http::debug_mqtt::debug_mqtt_routes())
         .merge(crate::http::settings_api::settings_routes())
+        // ADR-076 §决策 12: the account API exists only under
+        // `AUTH_MODE=multi_user`. In `local` mode the routes are not
+        // registered at all (404), not merely gated — an unregistered
+        // route cannot be reached by a future auth-middleware mistake.
+        .merge(match &state.auth_service {
+            Some(_) => crate::http::auth_api::auth_routes(),
+            None => Router::new(),
+        })
         .with_state(state)
         // Global body-size cap. See `GLOBAL_BODY_LIMIT` for why we
         // override axum's 2 MiB default at the root of the gateway
@@ -259,6 +280,14 @@ pub fn build_router(state: AppState) -> Router {
         // limits produce a clean error body instead of an opaque
         // extractor parse failure.
         .layer(DefaultBodyLimit::max(GLOBAL_BODY_LIMIT))
+        // ADR-076 §决策 3: bearer-token gate. Placed inside CORS (so a
+        // 401 still carries `Access-Control-Allow-Origin`) and outside
+        // every route (so no handler can be added without passing it).
+        // A no-op when `auth_service` is `None` (local mode).
+        .layer(middleware::from_fn_with_state(
+            auth_layer_state.clone(),
+            crate::http::auth_middleware::auth_middleware,
+        ))
         .layer(middleware::from_fn(log_request_origin))
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .layer(cors)

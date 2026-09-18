@@ -186,6 +186,37 @@ pub struct GatewayConfig {
     /// `None`). CLI `--auth-mode` beats this field.
     #[serde(default)]
     pub auth_mode: Option<AuthMode>,
+
+    /// Multi-user account system settings (ADR-076 §决策 5 / §决策 6).
+    ///
+    /// Read only under `AUTH_MODE=multi_user`; ignored in `local` mode.
+    #[serde(default)]
+    pub multi_user: MultiUserConfig,
+}
+
+/// `[multi_user]` section (ADR-076 §决策 12).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MultiUserConfig {
+    /// First-boot administrator (ADR-076 §决策 5).
+    ///
+    /// **Required when the account store is empty** under
+    /// `AUTH_MODE=multi_user` — a Gateway with no accounts has no way in,
+    /// so boot fails fast (ADR-076 §决策 12). Ignored once any account
+    /// exists: the bootstrap credential is first-boot-only, never a
+    /// standing second admin (see `AuthService::ensure_bootstrap_admin`).
+    #[serde(default)]
+    pub bootstrap_admin: Option<crate::auth::BootstrapAdmin>,
+
+    /// Password policy enforced on change / bootstrap
+    /// (ADR-076 §决策 6).
+    #[serde(default)]
+    pub password_policy: crate::auth::PasswordPolicy,
+
+    /// Whether non-admins may self-register (ADR-076 §决策 6).
+    /// Default `false`: only an admin creates accounts. **Not yet wired
+    /// to a route** — `POST /api/users` is admin-only for now.
+    #[serde(default)]
+    pub registration_open: bool,
 }
 
 /// Local Node Agent configuration (ADR-055 §6.11 / §6.13).
@@ -837,6 +868,10 @@ impl GatewayConfig {
                     None => file_config.as_ref().and_then(|c| c.auth_mode),
                 }
             },
+            multi_user: file_config
+                .as_ref()
+                .map(|c| c.multi_user.clone())
+                .unwrap_or_default(),
         };
 
         config.validate()?;
@@ -965,6 +1000,7 @@ impl Default for GatewayConfig {
             doc: DocConfig::default(),
             security: SecurityConfig::default(),
             auth_mode: None,
+            multi_user: MultiUserConfig::default(),
         }
     }
 }

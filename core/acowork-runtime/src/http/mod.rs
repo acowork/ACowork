@@ -11,6 +11,7 @@ pub mod avatar;
 pub mod debug;
 pub mod memory_query;
 pub mod prompts;
+pub mod session_control;
 pub mod server;
 pub mod skills;
 

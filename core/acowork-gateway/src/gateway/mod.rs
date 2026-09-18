@@ -149,6 +149,10 @@ async fn dispatch_bundled_agent_install(
 pub struct Gateway {
     config: GatewayConfig,
     state: SharedState,
+    /// ADR-076 §决策 12: the account system, `Some` only under
+    /// `AUTH_MODE=multi_user`. Built in [`Gateway::new`] so a
+    /// misconfigured multi-user deployment fails at construction.
+    auth_service: Option<Arc<crate::auth::AuthService>>,
 }
 
 impl Gateway {
@@ -196,9 +200,31 @@ impl Gateway {
         // it starts; the Gateway aggregates those into `installed_agents`
         // via the MQTT dispatch path.
 
+        // ADR-076 §决策 12: resolve the deployment auth mode. Under
+        // `multi_user` the account system is built here (fail-fast): a
+        // missing `bootstrap_admin` on an empty account store means no
+        // one could ever log in, so boot must fail rather than serve a
+        // Gateway nobody can authenticate against.
+        let auth_mode = config.effective_auth_mode();
+        let auth_service = if auth_mode.is_multi_user() {
+            let svc = crate::auth::AuthService::new(
+                std::path::Path::new(&data_dir),
+                config.multi_user.password_policy.clone(),
+                config.multi_user.bootstrap_admin.clone(),
+            )
+            .map_err(GatewayError::Config)?;
+            svc.ensure_bootstrap_admin().map_err(GatewayError::Config)?;
+            tracing::info!("AUTH_MODE=multi_user: account system enabled");
+            Some(Arc::new(svc))
+        } else {
+            tracing::info!("AUTH_MODE=local: single-user mode (account system disabled)");
+            None
+        };
+
         let gateway = Self {
             config,
             state: Arc::new(RwLock::new(state)),
+            auth_service,
         };
 
         Ok(gateway)
@@ -1233,6 +1259,10 @@ impl Gateway {
         // handlers (open records) and the MQTT dispatch layer
         // (transition them on NodeEvent correlation).
         let http_operation_store = operation_store_shared.clone();
+        // ADR-076 §决策 12: hand the (already built) account service and
+        // the resolved mode to the HTTP layer.
+        let http_auth_service = self.auth_service.clone();
+        let http_auth_mode = self.config.effective_auth_mode();
         let http_handle = tokio::spawn(async move {
             if let Err(e) = crate::http::server::start_http_server(
                 &http_config,
@@ -1248,6 +1278,8 @@ impl Gateway {
                 Some(http_bootstrap_registry),
                 Some(http_operation_store),
                 http_auth,
+                http_auth_mode,
+                http_auth_service,
             )
             .await
             {
@@ -1789,6 +1821,7 @@ mod tests {
             doc: crate::config::DocConfig::default(),
             security: crate::config::SecurityConfig::default(),
             auth_mode: None,
+            multi_user: crate::config::MultiUserConfig::default(),
         }
     }
 

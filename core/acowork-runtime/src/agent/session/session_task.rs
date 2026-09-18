@@ -86,8 +86,6 @@ pub enum SessionMessage {
     /// restart, ...). Removing the named builtin tool from this session's
     /// dispatch list. `name` should match `BuiltinToolEntry::name()`.
     RemoveDynamicBuiltinTool { name: String },
-    /// Update the title of the session's conversation
-    UpdateSessionTitle { title: String },
     /// Update the workspace directory path for tool execution.
     /// Carries the fully-resolved absolute path from SessionManager.
     SetWorkDir { path: String },
@@ -117,8 +115,6 @@ pub enum SessionMessage {
     /// Close the session gracefully: trigger distillation and free resources.
     /// JSONL history is preserved (use Delete to also remove the file).
     Close,
-    /// Manually trigger context compaction (from user-initiated compact_context WebSocket action).
-    CompactContext,
     /// ADR-032 C4c: User-initiated compression action (from frontend buttons).
     /// Carries the specific action type to execute.
     CompressAction(crate::agent::loop_::CompressionAction),
@@ -227,10 +223,6 @@ impl std::fmt::Debug for SessionMessage {
                 .debug_struct("RemoveDynamicBuiltinTool")
                 .field("name", name)
                 .finish(),
-            SessionMessage::UpdateSessionTitle { title } => f
-                .debug_struct("UpdateSessionTitle")
-                .field("title", title)
-                .finish(),
             SessionMessage::SetWorkDir { path } => {
                 f.debug_struct("SetWorkDir").field("path", path).finish()
             }
@@ -250,7 +242,6 @@ impl std::fmt::Debug for SessionMessage {
             SessionMessage::EnableDebugMode(_) => f.debug_tuple("EnableDebugMode").finish(),
             SessionMessage::DisableDebugMode => f.debug_tuple("DisableDebugMode").finish(),
             SessionMessage::Close => f.debug_tuple("Close").finish(),
-            SessionMessage::CompactContext => f.debug_tuple("CompactContext").finish(),
             SessionMessage::CompressAction(action) => f
                 .debug_tuple("CompressAction")
                 .field(&format!("{:?}", action))
@@ -1238,14 +1229,6 @@ impl SessionTask {
                         "SessionTask: dynamic builtin tool removed"
                     );
                 }
-                Some(SessionMessage::UpdateSessionTitle { title }) => {
-                    tracing::info!(
-                        session_id = %session_id,
-                        title = %title,
-                        "SessionTask: updating session title"
-                    );
-                    let _ = agent_loop.update_session_title(&title);
-                }
                 Some(SessionMessage::SetWorkDir { path }) => {
                     tracing::debug!(
                         session_id = %session_id,
@@ -1325,41 +1308,6 @@ impl SessionTask {
                         "SessionTask: Close received, shutting down"
                     );
                     break;
-                }
-                Some(SessionMessage::CompactContext) => {
-                    tracing::info!(
-                        session_id = %session_id,
-                        "SessionTask: manual compact_context triggered"
-                    );
-                    let model_name = agent_loop.session.model().unwrap_or("default").to_string();
-                    if let Err(e) = agent_loop
-                        .compact_history_if_needed(&model_name, true)
-                        .await
-                    {
-                        tracing::error!(
-                            session_id = %session_id,
-                            error = %e,
-                            "Manual compact_context failed"
-                        );
-                        if let Some(ref tx) = chunk_tx {
-                            let (user_message, detail, error_type) = e.error_info();
-                            let event = SessionChunkEvent {
-                                session_id: session_id.clone(),
-                                event: ChunkEvent::Error {
-                                    user_message,
-                                    detail,
-                                    error_type,
-                                    message_id: String::new(),
-                                },
-                            };
-                            if tx.send(event).await.is_err() {
-                                tracing::warn!(
-                                    session_id = %session_id,
-                                    "Failed to send Error chunk event (manual compaction)"
-                                );
-                            }
-                        }
-                    }
                 }
                 Some(SessionMessage::CompressAction(action)) => {
                     tracing::info!(

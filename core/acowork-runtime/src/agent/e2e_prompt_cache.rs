@@ -285,8 +285,9 @@ impl E2eHarness {
         }
     }
 
-    /// Send `CompactContext` and wait until the compaction round has fully
-    /// completed (not merely started).
+    /// Send the manual-compaction action (`CompressAction(CompressSummary)`,
+    /// the same thing the Desktop's context-usage menu triggers) and wait
+    /// until the compaction round has fully completed (not merely started).
     ///
     /// The session task emits `CompactingStarted` *before* the LLM summary
     /// call, so a wait on that event alone can race the writer: the
@@ -299,8 +300,13 @@ impl E2eHarness {
         {
             let mut guard = self.sm.lock().await;
             guard
-                .send_to_session(&self.sid, SessionMessage::CompactContext)
-                .expect("session task accepts CompactContext");
+                .send_to_session(
+                    &self.sid,
+                    SessionMessage::CompressAction(
+                        crate::agent::loop_::CompressionAction::CompressSummary,
+                    ),
+                )
+                .expect("session task accepts CompressAction(CompressSummary)");
         }
         let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
         let mut started = false;

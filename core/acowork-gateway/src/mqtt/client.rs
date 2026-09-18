@@ -361,29 +361,15 @@ impl GatewayMqttClient {
         let topic = format!("acowork/agents/{}/sessions/control/{}",
             instance_id,
             match &command.command {
-                // ── Session lifecycle ──
-                Some(acowork_core::mqtt_proto::control_command::Command::CreateSession(_)) => "create_session",
-                Some(acowork_core::mqtt_proto::control_command::Command::DeleteSession(_)) => "delete_session",
-                Some(acowork_core::mqtt_proto::control_command::Command::CloseSession(_)) => "close_session",
-                Some(acowork_core::mqtt_proto::control_command::Command::UpdateSessionTitle(_)) => "update_session_title",
-                // ── Chat ──
-                Some(acowork_core::mqtt_proto::control_command::Command::ChatMessage(_)) => "chat_message",
-                Some(acowork_core::mqtt_proto::control_command::Command::Stop(_)) => "stop",
-                Some(acowork_core::mqtt_proto::control_command::Command::ContinueExecution(_)) => "continue_execution",
-                Some(acowork_core::mqtt_proto::control_command::Command::EnableNotify(_)) => "enable_notify",
-                Some(acowork_core::mqtt_proto::control_command::Command::DisableNotify(_)) => "disable_notify",
-                // ── User responses ──
-                Some(acowork_core::mqtt_proto::control_command::Command::ApprovalDecision(_)) => "approval_decision",
-                Some(acowork_core::mqtt_proto::control_command::Command::QuestionAnswer(_)) => "question_answer",
-                // ── Per-session config ──
-                Some(acowork_core::mqtt_proto::control_command::Command::ModelSwitch(_)) => "model_switch",
-                Some(acowork_core::mqtt_proto::control_command::Command::ReasoningEffort(_)) => "reasoning_effort",
-                Some(acowork_core::mqtt_proto::control_command::Command::WorkspaceSwitch(_)) => "workspace_switch",
-                // ── Context management ──
-                Some(acowork_core::mqtt_proto::control_command::Command::CompactContext(_)) => "compact_context",
-                Some(acowork_core::mqtt_proto::control_command::Command::CompressAction(_)) => "compress_action",
-                // ── System ──
+                // ADR-076 §决策 4: this is the *only* user-invisible control
+                // command left. Every user-initiated session action (lifecycle,
+                // config, chat, stop, approve, …) is HTTP-only now, because a
+                // control message carries no identity for the Runtime to
+                // authorize. Their proto variants are deleted, so they cannot
+                // be matched (or published) at all.
                 Some(acowork_core::mqtt_proto::control_command::Command::Intent(_)) => "intent",
+                // `ActiveHeartbeat` is Desktop → Runtime and is never
+                // published from here.
                 _ => "unknown",
             }
         );

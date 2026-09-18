@@ -277,7 +277,12 @@ pub(crate) async fn phase_b_init_session(
     let latest_session_scan_clone = latest_session_scan.clone();
     let conversations_dir_clone = conversations_dir.clone();
     let _session_scan_handle = tokio::spawn(async move {
-        let handle = crate::conversation::scan_sessions_async(conversations_dir_clone, None, None);
+        let handle = crate::conversation::scan_sessions_async(
+            conversations_dir_clone,
+            None,
+            None,
+            crate::conversation::SessionScope::Unfiltered,
+        );
         let (sessions, _, _agent_totals) = handle.await.unwrap_or((Vec::new(), 0, (0, 0, 0, 0)));
         if let Some(s) = sessions.first() {
             *latest_session_scan_clone.write().unwrap() =

@@ -46,11 +46,23 @@ pub(crate) async fn phase_d_run(
     let (mqtt_dispatch_tx, mqtt_dispatch_rx) = tokio::sync::mpsc::unbounded_channel();
 
     // ADR-033: Forward Runtime HTTP dispatch messages to the MQTT dispatch channel.
+    //
+    // ADR-076 §决策 4: this is now the *only* funnel for user-originated
+    // session actions (they arrive over HTTP), so the idle-watcher
+    // `record_inbound()` lives here rather than in the MQTT control loop
+    // below. Without it a user who only ever sends chat over HTTP would
+    // have no inbound signal at all, and the session would auto-sleep
+    // underneath them.
     if let Some(http_rx) = ctx.http_dispatch_rx.take() {
         let tx = mqtt_dispatch_tx.clone();
+        let idle_watcher = idle_watcher.clone();
         tokio::spawn(async move {
             let mut rx = http_rx;
             while let Some(msg) = rx.recv().await {
+                // `None` means the user chose "never sleep".
+                if let Some(watcher) = idle_watcher.as_ref() {
+                    watcher.record_inbound();
+                }
                 let _ = tx.send(msg);
             }
             tracing::info!("Runtime HTTP dispatch channel closed");
@@ -175,7 +187,6 @@ pub(crate) async fn phase_d_run(
         ctx.embedding_update_rx.take(),
         ctx.lsps_update_rx.take(),
         &config.work_dir,
-        ctx.session_config_slot.clone(),
     )
     .await;
 
@@ -187,16 +198,18 @@ pub(crate) async fn phase_d_run(
 
 /// ADR-034 §8 Phase 2-1: ControlAction → InboundMessage single mapper.
 ///
-/// Returns `Some((session_id, msg))` for every supported control command.
-/// The mapper is exhaustive over `ControlAction` — adding a new variant
-/// in `control_handler.rs` triggers a compile error here.
+/// ADR-076 §决策 4: after the second wave of the HTTP migration this
+/// mapper is nearly empty. The MQTT control channel now carries only
+/// `Intent` (Gateway → Runtime: cron triggers, cross-agent messaging) and
+/// `ActiveHeartbeat` (presence). Every **user-initiated** action — chat,
+/// stop, continue, approval, question_answer, cancel_tool, compress, and
+/// the session lifecycle before them — arrives over the Gateway's
+/// authenticated HTTP API and is injected directly into the dispatch
+/// channel by `http::server::dispatch_session_action`, so it never passes
+/// through `ControlAction` at all.
 ///
-/// Session-bound commands return `Some((session_id, msg))` where
-/// `session_id` is the proto field.  System-level commands (CreateSession,
-/// IntentReceived) return `Some(("", msg))` to signal `mqtt_only_loop` to
-/// route through `session_manager` (system-level) instead of a session task.
-///
-/// Unsupported / parse-failure returns `None` (caller logs).
+/// The mapper is exhaustive over `ControlAction` — adding a variant in
+/// `control_handler.rs` triggers a compile error here, which is the point.
 fn control_action_to_inbound(
     action: crate::mqtt::control_handler::ControlAction,
 ) -> Option<(String, crate::agent::inbound::InboundMessage)> {
@@ -204,145 +217,10 @@ fn control_action_to_inbound(
     use crate::mqtt::control_handler::ControlAction;
 
     match action {
-        // ── Session lifecycle ──────────────────────────────────────────
-        ControlAction::CreateSession => Some((String::new(), InboundMessage::CreateSession)),
-        ControlAction::DeleteSession { session_id } => Some((
-            session_id.clone(),
-            InboundMessage::DeleteSession { session_id },
-        )),
-        ControlAction::CloseSession { session_id } => Some((
-            session_id.clone(),
-            InboundMessage::CloseSession { session_id },
-        )),
-        // ADR-038: explicit session activation. Routes through the system-level
-        // dispatcher (empty session_id) because the OpenSession handler needs
-        // to call `session_manager.open()` directly, not a specific SessionTask.
-        ControlAction::OpenSession { session_id } => {
-            Some((String::new(), InboundMessage::OpenSession { session_id }))
-        }
-        ControlAction::UpdateSessionTitle { session_id, title } => Some((
-            session_id.clone(),
-            InboundMessage::UpdateSessionTitle { session_id, title },
-        )),
-
-        // ── Chat ────────────────────────────────────────────────────────
-        ControlAction::SendMessage {
-            session_id,
-            message_id,
-            content,
-            command,
-            params_json,
-        } => Some((
-            session_id,
-            InboundMessage::ChatMessage {
-                content,
-                message_id,
-                command,
-                params_json,
-            },
-        )),
-        ControlAction::StopGeneration { session_id, reason } => {
-            Some((session_id, InboundMessage::Stop { reason }))
-        }
-        ControlAction::ContinueExecution { session_id, reason } => Some((
-            session_id.clone(),
-            InboundMessage::ContinueExecution { session_id, reason },
-        )),
-        // ADR-035 Phase 3: EnableNotify/DisableNotify removed from the
-        // control-action → inbound-message mapping. The proto fields are
-        // retained for wire compatibility but the runtime no longer acts
-        // on them.
-
-        // ── User responses ─────────────────────────────────────────────
-        ControlAction::ApprovalDecision {
-            session_id,
-            request_id,
-            approved,
-            allow_all_session,
-            reason,
-        } => Some((
-            session_id.clone(),
-            InboundMessage::ApprovalDecision {
-                session_id,
-                request_id,
-                approved,
-                allow_all_session,
-                // ADR-034: proto `string` is non-null but semantically optional.
-                // Empty string is normalized to None to preserve gRPC-era semantics
-                // where proto-empty = "no reason given".
-                reason: if reason.is_empty() {
-                    None
-                } else {
-                    Some(reason)
-                },
-            },
-        )),
-        ControlAction::QuestionAnswer {
-            session_id,
-            request_id,
-            answer,
-        } => Some((
-            session_id.clone(),
-            InboundMessage::QuestionAnswer {
-                session_id,
-                request_id,
-                answer,
-            },
-        )),
-
-        // ADR-045: Cancel a single in-flight tool. Routed via the fast
-        // UserOperation channel so it takes effect even while the agent
-        // loop is mid-iteration. Unknown tool_call_id is a no-op
-        // (race vs. tool natural completion).
-        ControlAction::CancelTool {
-            session_id,
-            tool_call_id,
-        } => Some((
-            session_id,
-            InboundMessage::UserOperation(crate::agent::inbound::UserOp::CancelTool {
-                tool_call_id,
-            }),
-        )),
-
-        // ── Per-session config ─────────────────────────────────────────
-        ControlAction::ModelSwitch {
-            session_id,
-            model_id,
-            provider_id,
-        } => Some((
-            session_id,
-            InboundMessage::ModelSwitchAction {
-                model_id,
-                provider_id,
-            },
-        )),
-        ControlAction::ReasoningEffort { session_id, effort } => {
-            Some((session_id, InboundMessage::ReasoningEffortAction { effort }))
-        }
-        ControlAction::WorkspaceSwitch {
-            session_id,
-            workspace_id,
-        } => Some((
-            session_id,
-            InboundMessage::WorkspaceSwitchAction { workspace_id },
-        )),
-
-        // ── Context management ─────────────────────────────────────────
-        ControlAction::CompactContext { session_id } => {
-            Some((session_id, InboundMessage::CompactContextAction))
-        }
-        ControlAction::CompressAction {
-            session_id,
-            compress_type,
-        } => Some((
-            session_id.clone(),
-            InboundMessage::CompressAction {
-                session_id,
-                compress_type,
-            },
-        )),
-
         // ── System ─────────────────────────────────────────────────────
+        // Uses the empty session id to signal `dispatch_inbound` to route
+        // through `session_manager` (system-level) rather than a session
+        // task.
         ControlAction::IntentReceived {
             from,
             action,
@@ -358,12 +236,6 @@ fn control_action_to_inbound(
                     params,
                 },
             ))
-        }
-
-        // ── Unsupported / parse failures (Phase 2-1: warn and drop) ───
-        ControlAction::Unsupported { command_type } => {
-            tracing::warn!(command_type, "Unsupported MQTT control command");
-            None
         }
 
         // ── Presence heartbeat (defensive) ──────────────────────────────
@@ -425,9 +297,6 @@ async fn mqtt_only_loop(
         tokio::sync::mpsc::UnboundedReceiver<crate::mqtt::client::LspRelayUpdate>,
     >,
     work_dir: &str,
-    session_config_slot: Arc<
-        tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionConfigService>>>,
-    >,
 ) -> Result<()> {
     tracing::info!("MQTT-only gateway loop started");
     let work_dir = std::path::PathBuf::from(work_dir);
@@ -444,7 +313,6 @@ async fn mqtt_only_loop(
                             session_id,
                             msg,
                             &work_dir,
-                            &session_config_slot,
                         ).await {
                             tracing::warn!(error = %e, "MQTT dispatch failed");
                         }
@@ -641,88 +509,38 @@ async fn mqtt_only_loop(
 /// ADR-034 §8 Phase 2-1: single dispatch table for `InboundMessage`.
 ///
 /// One arm per `InboundMessage` variant — no notification_type string
-/// parsing, no SystemNotification re-mapping for the 8 new control commands.
+/// parsing, no SystemNotification re-mapping for control commands.
 ///
 /// Routes:
 /// - `UserMessage` / `Stop` / `ContinueExecution` / `ApprovalDecision` /
 ///   `QuestionAnswer` / `UserOperation` / `IntentMessage` → session task inbox
-/// - `CloseSession` → `SessionManager::delete_session`
-/// - `UpdateSessionTitle` → `SessionMessage::UpdateSessionTitle` (direct,
-///   does NOT wrap in `SystemNotification` — ADR-034 §7.1 G1 fix)
-/// - `EnableNotify` / `DisableNotify` → `SessionMessage::EnableNotify` /
-///   `SessionMessage::DisableNotify` (the existing session_task handler
-///   sets `session_core.notify_enabled` AtomicBool)
 /// - `CompressAction` → `SessionMessage::CompressAction(CompressionAction)`
 ///   with explicit CompressType i32 → CompressionAction mapping
 ///   (1=SUMMARY → CompressSummary; ADR-052 removed TOOL_RESULTS because
 ///   tool-result compression is retired)
 /// - `SystemNotification` → legacy fallback (Phase 7: no longer produced by control path)
+///
+/// Session lifecycle (create / open / close / delete / retitle / model /
+/// reasoning / workspace) has no arm here on purpose: those are HTTP-only
+/// (ADR-076 §决策 4), because an MQTT control message carries no identity
+/// for the Runtime to authorize. The proto fields are deleted too, so the
+/// capability is unrepresentable rather than checked.
 async fn dispatch_inbound(
     session_manager: &Arc<tokio::sync::Mutex<crate::agent::session::SessionManager>>,
     lifecycle_publisher: &crate::mqtt::MqttChunkPublisher,
     session_id: String,
     msg: crate::agent::inbound::InboundMessage,
     work_dir: &std::path::Path,
-    session_config_slot: &Arc<
-        tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionConfigService>>>,
-    >,
 ) -> crate::error::Result<()> {
     use crate::agent::inbound::InboundMessage;
     use crate::agent::loop_::CompressionAction;
     use crate::agent::session::SessionMessage;
     use crate::cancellation::{CancellationReason, StopSource};
     use crate::error::RuntimeError;
-    use acowork_core::mqtt_proto::{DataEnvelope, data_envelope};
 
     // ── System-level (session_id empty) ─────────────────────────────
     if session_id.is_empty() {
         return match msg {
-            InboundMessage::CreateSession => {
-                // Phase A fix: route through `create_frontend_session` so the
-                // session gets a JSONL file, per-session meta, and enable_notify —
-                // not just an in-memory spawn. Without this the Desktop never
-                // sees the new session via fetchSessions and the session has no
-                // persisted workspace context.
-                match session_manager
-                    .lock()
-                    .await
-                    .create_frontend_session(None, None, None)
-                    .await
-                {
-                    Ok(sid) => {
-                        tracing::info!(new_sid = %sid, "MQTT: session created via control command");
-                        // Publish SessionCreated to the lifecycle topic so the
-                        // Desktop updates its session list immediately.
-                        let created = data_envelope::Payload::SessionCreated(
-                            acowork_core::mqtt_proto::SessionCreated {
-                                agent_id: lifecycle_publisher.agent_id().to_string(),
-                                session_id: sid.clone(),
-                                title: String::new(),
-                                created_at: chrono::Utc::now().to_rfc3339(),
-                            },
-                        );
-                        let envelope = DataEnvelope {
-                            version: 1,
-                            payload: Some(created),
-                        };
-                        if let Err(e) = lifecycle_publisher
-                            .publish_lifecycle("created", &envelope)
-                            .await
-                        {
-                            tracing::warn!(
-                                session_id = %sid,
-                                error = %e,
-                                "Failed to publish SessionCreated lifecycle event"
-                            );
-                        }
-                        Ok(())
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "MQTT: create_session failed");
-                        Err(e)
-                    }
-                }
-            }
             InboundMessage::IntentMessage { from, action, .. } => {
                 tracing::warn!(
                     from = %from,
@@ -732,18 +550,6 @@ async fn dispatch_inbound(
                 Err(RuntimeError::Config(
                     "IntentMessage without target session".to_string(),
                 ))
-            }
-            // ADR-038: explicit session activation. Routed through the
-            // system-level branch because `session_manager.lock().await.open()` is a
-            // manager-level operation, not a session-task-level one.
-            InboundMessage::OpenSession { session_id } => {
-                if session_id.is_empty() {
-                    return Err(RuntimeError::Config(
-                        "OpenSession requires non-empty session_id".to_string(),
-                    ));
-                }
-                handle_open_session(session_manager, lifecycle_publisher, &session_id, work_dir)
-                    .await
             }
             // ── ADR-052 §3.5: agent-level config mutations are
             //    GLOBAL, not per-session. Route through SessionManager
@@ -994,62 +800,16 @@ async fn dispatch_inbound(
             .await
         }
 
-        // ── ADR-034 §8 Phase 2: 8 new control commands ────────────────
-
-        // ⑧ CloseSession → SessionManager::close_session (preserves JSONL, triggers
-        // distillation). Publishes SessionDeleted so the Desktop can prune its
-        // session list immediately.
+        // ── ADR-034 §8 Phase 2 control commands ───────────────────────
         //
-        // This used to call delete_session — a Phase 6 gRPC-cleanup regression
-        // that physically removed the JSONL/meta files and made the closed
-        // session disappear from fetchSessions. Bug 2/Bug 3 root cause.
-        InboundMessage::CloseSession { session_id: sid } => {
-            let result = session_manager.lock().await.close_session(&sid).await;
-            // Publish SessionDeleted regardless of close result so the Desktop
-            // prunes its UI list. close_session returns Err if the session was
-            // already gone — that's still a "gone" signal for the Desktop.
-            let deleted =
-                data_envelope::Payload::SessionDeleted(acowork_core::mqtt_proto::SessionDeleted {
-                    agent_id: lifecycle_publisher.agent_id().to_string(),
-                    session_id: sid.clone(),
-                    deleted_at: chrono::Utc::now().to_rfc3339(),
-                });
-            let envelope = DataEnvelope {
-                version: 1,
-                payload: Some(deleted),
-            };
-            if let Err(e) = lifecycle_publisher
-                .publish_lifecycle("deleted", &envelope)
-                .await
-            {
-                tracing::warn!(
-                    session_id = %sid,
-                    error = %e,
-                    "Failed to publish SessionDeleted lifecycle event (close)"
-                );
-            }
-            // Log but don't propagate close errors (idempotent close is the
-            // best UX — re-closing an already-closed session should not break
-            // the dispatch loop).
-            if let Err(e) = result {
-                tracing::warn!(session_id = %sid, error = %e, "close_session reported error (ignored)");
-            }
-            Ok(())
-        }
-
-        // ⑨ UpdateSessionTitle — direct SessionMessage dispatch (Phase 2-6).
-        // Replaces the gRPC-era SystemNotification detour (fixes §7.1 G1).
-        // session_task.rs handles SessionMessage::UpdateSessionTitle at line ~1344.
-        InboundMessage::UpdateSessionTitle { title, .. } => session_manager
-            .lock()
-            .await
-            .send_to_session(&session_id, SessionMessage::UpdateSessionTitle { title })
-            .map_err(|e| RuntimeError::Config(format!("UpdateSessionTitle: {}", e))),
-
-        // ADR-035 Phase 3: ⑩/⑪ EnableNotify/DisableNotify removed — push
-        // drives all streaming, no front/back suppression. InboundMessage
-        // variants removed; proto fields retained for wire compat.
-
+        // ⑧ close_session, ⑨ update_session_title, ⑩/⑪ enable_notify /
+        // disable_notify are gone. The session-scoped ones are HTTP-only
+        // now (ADR-076 §决策 4) — an MQTT control message carries no
+        // identity, so the Runtime cannot authorize it; notify suppression
+        // was retired by ADR-035 Phase 3 (push drives all streaming).
+        // Their proto fields are deleted as well, so this is not a runtime
+        // check that could regress — the commands cannot be expressed.
+        //
         // ⑫ CompressAction — explicit CompressType i32 → CompressionAction mapping
         // (Phase 2-7: two paths must not cross).
         // CompressType::SUMMARY (1)     → CompressionAction::CompressSummary
@@ -1096,33 +856,6 @@ async fn dispatch_inbound(
                 .lock()
                 .await
                 .apply_system_prompt(&system_prompt);
-            Ok(())
-        }
-
-        // ⑬ CreateSession (session-level DeleteSession)
-        InboundMessage::DeleteSession { session_id: sid } => {
-            session_manager.lock().await.delete_session(&sid).await;
-            // Notify the Desktop so it can prune its session list immediately.
-            let deleted =
-                data_envelope::Payload::SessionDeleted(acowork_core::mqtt_proto::SessionDeleted {
-                    agent_id: lifecycle_publisher.agent_id().to_string(),
-                    session_id: sid.clone(),
-                    deleted_at: chrono::Utc::now().to_rfc3339(),
-                });
-            let envelope = DataEnvelope {
-                version: 1,
-                payload: Some(deleted),
-            };
-            if let Err(e) = lifecycle_publisher
-                .publish_lifecycle("deleted", &envelope)
-                .await
-            {
-                tracing::warn!(
-                    session_id = %sid,
-                    error = %e,
-                    "Failed to publish SessionDeleted lifecycle event (delete)"
-                );
-            }
             Ok(())
         }
 
@@ -1217,74 +950,6 @@ async fn dispatch_inbound(
                 .map_err(|e| RuntimeError::Config(format!("ChatMessage: {}", e)))
         }
 
-        // ⑮ ModelSwitchAction → SessionManager::route_model_switch
-        InboundMessage::ModelSwitchAction {
-            model_id,
-            provider_id,
-        } => {
-            let delta = crate::agent::session_config::SessionConfigDelta {
-                model: Some(model_id),
-                provider: provider_id,
-                ..Default::default()
-            };
-            let slot = session_config_slot.lock().await;
-            if let Some(ref svc) = *slot {
-                svc.apply_config(&session_id, delta)
-                    .await
-                    .map_err(|e| RuntimeError::Config(format!("ModelSwitchAction: {}", e)))
-            } else {
-                session_manager
-                    .lock()
-                    .await
-                    .route_model_switch(
-                        &session_id,
-                        delta.model.unwrap_or_default(),
-                        delta.provider,
-                    )
-                    .map_err(|e| {
-                        RuntimeError::Config(format!("ModelSwitchAction (fallback): {}", e))
-                    })
-            }
-        }
-
-        // ⑯ ReasoningEffortAction → SessionManager::route_reasoning_effort
-        InboundMessage::ReasoningEffortAction { effort } => {
-            let delta = crate::agent::session_config::SessionConfigDelta {
-                reasoning_effort: Some(effort),
-                ..Default::default()
-            };
-            let slot = session_config_slot.lock().await;
-            if let Some(ref svc) = *slot {
-                svc.apply_config(&session_id, delta)
-                    .await
-                    .map_err(|e| RuntimeError::Config(format!("ReasoningEffortAction: {}", e)))
-            } else {
-                session_manager
-                    .lock()
-                    .await
-                    .route_reasoning_effort(&session_id, delta.reasoning_effort.unwrap_or_default())
-                    .map_err(|e| {
-                        RuntimeError::Config(format!("ReasoningEffortAction (fallback): {}", e))
-                    })
-            }
-        }
-
-        // ⑰ WorkspaceSwitchAction → SessionManager::route_workspace_switch
-        InboundMessage::WorkspaceSwitchAction { workspace_id } => {
-            session_manager
-                .lock()
-                .await
-                .route_workspace_switch(&session_id, &workspace_id);
-            Ok(())
-        }
-
-        // ⑱ CompactContextAction → SessionMessage::CompactContext
-        InboundMessage::CompactContextAction => session_manager
-            .lock()
-            .await
-            .send_to_session(&session_id, SessionMessage::CompactContext)
-            .map_err(|e| RuntimeError::Config(format!("CompactContextAction: {}", e))),
-
         // ── Legacy fallback (Phase 7: no longer produced by control path) ──
         InboundMessage::SystemNotification {
             notification_type, ..
@@ -1296,110 +961,6 @@ async fn dispatch_inbound(
             Ok(())
         }
 
-        // CreateSession at session level is a no-op (only meaningful at system level)
-        InboundMessage::CreateSession => {
-            tracing::warn!(
-                "CreateSession received at session level — ignoring (system-level only)"
-            );
-            Ok(())
-        }
-
-        // ADR-038: OpenSession is a system-level command (handled by
-        // `handle_open_session` above). Reaching here means a non-empty
-        // session_id was carried through control_action_to_inbound with
-        // empty session_id, which is a routing bug. Log loudly and no-op.
-        InboundMessage::OpenSession { session_id } => {
-            tracing::error!(
-                session_id = %session_id,
-                "OpenSession reached session-level dispatch — routing bug, ignored"
-            );
-            Ok(())
-        }
-    }
-}
-
-/// ADR-038: Handle `InboundMessage::OpenSession`.
-///
-/// Transitions Closed/NotFound → Active (idempotent for Active). Always
-/// publishes a `SessionOpened` ack on success. On failure publishes
-/// `SessionNotOpened` (instead of returning an error) so the frontend gets
-/// a structured event it can react to.
-async fn handle_open_session(
-    session_manager: &Arc<tokio::sync::Mutex<crate::agent::session::SessionManager>>,
-    lifecycle_publisher: &crate::mqtt::MqttChunkPublisher,
-    session_id: &str,
-    work_dir: &std::path::Path,
-) -> crate::error::Result<()> {
-    use crate::agent::session::{SessionLifecycleState, SessionOpenOutcome};
-
-    let state = session_manager
-        .lock()
-        .await
-        .get_lifecycle_state(session_id, work_dir);
-    let result = match state {
-        SessionLifecycleState::NotFound => {
-            // Surface as a structured event so the frontend can react.
-            let _ = lifecycle_publisher
-                .publish_session_not_opened(session_id, "open_session", "session_not_found")
-                .await;
-            tracing::info!(
-                session_id = %session_id,
-                "OpenSession: session not found on disk"
-            );
-            return Ok(());
-        }
-        SessionLifecycleState::Active => {
-            // Already in memory; idempotent success.
-            Ok(SessionOpenOutcome::AlreadyActive)
-        }
-        SessionLifecycleState::Closed => {
-            session_manager
-                .lock()
-                .await
-                .open(session_id, work_dir)
-                .await
-        }
-    };
-
-    match result {
-        Ok(outcome) => {
-            let status = match outcome {
-                SessionOpenOutcome::AlreadyActive => "already_active",
-                SessionOpenOutcome::ResumedFromDisk => "resumed_from_disk",
-            };
-            let (model, provider, last_active_at) = session_manager
-                .lock()
-                .await
-                .session_metadata_summary(session_id, work_dir);
-            if let Err(e) = lifecycle_publisher
-                .publish_session_opened(session_id, status, model, provider, last_active_at)
-                .await
-            {
-                tracing::warn!(
-                    session_id = %session_id,
-                    status = %status,
-                    error = %e,
-                    "OpenSession: failed to publish SessionOpened ack"
-                );
-            }
-            tracing::info!(
-                session_id = %session_id,
-                status = %status,
-                "OpenSession: success"
-            );
-            Ok(())
-        }
-        Err(e) => {
-            let _ = lifecycle_publisher
-                .publish_session_not_opened(session_id, "open_session", "session_closed")
-                .await;
-            tracing::warn!(
-                session_id = %session_id,
-                error = %e,
-                "OpenSession: failed to resume session"
-            );
-            Ok(())
-        }
     }
 }
 
@@ -1459,4 +1020,65 @@ async fn forward_to_session_inbound(
     handle
         .send_inbound(msg)
         .map_err(|e| RuntimeError::Config(format!("send_inbound failed: {}", e)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::inbound::InboundMessage;
+    use crate::mqtt::control_handler::ControlAction;
+
+    /// ADR-076 §决策 4: after the second wave of the HTTP migration the MQTT
+    /// control plane holds exactly two variants, and neither is a user
+    /// action. A session-scoped command cannot be expressed at all — there is
+    /// no `ControlAction` variant and no proto field for it — so "refused over
+    /// MQTT" is enforced by the compiler rather than by an assert.
+    ///
+    /// What this test pins is the *routing* of the two survivors: `Intent`
+    /// maps to a system-level (`""`) `IntentMessage`, and the heartbeat is
+    /// dropped here because `phase_d_run` already handled it upstream.
+    #[test]
+    fn only_non_user_signals_map_over_mqtt() {
+        let (route, msg) = control_action_to_inbound(ControlAction::IntentReceived {
+            from: "cron:agent".into(),
+            action: "hourly_check".into(),
+            params_json: r#"{"k":1}"#.into(),
+        })
+        .expect("Intent must map");
+        assert_eq!(route, "", "Intent is system-level");
+
+        match msg {
+            InboundMessage::IntentMessage {
+                from,
+                action,
+                params,
+            } => {
+                assert_eq!(from, "cron:agent");
+                assert_eq!(action, "hourly_check");
+                assert_eq!(params["k"], 1);
+            }
+            other => panic!("expected IntentMessage, got {other:?}"),
+        }
+
+        assert!(
+            control_action_to_inbound(ControlAction::ActiveHeartbeat).is_none(),
+            "the heartbeat is handled by phase_d_run and must not become an InboundMessage"
+        );
+    }
+
+    /// Malformed `params_json` must not panic — it degrades to `{}`.
+    #[test]
+    fn intent_with_bad_params_json_degrades_to_empty_object() {
+        let (_, msg) = control_action_to_inbound(ControlAction::IntentReceived {
+            from: "cron:x".into(),
+            action: "a".into(),
+            params_json: "not json".into(),
+        })
+        .expect("Intent must still map");
+
+        match msg {
+            InboundMessage::IntentMessage { params, .. } => assert!(params.is_object()),
+            other => panic!("expected IntentMessage, got {other:?}"),
+        }
+    }
 }

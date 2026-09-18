@@ -159,9 +159,35 @@ pub fn proxy_routes() -> Router<AppState> {
             "/api/agents/{id}/git/revert",
             post(proxy_git_revert),
         )
+        // ADR-076 §决策 4: the session *control* plane moved from MQTT to
+        // HTTP so the auth middleware above can authenticate it — an MQTT
+        // control message carries no identity, so `create` could not record
+        // an owner and `close`/`delete` could not check one. The Gateway is
+        // a transparent proxy here; the identity decision is made by the
+        // Runtime from the `x-user-id` header this layer injects.
         .route(
             "/api/agents/{id}/sessions",
-            get(proxy_list_sessions),
+            get(proxy_list_sessions).post(proxy_create_session),
+        )
+        .route(
+            "/api/agents/{id}/sessions/{sid}/open",
+            post(proxy_open_session),
+        )
+        .route(
+            "/api/agents/{id}/sessions/{sid}/close",
+            post(proxy_close_session),
+        )
+        .route(
+            "/api/agents/{id}/sessions/{sid}/visibility",
+            put(proxy_set_session_visibility),
+        )
+        // ADR-076 §决策 4: `workspace_switch` moved off MQTT. It needs its
+        // own endpoint rather than riding `PUT .../config` — a workspace
+        // switch has to push the new context to the session, not just
+        // rewrite meta (Runtime-side `route_workspace_switch`).
+        .route(
+            "/api/agents/{id}/sessions/{sid}/workspace",
+            put(proxy_put_session_workspace),
         )
         .route(
             "/api/agents/{id}/latest-session",
@@ -169,7 +195,35 @@ pub fn proxy_routes() -> Router<AppState> {
         )
         .route(
             "/api/agents/{id}/sessions/{sid}/messages",
-            get(proxy_get_messages),
+            get(proxy_get_messages).post(proxy_post_message),
+        )
+        // ADR-076 §决策 4 (second wave): user-triggered session actions.
+        // The Runtime authorizes each one against the session's owner, which
+        // is only possible because these arrive through the Gateway's auth
+        // middleware (`x-user-id` is injected there, not by the client).
+        .route(
+            "/api/agents/{id}/sessions/{sid}/stop",
+            post(proxy_post_session_stop),
+        )
+        .route(
+            "/api/agents/{id}/sessions/{sid}/continue",
+            post(proxy_post_session_continue),
+        )
+        .route(
+            "/api/agents/{id}/sessions/{sid}/approval",
+            post(proxy_post_session_approval),
+        )
+        .route(
+            "/api/agents/{id}/sessions/{sid}/answer",
+            post(proxy_post_session_answer),
+        )
+        .route(
+            "/api/agents/{id}/sessions/{sid}/cancel-tool",
+            post(proxy_post_session_cancel_tool),
+        )
+        .route(
+            "/api/agents/{id}/sessions/{sid}/compress",
+            post(proxy_post_session_compress),
         )
         .route(
             "/api/agents/{id}/memory/nodes",
@@ -268,7 +322,7 @@ pub fn proxy_routes() -> Router<AppState> {
         // Route 1: Get single session
         .route(
             "/api/agents/{id}/sessions/{sid}",
-            get(proxy_get_session),
+            get(proxy_get_session).delete(proxy_delete_session),
         )
         // Legacy /state suffix - Runtime absorbed it into /sessions/{sid};
         // kept as a separate route so old callers still get a sensible
@@ -599,6 +653,136 @@ async fn proxy_list_sessions(
     proxy_to_runtime(&state, &id, "/sessions", &query, &headers).await
 }
 
+/// Reverse-proxy `POST /api/agents/{id}/sessions` to Runtime's `POST /sessions`.
+///
+/// ADR-076 §决策 4: the Runtime stamps the session's owner from the
+/// `x-user-id` header the auth middleware injected. The body
+/// (`workspace_id` / `model` / `provider` / `visibility`) is forwarded
+/// verbatim; every field is optional.
+async fn proxy_create_session(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let payload: Option<Vec<u8>> = if body.is_empty() { None } else { Some(body.to_vec()) };
+    proxy_to_runtime_with_method(
+        &state,
+        &id,
+        "/sessions",
+        "",
+        reqwest::Method::POST,
+        payload,
+        &headers,
+    )
+    .await
+}
+
+/// Reverse-proxy `POST /api/agents/{id}/sessions/{sid}/open` (ADR-038).
+async fn proxy_open_session(
+    State(state): State<AppState>,
+    Path((id, sid)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let path = format!("/sessions/{}/open", sid);
+    proxy_to_runtime_with_method(
+        &state,
+        &id,
+        &path,
+        "",
+        reqwest::Method::POST,
+        None,
+        &headers,
+    )
+    .await
+}
+
+/// Reverse-proxy `POST /api/agents/{id}/sessions/{sid}/close`.
+async fn proxy_close_session(
+    State(state): State<AppState>,
+    Path((id, sid)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let path = format!("/sessions/{}/close", sid);
+    proxy_to_runtime_with_method(
+        &state,
+        &id,
+        &path,
+        "",
+        reqwest::Method::POST,
+        None,
+        &headers,
+    )
+    .await
+}
+
+/// Reverse-proxy `DELETE /api/agents/{id}/sessions/{sid}`.
+async fn proxy_delete_session(
+    State(state): State<AppState>,
+    Path((id, sid)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let path = format!("/sessions/{}", sid);
+    proxy_to_runtime_with_method(
+        &state,
+        &id,
+        &path,
+        "",
+        reqwest::Method::DELETE,
+        None,
+        &headers,
+    )
+    .await
+}
+
+/// Reverse-proxy `PUT /api/agents/{id}/sessions/{sid}/visibility`.
+async fn proxy_set_session_visibility(
+    State(state): State<AppState>,
+    Path((id, sid)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let path = format!("/sessions/{}/visibility", sid);
+    let payload: Option<Vec<u8>> = if body.is_empty() { None } else { Some(body.to_vec()) };
+    proxy_to_runtime_with_method(
+        &state,
+        &id,
+        &path,
+        "",
+        reqwest::Method::PUT,
+        payload,
+        &headers,
+    )
+    .await
+}
+
+/// Reverse-proxy `PUT /api/agents/{id}/sessions/{sid}/workspace`.
+///
+/// ADR-076 §决策 4: this replaces the MQTT `workspace_switch` control
+/// command, which could not be attributed to a caller and therefore could
+/// not be authorized. The Runtime validates the body's `workspace_id`
+/// against its resolver and rejects the write unless the requester owns the
+/// session.
+async fn proxy_put_session_workspace(
+    State(state): State<AppState>,
+    Path((id, sid)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let path = format!("/sessions/{}/workspace", sid);
+    let payload: Option<Vec<u8>> = if body.is_empty() { None } else { Some(body.to_vec()) };
+    proxy_to_runtime_with_method(
+        &state,
+        &id,
+        &path,
+        "",
+        reqwest::Method::PUT,
+        payload,
+        &headers,
+    )
+    .await
+}
+
 /// Reverse-proxy `GET /api/agents/{id}/latest-session` to Runtime's `GET /sessions/latest`.
 async fn proxy_latest_session(
     State(state): State<AppState>,
@@ -631,6 +815,117 @@ async fn proxy_get_messages(
     let path = format!("/sessions/{}/messages", sid);
     let query = build_query_string(&params);
     proxy_to_runtime(&state, &id, &path, &query, &headers).await
+}
+
+/// Reverse-proxy a POST session action to the Runtime.
+///
+/// ADR-076 §决策 4: the six user-triggered session actions all share one
+/// shape — POST a JSON body to `/sessions/{sid}/<action>` — and the Runtime
+/// checks ownership before touching the session. Only the path suffix
+/// varies, hence this helper.
+async fn proxy_post_session_action(
+    state: &AppState,
+    id: &str,
+    sid: &str,
+    action: &str,
+    headers: &HeaderMap,
+    body: Bytes,
+) -> Response {
+    let path = format!("/sessions/{}/{}", sid, action);
+    let payload: Option<Vec<u8>> = if body.is_empty() { None } else { Some(body.to_vec()) };
+    proxy_to_runtime_with_method(
+        state,
+        id,
+        &path,
+        "",
+        reqwest::Method::POST,
+        payload,
+        headers,
+    )
+    .await
+}
+
+/// Reverse-proxy `POST .../sessions/{sid}/messages` — send a chat message.
+///
+/// ADR-076 §决策 4: replaces the MQTT `chat_message` command. A chat message
+/// is a user action, so it needs the caller's identity for the Runtime to
+/// authorize it against the session owner — which is what the Gateway's auth
+/// middleware injects as `x-user-id`.
+async fn proxy_post_message(
+    State(state): State<AppState>,
+    Path((id, sid)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    proxy_post_session_action(&state, &id, &sid, "messages", &headers, body).await
+}
+
+/// Reverse-proxy `POST .../sessions/{sid}/stop` — interrupt the current run.
+async fn proxy_post_session_stop(
+    State(state): State<AppState>,
+    Path((id, sid)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    proxy_post_session_action(&state, &id, &sid, "stop", &headers, body).await
+}
+
+/// Reverse-proxy `POST .../sessions/{sid}/continue` — resume a paused run.
+async fn proxy_post_session_continue(
+    State(state): State<AppState>,
+    Path((id, sid)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    proxy_post_session_action(&state, &id, &sid, "continue", &headers, body).await
+}
+
+/// Reverse-proxy `POST .../sessions/{sid}/approval` — the user's tool-risk
+/// decision.
+///
+/// This is the endpoint that closes the approval-spoofing hole: over MQTT,
+/// any client on the broker could publish `approval_decision{approved:true}`
+/// into another account's session.
+async fn proxy_post_session_approval(
+    State(state): State<AppState>,
+    Path((id, sid)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    proxy_post_session_action(&state, &id, &sid, "approval", &headers, body).await
+}
+
+/// Reverse-proxy `POST .../sessions/{sid}/answer` — answer an
+/// `ask_user_question` prompt.
+async fn proxy_post_session_answer(
+    State(state): State<AppState>,
+    Path((id, sid)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    proxy_post_session_action(&state, &id, &sid, "answer", &headers, body).await
+}
+
+/// Reverse-proxy `POST .../sessions/{sid}/cancel-tool` — ADR-045: abort a
+/// single in-flight tool.
+async fn proxy_post_session_cancel_tool(
+    State(state): State<AppState>,
+    Path((id, sid)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    proxy_post_session_action(&state, &id, &sid, "cancel-tool", &headers, body).await
+}
+
+/// Reverse-proxy `POST .../sessions/{sid}/compress` — user-initiated context
+/// compression (replaces the MQTT `compress_action`; ADR-076 §决策 4).
+async fn proxy_post_session_compress(
+    State(state): State<AppState>,
+    Path((id, sid)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    proxy_post_session_action(&state, &id, &sid, "compress", &headers, body).await
 }
 
 /// Reverse-proxy `GET /api/agents/{id}/sessions/{sid}/state` to

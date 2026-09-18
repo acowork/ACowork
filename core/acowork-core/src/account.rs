@@ -26,6 +26,26 @@ pub enum Role {
     Admin,
 }
 
+impl Role {
+    /// The canonical lowercase spelling carried in a token claim
+    /// (ADR-076 §决策 3) and in the `accounts.json` record.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Admin => "admin",
+        }
+    }
+
+    /// Parse the token-claim spelling. Unknown values fall back to the
+    /// least-privileged role — a malformed claim must never widen access.
+    pub fn from_claim(s: &str) -> Self {
+        match s {
+            "admin" => Self::Admin,
+            _ => Self::User,
+        }
+    }
+}
+
 /// Sentinel `password_hash` for accounts that have not yet set a password.
 ///
 /// Used (under `AUTH_MODE=multi_user`) for accounts an admin created but
@@ -134,6 +154,66 @@ impl UserAccount {
     }
 }
 
+/// Redacted account view (ADR-076 §决策 5 / §决策 6 `/api/auth/me`).
+///
+/// Everything a client is allowed to see about an account: identity,
+/// role and presentation fields — no credential material, no password
+/// timestamps. `accounts.json` keeps the full record; this is the shape
+/// that crosses the HTTP boundary (and, later, the Tauri IPC boundary).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AccountView {
+    pub user_id: String,
+    pub username: String,
+    pub display_name: String,
+    pub role: Role,
+    pub language: String,
+    pub timezone: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub city: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub country: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub occupation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub builtin_avatar: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub communication_style: Option<String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub custom: HashMap<String, String>,
+    pub created_at: String,
+    pub updated_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_login_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disabled_at: Option<String>,
+}
+
+impl From<&UserAccount> for AccountView {
+    fn from(a: &UserAccount) -> Self {
+        Self {
+            user_id: a.user_id.clone(),
+            username: a.username.clone(),
+            display_name: a.display_name.clone(),
+            role: a.role,
+            language: a.language.clone(),
+            timezone: a.timezone.clone(),
+            city: a.city.clone(),
+            country: a.country.clone(),
+            occupation: a.occupation.clone(),
+            avatar: a.avatar.clone(),
+            builtin_avatar: a.builtin_avatar.clone(),
+            communication_style: a.communication_style.clone(),
+            custom: a.custom.clone(),
+            created_at: a.created_at.clone(),
+            updated_at: a.updated_at.clone(),
+            last_login_at: a.last_login_at.clone(),
+            disabled_at: a.disabled_at.clone(),
+        }
+    }
+}
+
 /// Versioned account list persisted to disk (ADR-076 §决策 2).
 ///
 /// Follows the same pattern as [`crate::protocol::UserProfileListFile`].
@@ -234,6 +314,19 @@ mod tests {
         assert!(!json.contains("password"));
         assert!(!json.contains("alice"));
         assert!(!json.contains("username"));
+    }
+
+    #[test]
+    fn account_view_carries_no_credentials() {
+        let a = sample();
+        let view = AccountView::from(&a);
+        assert_eq!(view.user_id, a.user_id);
+        assert_eq!(view.username, a.username);
+        assert_eq!(view.role, a.role);
+        // The serialized view must not leak the hash or its timestamps.
+        let json = serde_json::to_string(&view).unwrap();
+        assert!(!json.contains("password"), "leaked password field: {json}");
+        assert!(!json.contains("argon2"), "leaked hash: {json}");
     }
 
     #[test]

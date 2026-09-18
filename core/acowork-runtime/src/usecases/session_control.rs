@@ -42,9 +42,6 @@ pub trait SessionControlService: Send + Sync {
     /// Switch the workspace for a session.
     async fn workspace_switch(&self, session_id: &str, workspace_id: String) -> Result<()>;
 
-    /// Trigger context compaction for a session.
-    async fn compact_context(&self, session_id: &str) -> Result<()>;
-
     /// Send a message to a session for processing.
     async fn send_message(
         &self,

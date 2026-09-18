@@ -51,7 +51,7 @@ use rumqttc::{AsyncClient, Event, Incoming, MqttOptions, QoS};
 use tokio::sync::mpsc;
 
 use acowork_core::mqtt_proto::{
-    ChatMessage, ControlCommand, DataEnvelope, control_command::Command,
+    ControlCommand, DataEnvelope, Intent, control_command::Command,
 };
 use acowork_gateway::mqtt::{GatewayMqttClient, start_broker};
 use acowork_runtime::mqtt::{MqttConnectConfig, RuntimeMqttClient, new_shared_cache};
@@ -228,17 +228,20 @@ fn two_runtime_instances_same_package_coexist_on_one_broker() {
         //    A's control_rx receives it. Uses GatewayMqttClient
         //    (already covered by mqtt_e2e_full.rs) — here we only
         //    care about the per-instance routing. ──
+        //
+        // ADR-076 §决策 4: the payload is an `Intent` because that (plus the
+        // presence heartbeat) is all the MQTT control plane still carries.
+        // The routing property under test is unchanged: a message addressed
+        // to A's instance topic must not surface on B's subscription.
         let gw = GatewayMqttClient::new_publisher("127.0.0.1", port)
             .await
             .expect("gateway publisher");
         let cmd = ControlCommand {
             instance_id: INSTANCE_A.to_string(),
-            command: Some(Command::ChatMessage(ChatMessage {
-                session_id: "sess-A".into(),
-                message_id: "msg-A".into(),
-                content: "hello A".into(),
-                command: String::new(),
-                params_json: String::new(),
+            command: Some(Command::Intent(Intent {
+                from: "cron:cron-agent".into(),
+                action: "route_probe".into(),
+                params_json: r#"{"target":"A"}"#.into(),
             })),
         };
         gw.publish_control_command(INSTANCE_A, cmd)
@@ -257,9 +260,9 @@ fn two_runtime_instances_same_package_coexist_on_one_broker() {
             env.payload
         {
             match ctrl.command {
-                Some(Command::ChatMessage(msg)) => {
-                    assert_eq!(msg.content, "hello A");
-                    assert_eq!(msg.session_id, "sess-A");
+                Some(Command::Intent(msg)) => {
+                    assert_eq!(msg.action, "route_probe");
+                    assert_eq!(msg.params_json, r#"{"target":"A"}"#);
                 }
                 other => panic!("A received unexpected command variant: {:?}", other),
             }

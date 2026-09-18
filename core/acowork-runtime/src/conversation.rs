@@ -271,6 +271,74 @@ pub struct AttachedFolderMeta {
 ///
 /// Field `last_compaction_offset` is an absolute byte offset (there is no
 /// header in the JSONL, so the offset is always absolute).
+/// Who may read a session (ADR-076 §决策 4).
+///
+/// The field exists so a session can be *shared* rather than owned
+/// exclusively: a [`Public`](Self::Public) session is readable by every
+/// authenticated user, a [`Private`](Self::Private) one only by its owner
+/// (or an administrator).
+///
+/// **Absent means public.** `SessionMeta.visibility` is
+/// `Option<SessionVisibility>` with `skip_serializing_if = "Option::is_none"`,
+/// so an unset visibility is identical on disk to a pre-ADR-076 file and
+/// a pre-ADR-076 session stays readable — upgrading must not retroactively
+/// hide every existing session from its user.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionVisibility {
+    /// Readable by any authenticated user (the default).
+    Public,
+    /// Readable only by the owning account (and administrators).
+    Private,
+}
+
+impl SessionVisibility {
+    /// Whether a session with this setting is restricted to its owner.
+    pub fn is_private(self) -> bool {
+        matches!(self, Self::Private)
+    }
+}
+
+/// Who is asking for a session (ADR-076 §决策 4).
+///
+/// Produced by the HTTP layer from the Gateway-injected `x-user-id`
+/// header (see `acowork-gateway`'s auth middleware) and consumed by the
+/// session read/write paths. Two variants, because "administrator" and
+/// "`AUTH_MODE=local`, no accounts at all" (ADR-076 §决策 12) have
+/// genuinely identical access — both are unfiltered — and splitting them
+/// would mean two code paths that can never diverge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionScope {
+    /// No restriction: an administrator, or a local-mode Runtime where
+    /// the account system is off.
+    Unfiltered,
+    /// A signed-in account.
+    User(String),
+}
+
+impl SessionScope {
+    /// Parse the `x-user-id` header value.
+    ///
+    /// `None` (header absent) means local mode — the Gateway never strips
+    /// or injects in that mode, so an absent header is the normal local
+    /// case and must NOT be treated as "anonymous, deny everything".
+    /// The all-axes sentinel `*` is the administrator's unfiltered view.
+    pub fn from_header_value(value: Option<&str>) -> Self {
+        match value.map(str::trim) {
+            None | Some("") | Some("*") => Self::Unfiltered,
+            Some(uid) => Self::User(uid.to_string()),
+        }
+    }
+
+    /// The account id, or `None` for an unfiltered scope.
+    pub fn user_id(&self) -> Option<&str> {
+        match self {
+            Self::Unfiltered => None,
+            Self::User(uid) => Some(uid.as_str()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionMeta {
     // ── Immutable fields ──
@@ -278,6 +346,20 @@ pub struct SessionMeta {
     pub session_id: String,
     pub agent_id: String,
     pub created_at: String,
+    /// ADR-076 §决策 4: the account that owns this session.
+    ///
+    /// `None` = created before the account system existed, or under
+    /// `AUTH_MODE=local` (no accounts at all) — only an unfiltered
+    /// (administrator) reader sees those. Immutable after creation: the
+    /// metadata builder never invents one, and the only writer is the
+    /// creation path (see `ConversationSession::set_user_id`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
+    /// ADR-076 §决策 4: who may read this session. **Absent = public**
+    /// (see [`SessionVisibility`]). Mutable — the owner can flip it at
+    /// any time via [`ConversationSession::set_visibility`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visibility: Option<SessionVisibility>,
 
     // ── User/API mutable fields ──
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -596,6 +678,13 @@ pub struct ConversationSession {
     /// Per-session context window override (ADR-074), persisted in meta
     /// file. `None` = no override (inherit the per-agent chain).
     context_window: std::sync::Mutex<Option<u64>>,
+    /// ADR-076 §决策 4: owner of this session, mirrored from
+    /// `SessionMeta.user_id`. Immutable after creation — the only writer
+    /// is [`Self::set_user_id`], called by the creation path once.
+    user_id: std::sync::Mutex<Option<String>>,
+    /// ADR-076 §决策 4: read visibility, mirrored from
+    /// `SessionMeta.visibility`. `None` = public (the default).
+    visibility: std::sync::Mutex<Option<SessionVisibility>>,
     /// ADR-060: todo snapshot mirror (Block C source).
     ///
     /// The single persistence owner is [`ConversationSession`] — the
@@ -728,6 +817,8 @@ impl ConversationSession {
             session_id: self.session_id.clone(),
             agent_id: self.agent_id.clone(),
             created_at: self.created_at.clone(),
+            user_id: self.user_id.lock().ok().and_then(|u| u.clone()),
+            visibility: self.visibility.lock().ok().and_then(|v| *v),
             title: self.current_title.lock().ok().and_then(|t| t.clone()),
             workspace_id: self.workspace_id.lock().ok().and_then(|w| w.clone()),
             model: self.model.lock().ok().and_then(|m| m.clone()),
@@ -985,6 +1076,8 @@ impl ConversationSession {
             temperature: std::sync::Mutex::new(None),
             context_window: std::sync::Mutex::new(None),
             todos: std::sync::Mutex::new(None),
+            user_id: std::sync::Mutex::new(None),
+            visibility: std::sync::Mutex::new(None),
             tokens: std::sync::Mutex::new(None),
             llm_call_counter: std::sync::Mutex::new(None),
             model_ratio: std::sync::Mutex::new(None),
@@ -1083,6 +1176,8 @@ impl ConversationSession {
                 temperature: std::sync::Mutex::new(meta.temperature),
                 context_window: std::sync::Mutex::new(meta.context_window),
                 todos: std::sync::Mutex::new(meta.todos),
+                user_id: std::sync::Mutex::new(meta.user_id),
+                visibility: std::sync::Mutex::new(meta.visibility),
                 tokens: std::sync::Mutex::new(meta.tokens.clone()),
                 llm_call_counter: std::sync::Mutex::new(meta.llm_call_counter),
                 model_ratio: std::sync::Mutex::new(meta.model_ratio),
@@ -1526,6 +1621,18 @@ impl ConversationSession {
     /// high-frequency `append_message` path). Immediate write guarantees
     /// the first `todo_write` after session creation survives a kill within
     /// the cooldown window (ADR-060 §6.1: restart must restore todos).
+    /// Persist the todo snapshot to the meta file (ADR-060 §6.1).
+    ///
+    /// Data flow: `todo_write` tool → `SessionState::update_todos()` →
+    /// this method (sync mirror). `ConversationSession` is the single
+    /// persistence owner; `SessionState` never writes meta directly.
+    ///
+    /// Write policy: content-equal updates skip the write entirely; changed
+    /// updates persist IMMEDIATELY (metadata-mutation semantics, same as
+    /// title/model/provider — `META_WRITE_COOLDOWN_MS` guards only the
+    /// high-frequency `append_message` path). Immediate write guarantees
+    /// the first `todo_write` after session creation survives a kill within
+    /// the cooldown window (ADR-060 §6.1: restart must restore todos).
     pub fn set_todos(&self, todos: &[TodoItem]) {
         {
             let mut slot = self.todos.lock().unwrap_or_else(|e| e.into_inner());
@@ -1547,6 +1654,73 @@ impl ConversationSession {
             todo_count = todos.len(),
             "Todo snapshot persisted to meta file"
         );
+    }
+
+    /// ADR-076 §决策 4: record the owning account.
+    ///
+    /// Called **once** by the session-creation path. Ownership is an
+    /// immutable fact (invariant 4), so a later call that would *change*
+    /// it is ignored with a warning rather than silently re-assigning the
+    /// session; an idempotent re-set of the same value is a no-op.
+    pub fn set_user_id(&self, user_id: Option<String>) {
+        {
+            let mut slot = self.user_id.lock().unwrap_or_else(|e| e.into_inner());
+            if *slot == user_id {
+                return;
+            }
+            if slot.is_some() {
+                tracing::warn!(
+                    session_id = %self.session_id,
+                    "session ownership is immutable — ignoring re-assignment"
+                );
+                return;
+            }
+            *slot = user_id;
+        }
+        // Persist immediately: `ConversationSession::new` writes the meta
+        // file before the owner is known, and the listing/authorization
+        // paths read that file. Leaving the owner in memory only would
+        // expose the session as ownerless (writable by anyone) to every
+        // reader until some unrelated mutation happened to flush meta.
+        self.write_meta();
+    }
+
+    /// ADR-076 §决策 4: the owning account, if any (`None` = legacy /
+    /// local mode).
+    pub fn user_id(&self) -> Option<String> {
+        self.user_id.lock().ok().and_then(|u| u.clone())
+    }
+
+    /// ADR-076 §决策 4: whether this session is restricted to its owner.
+    ///
+    /// An unset visibility means public — see [`SessionVisibility`].
+    pub fn is_private(&self) -> bool {
+        self.visibility()
+            .is_some_and(SessionVisibility::is_private)
+    }
+
+    /// ADR-076 §决策 4: the raw visibility setting (`None` = unset =
+    /// public).
+    pub fn visibility(&self) -> Option<SessionVisibility> {
+        self.visibility.lock().ok().and_then(|v| *v)
+    }
+
+    /// ADR-076 §决策 4: set the read visibility and persist it.
+    ///
+    /// Mutable by design (unlike [`Self::set_user_id`]): sharing a
+    /// session is a reversible user decision, not an identity fact.
+    /// `None` clears the field, restoring the public default — and,
+    /// because the field is `skip_serializing_if`, restoring the
+    /// pre-ADR-076 on-disk shape.
+    pub fn set_visibility(&self, visibility: Option<SessionVisibility>) {
+        {
+            let mut slot = self.visibility.lock().unwrap_or_else(|e| e.into_inner());
+            if *slot == visibility {
+                return;
+            }
+            *slot = visibility;
+        }
+        self.write_meta();
     }
 
     /// THE single entry point for ALL config changes (ADR-047).
@@ -1954,6 +2128,8 @@ impl Clone for ConversationSession {
             temperature: std::sync::Mutex::new(self.temperature.lock().ok().and_then(|t| *t)),
             context_window: std::sync::Mutex::new(self.context_window.lock().ok().and_then(|c| *c)),
             todos: std::sync::Mutex::new(self.todos.lock().ok().and_then(|t| t.clone())),
+            user_id: std::sync::Mutex::new(self.user_id.lock().ok().and_then(|u| u.clone())),
+            visibility: std::sync::Mutex::new(self.visibility.lock().ok().and_then(|v| *v)),
             tokens: std::sync::Mutex::new(self.tokens.lock().ok().and_then(|t| t.clone())),
             llm_call_counter: std::sync::Mutex::new(
                 self.llm_call_counter.lock().ok().and_then(|c| *c),
@@ -2058,6 +2234,18 @@ pub struct SessionInfo {
     pub provider: Option<String>,
     /// Per-session workspace selection, from JSONL metadata
     pub workspace_id: Option<String>,
+    /// ADR-076 §决策 4: read visibility (`None` = public). Surfaced so
+    /// the client can render the share toggle without a second request.
+    pub visibility: Option<SessionVisibility>,
+    /// ADR-076 §决策 4: whether the caller may modify this session —
+    /// the same `is_writable_by` the write handlers enforce.
+    ///
+    /// Deliberately *not* named `owned_by_me`: an administrator and a
+    /// `local`-mode caller may write a session they do not own, so an
+    /// ownership flag would make the UI disable controls that actually
+    /// work. Clients need this to disable the workspace / model / title
+    /// inputs up front instead of firing a request that 404s.
+    pub can_write: bool,
 }
 
 // ── Session Index (fast O(1) lookup) ───────────────────────────────────────
@@ -2096,6 +2284,55 @@ pub fn write_session_meta(conversations_dir: &Path, meta: &SessionMeta) -> std::
     std::fs::write(&temp, json)?;
     std::fs::rename(&temp, &target)?;
     Ok(())
+}
+
+impl SessionMeta {
+    /// May `scope` **read** this session (ADR-076 §决策 4)?
+    ///
+    /// An unset (`None`) visibility is public: every signed-in account
+    /// may read it. Only an explicit `private` restricts reading to the
+    /// owning account.
+    pub fn is_readable_by(&self, scope: &SessionScope) -> bool {
+        match scope {
+            SessionScope::Unfiltered => true,
+            SessionScope::User(uid) => match self.user_id.as_deref() {
+                // An ownerless session cannot be private: there is nobody
+                // to restrict it to, so honouring the flag would hide the
+                // session from everyone — and since any signed-in account
+                // may write an ownerless session (see
+                // [`Self::is_writable_by`]), that would be a one-click
+                // way to hide a shared session from its owner. The flag is
+                // ignored rather than trusted.
+                None => true,
+                Some(owner) => {
+                    !self.visibility.is_some_and(SessionVisibility::is_private)
+                        || owner == uid
+                }
+            },
+        }
+    }
+
+    /// May `scope` **modify** this session (open / close / delete /
+    /// retitle / re-share)?
+    ///
+    /// Deliberately stricter than [`Self::is_readable_by`]: a public
+    /// session is *visible* to every account but *owned* by exactly one,
+    /// so sharing is not the same as handing over the delete button.
+    ///
+    /// Sessions with `user_id == None` stay modifiable by any signed-in
+    /// account. That is the pre-ADR-076 behaviour for data that predates
+    /// accounts (and the only sane owner for sessions created in local
+    /// mode before multi-user was switched on) — locking them to admins
+    /// only would strand users outside their own history.
+    pub fn is_writable_by(&self, scope: &SessionScope) -> bool {
+        match scope {
+            SessionScope::Unfiltered => true,
+            SessionScope::User(uid) => match self.user_id.as_deref() {
+                None => true,
+                Some(owner) => owner == uid,
+            },
+        }
+    }
 }
 
 /// Read session metadata from `conversations/meta/{session_id}.json`.
@@ -2387,10 +2624,19 @@ pub fn scan_sessions_async(
     conversations_dir: PathBuf,
     page: Option<u32>,
     size: Option<u32>,
+    scope: SessionScope,
 ) -> tokio::task::JoinHandle<(Vec<SessionInfo>, usize, (u64, u64, u64, u64))> {
     tokio::task::spawn_blocking(move || {
         // ADR-024: scan per-session meta files instead of index.json.
-        let sessions = scan_sessions_from_meta(&conversations_dir);
+        //
+        // ADR-076 §决策 4: drop sessions `scope` may not read *before*
+        // paginating, so `total` / `total_pages` describe what the caller
+        // can actually see. Filtering after the slice would hand back
+        // short pages and a page count pointing at invisible rows.
+        let sessions: Vec<(String, SessionMeta)> = scan_sessions_from_meta(&conversations_dir)
+            .into_iter()
+            .filter(|(_, meta)| meta.is_readable_by(&scope))
+            .collect();
 
         // ADR-028 / ADR-066: full-scan aggregate. Walk every meta file
         // (not just the current page) so a single scan can rebuild the
@@ -2445,6 +2691,8 @@ pub fn scan_sessions_async(
                 model: meta.model.clone(),
                 provider: meta.provider.clone(),
                 workspace_id: meta.workspace_id.clone(),
+                visibility: meta.visibility,
+                can_write: meta.is_writable_by(&scope),
             })
             .collect();
 
@@ -2971,6 +3219,140 @@ mod tests {
         assert_eq!(meta.agent_id, agent_id);
     }
 
+    /// ADR-076 §决策 4: `user_id` is an additive, optional field — meta
+    /// files written before the account system load as `None` (legacy /
+    /// local mode), and a session with an owner round-trips.
+    #[test]
+    fn session_meta_user_id_is_backward_compatible() {
+        let legacy = r#"{"version":1,"session_id":"s-1","agent_id":"a","created_at":"t",
+            "message_count":0,"last_active_at":"t","corrupted":false}"#;
+        let meta: SessionMeta = serde_json::from_str(legacy).unwrap();
+        assert_eq!(meta.user_id, None);
+
+        let mut owned = meta.clone();
+        owned.user_id = Some("u-alice".into());
+        let json = serde_json::to_string(&owned).unwrap();
+        assert!(json.contains("u-alice"));
+        let back: SessionMeta = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.user_id.as_deref(), Some("u-alice"));
+
+        // An unowned session must not carry the key at all (the disk
+        // format stays byte-identical to pre-ADR-076 for local mode).
+        assert!(!serde_json::to_string(&meta).unwrap().contains("user_id"));
+    }
+
+    /// ADR-076 §决策 4: `visibility` is absent-on-disk by default and
+    /// **absent means public** — upgrading must not retroactively hide
+    /// every pre-existing session from its user.
+    #[test]
+    fn session_meta_visibility_is_absent_by_default_and_means_public() {
+        let legacy = r#"{"version":1,"session_id":"s-1","agent_id":"a","created_at":"t",
+            "message_count":0,"last_active_at":"t","corrupted":false}"#;
+        let meta: SessionMeta = serde_json::from_str(legacy).unwrap();
+        assert_eq!(meta.visibility, None);
+        assert!(!meta.visibility.is_some_and(SessionVisibility::is_private));
+
+        // Explicitly private round-trips, and explicitly public is
+        // serializable too.
+        for (v, wire) in [
+            (SessionVisibility::Private, "\"private\""),
+            (SessionVisibility::Public, "\"public\""),
+        ] {
+            let mut m = meta.clone();
+            m.visibility = Some(v);
+            let json = serde_json::to_string(&m).unwrap();
+            assert!(json.contains(wire), "{json} should contain {wire}");
+            assert_eq!(
+                serde_json::from_str::<SessionMeta>(&json).unwrap().visibility,
+                Some(v)
+            );
+        }
+
+        // Unset visibility leaves no key behind — the disk format stays
+        // byte-identical to pre-ADR-076.
+        assert!(!serde_json::to_string(&meta).unwrap().contains("visibility"));
+    }
+
+    /// `set_visibility` persists, is idempotent, and clearing it restores
+    /// the public default (ADR-076 §决策 4).
+    #[test]
+    fn set_visibility_persists_and_clears_back_to_public() {
+        let dir = std::env::temp_dir().join(format!(
+            "acowork-meta-visibility-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (session, _cfg, _state) = ConversationSession::new(
+            &dir,
+            "visibility",
+            SessionConfig {
+                agent_id: "a".into(),
+                workspace_id: None,
+                model: None,
+                provider: None,
+            },
+            10,
+            Arc::new(AtomicUsize::new(0)),
+        )
+        .unwrap();
+
+        assert!(!session.is_private(), "default must be public");
+
+        session.set_visibility(Some(SessionVisibility::Private));
+        assert!(session.is_private());
+        assert!(session.build_meta().visibility.is_some_and(|v| v.is_private()));
+
+        // Persisted, not just in memory.
+        let on_disk: SessionMeta =
+            serde_json::from_str(&std::fs::read_to_string(meta_path(&dir.join("conversations"), "visibility")).unwrap()).unwrap();
+        assert_eq!(on_disk.visibility, Some(SessionVisibility::Private));
+
+        // Clearing restores the public default and drops the key.
+        session.set_visibility(None);
+        assert!(!session.is_private());
+        let on_disk: SessionMeta =
+            serde_json::from_str(&std::fs::read_to_string(meta_path(&dir.join("conversations"), "visibility")).unwrap()).unwrap();
+        assert_eq!(on_disk.visibility, None);
+    }
+
+    /// `set_user_id` is the single writer and is immutable after the
+    /// first call (ADR-076 §决策 4).
+    #[test]
+    fn set_user_id_is_write_once() {
+        let dir = std::env::temp_dir().join(format!(
+            "acowork-meta-owner-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (session, _cfg, _state) = ConversationSession::new(
+            &dir,
+            "owned",
+            SessionConfig {
+                agent_id: "a".into(),
+                workspace_id: None,
+                model: None,
+                provider: None,
+            },
+            10,
+            Arc::new(AtomicUsize::new(0)),
+        )
+        .unwrap();
+
+        session.set_user_id(Some("u-alice".into()));
+        assert_eq!(session.user_id().as_deref(), Some("u-alice"));
+        session.set_user_id(Some("u-bob".into()));
+        assert_eq!(session.user_id().as_deref(), Some("u-alice"));
+        assert_eq!(session.build_meta().user_id.as_deref(), Some("u-alice"));
+    }
+
     #[test]
     fn write_meta_skips_when_jsonl_deleted() {
         // Regression: `ConversationSession::write_meta` used to rewrite the
@@ -3064,6 +3446,8 @@ mod tests {
                 session_id: id.to_string(),
                 agent_id: "com.test".to_string(),
                 created_at: ts.clone(),
+                user_id: None,
+                visibility: None,
                 title: None,
                 workspace_id: None,
                 model: None,
@@ -3272,6 +3656,8 @@ mod tests {
             session_id: valid_id.to_string(),
             agent_id: "com.test".to_string(),
             created_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            user_id: None,
+            visibility: None,
             title: Some("Valid".to_string()),
             workspace_id: None,
             model: None,
@@ -3303,7 +3689,7 @@ mod tests {
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         let (sessions, _total, _agent_totals) =
-            rt.block_on(async { scan_sessions_async(conv_dir, None, None).await.unwrap() });
+            rt.block_on(async { scan_sessions_async(conv_dir, None, None, SessionScope::Unfiltered).await.unwrap() });
 
         assert_eq!(
             sessions.len(),
@@ -3772,6 +4158,8 @@ mod tests {
             session_id: "roundtrip_test".to_string(),
             agent_id: "com.test".to_string(),
             created_at: "2026-01-01T00:00:00Z".to_string(),
+            user_id: None,
+            visibility: None,
             title: Some("Test session".to_string()),
             workspace_id: None,
             model: Some("gpt-4".to_string()),
@@ -4138,7 +4526,7 @@ mod tests {
             )
             .unwrap();
 
-            let join = scan_sessions_async(conv_dir, None, None);
+            let join = scan_sessions_async(conv_dir, None, None, SessionScope::Unfiltered);
             let (sessions, _total, (agent_in, agent_out, agent_cr, agent_cw)) = join.await.unwrap();
 
             assert_eq!(sessions.len(), 2);
@@ -5848,4 +6236,248 @@ mod tests {
         let d3 = crate::agent::session_config::SessionConfigDelta::default();
         assert!(d3.model.is_none());
     }
+
+    /// ADR-076 §决策 4: the `x-user-id` header is the whole identity
+    /// contract with the Gateway. Absent must mean *unfiltered* (local
+    /// mode), never "anonymous, deny everything" — the Gateway simply
+    /// does not inject the header when the account system is off.
+    #[test]
+    fn session_scope_from_header_value() {
+        let cases = [
+            (None, SessionScope::Unfiltered),
+            (Some(""), SessionScope::Unfiltered), // empty == absent
+            (Some("*"), SessionScope::Unfiltered), // administrator
+            (Some("u-alice"), SessionScope::User("u-alice".into())),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(
+                SessionScope::from_header_value(input),
+                expected,
+                "input = {input:?}"
+            );
+        }
+        // The unfiltered scope has no user id, so `create` records no owner.
+        assert_eq!(SessionScope::Unfiltered.user_id(), None);
+        assert_eq!(SessionScope::User("u-1".into()).user_id(), Some("u-1"));
+    }
+
+    /// The read/write rules are the whole point of the visibility switch:
+    /// public = visible to all, private = owner only, and **visible is not
+    /// the same as writable**.
+    #[test]
+    fn visibility_and_ownership_gate_read_and_write() {
+        let alice = SessionScope::User("u-alice".into());
+        let bob = SessionScope::User("u-bob".into());
+        let admin = SessionScope::Unfiltered;
+
+        let meta = |owner: Option<&str>, visibility: Option<SessionVisibility>| SessionMeta {
+            version: 1,
+            session_id: "s".into(),
+            agent_id: "a".into(),
+            created_at: "t".into(),
+            user_id: owner.map(str::to_string),
+            visibility,
+            title: None,
+            workspace_id: None,
+            model: None,
+            provider: None,
+            reasoning_effort: None,
+            temperature: None,
+            context_window: None,
+            todos: None,
+            message_count: 0,
+            last_active_at: "t".into(),
+            tokens: None,
+            corrupted: false,
+            llm_call_counter: None,
+            model_ratio: None,
+            last_compaction_offset: None,
+        };
+
+        // (owner, visibility) -> (alice reads, bob reads, alice writes, bob writes)
+        let cases = [
+            // Unset visibility defaults to public.
+            (Some("u-alice"), None, true, true, true, false),
+            // Explicit public behaves identically.
+            (
+                Some("u-alice"),
+                Some(SessionVisibility::Public),
+                true,
+                true,
+                true,
+                false,
+            ),
+            // Private is owner-only, for read AND write.
+            (Some("u-alice"), Some(SessionVisibility::Private), true, false, true, false),
+            // Legacy / local-mode sessions have no owner: readable by all
+            // and still writable by all, so nobody is locked out of their
+            // own pre-account history.
+            (None, None, true, true, true, true),
+            (None, Some(SessionVisibility::Private), true, true, true, true),
+        ];
+
+        for (owner, visibility, r_alice, r_bob, w_alice, w_bob) in cases {
+            let m = meta(owner, visibility);
+            let label = format!("owner={owner:?} visibility={visibility:?}");
+            assert_eq!(m.is_readable_by(&alice), r_alice, "alice read: {label}");
+            assert_eq!(m.is_readable_by(&bob), r_bob, "bob read: {label}");
+            assert_eq!(m.is_writable_by(&alice), w_alice, "alice write: {label}");
+            assert_eq!(m.is_writable_by(&bob), w_bob, "bob write: {label}");
+            // An administrator (and local mode) is never blocked.
+            assert!(m.is_readable_by(&admin), "admin read: {label}");
+            assert!(m.is_writable_by(&admin), "admin write: {label}");
+        }
+    }
+
+    /// The listing filter must run **before** pagination. Filtering the
+    /// returned page instead would hand back short pages and a page count
+    /// pointing at rows the caller cannot see.
+    #[tokio::test]
+    async fn scan_filters_by_scope_before_paginating() {
+        let dir = std::env::temp_dir().join(format!(
+            "acowork-scan-scope-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let conv = dir.join("conversations");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&conv).unwrap();
+
+        let meta = |sid: &str, owner: Option<&str>, v: Option<SessionVisibility>, at: &str| {
+            SessionMeta {
+                version: 1,
+                session_id: sid.into(),
+                agent_id: "a".into(),
+                created_at: at.into(),
+                user_id: owner.map(str::to_string),
+                visibility: v,
+                title: Some(sid.into()),
+                workspace_id: None,
+                model: None,
+                provider: None,
+                reasoning_effort: None,
+                temperature: None,
+                context_window: None,
+                todos: None,
+                message_count: 0,
+                last_active_at: at.into(),
+                tokens: None,
+                corrupted: false,
+                llm_call_counter: None,
+                model_ratio: None,
+                last_compaction_offset: None,
+            }
+        };
+
+        // Newest first (last_active_at desc).
+        write_session_meta(
+            &conv,
+            &meta("s-legacy", None, None, "2026-01-03T00:00:00Z"),
+        )
+        .unwrap();
+        write_session_meta(
+            &conv,
+            &meta(
+                "s-bob-private",
+                Some("u-bob"),
+                Some(SessionVisibility::Private),
+                "2026-01-02T00:00:00Z",
+            ),
+        )
+        .unwrap();
+        write_session_meta(
+            &conv,
+            &meta("s-alice", Some("u-alice"), None, "2026-01-01T00:00:00Z"),
+        )
+        .unwrap();
+
+        let scan = |scope: SessionScope| {
+            let conv = conv.clone();
+            async move {
+                let (sessions, total, _) =
+                    scan_sessions_async(conv, Some(1), Some(2), scope).await.unwrap();
+                (
+                    sessions.into_iter().map(|s| s.session_id).collect::<Vec<_>>(),
+                    total,
+                )
+            }
+        };
+
+        // Alice: legacy + her own. Bob's private session is gone, and
+        // `total` already reflects that (2, not 3) even though the page
+        // size is 2 — the filter runs before pagination.
+        let (ids, total) = scan(SessionScope::User("u-alice".into())).await;
+        assert_eq!(ids, vec!["s-legacy", "s-alice"]);
+        assert_eq!(total, 2, "total must count the filtered set, not all rows");
+
+        // Bob: everything except Alice's *private* sessions — her session
+        // here is public (the default), so he can read it. Privacy is
+        // per-session, not a blanket "only show me my own".
+        let (ids, total) = scan(SessionScope::User("u-bob".into())).await;
+        assert_eq!(ids, vec!["s-legacy", "s-bob-private"]);
+        assert_eq!(total, 3);
+
+        // Unfiltered (admin / local mode): everything, first page only.
+        let (ids, total) = scan(SessionScope::Unfiltered).await;
+        assert_eq!(ids, vec!["s-legacy", "s-bob-private"]);
+        assert_eq!(total, 3, "unfiltered total counts every session");
+
+        // Visibility travels with the row so the client can render the
+        // share toggle without a second request.
+        let (sessions, _, _) =
+            scan_sessions_async(conv.clone(), None, None, SessionScope::Unfiltered)
+                .await
+                .unwrap();
+        assert_eq!(sessions[1].visibility, Some(SessionVisibility::Private));
+        assert_eq!(sessions[0].visibility, None);
+
+        // `can_write` travels with the row: it is the frontend's only signal
+        // for disabling the session write controls, and it is NOT derivable
+        // from visibility — a public session is readable by every account
+        // but writable only by its owner.
+        let (sessions, _, _) = scan_sessions_async(
+            conv.clone(),
+            None,
+            None,
+            SessionScope::User("u-bob".into()),
+        )
+        .await
+        .unwrap();
+        let by_id = |id: &str| {
+            sessions
+                .iter()
+                .find(|s| s.session_id == id)
+                .unwrap_or_else(|| panic!("{id} missing from bob's scan"))
+        };
+        assert!(
+            !by_id("s-alice").can_write,
+            "alice's public session is readable by bob but not writable by him"
+        );
+        assert!(by_id("s-bob-private").can_write, "bob owns his session");
+        assert!(
+            by_id("s-legacy").can_write,
+            "ownerless (pre-ADR-076) sessions stay writable by any signed-in account"
+        );
+
+        // Admin (Unfiltered) may write everything, including sessions it
+        // does not own — this is why the frontend cannot use
+        // "owner == me" as its disable condition.
+        let (sessions, _, _) =
+            scan_sessions_async(conv.clone(), None, None, SessionScope::Unfiltered)
+                .await
+                .unwrap();
+        assert!(
+            sessions.iter().all(|s| s.can_write),
+            "admin/local may write every session: {:?}",
+            sessions
+                .iter()
+                .map(|s| (&s.session_id, s.can_write))
+                .collect::<Vec<_>>()
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
 }

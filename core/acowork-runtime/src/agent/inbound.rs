@@ -136,17 +136,6 @@ pub enum InboundMessage {
         session_id: String,
     },
     /// ADR-034 §8 Phase 1C placeholder (Phase 2 adds business logic):
-    /// graceful close of a session (preserves JSONL, triggers distillation).
-    CloseSession { session_id: String },
-    /// ADR-034 §8 Phase 1C placeholder (Phase 2 adds business logic):
-    /// rename a session's title. Phase 2 will route this via
-    /// `SessionMessage::UpdateSessionTitle` directly, instead of
-    /// wrapping in `SystemNotification` (fixes §7.1 G1).
-    UpdateSessionTitle { session_id: String, title: String },
-    // ADR-035 Phase 3: EnableNotify/DisableNotify removed — push drives all
-    // streaming, no front/back suppression. Proto ControlCommand fields 24/25
-    // retained for wire compatibility but the runtime no longer acts on them.
-    /// ADR-034 §8 Phase 1C placeholder (Phase 2 adds business logic):
     /// user-initiated compress action. `compress_type` is the prost-generated
     /// `CompressType` i32: 0=UNSPECIFIED, 1=SUMMARY, 2=TOOL_RESULTS.
     /// Phase 2 will dispatch to `SessionMessage::CompressAction(CompressionAction)`.
@@ -159,14 +148,6 @@ pub enum InboundMessage {
     /// consumed by `poll_stop()` / `drain_inbound_queue()` for
     /// immediate in-flight effect.
     UserOperation(UserOp),
-    /// ADR-034 Phase 7: Create a new session (system-level, session_id empty).
-    CreateSession,
-    /// ADR-038: Explicit session activation (transitions Closed/NotFound → Active).
-    /// Frontend sends this when the user opens a session from the history list
-    /// or when restoring a session on app startup. Idempotent for Active sessions.
-    OpenSession { session_id: String },
-    /// ADR-034 Phase 7: Delete a session by ID.
-    DeleteSession { session_id: String },
     /// ADR-034 Phase 7: User chat message from MQTT SendMessage.
     /// Carries content and message_id for SessionMessage::ChatMessage.
     /// Also carries raw params_json so the handler can extract
@@ -180,17 +161,6 @@ pub enum InboundMessage {
         command: String,
         params_json: String,
     },
-    /// ADR-034 Phase 7: Per-session model switch.
-    ModelSwitchAction {
-        model_id: String,
-        provider_id: Option<String>,
-    },
-    /// ADR-034 Phase 7: Per-session reasoning effort change.
-    ReasoningEffortAction { effort: String },
-    /// ADR-034 Phase 7: Per-session workspace switch.
-    WorkspaceSwitchAction { workspace_id: String },
-    /// ADR-034 Phase 7: Per-session compact context.
-    CompactContextAction,
     /// ADR-029 + ADR-052: agent-level builtin-tool enabled-flag update.
     ///
     /// `gateway_loop::dispatch_inbound` routes this variant at BOTH
@@ -301,17 +271,8 @@ impl InboundMessage {
             // ADR-034 §8 Phase 1C placeholder: new control commands.
             // Phase 2 will route these through AgentLoop. For now,
             // they don't carry user-supplied bytes, so no size limit.
-            InboundMessage::CloseSession { .. } => {}
-            InboundMessage::UpdateSessionTitle { .. } => {}
             InboundMessage::CompressAction { .. } => {}
-            InboundMessage::CreateSession => {}
-            InboundMessage::OpenSession { .. } => {}
-            InboundMessage::DeleteSession { .. } => {}
             InboundMessage::ChatMessage { .. } => {}
-            InboundMessage::ModelSwitchAction { .. } => {}
-            InboundMessage::ReasoningEffortAction { .. } => {}
-            InboundMessage::WorkspaceSwitchAction { .. } => {}
-            InboundMessage::CompactContextAction => {}
             InboundMessage::UpdateBuiltinTools { .. } => {}
             InboundMessage::UpdateSystemPrompt { system_prompt } => {
                 if system_prompt.len() > MAX_INBOUND_PAYLOAD_SIZE {

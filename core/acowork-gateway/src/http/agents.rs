@@ -174,7 +174,7 @@ pub struct AgentListResponse {
     /// for API stability and operator dashboards that surface this field.
     pub debug_port: Option<u16>,
     /// RFC3339 timestamp of the last user-driven interaction with this agent
-    /// (chat_message / approval / question_answer / compact_context).
+    /// (messages / approval / answer / compress).
     /// `None` for agents the user has never interacted with. Drives the
     /// sidebar sort order: newest first within each running/stopped group.
     #[serde(skip_serializing_if = "Option::is_none")]

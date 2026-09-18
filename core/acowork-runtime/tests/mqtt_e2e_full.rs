@@ -10,9 +10,9 @@ use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 
 use acowork_core::mqtt_proto::{
-    self, AvailableMcps, AvailableProviders, AvailableSearches, ChatMessage, ControlCommand,
-    DataEnvelope, LlmProtocol, McpRef, McpTransport as ProtoMcpTransport, ProviderRef, SearchRef,
-    control_command::Command, data_envelope::Payload,
+    AvailableMcps, AvailableProviders, AvailableSearches, ControlCommand,
+    DataEnvelope, Intent, LlmProtocol, McpRef, McpTransport as ProtoMcpTransport, ProviderRef,
+    SearchRef, control_command::Command, data_envelope::Payload,
 };
 use acowork_gateway::mqtt::{GatewayMqttClient, start_broker};
 use acowork_runtime::mqtt::{MqttConnectConfig, RuntimeMqttClient, new_shared_cache};
@@ -167,12 +167,10 @@ fn integration_control_message_flow() {
         // Publish control message from Gateway
         let cmd = ControlCommand {
             instance_id: TEST_INSTANCE_ID.into(),
-            command: Some(Command::ChatMessage(ChatMessage {
-                session_id: "sess-e2e".into(),
-                message_id: "msg-e2e".into(),
-                content: "Hello from E2E test".into(),
-                command: String::new(),
-                params_json: String::new(),
+            command: Some(Command::Intent(Intent {
+                from: "cron:cron-agent".into(),
+                action: "e2e_trigger".into(),
+                params_json: r#"{"hello":"e2e"}"#.into(),
             })),
         };
         gw.publish_control_command(TEST_INSTANCE_ID, cmd)
@@ -194,11 +192,12 @@ fn integration_control_message_flow() {
             Some(Payload::ControlCommand(ctrl)) => {
                 assert_eq!(ctrl.instance_id, TEST_INSTANCE_ID);
                 match ctrl.command {
-                    Some(Command::ChatMessage(msg)) => {
-                        assert_eq!(msg.content, "Hello from E2E test");
-                        assert_eq!(msg.session_id, "sess-e2e");
+                    Some(Command::Intent(msg)) => {
+                        assert_eq!(msg.from, "cron:cron-agent");
+                        assert_eq!(msg.action, "e2e_trigger");
+                        assert_eq!(msg.params_json, r#"{"hello":"e2e"}"#);
                     }
-                    other => panic!("Expected ChatMessage, got {:?}", other),
+                    other => panic!("Expected Intent, got {:?}", other),
                 }
             }
             other => panic!("Expected ControlCommand, got {:?}", other),
@@ -213,11 +212,11 @@ fn integration_control_message_flow() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// Test 4: Gateway publishes stop → Runtime receives
+// Test 4: Gateway publishes a second intent → Runtime receives
 // ═══════════════════════════════════════════════════════════════════════
 
 #[test]
-fn integration_control_stop_flow() {
+fn integration_control_intent_flow() {
     let port = fresh_broker_port();
     let broker = start_broker("127.0.0.1", port).unwrap();
 
@@ -257,9 +256,10 @@ fn integration_control_stop_flow() {
 
         let cmd = ControlCommand {
             instance_id: TEST_INSTANCE_ID.into(),
-            command: Some(Command::Stop(mqtt_proto::Stop {
-                session_id: "sess-stop".into(),
-                reason: String::new(),
+            command: Some(Command::Intent(Intent {
+                from: "cron:cron-agent".into(),
+                action: "retry_probe".into(),
+                params_json: String::new(),
             })),
         };
         gw.publish_control_command(TEST_INSTANCE_ID, cmd)
@@ -289,9 +289,10 @@ fn integration_control_stop_flow() {
                             TEST_INSTANCE_ID,
                             ControlCommand {
                                 instance_id: TEST_INSTANCE_ID.into(),
-                                command: Some(Command::Stop(mqtt_proto::Stop {
-                                    session_id: "sess-stop".into(),
-                                    reason: String::new(),
+                                command: Some(Command::Intent(Intent {
+                                    from: "cron:cron-agent".into(),
+                                    action: "retry_probe".into(),
+                                    params_json: String::new(),
                                 })),
                             },
                         )
@@ -307,7 +308,7 @@ fn integration_control_stop_flow() {
         assert!(matches!(
             env.payload,
             Some(Payload::ControlCommand(ControlCommand {
-                command: Some(Command::Stop(_)),
+                command: Some(Command::Intent(_)),
                 ..
             }))
         ));
@@ -363,12 +364,10 @@ fn integration_multiple_messages() {
         for (i, content) in messages.iter().enumerate() {
             let cmd = ControlCommand {
                 instance_id: TEST_INSTANCE_ID.into(),
-                command: Some(Command::ChatMessage(ChatMessage {
-                    session_id: "sess-seq".into(),
-                    message_id: format!("mid-{}", i),
-                    content: content.to_string(),
-                    command: String::new(),
-                    params_json: String::new(),
+                command: Some(Command::Intent(Intent {
+                    from: "cron:cron-agent".into(),
+                    action: content.to_string(),
+                    params_json: format!(r#"{{"seq":{i}}}"#),
                 })),
             };
             gw.publish_control_command(TEST_INSTANCE_ID, cmd)
@@ -389,9 +388,9 @@ fn integration_multiple_messages() {
                 .unwrap();
             let env = DataEnvelope::decode(payload.as_slice()).unwrap();
             if let Some(Payload::ControlCommand(ctrl)) = env.payload
-                && let Some(Command::ChatMessage(msg)) = ctrl.command
+                && let Some(Command::Intent(msg)) = ctrl.command
             {
-                received.push(msg.content);
+                received.push(msg.action);
             }
         }
 

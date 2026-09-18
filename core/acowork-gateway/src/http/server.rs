@@ -124,6 +124,10 @@ pub(crate) async fn start_http_server(
     // password). Its `enabled` flag may be `http.auth_enabled ||
     // mqtt.auth_enabled`.
     auth: Arc<HttpAuth>,
+    // ADR-076 §决策 12: resolved deployment auth mode, and the account
+    // service (`Some` only under `AUTH_MODE=multi_user`).
+    auth_mode: crate::auth::AuthMode,
+    auth_service: Option<Arc<crate::auth::AuthService>>,
 ) -> Result<(), GatewayError> {
     if !http_config.enabled {
         tracing::info!("HTTP API disabled by configuration");
@@ -148,6 +152,18 @@ pub(crate) async fn start_http_server(
     app_state.node_registry = node_registry;
     app_state.bootstrap_registry = bootstrap_registry;
     app_state.operation_store = operation_store;
+    app_state.auth_mode = auth_mode;
+    if auth_mode.is_multi_user() {
+        tracing::info!(
+            "AUTH_MODE=multi_user: account system active ({})",
+            if auth_service.is_some() {
+                "auth service ready"
+            } else {
+                "WARNING — no auth service; logins are impossible"
+            }
+        );
+    }
+    app_state.auth_service = auth_service;
 
     // Peer-IP allowlist (security backstop). Read from the loaded Gateway
     // config — this happens AFTER config load, so the values include the

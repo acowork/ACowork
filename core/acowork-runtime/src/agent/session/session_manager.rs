@@ -858,11 +858,15 @@ impl SessionManager {
     /// notifications — all in a single atomic operation.
     ///
     /// Returns the new session ID on success.
+    /// ADR-076 §决策 4: `user_id` is the creating account, or `None`
+    /// under `AUTH_MODE=local` (no account system). It is recorded once
+    /// on the session meta and never reassigned.
     pub async fn create_frontend_session(
         &mut self,
         workspace_id: Option<&str>,
         model: Option<&str>,
         provider: Option<&str>,
+        user_id: Option<&str>,
     ) -> Result<String> {
         let session_id = crate::conversation::generate_session_id();
         let committed_lines = Self::new_committed_lines();
@@ -890,6 +894,11 @@ impl SessionManager {
             max_sessions,
             committed_lines.clone(),
         )?;
+
+        // ADR-076 §决策 4: stamp the owner before the session task starts,
+        // so the very first meta write already carries it and a concurrent
+        // list can never observe an ownerless session it just created.
+        conv.set_user_id(user_id.map(|u| u.to_string()));
 
         // ADR-043: Spawn config + state change relays.
         if let Some(chunk_tx) = self.config.chunk_tx.clone() {
@@ -1525,6 +1534,54 @@ impl SessionManager {
             return SessionLifecycleState::Closed;
         }
         SessionLifecycleState::NotFound
+    }
+
+    /// ADR-038: activate a session, distinguishing "absent" from "closed".
+    ///
+    /// Returns `Ok(None)` when no session with that id exists on disk, so
+    /// callers can map it to their own not-found shape (404 over HTTP, a
+    /// `SessionNotOpened` event over MQTT). This is the single
+    /// implementation of the open state machine — `open()` is the raw
+    /// primitive and does not distinguish NotFound by return value.
+    pub async fn resume_session(
+        &mut self,
+        session_id: &str,
+    ) -> Result<Option<SessionOpenOutcome>> {
+        let work_dir = std::path::PathBuf::from(&self.core.config.work_dir);
+        match self.get_lifecycle_state(session_id, &work_dir) {
+            SessionLifecycleState::NotFound => Ok(None),
+            SessionLifecycleState::Active => Ok(Some(SessionOpenOutcome::AlreadyActive)),
+            SessionLifecycleState::Closed => self.open(session_id, &work_dir).await.map(Some),
+        }
+    }
+
+    /// ADR-076 §决策 4: set the read visibility of a session.
+    ///
+    /// Works whether the session is live or only on disk: a live session
+    /// goes through its [`ConversationSession`] (which persists meta), a
+    /// closed one has its meta read-modify-written in place. Returns
+    /// `false` if no such session exists.
+    pub fn set_session_visibility(
+        &self,
+        session_id: &str,
+        visibility: Option<crate::conversation::SessionVisibility>,
+    ) -> bool {
+        if let Some(handle) = self.sessions.get(session_id)
+            && let Some(conv) = handle.conversation.as_ref()
+        {
+            conv.set_visibility(visibility);
+            return true;
+        }
+
+        let conversations_dir =
+            std::path::Path::new(&self.core.config.work_dir).join("conversations");
+        let Ok(mut meta) =
+            crate::conversation::read_session_meta(&conversations_dir, session_id)
+        else {
+            return false;
+        };
+        meta.visibility = visibility;
+        crate::conversation::write_session_meta(&conversations_dir, &meta).is_ok()
     }
 
     /// ADR-038: Explicit session activation (transitions Closed/NotFound → Active).
@@ -2996,9 +3053,10 @@ After installation, ask the user to re-enable the MCP server.",
     ///
     /// Eviction destroys the in-memory SessionTask but leaves the JSONL
     /// file on disk. The session can be re-activated later via lazy
-    /// resume: the frontend must explicitly send the `open_session`
-    /// MQTT command (ADR-038), which routes through
-    /// `gateway_loop::handle_open_session` → `SessionManager::open`.
+    /// resume: the frontend must explicitly call `POST
+    /// /sessions/{sid}/open` (ADR-038, ADR-076 §决策 4), which routes
+    /// through `http::session_control::post_open_session` →
+    /// `SessionManager::resume_session`.
     pub async fn evict_idle_sessions(&mut self, idle_timeout: std::time::Duration) {
         let mut to_evict = Vec::new();
 
@@ -4693,6 +4751,8 @@ mod tests {
                 session_id: survivor_id.to_string(),
                 agent_id: "com.test.delete_latest".to_string(),
                 created_at: "2026-01-01T00:00:00Z".to_string(),
+                user_id: None,
+                visibility: None,
                 title: Some("Survivor".to_string()),
                 workspace_id: None,
                 model: None,

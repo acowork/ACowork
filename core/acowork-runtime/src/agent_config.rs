@@ -374,9 +374,9 @@ pub struct AgentToolsConfig {
 ///
 /// **Platform-protected tools** were historically filtered out here.
 /// The mechanism was retired along with the `context_retrieve` /
-/// `context_abandon` tool surface; their source files survive as dead
-/// code for future reference. Every persistence path now passes all
-/// declared entries through verbatim.
+/// `context_abandon` tool surface (`context_abandon` alone survives, as
+/// dead code — `context_retrieve` has been deleted). Every persistence
+/// path now passes all declared entries through verbatim.
 //
 /// See ADR-029 (per-agent builtin tools) and ADR-052 (tool compression).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -596,8 +596,9 @@ pub fn remove_tool_from_config(work_dir: &Path, tool_name: &str) {
 ///   preserved — dropping it would erase the user's preference. Only
 ///   genuinely-unknown names (removed by a Runtime upgrade) are dropped.
 /// - Platform-protected tool filtering was retired along with the
-///   `context_retrieve` / `context_abandon` tool surface; the registry
-///   now passes entries through verbatim.
+///   `context_retrieve` / `context_abandon` tool surface (`context_abandon`
+///   alone survives, as dead code); the registry now passes entries
+///   through verbatim.
 pub fn merge_tools_config(
     code_tool_names: &[String],   // from `all_builtin_tools()` registry
     persisted: &[AgentToolEntry], // from agent_tools.json
