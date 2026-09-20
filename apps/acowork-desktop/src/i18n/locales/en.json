@@ -830,6 +830,12 @@
     "discoverFailed": "Failed to discover models",
     "providerIdExists": "Provider ID already exists",
     "customProviderNoKey": "Custom provider — uses base URL",
+    "customJsonInputLabel": "Or import model JSON",
+    "customJsonInputPlaceholder": "Paste model JSON here, or click \"Use this example\" below",
+    "customJsonImportHint": "Same shape as offline_providers.json — see the formatted example below.",
+    "customJsonImport": "Import",
+    "customJsonUseExample": "Use this example",
+    "customJsonParseError": "Could not recognise the JSON shape — expected a single model spec, an id→spec map, or a provider entry containing a models field",
     "optional": "optional",
     "globalCompactModel": {
       "title": "Global Default Compact Model",

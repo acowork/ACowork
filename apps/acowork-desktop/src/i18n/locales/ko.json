@@ -561,6 +561,12 @@
     "discoverFailed": "모델 검색 실패",
     "providerIdExists": "공급자 ID가 이미 존재합니다",
     "customProviderNoKey": "사용자 정의 공급자 — 베이스 URL 사용",
+    "customJsonInputLabel": "또는 모델 JSON 가져오기",
+    "customJsonInputPlaceholder": "여기에 모델 JSON 붙여넣기 또는 아래 \"이 예시 사용\" 클릭",
+    "customJsonImportHint": "offline_providers.json 과 동일한 형식 — 서식이 지정된 예시는 아래에 있습니다.",
+    "customJsonImport": "가져오기",
+    "customJsonUseExample": "이 예시 사용",
+    "customJsonParseError": "JSON 형식을 인식할 수 없습니다 — 단일 모델 사양, id→사양 맵 또는 models 필드가 있는 공급자 항목이어야 합니다",
     "optional": "선택사항",
     "globalCompactModel": {
       "title": "귀첨 기본 결정 모델",

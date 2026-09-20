@@ -560,6 +560,12 @@
     "discoverFailed": "モデルの検出に失敗しました",
     "providerIdExists": "プロバイダ ID は既に存在します",
     "customProviderNoKey": "カスタムプロバイダ — ベース URL を使用",
+    "customJsonInputLabel": "またはモデル JSON をインポート",
+    "customJsonInputPlaceholder": "モデル JSON をここに貼り付けるか、下の「この例を使う」をクリック",
+    "customJsonImportHint": "offline_providers.json と同じ形式 — 整形された例は下にあります。",
+    "customJsonImport": "インポート",
+    "customJsonUseExample": "この例を使う",
+    "customJsonParseError": "JSON の形式を認識できません — 単一モデル、id→仕様マップ、または models フィールドを含む provider エントリのいずれかである必要があります",
     "optional": "任意",
     "globalCompactModel": {
       "title": "グローバルデフォルト精简モデル",

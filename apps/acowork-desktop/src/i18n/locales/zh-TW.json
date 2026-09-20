@@ -559,6 +559,12 @@
     "discoverFailed": "模型發現失敗",
     "providerIdExists": "服務商 ID 已存在",
     "customProviderNoKey": "自訂服務商 — 使用介面位址",
+    "customJsonInputLabel": "或匯入模型 JSON",
+    "customJsonInputPlaceholder": "在此貼上模型 JSON，或點擊下方「使用此範例」",
+    "customJsonImportHint": "格式與 offline_providers.json 相同 — 範例見下方。",
+    "customJsonImport": "匯入",
+    "customJsonUseExample": "使用此範例",
+    "customJsonParseError": "JSON 格式無法識別，請檢查是否為單個模型、id→配置對應，或帶 models 欄位的 provider 條目",
     "optional": "可選",
     "globalCompactModel": {
       "title": "全域預設精簡模型",

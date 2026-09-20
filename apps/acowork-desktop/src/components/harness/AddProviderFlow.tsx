@@ -6,6 +6,7 @@ import { needsApiKey, keyPlaceholder, isLocalProvider } from "../../lib/provider
 import { fetchProviderModels, discoverModels, fetchProviders } from "../../lib/gateway-api";
 import { ModelMultiSelect } from "./ModelMultiSelect";
 import { ProviderPicker } from "./ProviderPicker";
+import { parseOfflineJson, OFFLINE_JSON_EXAMPLE } from "./offlineJson";
 import { useTranslation } from "../../i18n/useTranslation";
 import { ChevronLeft, Minus, Plus } from "lucide-react";
 import { ErrorBox } from "../common/ErrorBox";
@@ -82,6 +83,11 @@ export function AddProviderFlow({
   const [customTesting, setCustomTesting] = useState(false);
   const [customModelCaps, setCustomModelCaps] = useState<Record<string, ModelCapabilitiesInfo>>({});
   const [customExpandedModels, setCustomExpandedModels] = useState<Set<string>>(new Set());
+  // Manual JSON import — escape hatch when the upstream base URL has no
+  // /models endpoint. Mirrors the offline_providers.json model-spec shape
+  // so the user can paste entries from the model vendor's docs verbatim.
+  const [customJsonInput, setCustomJsonInput] = useState("");
+  const [customJsonError, setCustomJsonError] = useState<string | null>(null);
 
   // ── Derived ──
   const selectedProviderIsLocal = useMemo(
@@ -171,6 +177,8 @@ export function AddProviderFlow({
     setCustomDiscoverError(null);
     setCustomModelCaps({});
     setCustomExpandedModels(new Set());
+    setCustomJsonInput("");
+    setCustomJsonError(null);
     setStep("custom");
   };
 
@@ -290,6 +298,29 @@ export function AddProviderFlow({
     } finally {
       setCustomModelsLoading(false);
     }
+  };
+
+  const handleImportCustomJson = () => {
+    const raw = customJsonInput.trim();
+    if (!raw) return;
+    setCustomJsonError(null);
+    const result = parseOfflineJson(raw);
+    if (!result) {
+      setCustomJsonError(t("harness.customJsonParseError"));
+      return;
+    }
+    // Replace discovered list. Keep previously selected IDs only if they
+    // still exist in the new list — otherwise the user would silently lose
+    // selections without explanation.
+    setCustomAvailableModels(result.models);
+    setCustomModelCaps((prev) => ({ ...result.caps, ...prev }));
+    setCustomModels((prev) => prev.filter((id) => result.models.some((m) => m.id === id)));
+    setCustomDiscoverError(null);
+  };
+
+  const handleUseExampleJson = () => {
+    setCustomJsonInput(OFFLINE_JSON_EXAMPLE);
+    if (customJsonError) setCustomJsonError(null);
   };
 
   const handleAddCustom = async () => {
@@ -592,6 +623,59 @@ export function AddProviderFlow({
                   {t("harness.addKey", { defaultValue: "Add key" })}
                 </button>
               </div>
+
+              {/* Manual JSON import — fallback when the upstream base URL
+                  has no /models endpoint. Mirrors offline_providers.json's
+                  model-spec shape so the user can paste vendor docs verbatim. */}
+              <details className="rounded-md border border-border-divider">
+                <summary className="cursor-pointer select-none px-3 py-1.5 text-xs text-text-tertiary hover:text-text-primary">
+                  {t("harness.customJsonInputLabel", { defaultValue: "Or import model JSON" })}
+                </summary>
+                <div className="space-y-1.5 border-t border-border-divider p-3">
+                  <p className="text-[10px] text-text-tertiary">
+                    {t("harness.customJsonImportHint", {
+                      defaultValue: "Same shape as offline_providers.json — see the formatted example below.",
+                    })}
+                  </p>
+                  {/* Pretty-printed demo — gives users something to copy
+                      from so they know where the schema starts and ends. */}
+                  <pre className="max-h-[160px] overflow-auto rounded-md bg-zinc-50 px-2 py-1.5 font-mono text-[10px] text-text-tertiary dark:bg-zinc-900">
+                    {OFFLINE_JSON_EXAMPLE}
+                  </pre>
+                  <div className="flex justify-end">
+                    <button
+                      type="button"
+                      onClick={handleUseExampleJson}
+                      className="text-[10px] text-text-tertiary hover:text-text-primary"
+                    >
+                      {t("harness.customJsonUseExample", { defaultValue: "Use this example" })}
+                    </button>
+                  </div>
+                  <textarea
+                    value={customJsonInput}
+                    onChange={(e) => {
+                      setCustomJsonInput(e.target.value);
+                      if (customJsonError) setCustomJsonError(null);
+                    }}
+                    placeholder={t("harness.customJsonInputPlaceholder", {
+                      defaultValue: "Paste model JSON here, or click \"Use this example\" above",
+                    })}
+                    rows={5}
+                    className="w-full resize-y rounded-md border border-border-divider bg-transparent px-2 py-1.5 font-mono text-[11px] outline-none focus:border-zinc-400 dark:focus:border-zinc-500"
+                  />
+                  {customJsonError && <ErrorBox message={customJsonError} />}
+                  <div className="flex justify-end">
+                    <button
+                      type="button"
+                      onClick={handleImportCustomJson}
+                      disabled={!customJsonInput.trim()}
+                      className="rounded-md bg-zinc-200 px-3 py-1.5 text-xs font-medium text-text hover:bg-zinc-300 disabled:opacity-50 dark:bg-zinc-700 dark:hover:bg-zinc-600"
+                    >
+                      {t("harness.customJsonImport", { defaultValue: "Import" })}
+                    </button>
+                  </div>
+                </div>
+              </details>
 
               {/* Model discovery status */}
               {customModelsLoading && (
