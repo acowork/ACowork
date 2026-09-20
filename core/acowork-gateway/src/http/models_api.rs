@@ -341,7 +341,7 @@ async fn refresh_catalog(
             return error_response(StatusCode::BAD_GATEWAY, format!("read body: {e}"));
         }
     };
-    match finalize_refresh(state, url, bytes) {
+    match finalize_refresh(state, url, bytes).await {
         Ok(summary) => Json(summary).into_response(),
         Err((code, msg)) => error_response(code, msg),
     }
@@ -435,7 +435,7 @@ async fn refresh_catalog_sse(
             }
         }
 
-        match finalize_refresh(state, url.clone(), buf) {
+        match finalize_refresh(state, url.clone(), buf).await {
             Ok(summary) => {
                 let event = Event::default()
                     .event("done")
@@ -487,7 +487,7 @@ async fn refresh_catalog_sse(
 
 /// Persist `bytes` to `data_dir/offline_providers.json` and swap the
 /// in-memory cache. Shared by the JSON and SSE code paths.
-fn finalize_refresh(
+async fn finalize_refresh(
     state: AppState,
     url: String,
     bytes: Vec<u8>,
@@ -523,12 +523,17 @@ fn finalize_refresh(
     };
     replace_offline_providers(cached);
 
+    // The catalog just changed, so capabilities captured when the user added a
+    // provider may be stale. Refresh them for the providers that already exist.
+    let caps_updated = resync_configured_capabilities(&state).await;
+
     tracing::info!(
         url = %url,
         providers = providers_count,
         models = models_count,
         bytes = bytes.len(),
         path = %target.display(),
+        caps_updated,
         "Refreshed offline provider catalog"
     );
 
@@ -543,6 +548,57 @@ fn finalize_refresh(
         bytes: bytes.len(),
         path: target.display().to_string(),
     })
+}
+
+/// Refresh the stored capabilities of already-configured providers from the
+/// catalog that was just swapped in.
+///
+/// Without this, `provider_list.json` keeps the context windows / costs /
+/// capability flags captured when the user added the provider, so a catalog
+/// refresh would never reach the configured entries (nor the runtimes fed from
+/// them).
+///
+/// Returns the number of model entries updated.
+async fn resync_configured_capabilities(state: &AppState) -> usize {
+    let mut gw = state.gateway_state.write().await;
+    let updated = resync_capabilities_in_place(
+        &mut gw.resource_cache.provider_list.providers,
+        lookup_model_capabilities,
+    );
+    if updated > 0 {
+        let data_dir = crate::http::provider_api::get_data_dir_from_gw(&gw);
+        crate::resource_cache::persist_provider_cache(&mut gw, &data_dir);
+    }
+    updated
+}
+
+/// Pure core of [`resync_configured_capabilities`]; kept separate so it can be
+/// tested without a `GatewayState`.
+///
+/// Skips custom providers (absent from the catalog — their capabilities are
+/// hand-written) and local providers (limits depend on the user's hardware and
+/// are editable in the UI, so the catalog must not overwrite them). Model
+/// *selection*, `base_url`, `compact_model` and `max_output_tokens_limit` are
+/// never touched — only `capabilities`.
+fn resync_capabilities_in_place(
+    providers: &mut [acowork_core::protocol::ProviderListItem],
+    lookup: impl Fn(&str, &str) -> Option<acowork_core::protocol::ModelCapabilitiesInfo>,
+) -> usize {
+    let mut updated = 0;
+    for cfg in providers.iter_mut() {
+        if cfg.custom || is_local_provider(&cfg.id) {
+            continue;
+        }
+        for entry in cfg.models.iter_mut() {
+            if let Some(caps) = lookup(&cfg.id, &entry.id)
+                && caps != entry.capabilities
+            {
+                entry.capabilities = caps;
+                updated += 1;
+            }
+        }
+    }
+    updated
 }
 
 // ── Offline data ──────────────────────────────────────────────────────
@@ -1593,6 +1649,66 @@ fn model_to_capabilities(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use acowork_core::protocol::{
+        ModelCapabilitiesInfo, ProtocolType, ProviderListItem, ProviderModelEntry,
+    };
+
+    /// Capabilities built from JSON so the test does not have to spell out
+    /// every optional field of `ModelCapabilitiesInfo`.
+    fn caps(context_window: u64) -> ModelCapabilitiesInfo {
+        serde_json::from_value(serde_json::json!({
+            "context_window": context_window,
+            "max_output_tokens": 4096,
+        }))
+        .unwrap()
+    }
+
+    fn provider(id: &str, custom: bool, models: &[&str]) -> ProviderListItem {
+        ProviderListItem {
+            id: id.to_string(),
+            base_url: "http://localhost:1234/v1".to_string(),
+            protocol_type: ProtocolType::OpenAI,
+            models: models
+                .iter()
+                .map(|m| ProviderModelEntry {
+                    id: m.to_string(),
+                    capabilities: caps(1000),
+                    max_output_tokens_limit: 4096,
+                })
+                .collect(),
+            compact_model: None,
+            custom,
+        }
+    }
+
+    /// A catalog refresh must reach remote providers, and only those.
+    #[test]
+    fn resync_capabilities_refreshes_remote_providers_only() {
+        let mut providers = vec![
+            // Stored entry for gpt-4o was captured when the catalog had 1000.
+            provider("openai", false, &["gpt-4o", "not-in-catalog"]),
+            // Local models run on the user's hardware; caps are calibrated in the UI.
+            provider("lmstudio", false, &["llama3"]),
+            // Custom endpoints are not in the catalog at all.
+            provider("my-endpoint", true, &["gpt-4o"]),
+        ];
+        // Pretend the catalog knows every id — including the local model and
+        // the custom endpoint. The skip rules must still win for those.
+        let lookup = |pid: &str, mid: &str| match (pid, mid) {
+            (_, "not-in-catalog") => None,
+            _ => Some(caps(2000)),
+        };
+
+        assert_eq!(resync_capabilities_in_place(&mut providers, lookup), 1);
+        assert_eq!(providers[0].models[0].capabilities.context_window, 2000);
+        // Model unknown to the catalog keeps the value it was configured with.
+        assert_eq!(providers[0].models[1].capabilities.context_window, 1000);
+        assert_eq!(providers[1].models[0].capabilities.context_window, 1000);
+        assert_eq!(providers[2].models[0].capabilities.context_window, 1000);
+
+        // Already in sync → no persistence, no version bump, no MQTT push.
+        assert_eq!(resync_capabilities_in_place(&mut providers, lookup), 0);
+    }
 
     #[test]
     fn test_offline_providers_loads() {
