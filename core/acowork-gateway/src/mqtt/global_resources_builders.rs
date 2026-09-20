@@ -25,6 +25,18 @@ use acowork_core::protocol::{McpTransportDef, ProtocolType};
 use crate::gateway::state::GatewayState;
 use crate::util::preview_key;
 
+/// Whether a provider with **no** vault account is still published to
+/// runtimes.
+///
+/// Only local providers (ollama, lmstudio…) are keyless by design: the
+/// runtime treats an empty `api_key` as "no auth", which those endpoints
+/// accept. A keyless non-local provider cannot be called, and publishing it
+/// plants a phantom entry in every Runtime's `agent_provider.json` that can
+/// even become the session's active provider.
+fn publish_keyless_provider(id: &str) -> bool {
+    crate::http::models_api::is_local_provider(id)
+}
+
 /// Build `AvailableProviders` from the GatewayState resource cache.
 ///
 /// "Available" = all providers in the cache. Phase 2+ will filter to only
@@ -37,29 +49,47 @@ pub(crate) fn build_available_providers(gw: &GatewayState) -> AvailableProviders
         // Decrypt every account key for this provider; one ProviderRef
         // per `(provider, account)` pair. `vault.list_keys()` returns
         // one row per account, so this is a 1:N fan-out.
+        //
+        // `None` = enumeration failed, so we cannot tell whether keys
+        // exist. Fall back to the historical "publish without key"
+        // behaviour rather than dropping a possibly-usable provider.
         let accounts = match gw.vault.list_keys() {
-            Ok(entries) => entries.into_iter().filter(|e| e.provider == p.id).collect::<Vec<_>>(),
+            Ok(entries) => Some(
+                entries
+                    .into_iter()
+                    .filter(|e| e.provider == p.id)
+                    .collect::<Vec<_>>(),
+            ),
             Err(e) => {
                 tracing::warn!(
                     provider_id = %p.id,
                     error = %e,
                     "global_resources: failed to enumerate vault accounts; emitting single ProviderRef without key"
                 );
-                Vec::new()
+                None
             }
         };
+
+        // A non-local provider with no vault account cannot be called by any
+        // Runtime (the wire carries an empty `api_key` = "no auth"), and
+        // publishing it plants a keyless phantom in every Runtime's
+        // `agent_provider.json` — where it can even become the session's
+        // active provider while being invisible (and undeletable) in the
+        // Desktop. Skip it. Local providers (ollama, lmstudio…) are keyless
+        // by design and must still be published.
+        if accounts.as_ref().is_some_and(|a| a.is_empty()) && !publish_keyless_provider(&p.id) {
+            tracing::debug!(
+                provider_id = %p.id,
+                "global_resources: skipping non-local provider with no vault account"
+            );
+            continue;
+        }
 
         // Decide which `(account_id, api_key)` tuples to emit. Local
         // providers have no real key but still want a row, so we emit
         // one empty entry for them.
-        let emit: Vec<(String, String)> = if accounts.is_empty() && !p.base_url.is_empty() {
-            // `is_local_provider` decides the wire-level handling of an
-            // empty api_key on the runtime side. We don't gate on it here
-            // because `models_api::is_local_provider` would create a
-            // cross-crate dependency that already exists elsewhere; the
-            // runtime already treats `api_key == ""` as "no auth".
-            vec![(String::new(), String::new())]
-        } else if accounts.is_empty() {
+        let accounts = accounts.unwrap_or_default();
+        let emit: Vec<(String, String)> = if accounts.is_empty() {
             vec![(String::new(), String::new())]
         } else {
             accounts
@@ -413,6 +443,16 @@ pub(crate) fn map_mcp_transport(t: &McpTransportDef) -> acowork_core::mqtt_proto
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only local providers may be published without a key; a keyless
+    /// non-local provider must not reach the runtimes.
+    #[test]
+    fn test_publish_keyless_provider_only_for_local() {
+        assert!(publish_keyless_provider("ollama"));
+        assert!(publish_keyless_provider("lmstudio"));
+        assert!(!publish_keyless_provider("volcengine-agent-plan"));
+        assert!(!publish_keyless_provider("custom-volcengine-agent-plan"));
+    }
 
     #[test]
     fn test_map_protocol_type() {

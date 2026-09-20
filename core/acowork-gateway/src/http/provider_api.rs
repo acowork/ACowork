@@ -220,6 +220,24 @@ pub struct UpdateSearchKeyRequest {
 
 // ── Handlers ──────────────────────────────────────────────────────────
 
+/// Which `(account_id, alias, key_preview)` rows to emit for one configured
+/// provider.
+///
+/// Local providers have no key by design. A non-local provider whose vault
+/// accounts are all gone (last key removed, or a leftover id from a rename)
+/// must still surface one empty-account row: without it the provider is
+/// invisible in the UI while `provider_list.json` and every Runtime still
+/// carry it, so the user has no way to delete it.
+fn account_rows_for_provider(
+    is_local: bool,
+    accounts: Option<Vec<(String, String, String)>>,
+) -> Vec<(String, String, String)> {
+    if is_local {
+        return vec![(String::new(), String::new(), "(local)".to_string())];
+    }
+    accounts.unwrap_or_else(|| vec![(String::new(), String::new(), "(no key)".to_string())])
+}
+
 /// `GET /api/providers` — list stored providers (masked keys) with config.
 ///
 /// For providers with multiple accounts the response contains one entry
@@ -253,14 +271,7 @@ pub async fn list_providers(
     for cfg in &gw.resource_cache.provider_list.providers {
         let is_local = models_api::is_local_provider(&cfg.id);
         let accounts = accounts_by_provider.remove(&cfg.id);
-        let accounts_for_provider: Vec<(String, String, String)> = if is_local {
-            // Local providers don't need a key; emit a single empty row
-            // so the frontend always sees at least one entry per
-            // configured provider.
-            vec![(String::new(), String::new(), "(local)".to_string())]
-        } else {
-            accounts.unwrap_or_default()
-        };
+        let accounts_for_provider = account_rows_for_provider(is_local, accounts);
 
         for (account_id, alias, key_preview) in accounts_for_provider {
             response.push(ProviderEntryResponse {
@@ -449,10 +460,22 @@ pub async fn remove_provider(
 ) -> Result<Json<MessageResponse>, ApiError> {
     let mut gw = state.gateway_state.write().await;
 
-    // 1. Remove API key from Vault.
-    gw.vault.remove_key(&provider).map_err(|e| {
-        ApiError::not_found(&format!("Key not found for provider '{}': {}", provider, e))
-    })?;
+    // 1. Remove API keys from Vault. A provider can legitimately have no
+    //    account left (every key removed, or a leftover id from a rename)
+    //    and is still configured in `provider_list.json` — such a provider
+    //    must stay deletable, so a missing key is not an error here. Only
+    //    skip the vault call when we can *prove* there is nothing to
+    //    remove; an enumeration failure keeps the strict path.
+    let has_keys = gw
+        .vault
+        .list_keys()
+        .map(|entries| entries.iter().any(|e| e.provider == provider))
+        .unwrap_or(true);
+    if has_keys {
+        gw.vault.remove_key(&provider).map_err(|e| {
+            ApiError::not_found(&format!("Key not found for provider '{}': {}", provider, e))
+        })?;
+    }
 
     // 2. Remove from in-memory provider list.
     resource_cache::remove_provider_from_memory(&mut gw, &provider);
@@ -894,7 +917,7 @@ fn merge_user_capabilities(
 }
 
 /// Get data_dir from GatewayState config.
-fn get_data_dir_from_gw(gw: &crate::gateway::state::GatewayState) -> PathBuf {
+pub(crate) fn get_data_dir_from_gw(gw: &crate::gateway::state::GatewayState) -> PathBuf {
     gw.config
         .as_ref()
         .map(|c| PathBuf::from(&c.data_dir))
@@ -904,6 +927,29 @@ fn get_data_dir_from_gw(gw: &crate::gateway::state::GatewayState) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A keyless provider must stay visible in the UI (one empty-account
+    /// row) so it can be deleted — otherwise it lingers in
+    /// `provider_list.json` and in every Runtime's provider list.
+    #[test]
+    fn account_rows_surface_keyless_non_local_provider() {
+        // Local provider: placeholder row, as before.
+        assert_eq!(
+            account_rows_for_provider(true, None),
+            vec![(String::new(), String::new(), "(local)".to_string())]
+        );
+        // Non-local provider with no vault account: still one row.
+        assert_eq!(
+            account_rows_for_provider(false, None),
+            vec![(String::new(), String::new(), "(no key)".to_string())]
+        );
+        // Accounts present: handed through untouched.
+        let accounts = vec![("acc-1".to_string(), "alias".to_string(), "sk-...123".to_string())];
+        assert_eq!(
+            account_rows_for_provider(false, Some(accounts.clone())),
+            accounts
+        );
+    }
 
     #[test]
     fn test_add_provider_request_deserialization() {
