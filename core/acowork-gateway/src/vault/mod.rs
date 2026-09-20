@@ -50,6 +50,24 @@ fn parse_account_entry_name(name: &str) -> Option<(String, String)> {
         .map(|(p, a)| (p.to_string(), a.to_string()))
 }
 
+/// Vault namespaces that are NOT LLM provider accounts. Embedding and
+/// web-search credentials share the same encrypted directory (see
+/// `EMBEDDING_PREFIX` / `SEARCH_PREFIX`) but must never be indexed as
+/// providers nor pulled through the legacy-name migration.
+const RESERVED_VAULT_PREFIXES: [&str; 2] = ["_embedding_", "_search_"];
+
+fn is_reserved_vault_key(name: &str) -> bool {
+    RESERVED_VAULT_PREFIXES.iter().any(|p| name.starts_with(p))
+}
+
+/// In-memory index key for one account. The bare `account_id` is NOT
+/// unique across providers - every migrated legacy entry shares the same
+/// `LEGACY_ACCOUNT_ID` - so `accounts` must be keyed by the pair, or one
+/// provider's legacy entry silently overwrites another's.
+fn account_key(provider_id: &str, account_id: &str) -> String {
+    account_entry_name(provider_id, account_id)
+}
+
 /// Pre-multi-account JSON shape used to recognise legacy vault payloads
 /// during the one-shot migration in [`VaultFacade::rebuild_index`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -115,7 +133,9 @@ pub struct SearchKeyPreview {
 pub struct VaultFacade {
     /// Inner vault (encrypted on-disk storage)
     vault: acowork_vault::Vault,
-    /// Decrypted account entries keyed by `account_id`.
+    /// Decrypted account entries keyed by `provider_id__account_id`
+    /// (see [`account_key`]). The bare account id is only unique within
+    /// a single provider, so it cannot be the map key.
     accounts: HashMap<String, ProviderEntry>,
     /// Reverse index: `provider_id` → list of `account_id` (insertion order).
     /// Replaces the old `provider_names` cache.
@@ -168,10 +188,15 @@ impl VaultFacade {
             .map_err(|e| GatewayError::Vault(format!("Failed to list vault keys: {}", e)))?;
 
         // Pass 1: load everything that's already in the new shape.
+        // Reserved namespaces (`_embedding_*` / `_search_*`) share the
+        // directory but are not LLM accounts - never index them.
         for name in &names {
-            let Some((_provider, _account)) = parse_account_entry_name(name) else {
+            let Some((provider, _account)) = parse_account_entry_name(name) else {
                 continue; // legacy; handled in pass 2
             };
+            if is_reserved_vault_key(&provider) {
+                continue;
+            }
             match self.vault.retrieve(name) {
                 Ok(secret) => match serde_json::from_str::<ProviderEntry>(secret.expose_secret()) {
                     Ok(entry) => self.index_entry(entry),
@@ -194,7 +219,7 @@ impl VaultFacade {
         // Pass 2: migrate legacy entries (no `__` in the name).
         let legacy: Vec<String> = names
             .into_iter()
-            .filter(|n| parse_account_entry_name(n).is_none())
+            .filter(|n| parse_account_entry_name(n).is_none() && !is_reserved_vault_key(n))
             .collect();
         for old_name in legacy {
             self.migrate_legacy_entry(&old_name)?;
@@ -267,10 +292,11 @@ impl VaultFacade {
         let provider = entry.provider_id.clone();
         let account = entry.account_id.clone();
         self.by_provider
-            .entry(provider)
+            .entry(provider.clone())
             .or_default()
             .push(account.clone());
-        self.accounts.insert(account, entry);
+        self.accounts
+            .insert(account_key(&provider, &account), entry);
     }
 
     /// Check if vault is unlocked
@@ -358,11 +384,14 @@ impl VaultFacade {
         provider_id: &str,
         account_id: &str,
     ) -> Result<ProviderEntry, GatewayError> {
-        self.accounts.get(account_id).cloned().ok_or_else(|| {
-            GatewayError::Vault(format!(
-                "No account {account_id} for provider {provider_id}"
-            ))
-        })
+        self.accounts
+            .get(&account_key(provider_id, account_id))
+            .cloned()
+            .ok_or_else(|| {
+                GatewayError::Vault(format!(
+                    "No account {account_id} for provider {provider_id}"
+                ))
+            })
     }
 
     /// Rename the alias of an existing account. The provider_id and
@@ -379,7 +408,7 @@ impl VaultFacade {
         }
         let mut entry = self
             .accounts
-            .get(account_id)
+            .get(&account_key(provider_id, account_id))
             .cloned()
             .ok_or_else(|| {
                 GatewayError::Vault(format!(
@@ -397,7 +426,8 @@ impl VaultFacade {
         self.vault
             .store(&name, &json)
             .map_err(|e| GatewayError::Vault(format!("Failed to update alias: {}", e)))?;
-        self.accounts.insert(account_id.to_string(), entry);
+        self.accounts
+            .insert(account_key(provider_id, account_id), entry);
         Ok(())
     }
 
@@ -419,7 +449,7 @@ impl VaultFacade {
         }
         let mut entry = self
             .accounts
-            .get(account_id)
+            .get(&account_key(provider_id, account_id))
             .cloned()
             .ok_or_else(|| {
                 GatewayError::Vault(format!(
@@ -437,7 +467,8 @@ impl VaultFacade {
         self.vault
             .store(&name, &json)
             .map_err(|e| GatewayError::Vault(format!("Failed to update key: {}", e)))?;
-        self.accounts.insert(account_id.to_string(), entry);
+        self.accounts
+            .insert(account_key(provider_id, account_id), entry);
         Ok(())
     }
 
@@ -470,7 +501,7 @@ impl VaultFacade {
         // 1. Direct lookup: accounts indexed under this exact id.
         if let Some(accounts) = self.by_provider.get(provider)
             && let Some(first) = accounts.first()
-            && let Some(entry) = self.accounts.get(first)
+            && let Some(entry) = self.accounts.get(&account_key(provider, first))
         {
             return Ok(entry.clone());
         }
@@ -536,7 +567,7 @@ impl VaultFacade {
                 None => continue,
             };
             for account_id in account_ids {
-                let entry = match self.accounts.get(account_id) {
+                let entry = match self.accounts.get(&account_key(provider, account_id)) {
                     Some(e) => e,
                     None => continue,
                 };
@@ -577,7 +608,7 @@ impl VaultFacade {
         // 1. Drop accounts indexed under this exact provider id.
         if let Some(account_ids) = self.by_provider.remove(provider) {
             for account_id in account_ids {
-                if let Some(entry) = self.accounts.remove(&account_id) {
+                if let Some(entry) = self.accounts.remove(&account_key(provider, &account_id)) {
                     let name = account_entry_name(&entry.provider_id, &account_id);
                     if self.vault.exists(&name) {
                         self.vault.delete(&name).map_err(|e| {
@@ -631,7 +662,7 @@ impl VaultFacade {
         // Drop the in-memory entry; the on-disk file is deleted below.
         let _entry = self
             .accounts
-            .remove(account_id)
+            .remove(&account_key(provider_id, account_id))
             .ok_or_else(|| GatewayError::Vault(format!("No account {account_id}")))?;
         if let Some(list) = self.by_provider.get_mut(provider_id) {
             list.retain(|a| a != account_id);
@@ -1256,6 +1287,110 @@ mod tests {
         facade.unlock("password123").unwrap();
         let entry = facade.get_provider("anthropic").unwrap();
         assert_eq!(entry.api_key, "sk-legacy-json");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_vault_legacy_accounts_are_isolated_per_provider() {
+        // Two legacy entries both use the account id `"legacy"`. The
+        // in-memory index must keep them apart (they used to collapse to
+        // whichever was written last), and removing one must not delete
+        // the other's vault file.
+        let dir = temp_vault_dir("legacy_isolation");
+        {
+            let mut v = acowork_vault::Vault::open(std::path::Path::new(&dir)).unwrap();
+            v.unlock("password123").unwrap();
+            v.store("openai", "sk-openai").unwrap();
+            v.store("deepseek", "sk-deepseek").unwrap();
+        }
+        let mut facade = VaultFacade::new(&dir);
+        facade.unlock("password123").unwrap();
+
+        let keys = facade.list_keys().unwrap();
+        for (provider, alias, key) in [
+            ("openai", "openai-default", "sk-openai"),
+            ("deepseek", "deepseek-default", "sk-deepseek"),
+        ] {
+            let row = keys
+                .iter()
+                .find(|k| k.provider == provider)
+                .unwrap_or_else(|| panic!("{provider} missing from list_keys"));
+            assert_eq!(row.alias, alias, "{provider} alias must be its own");
+            assert_eq!(facade.get_provider(provider).unwrap().api_key, key);
+        }
+
+        facade.remove_key("openai").unwrap();
+        let remaining: Vec<String> = facade
+            .list_keys()
+            .unwrap()
+            .iter()
+            .map(|k| k.provider.clone())
+            .collect();
+        assert_eq!(remaining, vec!["deepseek".to_string()]);
+        assert!(
+            std::path::Path::new(&dir)
+                .join(format!("deepseek{ACCOUNT_SEP}{LEGACY_ACCOUNT_ID}.enc"))
+                .exists(),
+            "removing openai must not delete deepseek's legacy account"
+        );
+        assert_eq!(
+            facade.get_provider("deepseek").unwrap().api_key,
+            "sk-deepseek"
+        );
+
+        // Simulate a Gateway restart: a fresh facade re-reads the vault
+        // from disk. The removed provider must NOT come back — under the
+        // old keying every delete hit another provider's file, so the
+        // target was never removed and reappeared on the next unlock.
+        let mut reopened = VaultFacade::new(&dir);
+        reopened.unlock("password123").unwrap();
+        let providers: Vec<String> = reopened
+            .list_keys()
+            .unwrap()
+            .iter()
+            .map(|k| k.provider.clone())
+            .collect();
+        assert_eq!(providers, vec!["deepseek".to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_vault_reserved_namespaces_are_not_providers() {
+        // Embedding / search keys share the vault directory but must not
+        // be indexed as LLM providers, nor migrated into the `__legacy`
+        // shape (that is how a stray `_embedding_volcengine` used to show
+        // up in the configured-providers list).
+        let dir = temp_vault_dir("reserved_prefix");
+        {
+            let mut v = acowork_vault::Vault::open(std::path::Path::new(&dir)).unwrap();
+            v.unlock("password123").unwrap();
+            v.store("_embedding_volcengine", "sk-embed").unwrap();
+            v.store("_search_tavily", "tvly-xyz").unwrap();
+        }
+        let mut facade = VaultFacade::new(&dir);
+        facade.unlock("password123").unwrap();
+
+        assert!(
+            facade.list_keys().unwrap().is_empty(),
+            "reserved keys must not surface as configured providers"
+        );
+        // Left untouched on disk: neither migrated nor deleted.
+        assert!(
+            std::path::Path::new(&dir)
+                .join("_embedding_volcengine.enc")
+                .exists()
+        );
+        assert!(
+            std::path::Path::new(&dir)
+                .join("_search_tavily.enc")
+                .exists()
+        );
+
+        // Still invisible after a reopen — reserved namespaces never
+        // surface as providers, so there is nothing to delete here.
+        let mut reopened = VaultFacade::new(&dir);
+        reopened.unlock("password123").unwrap();
+        assert!(reopened.list_keys().unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
