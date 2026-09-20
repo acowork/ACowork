@@ -88,6 +88,10 @@ pub enum ControlAction {
         session_id: String,
         model_id: String,
         provider_id: Option<String>,
+        /// Multi-account: optional account override so the Runtime picks
+        /// the right API key among a provider's accounts. `None` = keep
+        /// the current / first account.
+        account_id: Option<String>,
     },
     /// User wants to change reasoning effort level.
     ReasoningEffort { session_id: String, effort: String },
@@ -212,10 +216,16 @@ pub fn parse_control_payload(topic: &str, payload: &[u8]) -> Option<ControlActio
             } else {
                 Some(sw.provider_id)
             };
+            let account_id = if sw.account_id.is_empty() {
+                None
+            } else {
+                Some(sw.account_id)
+            };
             ControlAction::ModelSwitch {
                 session_id: sw.session_id,
                 model_id: sw.model_id,
                 provider_id,
+                account_id,
             }
         }
         mqtt_proto::control_command::Command::ReasoningEffort(re) => {

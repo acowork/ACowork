@@ -915,6 +915,7 @@ async fn concurrent_provider_and_identity_writes_carry_correct_versions() {
             axum::Json(acowork_gateway::http::provider_api::AddProviderRequest {
                 provider: "deepseek".to_string(),
                 key: "sk-deepseek-1".to_string(),
+                keys: Vec::new(),
                 base_url: None,
                 default_model: None,
                 models: vec!["deepseek-chat".to_string()],
@@ -932,6 +933,7 @@ async fn concurrent_provider_and_identity_writes_carry_correct_versions() {
             axum::Json(acowork_gateway::http::provider_api::AddProviderRequest {
                 provider: "openai".to_string(),
                 key: "sk-openai-1".to_string(),
+                keys: Vec::new(),
                 base_url: None,
                 default_model: None,
                 models: vec!["gpt-4o".to_string()],

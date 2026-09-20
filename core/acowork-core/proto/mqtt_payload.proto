@@ -290,6 +290,11 @@ message ProviderRef {
   /// the LLM provider's auth header directly; no env var or separate
   /// handshake is required.
   string api_key = 7;
+  /// Stable account UUID — Gateway emits one `ProviderRef` per
+  /// `(provider, account)` pair when the provider has multiple
+  /// accounts. Empty for legacy single-account rows. Runtime uses
+  /// `(id, account_id)` together to address a specific account.
+  string account_id = 8;
 }
 
 /// LLM protocol type (mirrors ProtocolType from domain).
@@ -532,6 +537,9 @@ message SessionConfig {
   // the session inherits the per-agent chain (agent_config → manifest →
   // DEFAULT_CONTEXT_WINDOW).
   optional uint64 context_window = 10;
+  // Multi-account: the account (API key) selected for this session.
+  // Empty = provider's first account.
+  string account_id = 11;
 }
 
 /// Session runtime state (always latest complete value).
@@ -1035,6 +1043,11 @@ message ModelSwitch {
   // from the gRPC/WebSocket-era model_switch payload. Empty string means
   // "do not change the current Provider instance — only update the model name".
   string provider_id = 4;
+  // Multi-account: optional account override so the Runtime picks the right
+  // API key among the provider's accounts (`ProviderKeyEntry.account_id`).
+  // Empty string = keep the current / first account (pre-multi-account
+  // behaviour).
+  string account_id = 5;
 }
 
 message ReasoningEffort {

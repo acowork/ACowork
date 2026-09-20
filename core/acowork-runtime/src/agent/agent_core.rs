@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use acowork_core::protocol::{ModelCapabilitiesInfo, ProtocolType, ProviderListItem};
+use acowork_core::protocol::{ModelCapabilitiesInfo, ProtocolType, ProviderKeyEntry, ProviderListItem};
 use acowork_core::providers::traits::{Provider, UsageInfo};
 use acowork_core::rag::RagProvider;
 use acowork_core::tools::traits::Tool;
@@ -109,7 +109,7 @@ pub struct AgentCore {
     /// through the same Arc by every session clone.
     pub(crate) provider_list_version: Arc<RwLock<u64>>,
     /// Provider key vault (in-memory only, never persisted).
-    pub(crate) provider_key_vault: Arc<RwLock<HashMap<String, String>>>,
+    pub(crate) provider_key_vault: Arc<RwLock<HashMap<String, Vec<ProviderKeyEntry>>>>,
     /// Search key vault (in-memory only, never persisted).
     ///
     /// Shared with `WebSearchEngine` - when `SessionManager::update_search_config`
@@ -1551,9 +1551,36 @@ impl AgentCore {
         list.iter().find(|p| p.id == provider_id).cloned()
     }
 
+    /// First account's API key for a provider.
+    ///
+    /// Back-compat accessor for callers that predate multi-account support
+    /// (e.g. `is_default_compact_provider_available`). Callers that know
+    /// which account they want should use
+    /// [`Self::get_provider_account_api_key`].
     pub fn get_provider_api_key(&self, provider_id: &str) -> Option<String> {
+        self.get_provider_account_api_key(provider_id, None)
+    }
+
+    /// API key for a specific account of a provider.
+    ///
+    /// `account_id == None` falls back to the provider's first account
+    /// (pre-multi-account behaviour). `Some(id)` that matches no account
+    /// returns `None`; the `build_provider_for` path treats that as
+    /// "account gone" and falls back to the first account.
+    pub fn get_provider_account_api_key(
+        &self,
+        provider_id: &str,
+        account_id: Option<&str>,
+    ) -> Option<String> {
         let vault = self.provider_key_vault.read().unwrap();
-        vault.get(provider_id).cloned()
+        let accounts = vault.get(provider_id)?;
+        match account_id {
+            Some(aid) => accounts
+                .iter()
+                .find(|e| e.account_id == aid)
+                .map(|e| e.api_key.clone()),
+            None => accounts.first().map(|e| e.api_key.clone()),
+        }
     }
 
     /// ADR-056: Whether the global default compact model's provider is

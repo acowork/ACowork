@@ -287,12 +287,21 @@ pub struct McpListItem {
 
 /// Provider key entry — delivered by Gateway to Runtime via AgentHelloResult.
 ///
+/// One entry per `(provider, account)` pair: when a provider has
+/// multiple accounts the Gateway sends one row per account, all with
+/// their own `account_id`. Runtime addresses each account by its UUID;
+/// `provider_id` alone is ambiguous for multi-account providers.
+///
 /// Always delivered in full on every AgentHello (no version check).
 /// Runtime stores this ONLY in memory, never persisted to disk.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderKeyEntry {
     /// Provider identifier
     pub provider_id: String,
+    /// Stable account UUID. Use this together with `provider_id` to
+    /// address a specific account; matches the `account_id` returned
+    /// by `GET /api/providers`.
+    pub account_id: String,
     /// Decrypted API key
     pub api_key: String,
 }

@@ -32,31 +32,87 @@ use crate::util::preview_key;
 /// performed here so both MQTT and HTTP channels see the same key.
 pub(crate) fn build_available_providers(gw: &GatewayState) -> AvailableProviders {
     let cache = &gw.resource_cache.provider_list;
-    let providers: Vec<ProviderRef> = cache
-        .providers
-        .iter()
-        .map(|p| {
-            // Decrypt the provider's API key from the Gateway's Vault.
-            // Empty string when no key is configured (e.g. local Ollama).
-            // MQTT broker is localhost-only so it's safe to publish the
-            // decrypted key in the retained payload — see mqtt.md §3.1.1.
-            let api_key = gw
-                .vault
-                .get_provider(&p.id)
-                .map(|entry| entry.api_key)
-                .unwrap_or_default();
-            // DIAG: log the byte range about to be published to MQTT so
-            // we can correlate this preview with the `build_provider_for`
-            // + `OpenAI streaming request prepared` lines on the runtime
-            // side. If this preview matches the runtime's prefix, the
-            // corruption is upstream of the publisher (vault layer).
+    let mut providers: Vec<ProviderRef> = Vec::new();
+    for p in &cache.providers {
+        // Decrypt every account key for this provider; one ProviderRef
+        // per `(provider, account)` pair. `vault.list_keys()` returns
+        // one row per account, so this is a 1:N fan-out.
+        let accounts = match gw.vault.list_keys() {
+            Ok(entries) => entries.into_iter().filter(|e| e.provider == p.id).collect::<Vec<_>>(),
+            Err(e) => {
+                tracing::warn!(
+                    provider_id = %p.id,
+                    error = %e,
+                    "global_resources: failed to enumerate vault accounts; emitting single ProviderRef without key"
+                );
+                Vec::new()
+            }
+        };
+
+        // Decide which `(account_id, api_key)` tuples to emit. Local
+        // providers have no real key but still want a row, so we emit
+        // one empty entry for them.
+        let emit: Vec<(String, String)> = if accounts.is_empty() && !p.base_url.is_empty() {
+            // `is_local_provider` decides the wire-level handling of an
+            // empty api_key on the runtime side. We don't gate on it here
+            // because `models_api::is_local_provider` would create a
+            // cross-crate dependency that already exists elsewhere; the
+            // runtime already treats `api_key == ""` as "no auth".
+            vec![(String::new(), String::new())]
+        } else if accounts.is_empty() {
+            vec![(String::new(), String::new())]
+        } else {
+            accounts
+                .into_iter()
+                .map(|a| (a.account_id, a.key_preview))
+                .collect()
+        };
+
+        // We need the *decrypted* keys, not previews. Re-resolve from
+        // the vault by (provider, account_id) so the wire payload
+        // matches the historical "decrypt before publish" contract.
+        // `vault.get_provider` returns the first account when no
+        // account_id is given; for multi-account providers we look up
+        // each account explicitly.
+        let decrypted_keys: Vec<(String, String)> = if p.id.is_empty() {
+            Vec::new()
+        } else {
+            // Build (account_id, decrypted_key) pairs. For the local
+            // case (no accounts), emit one ("", "") row.
+            if emit.len() == 1 && emit[0].0.is_empty() {
+                vec![(String::new(), String::new())]
+            } else {
+                emit.iter()
+                    .map(|(account_id, _preview)| {
+                        let api_key = match gw.vault.get_account(&p.id, account_id) {
+                            Ok(entry) => entry.api_key,
+                            Err(e) => {
+                                tracing::warn!(
+                                    provider_id = %p.id,
+                                    account_id = %account_id,
+                                    error = %e,
+                                    "global_resources: failed to decrypt account key; emitting empty"
+                                );
+                                String::new()
+                            }
+                        };
+                        (account_id.clone(), api_key)
+                    })
+                    .collect()
+            }
+        };
+
+        for (account_id, api_key) in decrypted_keys {
+            // DIAG: log the byte range about to be published to MQTT
+            // so we can correlate this preview with the runtime side.
             tracing::info!(
                 provider_id = %p.id,
+                account_id = %account_id,
                 api_key_len = api_key.len(),
                 api_key_prefix = %preview_key(&api_key),
                 "global_resources: building ProviderRef for AvailableProviders snapshot"
             );
-            ProviderRef {
+            providers.push(ProviderRef {
                 id: p.id.clone(),
                 base_url: p.base_url.clone(),
                 protocol_type: map_protocol_type(&p.protocol_type).into(),
@@ -87,9 +143,10 @@ pub(crate) fn build_available_providers(gw: &GatewayState) -> AvailableProviders
                 compact_model: p.compact_model.clone().unwrap_or_default(),
                 custom: p.custom,
                 api_key,
-            }
-        })
-        .collect();
+                account_id,
+            });
+        }
+    }
 
     AvailableProviders {
         version: cache.version,

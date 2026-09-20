@@ -20,6 +20,7 @@ describe("sessionConfigToPatch", () => {
         {
           model: "claude-3",
           provider: "anthropic",
+          account: "acc-1",
           reasoning_effort: "high",
           temperature: 0.5,
         },
@@ -28,6 +29,7 @@ describe("sessionConfigToPatch", () => {
       expect(patch).toEqual({
         model: "claude-3",
         provider: "anthropic",
+        providerAccountId: "acc-1",
         reasoningEffort: "high",
         temperature: 0.5,
         sessionContextWindow: null, // ADR-074: 未提供 → 全量快照补 null（clearOnNull）
@@ -39,6 +41,7 @@ describe("sessionConfigToPatch", () => {
         {
           model: null,
           provider: null,
+          account: null,
           reasoning_effort: null,
           temperature: null,
         },
@@ -47,6 +50,7 @@ describe("sessionConfigToPatch", () => {
       expect(patch).toEqual({
         model: null,
         provider: null,
+        providerAccountId: null,
         reasoningEffort: null,
         temperature: null,
         sessionContextWindow: null,
@@ -107,6 +111,7 @@ describe("sessionConfigToPatch", () => {
       expect(sessionConfigToPatch({}, { clearOnNull: true })).toEqual({
         model: null,
         provider: null,
+        providerAccountId: null,
         reasoningEffort: null,
         temperature: null,
         sessionContextWindow: null,

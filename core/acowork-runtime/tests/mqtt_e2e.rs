@@ -238,6 +238,7 @@ fn test_available_providers_roundtrip() {
             custom: false,
             models: vec![],
             api_key: String::new(),
+            account_id: String::new(),
         }],
     };
 
@@ -381,6 +382,7 @@ fn phase9_model_switch_provider_id_normalization() {
             session_id: "s".into(),
             model_id: "gpt-4o-mini".into(),
             provider_id: String::new(),
+            account_id: String::new(),
         })),
     };
     let env_same = DataEnvelope {
@@ -413,6 +415,7 @@ fn phase9_model_switch_provider_id_normalization() {
             session_id: "s".into(),
             model_id: "MiniMax-Text-01".into(),
             provider_id: "minimax".into(),
+            account_id: String::new(),
         })),
     };
     let env_x = DataEnvelope {

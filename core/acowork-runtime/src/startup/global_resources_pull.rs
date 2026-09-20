@@ -513,6 +513,7 @@ mod tests {
                             compact_model: String::new(),
                             custom: false,
                             api_key: "sk-test".to_string(),
+                            account_id: String::new(),
                         }],
                     },
                 ),

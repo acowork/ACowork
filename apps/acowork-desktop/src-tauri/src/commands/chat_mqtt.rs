@@ -317,6 +317,7 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
                     "session_id": config.session_id,
                     "title": config.title,
                     "provider_id": config.provider_id,
+                    "account_id": config.account_id,
                     "model_id": config.model_id,
                     "reasoning_effort": config.reasoning_effort,
                     "temperature": config.temperature,
@@ -944,11 +945,16 @@ fn build_control_command(
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
+            let account_id = json.get("account_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             tracing::info!(
                 instance_id = %instance_id,
                 session_id = %session_id,
                 model_id = %model_id,
                 provider_id = %provider_id,
+                account_id = %account_id,
                 "BUILDING ModelSwitch control command"
             );
             control_command::Command::ModelSwitch(
@@ -956,6 +962,7 @@ fn build_control_command(
                     session_id,
                     model_id,
                     provider_id,
+                    account_id,
                 },
             )
         }

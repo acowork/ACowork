@@ -39,6 +39,12 @@
 export interface SessionConfigInput {
   model?: string | null;
   provider?: string | null;
+  /**
+   * Multi-account: which of the provider's accounts this session uses.
+   * HTTP `SessionConfigSnapshot` carries `account_id`; MQTT `SessionConfig`
+   * carries it as `account_id` (empty string → `null`).
+   */
+  account?: string | null;
   reasoning_effort?: string | null;
   temperature?: number | null;
   /**
@@ -63,6 +69,8 @@ export interface SessionConfigInput {
 export interface SessionConfigPatch {
   model?: string | null;
   provider?: string | null;
+  /** Multi-account: selected account id for `provider`. `null` = first account. */
+  providerAccountId?: string | null;
   reasoningEffort?: string | null;
   temperature?: number | null;
   /** ADR-074: `null` = no per-session override. */
@@ -109,6 +117,13 @@ export function sessionConfigToPatch(
     patch.provider = config.provider;
   } else if (clearOnNull) {
     patch.provider = null;
+  }
+
+  // -- account (multi-account) --
+  if (typeof config.account === "string" && config.account) {
+    patch.providerAccountId = config.account;
+  } else if (clearOnNull) {
+    patch.providerAccountId = null;
   }
 
   // -- temperature (NaN is the Runtime "no override" sentinel) --

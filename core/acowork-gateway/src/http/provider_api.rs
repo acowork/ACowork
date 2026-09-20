@@ -33,6 +33,10 @@ pub fn provider_routes() -> Router<AppState> {
             delete(remove_provider).put(update_provider),
         )
         .route(
+            "/api/providers/{provider}/keys/{account_id}",
+            delete(remove_provider_account).patch(update_provider_account),
+        )
+        .route(
             "/api/search/keys",
             get(list_search_keys).post(add_search_key),
         )
@@ -51,6 +55,11 @@ pub fn provider_routes() -> Router<AppState> {
 #[derive(Serialize)]
 pub struct ProviderEntryResponse {
     pub provider: String,
+    /// Stable account UUID — empty for legacy single-key rows.
+    /// Use this in subsequent add/update/remove calls.
+    pub account_id: String,
+    /// User-facing label for this account. Empty for legacy rows.
+    pub alias: String,
     pub key_preview: String,
     /// Configured base URL (if any)
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -78,15 +87,35 @@ pub struct ProviderEntryResponse {
 /// Default max output tokens when gateway config doesn't specify a limit.
 const DEFAULT_MAX_OUTPUT_TOKENS: u64 = 32_768;
 
+/// One API key entry inside an `AddProviderRequest.keys` array.
+#[derive(Deserialize)]
+pub struct AddProviderKey {
+    /// User-facing label; optional. Empty/missing → `"{provider}-default"`.
+    #[serde(default)]
+    pub alias: Option<String>,
+    /// API key value. Empty allowed for local or key-less custom providers.
+    #[serde(default)]
+    pub key: String,
+}
+
 /// Add provider request.
 ///
-/// `key` → stored in encrypted Vault.
+/// Backwards compatibility: `key` (single, no alias) is still accepted
+/// and is treated as a one-element `keys` list. New callers should use
+/// `keys` to attach multiple accounts (e.g. work + personal) to the
+/// same provider.
+///
 /// `base_url`, `models`, `compact_model` → stored in provider_list.json.
 /// `model_capabilities` → user-configured overrides merged into offline data.
 #[derive(Deserialize)]
 pub struct AddProviderRequest {
     pub provider: String,
+    /// Legacy single-key field. Ignored when `keys` is non-empty.
+    #[serde(default)]
     pub key: String,
+    /// Multi-account entry: each entry creates a separate vault account.
+    #[serde(default)]
+    pub keys: Vec<AddProviderKey>,
     /// Optional base URL override (e.g. "https://api.deepseek.com/v1")
     #[serde(default)]
     pub base_url: Option<String>,
@@ -117,12 +146,30 @@ pub struct AddProviderRequest {
     pub expected_version: Option<u64>,
 }
 
-/// Update provider request (supports partial updates — key and config are optional).
+/// Update provider request (supports partial updates — config and
+/// incremental key additions are optional).
+///
+/// Two key-bearing fields coexist for backwards compatibility:
+/// - `key` (single, no alias): replaces the first account's key when
+///   present. Pre-multi-account clients keep working.
+/// - `keys` (multi): each entry becomes a brand-new account on the
+///   Vault side, leaving existing accounts untouched. Used by the
+///   edit dialog to add new accounts without disturbing the
+///   already-configured ones.
+///
+/// `base_url`, `models`, `compact_model`, `model_capabilities` cover
+/// provider-level config; they're shared across all accounts.
 #[derive(Deserialize)]
 pub struct UpdateProviderRequest {
-    /// API key. If None or empty, the existing key is preserved.
+    /// Legacy single-key field. If `None` or empty, the existing first
+    /// account's key is preserved. Mutually compatible with `keys`
+    /// (which adds accounts instead of replacing).
     #[serde(default)]
     pub key: Option<String>,
+    /// Multi-account entries to append. Each entry creates a fresh
+    /// vault account; existing accounts are not modified.
+    #[serde(default)]
+    pub keys: Vec<AddProviderKey>,
     /// Optional base URL override
     #[serde(default)]
     pub base_url: Option<String>,
@@ -175,42 +222,52 @@ pub struct UpdateSearchKeyRequest {
 
 /// `GET /api/providers` — list stored providers (masked keys) with config.
 ///
-/// Key previews come from Vault. Config (base_url, models, compact_model)
-/// comes from provider_list.json (resource_cache).
+/// For providers with multiple accounts the response contains one entry
+/// per `(provider, account_id)` pair; provider-level config
+/// (`base_url`, `models`, `compact_model`, `model_capabilities`) is
+/// duplicated across each row for the same provider. Local providers
+/// (no API key) keep emitting a single row with empty `account_id`.
 pub async fn list_providers(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<ProviderEntryResponse>>, ApiError> {
     let gw = state.gateway_state.read().await;
 
-    // Build key_preview lookup from Vault (only for key masking, not authority).
-    // resource_cache.provider_list is the source of truth for which providers exist.
-    let key_previews: std::collections::HashMap<String, String> = gw
-        .vault
-        .list_keys()
-        .map(|entries| {
-            entries
-                .into_iter()
-                .map(|e| (e.provider, e.key_preview))
-                .collect()
-        })
-        .unwrap_or_default();
+    // Group vault accounts by provider so we can join against the
+    // provider_list.json cache below. `vault.list_keys()` already
+    // expands one row per account, so this is a 1:N fan-out.
+    let mut accounts_by_provider: std::collections::HashMap<
+        String,
+        Vec<(String, String, String)>,
+    > = std::collections::HashMap::new();
+    if let Ok(entries) = gw.vault.list_keys() {
+        for e in entries {
+            accounts_by_provider
+                .entry(e.provider)
+                .or_default()
+                .push((e.account_id, e.alias, e.key_preview));
+        }
+    }
 
     // Iterate resource_cache as source of truth for which providers exist.
-    let response: Vec<ProviderEntryResponse> = gw
-        .resource_cache
-        .provider_list
-        .providers
-        .iter()
-        .map(|cfg| {
-            let is_local = models_api::is_local_provider(&cfg.id);
-            let key_preview = if is_local {
-                "(local)".to_string()
-            } else {
-                key_previews.get(&cfg.id).cloned().unwrap_or_default()
-            };
-            ProviderEntryResponse {
+    let mut response: Vec<ProviderEntryResponse> = Vec::new();
+    for cfg in &gw.resource_cache.provider_list.providers {
+        let is_local = models_api::is_local_provider(&cfg.id);
+        let accounts = accounts_by_provider.remove(&cfg.id);
+        let accounts_for_provider: Vec<(String, String, String)> = if is_local {
+            // Local providers don't need a key; emit a single empty row
+            // so the frontend always sees at least one entry per
+            // configured provider.
+            vec![(String::new(), String::new(), "(local)".to_string())]
+        } else {
+            accounts.unwrap_or_default()
+        };
+
+        for (account_id, alias, key_preview) in accounts_for_provider {
+            response.push(ProviderEntryResponse {
                 provider: cfg.id.clone(),
-                key_preview,
+                account_id,
+                alias,
+                key_preview: key_preview.clone(),
                 base_url: if cfg.base_url.is_empty() {
                     None
                 } else {
@@ -229,9 +286,31 @@ pub async fn list_providers(
                         .collect();
                     if caps.is_empty() { None } else { Some(caps) }
                 },
-            }
-        })
-        .collect();
+            });
+        }
+    }
+
+    // Account rows for which there's no provider_list.json entry
+    // (e.g. a key was added but the provider config hasn't been
+    // populated yet). Surface them too so the user can see and edit
+    // orphaned accounts.
+    for (provider, accounts) in accounts_by_provider {
+        for (account_id, alias, key_preview) in accounts {
+            response.push(ProviderEntryResponse {
+                provider: provider.clone(),
+                account_id,
+                key_preview,
+                alias,
+                base_url: None,
+                default_model: None,
+                models: Vec::new(),
+                compact_model: None,
+                local: false,
+                custom: false,
+                model_capabilities: None,
+            });
+        }
+    }
 
     Ok(Json(response))
 }
@@ -263,23 +342,41 @@ pub async fn add_provider(
     }
     let is_local = models_api::is_local_provider(&body.provider);
     let is_custom = body.custom.unwrap_or(false);
-    if !is_local && !is_custom && body.key.is_empty() {
+
+    // Normalise `key` + `keys[]` into a single `[(alias, key)]` list.
+    // Legacy single-key callers keep working; new callers pass `keys`
+    // for multi-account setups.
+    let key_entries: Vec<(Option<String>, String)> = if !body.keys.is_empty() {
+        body.keys
+            .iter()
+            .map(|k| (k.alias.clone(), k.key.clone()))
+            .collect()
+    } else if !body.key.is_empty() || is_local || is_custom {
+        vec![(None, body.key.clone())]
+    } else {
+        Vec::new()
+    };
+    if !is_local && !is_custom && key_entries.is_empty() {
         return Err(ApiError::bad_request("key must not be empty"));
     }
 
     let mut gw = state.gateway_state.write().await;
 
-    // 1. Store API key in encrypted Vault.
-    let effective_key = if is_local {
-        "local".to_string()
-    } else if is_custom && body.key.is_empty() {
-        "custom".to_string()
-    } else {
-        body.key.clone()
-    };
-    gw.vault
-        .store_key(&body.provider, &effective_key)
-        .map_err(|e| ApiError::internal(&format!("Failed to store key: {}", e)))?;
+    // 1. Store each API key as a separate Vault account. Local / key-less
+    //    custom providers still get a single default account so the
+    //    Runtime can resolve a (provider, account) pair.
+    for (alias, raw_key) in &key_entries {
+        let effective_key = if is_local {
+            "local".to_string()
+        } else if is_custom && raw_key.is_empty() {
+            "custom".to_string()
+        } else {
+            raw_key.clone()
+        };
+        gw.vault
+            .add_account(&body.provider, alias.as_deref(), &effective_key)
+            .map_err(|e| ApiError::internal(&format!("Failed to store key: {}", e)))?;
+    }
 
     // 2. Resolve models list.
     let resolved_models: Vec<String> = if !body.models.is_empty() {
@@ -376,6 +473,107 @@ pub async fn remove_provider(
     }))
 }
 
+/// `DELETE /api/providers/:provider/keys/:account_id` — remove ONE account
+/// (API key) of a provider.
+///
+/// The provider's other accounts and its provider-level config (`base_url`,
+/// `models`, `compact_model`) stay untouched. Removing the last account
+/// leaves the provider listed but keyless — `list_providers` iterates the
+/// account rows, so it drops out of the configured set and the provider
+/// returns to the "not yet configured" list.
+pub async fn remove_provider_account(
+    State(state): State<AppState>,
+    Path((provider, account_id)): Path<(String, String)>,
+) -> Result<Json<MessageResponse>, ApiError> {
+    let mut gw = state.gateway_state.write().await;
+
+    // Vault::delete removes the on-disk entry as well, so no extra
+    // persistence step here (unlike provider_list.json below).
+    gw.vault
+        .remove_account(&provider, &account_id)
+        .map_err(|e| {
+            ApiError::not_found(&format!(
+                "Account '{}' not found for provider '{}': {}",
+                account_id, provider, e
+            ))
+        })?;
+    drop(gw);
+
+    // Hot-push: running agents must stop receiving the removed account.
+    // ADR-033: Trigger MQTT global resource republish after resource change.
+    if let Some(ref trigger) = state.mqtt_publisher_trigger {
+        trigger.trigger();
+    }
+
+    Ok(Json(MessageResponse {
+        message: format!("Account {} removed for provider: {}", account_id, provider),
+    }))
+}
+
+/// `PATCH /api/providers/:provider/keys/:account_id` — edit an existing
+/// account's `alias` and/or `api_key`. At least one field must be
+/// provided. Used by the harness edit dialog so users can rename or
+/// rotate keys on already-configured accounts without losing the
+/// account's UUID.
+pub async fn update_provider_account(
+    State(state): State<AppState>,
+    Path((provider, account_id)): Path<(String, String)>,
+    Json(body): Json<UpdateProviderAccountRequest>,
+) -> Result<Json<MessageResponse>, ApiError> {
+    if body.alias.is_none() && body.key.is_none() {
+        return Err(ApiError::bad_request(
+            "at least one of `alias` or `key` must be provided",
+        ));
+    }
+
+    let mut gw = state.gateway_state.write().await;
+    if let Some(ref new_alias) = body.alias {
+        gw.vault
+            .update_alias(&provider, &account_id, new_alias)
+            .map_err(|e| {
+                ApiError::not_found(&format!(
+                    "Failed to update alias for {}/{}: {}",
+                    provider, account_id, e
+                ))
+            })?;
+    }
+    if let Some(ref new_key) = body.key {
+        gw.vault
+            .update_account_key(&provider, &account_id, new_key)
+            .map_err(|e| {
+                ApiError::not_found(&format!(
+                    "Failed to update key for {}/{}: {}",
+                    provider, account_id, e
+                ))
+            })?;
+    }
+    drop(gw);
+
+    // Hot-push: the account's alias is used by the model menu breadcrumb
+    // when drilling into multi-key providers, so we must republish.
+    if let Some(ref trigger) = state.mqtt_publisher_trigger {
+        trigger.trigger();
+    }
+
+    Ok(Json(MessageResponse {
+        message: format!("Account {} updated for provider: {}", account_id, provider),
+    }))
+}
+
+/// Request body for `PATCH /api/providers/:provider/keys/:account_id`.
+///
+/// Both fields are optional but at least one must be present — enforced
+/// in the handler so we reject no-op calls early.
+#[derive(Deserialize)]
+pub struct UpdateProviderAccountRequest {
+    /// New alias for the account. Trimmed server-side; must be non-empty.
+    #[serde(default)]
+    pub alias: Option<String>,
+    /// New API key for the account. Trimmed server-side; must be non-empty.
+    #[serde(default)]
+    pub key: Option<String>,
+}
+
 /// `PUT /api/providers/:provider` — update a provider (key and/or config).
 ///
 /// If `key` is None/empty, the existing Vault key is preserved.
@@ -398,25 +596,30 @@ pub async fn update_provider(
 
     let mut gw = state.gateway_state.write().await;
 
-    // 1. Update API key in Vault (preserve existing if not provided).
-    let api_key = match body.key {
-        Some(ref k) if !k.is_empty() => k.clone(),
-        _ => match gw.vault.get_provider(&provider) {
-            Ok(entry) => entry.api_key,
-            Err(e) => {
-                return Err(ApiError::not_found(&format!(
-                    "Provider '{}' not found in Vault: {}",
-                    provider, e
-                )));
-            }
-        },
-    };
-    // Only re-store if the key actually changed; otherwise skip to avoid
-    // unnecessary Vault re-serialization.
-    if body.key.as_ref().is_some_and(|k| !k.is_empty()) {
+    // 1a. Legacy single-key update path — kept for backwards
+    //     compatibility with pre-multi-account clients. When the caller
+    //     provides `keys`, the per-account update still wins: it adds
+    //     accounts instead of mutating the first one.
+    let has_legacy_key_change = body.key.as_ref().is_some_and(|k| !k.is_empty());
+    if has_legacy_key_change && body.keys.is_empty() {
+        let api_key = body.key.as_ref().expect("checked above").clone();
         gw.vault
             .store_key(&provider, &api_key)
             .map_err(|e| ApiError::internal(&format!("Failed to update key: {}", e)))?;
+    }
+
+    // 1b. Multi-account path — append each entry as a fresh account.
+    //     Empty keys are silently dropped so the dialog can keep
+    //     stub rows around without contaminating the vault.
+    for entry in &body.keys {
+        let alias = entry.alias.as_deref();
+        let api_key = entry.key.trim();
+        if api_key.is_empty() {
+            continue;
+        }
+        gw.vault
+            .add_account(&provider, alias, api_key)
+            .map_err(|e| ApiError::internal(&format!("Failed to add account: {}", e)))?;
     }
 
     // 2. Resolve models: provided > default_model > existing from cache.
@@ -741,5 +944,50 @@ mod tests {
         assert_eq!(req.key, Some("sk-new".to_string()));
         assert_eq!(req.base_url, Some("https://api.custom.com/v1".to_string()));
         assert_eq!(req.default_model, Some("custom-model".to_string()));
+    }
+
+    #[test]
+    fn test_update_provider_request_accepts_keys_array() {
+        // The edit dialog sends `keys` to append accounts in one round-trip.
+        let json = r#"{
+            "keys": [
+                {"alias": "work", "key": "sk-work"},
+                {"alias": "personal", "key": "sk-personal"}
+            ],
+            "base_url": "https://api.example.com/v1"
+        }"#;
+        let req: UpdateProviderRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.keys.len(), 2);
+        assert_eq!(req.keys[0].alias.as_deref(), Some("work"));
+        assert_eq!(req.keys[0].key, "sk-work");
+        assert_eq!(req.keys[1].alias.as_deref(), Some("personal"));
+        assert_eq!(req.keys[1].key, "sk-personal");
+        assert_eq!(req.base_url.as_deref(), Some("https://api.example.com/v1"));
+        // `key` defaults to None when only `keys` is sent.
+        assert!(req.key.is_none());
+    }
+
+    #[test]
+    fn test_update_provider_account_request_alias_only() {
+        let json = r#"{"alias": "prod"}"#;
+        let req: UpdateProviderAccountRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.alias.as_deref(), Some("prod"));
+        assert!(req.key.is_none());
+    }
+
+    #[test]
+    fn test_update_provider_account_request_key_only() {
+        let json = r#"{"key": "sk-rotated"}"#;
+        let req: UpdateProviderAccountRequest = serde_json::from_str(json).unwrap();
+        assert!(req.alias.is_none());
+        assert_eq!(req.key.as_deref(), Some("sk-rotated"));
+    }
+
+    #[test]
+    fn test_update_provider_account_request_both_fields() {
+        let json = r#"{"alias": "prod", "key": "sk-rotated"}"#;
+        let req: UpdateProviderAccountRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.alias.as_deref(), Some("prod"));
+        assert_eq!(req.key.as_deref(), Some("sk-rotated"));
     }
 }

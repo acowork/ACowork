@@ -606,6 +606,7 @@ impl AgentLoop {
 
         match self.session_core.build_provider_for(
             &resolved.provider_id,
+            None,
             &self.core.config,
             &self.core.global_provider_list,
             &self.core.provider_key_vault,
@@ -2030,7 +2031,14 @@ mod tests {
         // Only the cloud provider (deepseek) gets a key; ollama-local stays
         // keyless (local provider, no key required).
         let mut keys = loop_.core.provider_key_vault.write().unwrap();
-        keys.insert("deepseek".to_string(), "sk-test-deepseek".to_string());
+        keys.insert(
+            "deepseek".to_string(),
+            vec![acowork_core::protocol::ProviderKeyEntry {
+                provider_id: "deepseek".to_string(),
+                account_id: String::new(),
+                api_key: "sk-test-deepseek".to_string(),
+            }],
+        );
     }
 
     fn set_session(loop_: &mut AgentLoop, provider: &str, model: &str) {

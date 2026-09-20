@@ -18,6 +18,28 @@ use crate::agent::loop_::{ChunkEvent, SessionChunkEvent};
 use crate::agent::loop_approval::ApprovalHandle;
 use crate::agent::session_state::SessionStatus;
 use crate::cancellation::CancelHandle;
+
+/// Resolve an account's API key from a provider's account list (multi-account).
+///
+/// - `account_id == None` → the provider's first account (pre-multi-account
+///   behaviour / no explicit selection).
+/// - `Some(id)` matching an account → that account's key.
+/// - `Some(id)` not found (account deleted since selection) → the first
+///   account, so a stale selection degrades gracefully instead of failing.
+pub(crate) fn resolve_provider_key(
+    accounts: Option<&[acowork_core::protocol::ProviderKeyEntry]>,
+    account_id: Option<&str>,
+) -> Option<String> {
+    let list = accounts?;
+    match account_id {
+        Some(aid) => list
+            .iter()
+            .find(|e| e.account_id == aid)
+            .or_else(|| list.first()),
+        None => list.first(),
+    }
+    .map(|e| e.api_key.clone())
+}
 use crate::conversation::StreamingStateMap;
 use crate::providers::reliable::RetryWaitHandle;
 
@@ -699,9 +721,10 @@ impl SessionCore {
     pub fn build_provider_for(
         &self,
         provider_id: &str,
+        account_id: Option<&str>,
         config: &crate::config::RuntimeConfig,
         global_provider_list: &std::sync::RwLock<Vec<acowork_core::protocol::ProviderListItem>>,
-        provider_key_vault: &std::sync::RwLock<std::collections::HashMap<String, String>>,
+        provider_key_vault: &std::sync::RwLock<std::collections::HashMap<String, Vec<acowork_core::protocol::ProviderKeyEntry>>>,
         compat_cache: Option<&std::sync::Arc<crate::providers::compat::CompatCache>>,
     ) -> Option<Arc<dyn acowork_core::providers::traits::Provider>> {
         let provider_meta = {
@@ -709,9 +732,20 @@ impl SessionCore {
             list.iter().find(|p| p.id == provider_id).cloned()
         }?;
 
+        // Multi-account: resolve the key for the requested account.
         let api_key = {
             let vault = provider_key_vault.read().unwrap();
-            vault.get(provider_id).cloned()
+            let accounts = vault.get(provider_id);
+            if let (Some(list), Some(aid)) = (accounts, account_id)
+                && !list.iter().any(|e| e.account_id == aid)
+            {
+                tracing::warn!(
+                    provider_id = %provider_id,
+                    account_id = %aid,
+                    "build_provider_for: account not found, falling back to first account"
+                );
+            }
+            resolve_provider_key(accounts.map(|v| v.as_slice()), account_id)
         };
 
         tracing::debug!(
@@ -772,6 +806,50 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::AtomicUsize;
     use tokio::sync::mpsc;
+
+    // ── resolve_provider_key (multi-account) ───────────────────────────
+
+    fn acct(account_id: &str, api_key: &str) -> acowork_core::protocol::ProviderKeyEntry {
+        acowork_core::protocol::ProviderKeyEntry {
+            provider_id: "p".to_string(),
+            account_id: account_id.to_string(),
+            api_key: api_key.to_string(),
+        }
+    }
+
+    #[test]
+    fn resolve_key_picks_matching_account() {
+        let list = vec![acct("a1", "k1"), acct("a2", "k2")];
+        assert_eq!(
+            resolve_provider_key(Some(&list), Some("a2")).as_deref(),
+            Some("k2")
+        );
+    }
+
+    #[test]
+    fn resolve_key_none_uses_first_account() {
+        let list = vec![acct("a1", "k1"), acct("a2", "k2")];
+        assert_eq!(
+            resolve_provider_key(Some(&list), None).as_deref(),
+            Some("k1")
+        );
+    }
+
+    #[test]
+    fn resolve_key_missing_account_falls_back_to_first() {
+        let list = vec![acct("a1", "k1")];
+        assert_eq!(
+            resolve_provider_key(Some(&list), Some("gone")).as_deref(),
+            Some("k1")
+        );
+    }
+
+    #[test]
+    fn resolve_key_empty_returns_none() {
+        assert_eq!(resolve_provider_key(None, Some("a1")), None);
+        let empty: Vec<acowork_core::protocol::ProviderKeyEntry> = vec![];
+        assert_eq!(resolve_provider_key(Some(&empty), None), None);
+    }
 
     // ── Helpers ────────────────────────────────────────────────────────
 

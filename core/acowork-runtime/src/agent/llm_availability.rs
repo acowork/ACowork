@@ -202,6 +202,7 @@ mod tests {
             compact_model: String::new(),
             custom: false,
             api_key: api_key.to_string(),
+            account_id: String::new(),
         }
     }
 

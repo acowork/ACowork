@@ -279,6 +279,7 @@ fn extract_provider_keys(
         .filter(|pr| !pr.api_key.is_empty())
         .map(|pr| acowork_core::protocol::ProviderKeyEntry {
             provider_id: pr.id.clone(),
+            account_id: pr.account_id.clone(),
             api_key: pr.api_key.clone(),
         })
         .collect()

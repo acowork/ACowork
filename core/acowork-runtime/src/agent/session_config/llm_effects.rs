@@ -117,9 +117,10 @@ pub fn apply_llm_effects(
 ) {
     let model_changed = snapshot.model != prev.model;
     let provider_changed = snapshot.provider != prev.provider;
+    let account_changed = snapshot.account_id != prev.account_id;
 
-    // ── Model/Provider change -> rebuild LLM Provider ──────────────
-    if (model_changed || provider_changed)
+    // ── Model/Provider/Account change -> rebuild LLM Provider ──────
+    if (model_changed || provider_changed || account_changed)
         && let Some(ref model) = snapshot.model
     {
         tracing::info!(
@@ -132,10 +133,14 @@ pub fn apply_llm_effects(
         agent_loop.session.set_model(model.clone());
         if let Some(ref provider_id) = snapshot.provider {
             agent_loop.session.set_provider(provider_id.clone());
+            if let Some(ref account_id) = snapshot.account_id {
+                agent_loop.session.set_account_id(account_id.clone());
+            }
 
             // Rebuild the LLM Provider instance from the shared global cache.
             if let Some(new_provider) = agent_loop.session_core.build_provider_for(
                 provider_id,
+                snapshot.account_id.as_deref(),
                 &agent_loop.core.config,
                 &agent_loop.core.global_provider_list,
                 &agent_loop.core.provider_key_vault,

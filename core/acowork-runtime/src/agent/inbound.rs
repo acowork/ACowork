@@ -184,6 +184,8 @@ pub enum InboundMessage {
     ModelSwitchAction {
         model_id: String,
         provider_id: Option<String>,
+        /// Multi-account: optional account override (see `ControlAction::ModelSwitch`).
+        account_id: Option<String>,
     },
     /// ADR-034 Phase 7: Per-session reasoning effort change.
     ReasoningEffortAction { effort: String },

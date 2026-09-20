@@ -309,11 +309,13 @@ fn control_action_to_inbound(
             session_id,
             model_id,
             provider_id,
+            account_id,
         } => Some((
             session_id,
             InboundMessage::ModelSwitchAction {
                 model_id,
                 provider_id,
+                account_id,
             },
         )),
         ControlAction::ReasoningEffort { session_id, effort } => {
@@ -1221,10 +1223,12 @@ async fn dispatch_inbound(
         InboundMessage::ModelSwitchAction {
             model_id,
             provider_id,
+            account_id,
         } => {
             let delta = crate::agent::session_config::SessionConfigDelta {
                 model: Some(model_id),
                 provider: provider_id,
+                account_id,
                 ..Default::default()
             };
             let slot = session_config_slot.lock().await;
@@ -1240,6 +1244,7 @@ async fn dispatch_inbound(
                         &session_id,
                         delta.model.unwrap_or_default(),
                         delta.provider,
+                        delta.account_id,
                     )
                     .map_err(|e| {
                         RuntimeError::Config(format!("ModelSwitchAction (fallback): {}", e))

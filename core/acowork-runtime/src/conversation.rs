@@ -288,6 +288,11 @@ pub struct SessionMeta {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
+    /// Multi-account (ADR-012): which of the provider's accounts this session
+    /// uses. `None` = provider's first account. Only the stable `account_id`
+    /// is persisted — the mutable `alias` is resolved for display elsewhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -589,6 +594,10 @@ pub struct ConversationSession {
     model: std::sync::Mutex<Option<String>>,
     /// Per-session provider selection (ADR-012).
     provider: std::sync::Mutex<Option<String>>,
+    /// Per-session account selection (multi-account, ADR-012): which of the
+    /// provider's accounts (API keys) this session uses. Persisted in the meta
+    /// file; `None` = provider's first account.
+    account_id: std::sync::Mutex<Option<String>>,
     /// Per-session reasoning effort override, persisted in meta file.
     reasoning_effort: std::sync::Mutex<Option<String>>,
     /// Per-session temperature override, persisted in meta file.
@@ -732,6 +741,7 @@ impl ConversationSession {
             workspace_id: self.workspace_id.lock().ok().and_then(|w| w.clone()),
             model: self.model.lock().ok().and_then(|m| m.clone()),
             provider: self.provider.lock().ok().and_then(|p| p.clone()),
+            account_id: self.account_id.lock().ok().and_then(|a| a.clone()),
             reasoning_effort: self.reasoning_effort.lock().ok().and_then(|r| r.clone()),
             temperature: self.temperature.lock().ok().and_then(|t| *t),
             context_window: self.context_window.lock().ok().and_then(|c| *c),
@@ -775,6 +785,7 @@ impl ConversationSession {
             workspace_id: full.workspace_id.unwrap_or_default(),
             llm_availability: llm_availability as i32,
             context_window: full.context_window,
+            account_id: full.account_id.unwrap_or_default(),
         }
     }
 
@@ -981,6 +992,7 @@ impl ConversationSession {
             workspace_id: std::sync::Mutex::new(config.workspace_id),
             model: std::sync::Mutex::new(config.model),
             provider: std::sync::Mutex::new(config.provider),
+            account_id: std::sync::Mutex::new(None),
             reasoning_effort: std::sync::Mutex::new(None),
             temperature: std::sync::Mutex::new(None),
             context_window: std::sync::Mutex::new(None),
@@ -1079,6 +1091,7 @@ impl ConversationSession {
                 workspace_id: std::sync::Mutex::new(meta.workspace_id),
                 model: std::sync::Mutex::new(meta.model),
                 provider: std::sync::Mutex::new(meta.provider),
+                account_id: std::sync::Mutex::new(meta.account_id),
                 reasoning_effort: std::sync::Mutex::new(meta.reasoning_effort),
                 temperature: std::sync::Mutex::new(meta.temperature),
                 context_window: std::sync::Mutex::new(meta.context_window),
@@ -1382,6 +1395,11 @@ impl ConversationSession {
         self.provider.lock().ok().and_then(|p| p.clone())
     }
 
+    /// Return the persisted account selection, if any (multi-account, ADR-012).
+    pub fn account_id(&self) -> Option<String> {
+        self.account_id.lock().ok().and_then(|a| a.clone())
+    }
+
     /// Persist the per-session model and provider selection to meta file (ADR-012).
     ///
     /// Does NOT mutate the in-memory `SessionState` — the caller is
@@ -1572,6 +1590,12 @@ impl ConversationSession {
             }
             changed = true;
         }
+        if let Some(ref account_id) = delta.account_id {
+            if let Ok(mut a) = self.account_id.lock() {
+                *a = Some(account_id.clone());
+            }
+            changed = true;
+        }
         if let Some(ref workspace_id) = delta.workspace_id {
             if let Ok(mut w) = self.workspace_id.lock() {
                 *w = Some(workspace_id.clone());
@@ -1644,6 +1668,7 @@ impl ConversationSession {
         crate::agent::session_config::SessionConfigSnapshot {
             model: self.model.lock().ok().and_then(|m| m.clone()),
             provider: self.provider.lock().ok().and_then(|p| p.clone()),
+            account_id: self.account_id.lock().ok().and_then(|a| a.clone()),
             workspace_id: self.workspace_id.lock().ok().and_then(|w| w.clone()),
             reasoning_effort: self.reasoning_effort.lock().ok().and_then(|r| r.clone()),
             temperature: self.temperature.lock().ok().and_then(|t| *t),
@@ -1948,6 +1973,7 @@ impl Clone for ConversationSession {
             ),
             model: std::sync::Mutex::new(self.model.lock().ok().and_then(|m| m.clone())),
             provider: std::sync::Mutex::new(self.provider.lock().ok().and_then(|p| p.clone())),
+            account_id: std::sync::Mutex::new(self.account_id.lock().ok().and_then(|a| a.clone())),
             reasoning_effort: std::sync::Mutex::new(
                 self.reasoning_effort.lock().ok().and_then(|r| r.clone()),
             ),
@@ -2056,6 +2082,8 @@ pub struct SessionInfo {
     pub model: Option<String>,
     /// Per-session provider selection (ADR-012), from JSONL metadata
     pub provider: Option<String>,
+    /// Per-session account selection (multi-account), from JSONL metadata
+    pub account_id: Option<String>,
     /// Per-session workspace selection, from JSONL metadata
     pub workspace_id: Option<String>,
 }
@@ -2444,6 +2472,7 @@ pub fn scan_sessions_async(
                 corrupted: meta.corrupted,
                 model: meta.model.clone(),
                 provider: meta.provider.clone(),
+                account_id: meta.account_id.clone(),
                 workspace_id: meta.workspace_id.clone(),
             })
             .collect();
@@ -3068,6 +3097,7 @@ mod tests {
                 workspace_id: None,
                 model: None,
                 provider: None,
+                account_id: None,
                 reasoning_effort: None,
                 temperature: None,
                 context_window: None,
@@ -3276,6 +3306,7 @@ mod tests {
             workspace_id: None,
             model: None,
             provider: None,
+            account_id: None,
             reasoning_effort: None,
             temperature: None,
             context_window: None,
@@ -3776,6 +3807,7 @@ mod tests {
             workspace_id: None,
             model: Some("gpt-4".to_string()),
             provider: Some("openai".to_string()),
+            account_id: None,
             reasoning_effort: None,
             temperature: Some(0.7),
             context_window: None,

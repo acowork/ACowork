@@ -12,6 +12,7 @@ fn encode_session_config_runtime_realistic() {
         title: "启动时红色报警框一闪而过的问题排查".into(),
         provider_id: "minimax-cn-coding-plan".into(),
         model_id: "MiniMax-M3".into(),
+        account_id: "".into(),
         reasoning_effort: "".into(),
         temperature: 0.1,
         workspace_id: "ws-091813bf4349".into(),
