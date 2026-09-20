@@ -59,11 +59,25 @@ pub struct NodeInfoState {
 #[derive(Debug, Default)]
 pub struct NodeRegistry {
     nodes: HashMap<String, NodeInfoState>,
+    /// Exact identity anchor for the Gateway's own-machine node
+    /// (ADR-075 D5 amendment). Learned from a spawn/supervision cycle
+    /// or a same-hostname resolution, persisted to
+    /// `{data_dir}/local_node.json` and re-injected at startup — see
+    /// [`local_node_id`] for why `gateway_managed` alone is not
+    /// machine-scoped.
+    local_node_anchor: Option<String>,
 }
 
 impl NodeRegistry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Pin the exact node_id of the Gateway's own-machine node. The
+    /// anchor is authoritative in [`local_node_id`]: once set, no
+    /// other (possibly remote) `gateway_managed` node can win.
+    pub fn set_local_node_anchor(&mut self, node_id: &str) {
+        self.local_node_anchor = Some(node_id.to_string());
     }
 
     /// Update a node's status from a plain-text MQTT message.
@@ -365,46 +379,107 @@ pub fn new_shared_registry() -> SharedNodeRegistry {
 
 /// The node_id of the Gateway's own-machine node (ADR-075 D5).
 ///
-/// NOT a pure function anymore: `node_id` is a UUID minted by the Node
-/// at first start, so the Gateway cannot derive it from the hostname.
-/// It queries the registry for a node that is `gateway_managed == true`
-/// (persisted at spawn, reported on every NodeInfo) and currently
-/// online. Multiple hits → the newest `last_updated` wins (WARN);
-/// none → `None`, and callers must fail loud ("本机节点未上线") instead
-/// of silently targeting a remote node.
+/// NOT a pure function: `node_id` is a UUID minted by the Node at
+/// first start, so the Gateway cannot derive it from the hostname.
+/// Resolution order:
+///
+/// 1. **Anchor** — the id this Gateway resolved before (learned from
+///    a spawn, persisted to `{data_dir}/local_node.json`, re-injected
+///    via [`NodeRegistry::set_local_node_anchor`]), still online.
+///    Exact and machine-scoped by construction.
+/// 2. **Same-hostname scan** — `gateway_managed == true` && online &&
+///    the node's reported `NodeInfo.hostname` equals this machine's
+///    (both sides share `acowork_core::node::system_hostname()`).
+///    Covers the first boot after an upgrade (no anchor file yet) and
+///    a deleted anchor file. Multiple hits → the newest
+///    `last_updated` wins (WARN).
+///
+/// The hostname gate is load-bearing: `gateway_managed` means "spawned
+/// by a Gateway on its own machine", NOT "spawned by THIS Gateway" —
+/// without it a remote LAN node reconnecting right after a restart
+/// masquerades as the local node and the Gateway skips spawning the
+/// real one (2026-09-20 incident: the Mac's own node never started
+/// because the Windows node carried the marker over the LAN).
+///
+/// None → callers must fail loud ("本机节点未上线") instead of silently
+/// targeting a remote node (ADR-075 Q2).
 pub async fn local_node_id(registry: &SharedNodeRegistry) -> Option<String> {
-    let reg = registry.read().await;
+    // Fast path: the persisted/learned anchor, still online.
+    {
+        let reg = registry.read().await;
+        if let Some(anchor) = reg.local_node_anchor.as_deref()
+            && reg.nodes.get(anchor).is_some_and(|n| n.online)
+        {
+            return Some(anchor.to_string());
+        }
+    }
+
+    // Fallback: a gateway-managed node that reports THIS machine's
+    // hostname. Missing info / empty hostname never matches — fail
+    // safe (spawning our own node) over guessing.
+    let local_hostname = acowork_core::node::system_hostname();
+    let mut reg = registry.write().await;
     let mut candidates: Vec<&NodeInfoState> = reg
         .nodes
         .values()
-        .filter(|n| n.gateway_managed && n.online)
+        .filter(|n| n.gateway_managed && n.online && node_is_on_local_machine(n, &local_hostname))
         .collect();
     if candidates.is_empty() {
         return None;
     }
     candidates.sort_by_key(|n| n.last_updated);
     let best = candidates.pop().expect("non-empty");
+    let resolved = best.node_id.clone();
     if !candidates.is_empty() {
         let others: Vec<&str> = candidates.iter().map(|n| n.node_id.as_str()).collect();
         tracing::warn!(
             best = %best.node_id,
             others = ?others,
-            "Multiple gateway-managed nodes online — using the most recently updated"
+            "Multiple gateway-managed nodes online on this machine — using the most recently updated"
         );
     }
-    Some(best.node_id.clone())
+    // Memoize so later calls skip the scan (online-ness is re-checked
+    // above on every call).
+    reg.local_node_anchor = Some(resolved.clone());
+    Some(resolved)
+}
+
+/// Whether a registry entry reports this machine's hostname.
+fn node_is_on_local_machine(node: &NodeInfoState, local_hostname: &str) -> bool {
+    node.info.as_ref().is_some_and(|info| {
+        !info.hostname.is_empty() && info.hostname.eq_ignore_ascii_case(local_hostname)
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Info fixture for a node reporting THIS machine's hostname —
+    /// what `acowork-node` always does (`system_hostname()`), and what
+    /// the local-node resolution requires.
     fn info_envelope(node_id: &str, node_name: &str, gateway_managed: bool) -> Vec<u8> {
+        info_envelope_on_host(
+            node_id,
+            node_name,
+            gateway_managed,
+            &acowork_core::node::system_hostname(),
+        )
+    }
+
+    /// Info fixture reporting an arbitrary hostname (cross-machine
+    /// scenarios).
+    fn info_envelope_on_host(
+        node_id: &str,
+        node_name: &str,
+        gateway_managed: bool,
+        hostname: &str,
+    ) -> Vec<u8> {
         let info = NodeInfo {
             node_id: node_id.to_string(),
             node_name: node_name.to_string(),
             gateway_managed,
-            hostname: "h".to_string(),
+            hostname: hostname.to_string(),
             os: "macos".to_string(),
             arch: "aarch64".to_string(),
             node_version: "0.1.0".to_string(),
@@ -648,5 +723,108 @@ mod tests {
         }
         // local-2 was updated last → it wins.
         assert_eq!(local_node_id(&registry).await.as_deref(), Some("local-2"));
+    }
+
+    #[tokio::test]
+    async fn local_node_id_rejects_gateway_managed_node_on_another_machine() {
+        // 2026-09-20 incident regression: a node spawned by a Gateway
+        // on ANOTHER machine (LAN) carries gateway_managed = true too —
+        // it must never resolve as this machine's local node.
+        let registry = new_shared_registry();
+        registry
+            .write()
+            .await
+            .update_status_from_mqtt("acowork/nodes/remote-managed/status", b"online");
+        registry
+            .write()
+            .await
+            .update_info_from_mqtt(
+                "acowork/nodes/remote-managed/info",
+                &info_envelope_on_host("remote-managed", "nytb", true, "OTHER-PC"),
+            );
+        assert_eq!(local_node_id(&registry).await, None);
+
+        // The real local node (reports this machine's hostname) still
+        // resolves alongside it.
+        registry
+            .write()
+            .await
+            .update_status_from_mqtt("acowork/nodes/local-1/status", b"online");
+        registry
+            .write()
+            .await
+            .update_info_from_mqtt(
+                "acowork/nodes/local-1/info",
+                &info_envelope("local-1", "local-box", true),
+            );
+        assert_eq!(local_node_id(&registry).await.as_deref(), Some("local-1"));
+    }
+
+    #[tokio::test]
+    async fn local_node_id_requires_a_non_empty_hostname() {
+        // gateway_managed but no reported hostname cannot be proven
+        // local — fail safe (spawn our own) over guessing.
+        let registry = new_shared_registry();
+        registry
+            .write()
+            .await
+            .update_status_from_mqtt("acowork/nodes/managed-1/status", b"online");
+        registry
+            .write()
+            .await
+            .update_info_from_mqtt(
+                "acowork/nodes/managed-1/info",
+                &info_envelope_on_host("managed-1", "m1", true, ""),
+            );
+        assert_eq!(local_node_id(&registry).await, None);
+    }
+
+    #[tokio::test]
+    async fn local_node_id_prefers_exact_anchor_over_candidates() {
+        let registry = new_shared_registry();
+        // Anchor recorded by a previous spawn/supervision cycle.
+        registry.write().await.set_local_node_anchor("local-1");
+        for id in ["local-1", "local-2"] {
+            registry
+                .write()
+                .await
+                .update_status_from_mqtt(&format!("acowork/nodes/{id}/status"), b"online");
+            registry
+                .write()
+                .await
+                .update_info_from_mqtt(
+                    &format!("acowork/nodes/{id}/info"),
+                    &info_envelope(id, &format!("{id}-box"), true),
+                );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        // local-2 is newer, but the exact anchor wins.
+        assert_eq!(local_node_id(&registry).await.as_deref(), Some("local-1"));
+
+        // Anchor goes offline → fall back to the same-hostname scan.
+        registry
+            .write()
+            .await
+            .update_status_from_mqtt("acowork/nodes/local-1/status", b"offline");
+        assert_eq!(local_node_id(&registry).await.as_deref(), Some("local-2"));
+    }
+
+    #[tokio::test]
+    async fn local_node_id_stale_anchor_falls_back_to_hostname_scan() {
+        let registry = new_shared_registry();
+        // Anchor points at a node that is gone (identity re-minted).
+        registry.write().await.set_local_node_anchor("ghost");
+        registry
+            .write()
+            .await
+            .update_status_from_mqtt("acowork/nodes/local-1/status", b"online");
+        registry
+            .write()
+            .await
+            .update_info_from_mqtt(
+                "acowork/nodes/local-1/info",
+                &info_envelope("local-1", "local-box", true),
+            );
+        assert_eq!(local_node_id(&registry).await.as_deref(), Some("local-1"));
     }
 }
