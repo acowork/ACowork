@@ -803,7 +803,11 @@ impl ConversationSession {
             .lock()
             .map(|s| s.clone())
             .unwrap_or_default();
-        let ratio = self.last_ratio.lock().map(|r| *r).unwrap_or(0.0);
+        let ratio = self
+            .last_ratio
+            .lock()
+            .map(|r| *r)
+            .unwrap_or(crate::token::counter::DEFAULT_RATIO);
         let context_usage = self
             .last_context_usage
             .lock()
@@ -1009,7 +1013,7 @@ impl ConversationSession {
             state_change_tx: state_tx,
             config_version: AtomicU64::new(0),
             last_status: std::sync::Mutex::new(String::new()),
-            last_ratio: std::sync::Mutex::new(0.0),
+            last_ratio: std::sync::Mutex::new(crate::token::counter::DEFAULT_RATIO),
             last_context_usage: std::sync::Mutex::new(String::new()),
             last_context_usage_sections: std::sync::Mutex::new(None),
             last_compaction_offset,
@@ -1108,7 +1112,7 @@ impl ConversationSession {
                 state_change_tx: state_tx,
                 config_version: AtomicU64::new(0),
                 last_status: std::sync::Mutex::new(String::new()),
-                last_ratio: std::sync::Mutex::new(0.0),
+                last_ratio: std::sync::Mutex::new(crate::token::counter::DEFAULT_RATIO),
                 last_context_usage: std::sync::Mutex::new(String::new()),
                 last_context_usage_sections: std::sync::Mutex::new(None),
                 last_compaction_offset,
@@ -2007,7 +2011,11 @@ impl Clone for ConversationSession {
                     .unwrap_or_default(),
             ),
             last_ratio: std::sync::Mutex::new(
-                self.last_ratio.lock().ok().map(|r| *r).unwrap_or(0.0),
+                self.last_ratio
+                    .lock()
+                    .ok()
+                    .map(|r| *r)
+                    .unwrap_or(crate::token::counter::DEFAULT_RATIO),
             ),
             last_context_usage: std::sync::Mutex::new(
                 self.last_context_usage

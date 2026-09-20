@@ -194,7 +194,9 @@ impl super::loop_::AgentLoop {
         // This replaces the old ChunkEvent::SessionStateChanged path.
         if let Some(ref conv) = self.session.conversation {
             let status = serde_json::to_string(&status).unwrap_or_else(|_| r#""idle""#.to_string());
-            let ratio = self.session.model_ratio().unwrap_or(0.0);
+            let ratio = self.session
+                .model_ratio()
+                .unwrap_or(crate::token::counter::DEFAULT_RATIO);
             let cu = context_usage.clone().unwrap_or_default();
             conv.update_runtime_state_cache(&status, ratio, &cu);
             conv.notify_state_change();
