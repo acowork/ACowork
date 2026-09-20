@@ -495,7 +495,6 @@
     "available": "可用",
     "modelsAvailable": "{{count}} 個模型可用",
     "connect": "連線",
-    "accountsConfigured": "已設定 {{count}} 個",
     "addKey": "新增金鑰",
     "connectLocalProvider": "連線本機服務提供者：",
     "addApiKey": "新增 API 金鑰：",

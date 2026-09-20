@@ -497,7 +497,6 @@
     "available": "사용 가능",
     "modelsAvailable": "{{count}}개 모델 사용 가능",
     "connect": "연결",
-    "accountsConfigured": "{{count}}개 설정됨",
     "addKey": "키 추가",
     "connectLocalProvider": "로컬 제공자 연결：",
     "addApiKey": "API 키 추가：",

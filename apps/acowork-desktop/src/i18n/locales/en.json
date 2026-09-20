@@ -766,7 +766,6 @@
     "available": "available",
     "modelsAvailable": "{{count}} models available",
     "connect": "Connect",
-    "accountsConfigured": "{{count}} key",
     "addKey": "Add Key",
     "connectLocalProvider": "Connect Local Provider: ",
     "addApiKey": "Add API Key: ",

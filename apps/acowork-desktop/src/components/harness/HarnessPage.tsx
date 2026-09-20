@@ -197,6 +197,7 @@ function ProvidersTab() {
     try {
       await invoke("remove_key", { provider, accountId: undefined });
       await fetchKeys();
+      await loadProviders();
     } catch (e) {
       alert(`${t("harness.failedRemoveKey")}: ${e}`);
     }
@@ -475,7 +476,13 @@ function ProvidersTab() {
           setAddFlowEntry(undefined);
           setShowAddFlow(true);
         }}
-        onCatalogRefreshed={loadProviders}
+        onCatalogRefreshed={async () => {
+          // The Gateway re-derives the capabilities of already-configured
+          // providers on refresh, so the configured list has to be re-read as
+          // well — not just the available one.
+          await loadProviders();
+          await fetchKeys();
+        }}
       />
 
       {/* Add Provider Flow dialog (picker → add / custom) */}

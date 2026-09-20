@@ -205,11 +205,13 @@ export function ProviderPicker({ providers, keys, onConnect, onAddCustom, onCata
     return { localProviders: local, remoteProviders: remote, customProviders: custom };
   }, [providers]);
 
-  // Every provider stays listed, configured or not: one provider can hold
-  // several accounts, so "has a key" no longer means "done" — re-clicking it
-  // ADDS another account. Configured rows just carry a count badge.
+  // Once a provider has an account it lives ONLY under "Configured Providers":
+  // a picker row has no per-row edit/remove, so a leftover copy here would
+  // drift out of sync with the configured list and offer no way to manage it.
+  // Extra accounts for an already-configured provider are added from its row in
+  // the configured list (edit dialog), not by re-clicking here.
   const configuredCount = (providerId: string) => keys.filter((k) => k.provider === providerId).length;
-  const remoteAvailable = remoteProviders;
+  const remoteAvailable = remoteProviders.filter((p) => configuredCount(p.id) === 0);
   const normalizedTerm = providerSearchTerm.trim().toLowerCase();
   const filteredRemoteProviders = normalizedTerm
     ? remoteAvailable.filter(
@@ -218,8 +220,8 @@ export function ProviderPicker({ providers, keys, onConnect, onAddCustom, onCata
     : remoteAvailable;
 
   // Providers per group + remote display window (first 5 when >5).
-  const availableCustom = customProviders;
-  const availableLocal = localProviders;
+  const availableCustom = customProviders.filter((p) => configuredCount(p.id) === 0);
+  const availableLocal = localProviders.filter((p) => configuredCount(p.id) === 0);
   const availableRemote = remoteAvailable.length;
   const remoteLimitReached = !providerSearchTerm.trim() && !showAllRemote && filteredRemoteProviders.length > 5;
   const displayedRemote = remoteLimitReached ? filteredRemoteProviders.slice(0, 5) : filteredRemoteProviders;
@@ -253,11 +255,6 @@ export function ProviderPicker({ providers, keys, onConnect, onAddCustom, onCata
                   leading={<ProviderLogo providerId={providerId} size={16} />}
                   trailing={
                     <div className="flex items-center gap-2">
-                      {configuredCount(providerId) > 0 && (
-                        <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] text-text-secondary dark:bg-zinc-700">
-                          {t("harness.accountsConfigured", { count: configuredCount(providerId) })}
-                        </span>
-                      )}
                       <button
                         type="button"
                         onClick={() => onConnect(providerId, item)}
@@ -308,11 +305,6 @@ export function ProviderPicker({ providers, keys, onConnect, onAddCustom, onCata
                     leading={<ProviderLogo providerId={providerId} size={16} />}
                     trailing={
                       <div className="flex items-center gap-2">
-                        {configuredCount(providerId) > 0 && (
-                          <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] text-text-secondary dark:bg-zinc-700">
-                            {t("harness.accountsConfigured", { count: configuredCount(providerId) })}
-                          </span>
-                        )}
                         <button
                           type="button"
                           onClick={() => onConnect(providerId, item)}
@@ -442,11 +434,6 @@ export function ProviderPicker({ providers, keys, onConnect, onAddCustom, onCata
                         leading={<ProviderLogo providerId={providerId} size={16} />}
                         trailing={
                           <div className="flex items-center gap-2">
-                            {configuredCount(providerId) > 0 && (
-                              <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] text-text-secondary dark:bg-zinc-700">
-                                {t("harness.accountsConfigured", { count: configuredCount(providerId) })}
-                              </span>
-                            )}
                             <button
                               type="button"
                               onClick={() => onConnect(providerId, item)}

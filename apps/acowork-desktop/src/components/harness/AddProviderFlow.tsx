@@ -94,6 +94,13 @@ export function AddProviderFlow({
     () => isLocalProvider(selectedProvider),
     [selectedProvider],
   );
+  // Custom providers must keep their `custom` flag through the Connect path,
+  // otherwise re-adding one (e.g. a custom provider whose last account was
+  // removed) would silently drop it out of the Custom group into Remote.
+  const selectedProviderIsCustom = useMemo(
+    () => dynamicProviders.find((p) => p.id === selectedProvider)?.custom ?? false,
+    [dynamicProviders, selectedProvider],
+  );
 
   // ── Data fetching ──
   const fetchKeys = useCallback(async () => {
@@ -250,6 +257,7 @@ export function AddProviderFlow({
         provider: selectedProvider,
         keys: [{ alias: validEntries[0].alias, key: firstKey }],
         baseUrl: newBaseUrl || undefined,
+        custom: selectedProviderIsCustom || undefined,
       });
       await fetchProviderModels(selectedProvider);
       setTestResult({ success: true, message: t("harness.apiKeyValid") });
@@ -272,6 +280,7 @@ export function AddProviderFlow({
         defaultModel: undefined,
         models: newModels.length > 0 ? newModels : undefined,
         compactModel: newCompactModel || undefined,
+        custom: selectedProviderIsCustom || undefined,
       });
       window.dispatchEvent(new CustomEvent('models-added'));
       onSuccess();

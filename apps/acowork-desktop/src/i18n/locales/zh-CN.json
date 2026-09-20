@@ -547,7 +547,6 @@
     "available": "可用",
     "modelsAvailable": "{{count}} 个模型可用",
     "connect": "连接",
-    "accountsConfigured": "已配置 {{count}} 个",
     "addKey": "添加密钥",
     "connectLocalProvider": "连接本地服务商：",
     "addApiKey": "添加 API 密钥：",

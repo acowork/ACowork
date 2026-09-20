@@ -496,7 +496,6 @@
     "available": "利用可能",
     "modelsAvailable": "{{count}} モデルが利用可能",
     "connect": "接続",
-    "accountsConfigured": "{{count}} 件設定済み",
     "addKey": "キーを追加",
     "connectLocalProvider": "ローカルプロバイダーに接続：",
     "addApiKey": "APIキーを追加：",
