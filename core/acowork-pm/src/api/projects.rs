@@ -4,7 +4,7 @@
 use axum::extract::{Path, State};
 use axum::Json;
 
-use crate::types::{AddProjectMember, CreateProject, Project, ProjectId, UpdateProject};
+use crate::types::{AddProjectMember, CreateProject, MemberKind, Project, ProjectId, UpdateProject};
 
 use super::ApiState;
 use crate::store::tree::PmStore;
@@ -39,7 +39,12 @@ pub async fn create(
         .get("x-actor")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("unknown");
-    let project = state.store.create_project(input, created_by).await?;
+    // ADR-076 §决策 11: REST 面 = 人类操作面，actor 恒为 User（Gateway
+    // 注入 token user_id；local 模式注入常量 "human"）。
+    let project = state
+        .store
+        .create_project_as(input, created_by, MemberKind::User)
+        .await?;
     Ok(Json(project))
 }
 

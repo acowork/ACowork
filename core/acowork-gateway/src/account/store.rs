@@ -59,7 +59,9 @@ fn backup_corrupt(path: &Path) {
         .unwrap_or(0);
     let backup = path.with_file_name(format!(
         "{}.corrupt-{ts}",
-        path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()
+        path.file_name()
+            .map(|n| n.to_string_lossy())
+            .unwrap_or_default()
     ));
     match std::fs::copy(path, &backup) {
         Ok(_) => tracing::error!(
@@ -144,6 +146,8 @@ mod tests {
             updated_at: "t".into(),
             last_login_at: None,
             disabled_at: None,
+            invite_token_hash: None,
+            invite_expires_at: None,
         }
     }
 

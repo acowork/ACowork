@@ -70,7 +70,7 @@ pub use error::{PmError, Result};
 
 // Domain types
 pub use types::{
-    AttachmentId, AttachmentKind, AttachmentMeta, DependencyKind, Project, ProjectId,
+    AttachmentId, AttachmentKind, AttachmentMeta, DependencyKind, MemberKind, Project, ProjectId,
     ProjectStatus, ReviewStatus, Task, TaskId, TaskStatus, TaskType,
 };
 

@@ -197,19 +197,53 @@ pub enum DependencyKind {
 // 实体：Project
 // ────────────────────────────────────────────────────────────────────────────
 
-/// 项目成员（Agent 实例）。
+/// 项目成员身份类型（ADR-076 §决策 11）。
+///
+/// 人类操作者与 Agent 成员对称：`Agent` → `instance_id`（ADR-073）；
+/// `User` → `user_id`（ADR-076）。两者共用 [`ProjectMember::instance_id`]
+/// 字段承载（字段名兼容保留），由本枚举区分语义。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemberKind {
+    /// Agent 实例（ADR-073）。旧数据缺 `kind` 时按此解析（零迁移）。
+    #[default]
+    Agent,
+    /// 人类账号（ADR-076）。
+    User,
+}
+
+impl MemberKind {
+    /// 从 actor 值推断身份类型（ADR-076 §决策 10/11）。
+    ///
+    /// 遗留常量 `"human"` 与 `"unknown"`（`X-Actor` 缺失时的兜底）视为
+    /// `User`；其余（UUID instance_id）视为 `Agent`。
+    pub fn from_actor(actor: &str) -> Self {
+        match actor {
+            "human" | "unknown" => Self::User,
+            _ => Self::Agent,
+        }
+    }
+}
+
+/// 项目成员（Agent 实例或人类账号，ADR-076 §决策 11）。
 ///
 /// **ADR-073**：`instance_id` 是唯一身份 key（UUID），`agent_id`（包 ID）仅
-/// 显示用。成员 = 可被指派为 `task.assignee` 的 Agent（联动指派不变量：
+/// 显示用。成员 = 可被指派为 `task.assignee` 的身份（联动指派不变量：
 /// `assignee ∈ ∅ ∪ project.members`，由 store 层强制）。
+///
+/// **ADR-076 §决策 11**：`kind` 区分 Agent / User，人类操作者成员化——
+/// 与 Agent 成员对称，移除 `assignee == "human"` 特例。
 ///
 /// 只存身份 + 加入时间，**不**存显示名/头像快照——展示信息由前端 join
 /// agentStore 获取，避免快照过期不一致。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectMember {
-    /// Agent 实例 ID（UUID，ADR-073）。
+    /// Agent 实例 ID（UUID，ADR-073）或 User ID（ADR-076，按 `kind` 解释）。
     pub instance_id: String,
+    /// 身份类型。`#[serde(default)]` = `Agent` → 旧 `project.json` 零迁移。
+    #[serde(default)]
+    pub kind: MemberKind,
     pub added_at: DateTime<Utc>,
 }
 

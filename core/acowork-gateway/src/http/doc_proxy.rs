@@ -26,23 +26,20 @@
 //!
 //! | Path | Policy |
 //! |------|--------|
-//! | `/api/doc/*` (REST, Desktop) | **Override** `X-Actor` with trusted `human` (Desktop session user). Client-claimed `X-Actor` (e.g. forged `agent:xxx`) is dropped |
+//! | `/api/doc/*` (REST, Desktop) | **Override** `X-Actor` with the trusted identity: the token identity (`AuthContext.effective_user_id`) under `multi_user`, the `human` constant under `local`. Client-claimed `X-Actor` (e.g. forged `agent:xxx`) is dropped |
 //! | `/api/doc/mcp` (MCP, Agent) | **Validate** `X-MCP-Actor`: agent_id ∈ Gateway `installed_agents` → pass through (trusted); otherwise **strip** (→ anonymous, read-only tools only, design §9.3) |
 
+use axum::Router;
 use axum::body::Bytes;
-use axum::extract::{Path, RawQuery, State};
+use axum::extract::{Extension, Path, RawQuery, State};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
-use axum::Router;
 
 use crate::gateway::state::GatewayState;
+use crate::http::auth_middleware::{AuthContext, trusted_rest_actor};
 use crate::http::proxy::{is_hop_by_hop_header, runtime_http_client};
 use crate::http::routes::AppState;
-
-/// Trusted identity of the Desktop session user (design §9.2:
-/// `created_by: "human" | "agent:xxx"`).
-const TRUSTED_HUMAN_ACTOR: &str = "human";
 
 /// Build the doc reverse-proxy router.
 ///
@@ -62,15 +59,19 @@ async fn doc_proxy_handler(
     RawQuery(query): RawQuery,
     headers: HeaderMap,
     method: Method,
+    auth: Option<Extension<AuthContext>>,
     body: Bytes,
 ) -> Response {
+    // ADR-076 §决策 10: REST actor is the token identity under `multi_user`,
+    // the `human` constant under `local` (§决策 12).
+    let actor = trusted_rest_actor(auth.as_ref().map(|Extension(c)| c));
     // Read the doc process actual port + identity-injection state (the
     // supervisor writes `doc_process` once doc is ready).
     let (port, trusted_headers) = {
         let gw = state.gateway_state.read().await;
         let port = gw.doc_process.as_ref().map(|p| p.port);
         let is_mcp = rest == "mcp" || rest.starts_with("mcp/");
-        let trusted = build_trusted_headers(&headers, is_mcp, &gw);
+        let trusted = build_trusted_headers(&headers, is_mcp, &gw, &actor);
         (port, trusted)
     };
     let Some(port) = port else {
@@ -143,11 +144,17 @@ async fn doc_proxy_handler(
 /// Build the forwarding headers (identity injection).
 ///
 /// - **REST path** (`is_mcp = false`): drop the client-claimed `X-Actor` and
-///   inject the trusted `X-Actor: human` — prevents forging `agent:xxx`.
+///   inject `actor` — the token identity under `multi_user`, the `human`
+///   constant under `local` (ADR-076 §决策 10 / §决策 12).
 /// - **MCP path** (`is_mcp = true`): validate `X-MCP-Actor` — agent_id in
 ///   Gateway `installed_agents` passes through; otherwise strip (→ anonymous,
 ///   read-only tools only).
-fn build_trusted_headers(headers: &HeaderMap, is_mcp: bool, gw: &GatewayState) -> HeaderMap {
+fn build_trusted_headers(
+    headers: &HeaderMap,
+    is_mcp: bool,
+    gw: &GatewayState,
+    actor: &str,
+) -> HeaderMap {
     let mut out = HeaderMap::new();
     for (name, value) in headers.iter() {
         if is_hop_by_hop_header(name) {
@@ -174,18 +181,18 @@ fn build_trusted_headers(headers: &HeaderMap, is_mcp: bool, gw: &GatewayState) -
             }
         }
     }
-    if !is_mcp {
-        out.insert("x-actor", HeaderValue::from_static(TRUSTED_HUMAN_ACTOR));
+    if !is_mcp && let Ok(header) = HeaderValue::from_str(actor) {
+        out.insert("x-actor", header);
     }
     out
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
-    use axum::body::{to_bytes, Body};
+    use axum::body::{Body, to_bytes};
     use axum::extract::Path;
     use axum::http::{Request, StatusCode};
     use axum::routing::get;
@@ -194,7 +201,7 @@ mod tests {
 
     use crate::gateway::state::GatewayState;
     use crate::http::auth::HttpAuth;
-    use crate::http::routes::{build_router, AppState};
+    use crate::http::routes::{AppState, build_router};
     use crate::lifecycle::doc_supervisor::DocProcessState;
 
     /// Build a minimal `AppState` (same as `routes.rs::tests::test_app_state`).
@@ -219,7 +226,10 @@ mod tests {
     /// `/api` prefix, as the doc router does). Returns the port.
     async fn start_mock_doc_server() -> u16 {
         let app = axum::Router::new()
-            .route("/api/tree", get(|| async { axum::Json(serde_json::json!({ "dirs": [] })) }))
+            .route(
+                "/api/tree",
+                get(|| async { axum::Json(serde_json::json!({ "dirs": [] })) }),
+            )
             .route(
                 "/api/docs/{id}",
                 get(|Path(id): Path<String>| async move {
@@ -231,7 +241,9 @@ mod tests {
             .expect("bind mock doc server");
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move {
-            axum::serve(listener, app).await.expect("mock doc server runs");
+            axum::serve(listener, app)
+                .await
+                .expect("mock doc server runs");
         });
         port
     }
@@ -244,6 +256,75 @@ mod tests {
             port,
             ready: true,
         });
+    }
+
+    /// `multi_user` `AppState` (ADR-076 §决策 12): the account system is on,
+    /// so the auth middleware injects an `AuthContext` on authenticated
+    /// requests. Mirrors `pm_proxy`'s helper — the two proxies are
+    /// isomorphic and must be tested symmetrically.
+    fn multi_user_app_state() -> AppState {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "acowork-test-doc-proxy-mu-{}-{}",
+            std::process::id(),
+            unique
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let gw_state = GatewayState::new(&dir.to_string_lossy());
+        let mut st = AppState::new(
+            Arc::new(RwLock::new(gw_state)),
+            Arc::new(HttpAuth::new(false)),
+        );
+        st.auth_mode = crate::auth::AuthMode::MultiUser;
+        st.auth_service = Some(Arc::new(
+            crate::auth::AuthService::new(&dir, Default::default(), None).unwrap(),
+        ));
+        st
+    }
+
+    /// Seed one account (`u-alice` / password `s3cret123`) and return a valid
+    /// access token for it.
+    fn seed_and_login(state: &AppState) -> String {
+        use acowork_core::account::{AccountListFile, Role, UserAccount};
+        let svc = state.auth_service.clone().unwrap();
+        let account = UserAccount {
+            user_id: "u-alice".into(),
+            username: "alice".into(),
+            display_name: "Alice".into(),
+            role: Role::User,
+            password_hash: crate::account::password::hash_password_with(
+                "s3cret123",
+                argon2::Params::new(8, 1, 1, Some(32)).unwrap(),
+            )
+            .unwrap(),
+            password_changed_at: "t".into(),
+            password_expires_at: None,
+            language: "en".into(),
+            timezone: "UTC".into(),
+            city: None,
+            country: None,
+            occupation: None,
+            avatar: None,
+            builtin_avatar: None,
+            communication_style: None,
+            custom: Default::default(),
+            created_at: "t".into(),
+            updated_at: "t".into(),
+            last_login_at: None,
+            disabled_at: None,
+            invite_token_hash: None,
+            invite_expires_at: None,
+        };
+        svc.save_accounts(&AccountListFile {
+            version: 1,
+            accounts: vec![account],
+        })
+        .unwrap();
+        svc.login("alice", "s3cret123", crate::auth::token::now_unix())
+            .unwrap()
+            .access_token
     }
 
     /// `doc_process = None` (not started / restarting): 503 + `Retry-After: 2`.
@@ -406,7 +487,9 @@ mod tests {
             .expect("bind echo doc server");
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move {
-            axum::serve(listener, app).await.expect("echo doc server runs");
+            axum::serve(listener, app)
+                .await
+                .expect("echo doc server runs");
         });
         port
     }
@@ -423,11 +506,7 @@ mod tests {
 
     /// `add_installed_agent` with an explicit package id (for tests that
     /// must prove a package id does NOT pass the trust boundary).
-    async fn add_installed_agent_with_pkg(
-        state: &AppState,
-        instance_id: &str,
-        package_id: &str,
-    ) {
+    async fn add_installed_agent_with_pkg(state: &AppState, instance_id: &str, package_id: &str) {
         let manifest = acowork_core::AgentManifest::from_toml(&format!(
             r#"
             agent_id = "{package_id}"
@@ -496,6 +575,35 @@ mod tests {
             echoed["x-actor"],
             serde_json::json!("human"),
             "forged X-Actor must be overridden to trusted human actor, got: {echoed}"
+        );
+    }
+
+    /// ADR-076 §决策 10: under `multi_user` the REST actor is the *token*
+    /// identity, not the `human` constant. Mirrors `pm_proxy`'s case.
+    #[tokio::test]
+    async fn rest_path_injects_token_identity_under_multi_user() {
+        let state = multi_user_app_state();
+        let token = seed_and_login(&state);
+        let port = start_echo_doc_server().await;
+        set_doc_process(&state, port).await;
+
+        let router = build_router(state);
+        let request = Request::builder()
+            .method("GET")
+            .uri("/api/doc/echo-headers")
+            .header("Authorization", format!("Bearer {token}"))
+            .header("X-Actor", "agent:com.evil")
+            .body(Body::empty())
+            .expect("build request");
+        let response = router.oneshot(request).await.expect("router responds");
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let echoed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+        assert_eq!(
+            echoed["x-actor"],
+            serde_json::json!("u-alice"),
+            "multi_user REST actor must be the token identity, got: {echoed}"
         );
     }
 

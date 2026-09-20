@@ -8,29 +8,50 @@
 use axum::{
     Json, Router,
     body::Body,
-    extract::{Multipart, Path, Query, State},
-    http::{header, StatusCode},
+    extract::{Extension, Multipart, Path, Query, State},
+    http::{StatusCode, header},
     response::Response,
     routing::{get, post, put},
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::auth::service::ProfilePatch;
+use crate::auth::token::now_unix;
+use crate::http::account_api::{blocking, sync_profiles};
+use crate::http::auth_middleware::AuthContext;
 use crate::http::routes::{ApiError, AppState, OperationAck};
 use crate::resource_cache;
 use acowork_core::operation::{OperationRecord, OperationState};
 use acowork_core::protocol::UserProfile;
 
-/// Build the users router
+/// Build the users router (local mode: presentation-only profile CRUD).
+///
+/// Under `AUTH_MODE=multi_user` these routes are replaced by
+/// [`crate::http::account_api::account_routes`], which owns the same
+/// `/api/users` paths with credential-aware semantics.
 pub fn users_routes() -> Router<AppState> {
     Router::new()
         .route("/api/users", get(list_users).post(create_user))
         .route("/api/users/{user_id}", put(update_user))
         .route("/api/users/{user_id}/activate", post(activate_user))
-        // User avatar endpoints
-        .route("/api/user/avatar-config", get(get_user_avatar_config).put(update_user_avatar_config))
+}
+
+/// Avatar endpoints — mode-independent (ADR-076 keeps them on the
+/// presentation cache in both modes; `account_api` re-derives that cache).
+pub fn user_avatar_routes() -> Router<AppState> {
+    Router::new()
+        .route(
+            "/api/user/avatar-config",
+            get(get_user_avatar_config).put(update_user_avatar_config),
+        )
         .route("/api/user/avatar-assets", get(list_user_avatar_assets))
-        .route("/api/user/avatar-file", get(get_user_avatar_file).post(upload_user_avatar_file).delete(delete_user_avatar_file))
+        .route(
+            "/api/user/avatar-file",
+            get(get_user_avatar_file)
+                .post(upload_user_avatar_file)
+                .delete(delete_user_avatar_file),
+        )
 }
 
 // ── Request types ──────────────────────────────────────────────────────
@@ -122,9 +143,7 @@ async fn get_data_dir(state: &AppState) -> std::path::PathBuf {
 // ── Handlers ───────────────────────────────────────────────────────────
 
 /// `GET /api/users` — list all user profiles
-pub async fn list_users(
-    State(state): State<AppState>,
-) -> Result<Json<UserListResponse>, ApiError> {
+pub async fn list_users(State(state): State<AppState>) -> Result<Json<UserListResponse>, ApiError> {
     let gw = state.gateway_state.read().await;
     let list = gw.resource_cache.user_profile_list.clone();
     Ok(Json(UserListResponse {
@@ -261,10 +280,18 @@ pub async fn update_user(
             user.occupation = Some(occ);
         }
         if let Some(avatar) = req.avatar {
-            user.avatar = if avatar.is_empty() { None } else { Some(avatar) };
+            user.avatar = if avatar.is_empty() {
+                None
+            } else {
+                Some(avatar)
+            };
         }
         if let Some(builtin) = req.builtin_avatar {
-            user.builtin_avatar = if builtin.is_empty() { None } else { Some(builtin) };
+            user.builtin_avatar = if builtin.is_empty() {
+                None
+            } else {
+                Some(builtin)
+            };
         }
         if let Some(style) = req.communication_style {
             user.communication_style = Some(style);
@@ -415,11 +442,10 @@ fn has_image_extension(path: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Compute the next available avatar-XX filename in `{data_dir}/assets/`.
-fn next_avatar_name(data_dir: &std::path::Path, ext: &str) -> String {
-    let assets_dir = data_dir.join("assets");
+/// Compute the next available avatar-XX filename in `dir`.
+fn next_avatar_name(dir: &std::path::Path, ext: &str) -> String {
     let mut used = std::collections::BTreeSet::new();
-    if let Ok(entries) = std::fs::read_dir(&assets_dir) {
+    if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             let name = entry.file_name();
             let name = name.to_string_lossy();
@@ -438,10 +464,58 @@ fn next_avatar_name(data_dir: &std::path::Path, ext: &str) -> String {
     format!("avatar-{:02}.{}", n, ext)
 }
 
-/// `GET /api/user/avatar-config` — get active user's avatar config.
+/// Resolve the avatar asset directory for a request.
+///
+/// Under `multi_user` each account owns `assets/avatars/{user_id}/` —
+/// uploads land there and deletes are confined to it (ADR-076 §5.5);
+/// under `local` there is a single user and the legacy shared `assets/`
+/// root is kept. Returns the directory plus the relative path prefix
+/// used to build the stored `avatar` field.
+fn avatar_target_dir(
+    data_dir: &std::path::Path,
+    auth: Option<&AuthContext>,
+) -> Result<(std::path::PathBuf, String), ApiError> {
+    let Some(ctx) = auth else {
+        return Ok((data_dir.join("assets"), "assets".to_string()));
+    };
+    // The user id becomes a path component. It comes from our own signed
+    // token, but a path boundary stays a path boundary — reject anything
+    // that could escape the namespace instead of trusting the claim.
+    if !is_safe_user_id(&ctx.user_id) {
+        return Err(ApiError::bad_request("invalid user id"));
+    }
+    let prefix = format!("assets/avatars/{}", ctx.user_id);
+    Ok((data_dir.join(&prefix), prefix))
+}
+
+/// A user id is used as a directory name; keep it to the token-minted
+/// shape (alnum / `-` / `_`) so it can never traverse out of the
+/// namespace.
+fn is_safe_user_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// `GET /api/user/avatar-config` — get the caller's avatar config.
+///
+/// Under `multi_user` the authority is the caller's `UserAccount`
+/// (ADR-076 §5.5); under `local` it is the single active profile.
 pub async fn get_user_avatar_config(
     State(state): State<AppState>,
+    auth: Option<Extension<AuthContext>>,
 ) -> Result<Json<UserAvatarConfigResponse>, ApiError> {
+    if let (Some(svc), Some(ctx)) = (state.auth_service.clone(), auth.map(|Extension(c)| c)) {
+        let uid = ctx.user_id;
+        let account = blocking(move || svc.account(&uid)).await?;
+        return Ok(Json(UserAvatarConfigResponse {
+            avatar: account.avatar,
+            builtin_avatar: account.builtin_avatar,
+        }));
+    }
+
     let gw = state.gateway_state.read().await;
     let active = gw
         .resource_cache
@@ -462,11 +536,35 @@ pub async fn get_user_avatar_config(
     }
 }
 
-/// `PUT /api/user/avatar-config` — update active user's avatar config.
+/// `PUT /api/user/avatar-config` — update the caller's avatar config.
+///
+/// Under `multi_user` this writes through `accounts.json` (the authority)
+/// for the authenticated caller: the derived `user_profiles.json` is
+/// rebuilt from it on the next account mutation, so writing the view
+/// directly would lose the change (ADR-076 §5.5).
 pub async fn update_user_avatar_config(
     State(state): State<AppState>,
+    auth: Option<Extension<AuthContext>>,
     Json(req): Json<UpdateUserAvatarConfigRequest>,
 ) -> Result<Json<UserAvatarConfigResponse>, ApiError> {
+    if let (Some(svc), Some(ctx)) = (
+        state.auth_service.clone(),
+        auth.clone().map(|Extension(c)| c),
+    ) {
+        let patch = ProfilePatch {
+            avatar: req.avatar,
+            builtin_avatar: req.builtin_avatar,
+            ..Default::default()
+        };
+        let uid = ctx.user_id;
+        let account = blocking(move || svc.update_account(&uid, patch, now_unix())).await?;
+        sync_profiles(&state).await;
+        return Ok(Json(UserAvatarConfigResponse {
+            avatar: account.avatar,
+            builtin_avatar: account.builtin_avatar,
+        }));
+    }
+
     let data_dir = get_data_dir(&state).await;
 
     let is_active = {
@@ -503,15 +601,20 @@ pub async fn update_user_avatar_config(
     }
 
     // Return updated config
-    get_user_avatar_config(State(state)).await
+    get_user_avatar_config(State(state), auth).await
 }
 
-/// `GET /api/user/avatar-assets` — list avatar files in `{data_dir}/assets/`.
+/// `GET /api/user/avatar-assets` — list the caller's avatar files.
+///
+/// Under `multi_user` this is the caller's own namespace; under `local`
+/// the shared `assets/` root.
 pub async fn list_user_avatar_assets(
     State(state): State<AppState>,
+    auth: Option<Extension<AuthContext>>,
 ) -> Result<Json<UserAvatarAssetsResponse>, ApiError> {
     let data_dir = get_data_dir(&state).await;
-    let assets_dir = data_dir.join("assets");
+    let (assets_dir, rel_prefix) =
+        avatar_target_dir(&data_dir, auth.as_ref().map(|Extension(c)| c))?;
     let mut entries = Vec::new();
 
     if let Ok(dir) = std::fs::read_dir(&assets_dir) {
@@ -520,7 +623,7 @@ pub async fn list_user_avatar_assets(
             let name = name.to_string_lossy().to_string();
             if name.starts_with("avatar-") && has_image_extension(&name) {
                 entries.push(UserAvatarAssetEntry {
-                    relative_path: format!("assets/{}", name),
+                    relative_path: format!("{rel_prefix}/{name}"),
                 });
             }
         }
@@ -543,7 +646,9 @@ pub async fn get_user_avatar_file(
         return Err(ApiError::bad_request("Invalid path: must be under assets/"));
     }
     if relative.contains("..") {
-        return Err(ApiError::bad_request("Invalid path: path traversal detected"));
+        return Err(ApiError::bad_request(
+            "Invalid path: path traversal detected",
+        ));
     }
 
     let canonical = data_dir.join(relative);
@@ -554,9 +659,8 @@ pub async fn get_user_avatar_file(
         ));
     }
 
-    let bytes = std::fs::read(&canonical).map_err(|e| {
-        ApiError::not_found(&format!("Failed to read avatar file: {}", e))
-    })?;
+    let bytes = std::fs::read(&canonical)
+        .map_err(|e| ApiError::not_found(&format!("Failed to read avatar file: {}", e)))?;
 
     let content_type = match std::path::Path::new(&query.path)
         .extension()
@@ -582,16 +686,19 @@ pub async fn get_user_avatar_file(
 
 /// `POST /api/user/avatar-file` — upload a new avatar file.
 ///
-/// Returns the generated relative path (e.g. "assets/avatar-01.png").
+/// Returns the generated relative path — `assets/avatars/{uid}/avatar-01.png`
+/// under `multi_user` (the caller's own namespace), `assets/avatar-01.png`
+/// under `local`.
 pub async fn upload_user_avatar_file(
     State(state): State<AppState>,
+    auth: Option<Extension<AuthContext>>,
     mut multipart: Multipart,
 ) -> Result<Json<UserAvatarAssetEntry>, ApiError> {
     let data_dir = get_data_dir(&state).await;
-    let assets_dir = data_dir.join("assets");
-    std::fs::create_dir_all(&assets_dir).map_err(|e| {
-        ApiError::internal(&format!("Failed to create assets dir: {}", e))
-    })?;
+    let (assets_dir, rel_prefix) =
+        avatar_target_dir(&data_dir, auth.as_ref().map(|Extension(c)| c))?;
+    std::fs::create_dir_all(&assets_dir)
+        .map_err(|e| ApiError::internal(&format!("Failed to create assets dir: {}", e)))?;
 
     let mut bytes: Option<Vec<u8>> = None;
     let mut ext = String::from("png");
@@ -610,9 +717,10 @@ pub async fn upload_user_avatar_file(
             {
                 ext = e.to_lowercase();
             }
-            let data = field.bytes().await.map_err(|e| {
-                ApiError::bad_request(&format!("Failed to read file bytes: {}", e))
-            })?;
+            let data = field
+                .bytes()
+                .await
+                .map_err(|e| ApiError::bad_request(&format!("Failed to read file bytes: {}", e)))?;
             bytes = Some(data.to_vec());
         }
     }
@@ -627,24 +735,23 @@ pub async fn upload_user_avatar_file(
         )));
     }
 
-    let name = next_avatar_name(&data_dir, &ext);
+    let name = next_avatar_name(&assets_dir, &ext);
     let target = assets_dir.join(&name);
-    std::fs::write(&target, &bytes).map_err(|e| {
-        ApiError::internal(&format!("Failed to write avatar file: {}", e))
-    })?;
+    std::fs::write(&target, &bytes)
+        .map_err(|e| ApiError::internal(&format!("Failed to write avatar file: {}", e)))?;
 
-    let relative_path = format!("assets/{}", name);
+    let relative_path = format!("{rel_prefix}/{name}");
     tracing::info!(path = %relative_path, "User avatar file uploaded");
-    Ok(Json(UserAvatarAssetEntry {
-        relative_path,
-    }))
+    Ok(Json(UserAvatarAssetEntry { relative_path }))
 }
 
 /// `DELETE /api/user/avatar-file?path=<relative>` — delete an avatar file.
 ///
-/// If the deleted file was the active user's current avatar, clears that field.
+/// If the deleted file was the caller's current avatar (multi_user) or the
+/// active user's (local), that field is cleared.
 pub async fn delete_user_avatar_file(
     State(state): State<AppState>,
+    auth: Option<Extension<AuthContext>>,
     Query(query): Query<UserAvatarFileQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let data_dir = get_data_dir(&state).await;
@@ -655,10 +762,50 @@ pub async fn delete_user_avatar_file(
         return Err(ApiError::bad_request("Invalid path"));
     }
 
+    // multi_user: avatar files are per-user — only the owner may unlink.
+    // The guard runs *before* the unlink: refusing after the delete would
+    // still have destroyed the file. An admin removing someone else's file
+    // goes through `PUT /api/users/{id}` first (un-reference, then delete).
+    if state.auth_service.is_some() {
+        let ctx = auth
+            .as_ref()
+            .map(|Extension(c)| c)
+            .ok_or_else(|| ApiError::unauthorized("authentication required"))?;
+        let own = format!("assets/avatars/{}/", ctx.user_id);
+        if !relative.starts_with(&own) {
+            return Err(ApiError::forbidden(
+                "avatar files are per-user; only the owner may delete them",
+            ));
+        }
+    }
+
     let canonical = data_dir.join(relative);
-    std::fs::remove_file(&canonical).map_err(|e| {
-        ApiError::internal(&format!("Failed to delete avatar file: {}", e))
-    })?;
+    std::fs::remove_file(&canonical)
+        .map_err(|e| ApiError::internal(&format!("Failed to delete avatar file: {}", e)))?;
+
+    // multi_user: clear the caller's own field through the authority.
+    if let (Some(svc), Some(ctx)) = (state.auth_service.clone(), auth.map(|Extension(c)| c)) {
+        let uid = ctx.user_id;
+        let path = query.path.clone();
+        let cleared = blocking(move || {
+            if svc.account(&uid)?.avatar.as_deref() != Some(path.as_str()) {
+                return Ok(false);
+            }
+            let patch = ProfilePatch {
+                avatar: Some(String::new()),
+                ..Default::default()
+            };
+            svc.update_account(&uid, patch, now_unix()).map(|_| true)
+        })
+        .await?;
+        if cleared {
+            sync_profiles(&state).await;
+        }
+        return Ok(Json(serde_json::json!({
+            "message": "Avatar file deleted",
+            "path": query.path,
+        })));
+    }
 
     // If it was the active user's avatar, clear it
     {
@@ -692,5 +839,40 @@ mod tests {
     #[test]
     fn test_users_routes_builds() {
         let _router = users_routes();
+    }
+
+    /// ADR-076 §5.5: avatar assets are per-user under `multi_user` and
+    /// stay in the legacy shared root under `local`; a user id that could
+    /// escape its namespace is refused at the boundary.
+    #[test]
+    fn avatar_target_dir_is_per_user_under_multi_user_and_shared_under_local() {
+        let data_dir = std::env::temp_dir().join("acowork-avatar-dir-test");
+        let ctx = |uid: &str| AuthContext {
+            user_id: uid.to_string(),
+            role: acowork_core::account::Role::User,
+            as_user: None,
+        };
+
+        let (dir, prefix) = avatar_target_dir(&data_dir, Some(&ctx("u-bob"))).unwrap();
+        assert_eq!(dir, data_dir.join("assets/avatars/u-bob"));
+        assert_eq!(prefix, "assets/avatars/u-bob");
+
+        let (dir, prefix) = avatar_target_dir(&data_dir, None).unwrap();
+        assert_eq!(dir, data_dir.join("assets"));
+        assert_eq!(prefix, "assets");
+
+        assert!(avatar_target_dir(&data_dir, Some(&ctx("../u-evil"))).is_err());
+        assert!(avatar_target_dir(&data_dir, Some(&ctx("u/bob"))).is_err());
+        assert!(avatar_target_dir(&data_dir, Some(&ctx(""))).is_err());
+    }
+
+    #[test]
+    fn next_avatar_name_scans_the_target_directory() {
+        let dir = std::env::temp_dir().join("acowork-avatar-next-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(next_avatar_name(&dir, "png"), "avatar-01.png");
+        std::fs::write(dir.join("avatar-01.png"), b"x").unwrap();
+        assert_eq!(next_avatar_name(&dir, "png"), "avatar-02.png");
     }
 }

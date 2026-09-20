@@ -46,10 +46,18 @@ export type DependencyKind = "blocks" | "relates" | "duplicates";
 
 // ── 实体 ──────────────────────────────────────────────────────────────
 
-/** 项目成员（Agent 实例，ADR-073 instance_id 身份）。 */
+/** 项目成员身份类型（ADR-076 §决策 11）。 */
+export type PmMemberKind = "agent" | "user";
+
+/** 项目成员（Agent 实例或人类账号，ADR-076 §决策 11）。 */
 export interface PmProjectMember {
-  /** Agent 实例 ID（UUID，ADR-073） */
+  /** Agent 实例 ID（UUID，ADR-073）或 User ID（ADR-076，按 `kind` 解释） */
   instance_id: string;
+  /**
+   * 身份类型。服务端 `#[serde(default)]` = `agent`，兼容旧数据（零迁移）；
+   * 前端默认 `agent`。仅 MCP `pm_get_project` 路径透出（REST 路径暂不含）。
+   */
+  kind?: PmMemberKind;
   added_at: string;
   /**
    * Agent 角色（manifest 顶层 `role`，例："Senior Software Engineer"）。

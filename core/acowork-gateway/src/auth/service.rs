@@ -14,15 +14,20 @@
 //! in `local` mode nothing in this module runs and `accounts.json` is
 //! never created.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use acowork_core::account::{AccountListFile, DISABLED_PASSWORD_HASH, Role, UserAccount};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::account::{password, store};
 use crate::auth::revoked::RevokedFamilies;
 use crate::auth::token::{ACCESS_TTL_SECS, Claims, TokenError, TokenKind, TokenSigner};
+
+/// Invite-token lifetime (ADR-076 §决策 6: "一次性 invite_token（24h 过期）").
+pub const INVITE_TTL_SECS: i64 = 24 * 3600;
 
 /// Password policy (ADR-076 §决策 6, `[multi_user].password_policy`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -97,6 +102,70 @@ impl AuthPrincipal {
     }
 }
 
+/// Display-field patch applied by [`AuthService::update_account`]
+/// (ADR-076 §决策 1: the presentation fields live on `UserAccount`, so
+/// they are edited through the same authority as the credentials — never
+/// through the derived `user_profiles.json` view, which `sync_profiles`
+/// rebuilds from `accounts.json` and would clobber).
+///
+/// `None` = leave the field unchanged. `avatar` / `builtin_avatar` keep
+/// the existing wire contract: an empty string clears the field.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct ProfilePatch {
+    pub display_name: Option<String>,
+    pub language: Option<String>,
+    pub timezone: Option<String>,
+    pub city: Option<String>,
+    pub country: Option<String>,
+    pub occupation: Option<String>,
+    pub avatar: Option<String>,
+    pub builtin_avatar: Option<String>,
+    pub communication_style: Option<String>,
+    pub custom: Option<HashMap<String, String>>,
+}
+
+impl ProfilePatch {
+    /// Apply this patch to an account. `display_name` keeps the legacy
+    /// contract: trimmed, and an all-whitespace value is ignored rather
+    /// than blanking the name.
+    fn apply_to(self, account: &mut UserAccount) {
+        if let Some(name) = self.display_name {
+            let name = name.trim();
+            if !name.is_empty() {
+                account.display_name = name.to_string();
+            }
+        }
+        if let Some(v) = self.language {
+            account.language = v;
+        }
+        if let Some(v) = self.timezone {
+            account.timezone = v;
+        }
+        if let Some(v) = self.city {
+            account.city = Some(v);
+        }
+        if let Some(v) = self.country {
+            account.country = Some(v);
+        }
+        if let Some(v) = self.occupation {
+            account.occupation = Some(v);
+        }
+        if let Some(v) = self.avatar {
+            account.avatar = (!v.is_empty()).then_some(v);
+        }
+        if let Some(v) = self.builtin_avatar {
+            account.builtin_avatar = (!v.is_empty()).then_some(v);
+        }
+        if let Some(v) = self.communication_style {
+            account.communication_style = Some(v);
+        }
+        if let Some(v) = self.custom {
+            account.custom = v;
+        }
+    }
+}
+
 /// Why an authentication operation failed. The HTTP layer maps these to
 /// status codes; the variants deliberately do not distinguish
 /// "unknown user" from "wrong password" (see [`AuthService::login`]).
@@ -111,6 +180,10 @@ pub enum AuthError {
     Revoked,
     /// The new password violates the policy.
     Policy(String),
+    /// A uniqueness / state precondition failed (duplicate username, last
+    /// admin, already-disabled). Distinct from `Policy` because it maps to
+    /// 409, not 422.
+    Conflict(String),
     /// Storage failure — never the user's fault.
     Store(String),
 }
@@ -122,6 +195,7 @@ impl std::fmt::Display for AuthError {
             Self::Token(e) => write!(f, "{e}"),
             Self::Revoked => f.write_str("token revoked"),
             Self::Policy(m) => f.write_str(m),
+            Self::Conflict(m) => f.write_str(m),
             Self::Store(m) => write!(f, "account store error: {m}"),
         }
     }
@@ -153,7 +227,9 @@ impl AuthService {
         Ok(Self {
             data_dir: data_dir.to_path_buf(),
             signer: TokenSigner::load_or_generate(&auth_dir.join("secret"))?,
-            revoked: Mutex::new(RevokedFamilies::load(&auth_dir.join("revoked_families.txt"))),
+            revoked: Mutex::new(RevokedFamilies::load(
+                &auth_dir.join("revoked_families.txt"),
+            )),
             policy,
             bootstrap_admin,
         })
@@ -266,7 +342,9 @@ impl AuthService {
         // was issued (15-minute access tokens expire, refresh tokens do
         // not) — refresh is the enforcement point for that.
         let list = self.load_accounts().map_err(AuthError::Store)?;
-        let account = list.find(&claims.sub).ok_or(AuthError::InvalidCredentials)?;
+        let account = list
+            .find(&claims.sub)
+            .ok_or(AuthError::InvalidCredentials)?;
         if !account.is_login_capable() {
             return Err(AuthError::InvalidCredentials);
         }
@@ -323,7 +401,9 @@ impl AuthService {
             return Err(AuthError::InvalidCredentials);
         }
 
-        self.policy.validate(new_password).map_err(AuthError::Policy)?;
+        self.policy
+            .validate(new_password)
+            .map_err(AuthError::Policy)?;
         let hash = password::hash_password(new_password).map_err(AuthError::Store)?;
 
         let stamp = iso(now);
@@ -434,11 +514,264 @@ impl AuthService {
             updated_at: stamp,
             last_login_at: None,
             disabled_at: None,
+            invite_token_hash: None,
+            invite_expires_at: None,
         };
         tracing::info!(username = %account.username, "created bootstrap administrator");
         list.accounts.push(account);
         list.version += 1;
         self.save_accounts(&list)
+    }
+
+    // ── Account CRUD (ADR-076 §决策 5 / §决策 6, `account_api.rs`) ──
+    //
+    // These are the *authoritative* account mutations. The presentation
+    // cache (`user_profiles.json`, the `last_user_profile` source) is
+    // derived from this store by the HTTP layer, which owns the resource
+    // cache; this service only owns `accounts.json`.
+
+    /// Create an account (ADR-076 §决策 6 `POST /api/users`).
+    ///
+    /// `password` is optional: `None` mints an [`invite_token`] instead and
+    /// stores [`DISABLED_PASSWORD_HASH`], so the owner must complete
+    /// first-login to activate. The returned tuple is `(account, invite)`
+    /// where `invite` is `Some` only in the passwordless case.
+    ///
+    /// The username is lowercased and must be unique (case-insensitive) —
+    /// duplicates are a 409, not a silent second account.
+    pub fn create_account(
+        &self,
+        username: &str,
+        display_name: &str,
+        password: Option<&str>,
+        role: Role,
+        now: i64,
+    ) -> Result<(UserAccount, Option<String>), AuthError> {
+        let username = username.trim().to_ascii_lowercase();
+        if username.is_empty() || !username.bytes().all(is_username_byte) {
+            return Err(AuthError::Policy(
+                "username must be lowercase letters, digits, '-' or '_'".into(),
+            ));
+        }
+
+        let mut list = self.load_accounts().map_err(AuthError::Store)?;
+        if list.find_by_username(&username).is_some() {
+            return Err(AuthError::Conflict(format!(
+                "username '{username}' already exists"
+            )));
+        }
+
+        let stamp = iso(now);
+        let (password_hash, invite) = match password {
+            Some(p) => {
+                self.policy.validate(p).map_err(AuthError::Policy)?;
+                (password::hash_password(p).map_err(AuthError::Store)?, None)
+            }
+            None => (DISABLED_PASSWORD_HASH.to_string(), Some(self.new_invite())),
+        };
+
+        let mut account = UserAccount {
+            user_id: uuid::Uuid::new_v4().to_string(),
+            username,
+            display_name: if display_name.trim().is_empty() {
+                "User".into()
+            } else {
+                display_name.trim().to_string()
+            },
+            role,
+            password_hash,
+            password_changed_at: stamp.clone(),
+            password_expires_at: None,
+            language: "zh-CN".into(),
+            timezone: "Asia/Shanghai".into(),
+            city: None,
+            country: None,
+            occupation: None,
+            avatar: None,
+            builtin_avatar: None,
+            communication_style: None,
+            custom: HashMap::new(),
+            created_at: stamp.clone(),
+            updated_at: stamp,
+            last_login_at: None,
+            disabled_at: None,
+            invite_token_hash: None,
+            invite_expires_at: None,
+        };
+        if let Some((_, hash)) = &invite {
+            account.invite_token_hash = Some(hash.clone());
+            account.invite_expires_at = Some(iso(now + INVITE_TTL_SECS));
+        }
+
+        list.accounts.push(account.clone());
+        list.version += 1;
+        self.save_accounts(&list).map_err(AuthError::Store)?;
+        Ok((account, invite.map(|(t, _)| t)))
+    }
+
+    /// Update an account's editable fields (ADR-076 §决策 6).
+    ///
+    /// `None` leaves a field unchanged. `role` is handled by
+    /// [`Self::set_role`] because demoting the last admin must be refused
+    /// as a whole-store invariant, not a per-field edit.
+    pub fn update_account(
+        &self,
+        user_id: &str,
+        patch: ProfilePatch,
+        now: i64,
+    ) -> Result<UserAccount, AuthError> {
+        let mut list = self.load_accounts().map_err(AuthError::Store)?;
+        let idx = self.index_of(&list, user_id)?;
+        patch.apply_to(&mut list.accounts[idx]);
+        list.accounts[idx].updated_at = iso(now);
+        list.version += 1;
+        let account = list.accounts[idx].clone();
+        self.save_accounts(&list).map_err(AuthError::Store)?;
+        Ok(account)
+    }
+
+    /// Change an account's role, refusing to remove the last administrator.
+    pub fn set_role(&self, user_id: &str, role: Role, now: i64) -> Result<UserAccount, AuthError> {
+        let mut list = self.load_accounts().map_err(AuthError::Store)?;
+        let idx = self.index_of(&list, user_id)?;
+        if list.accounts[idx].role == Role::Admin
+            && role != Role::Admin
+            && self.admin_count(&list) <= 1
+        {
+            return Err(AuthError::Conflict(
+                "cannot demote the last administrator".into(),
+            ));
+        }
+        list.accounts[idx].role = role;
+        list.accounts[idx].updated_at = iso(now);
+        list.version += 1;
+        let account = list.accounts[idx].clone();
+        self.save_accounts(&list).map_err(AuthError::Store)?;
+        Ok(account)
+    }
+
+    /// Soft-delete an account (ADR-076 §决策 6). `disabled_at = now`; every
+    /// refresh family is revoked so no live session outlives the deletion.
+    ///
+    /// Idempotent: disabling an already-disabled account is a no-op success
+    /// (the operator's intent is satisfied either way). Refuses to disable
+    /// the last administrator — that would lock everyone out.
+    pub fn disable_account(&self, user_id: &str, now: i64) -> Result<(), AuthError> {
+        let mut list = self.load_accounts().map_err(AuthError::Store)?;
+        let idx = self.index_of(&list, user_id)?;
+        if list.accounts[idx].disabled_at.is_some() {
+            return Ok(());
+        }
+        if list.accounts[idx].role == Role::Admin && self.admin_count(&list) <= 1 {
+            return Err(AuthError::Conflict(
+                "cannot disable the last administrator".into(),
+            ));
+        }
+        list.accounts[idx].disabled_at = Some(iso(now));
+        list.accounts[idx].updated_at = iso(now);
+        list.version += 1;
+        self.save_accounts(&list).map_err(AuthError::Store)?;
+        self.revoked()
+            .revoke_user(user_id)
+            .map_err(AuthError::Store)
+    }
+
+    /// Mint a fresh single-use `invite_token` for an account and clear its
+    /// password (ADR-076 §决策 6 `POST /api/users/{id}/reset-password`).
+    ///
+    /// The account becomes [`DISABLED_PASSWORD_HASH`] — the reset flow *is*
+    /// first-login. Every refresh family is revoked so the previous holder
+    /// is logged out immediately.
+    pub fn reset_password(&self, user_id: &str, now: i64) -> Result<String, AuthError> {
+        let mut list = self.load_accounts().map_err(AuthError::Store)?;
+        let idx = self.index_of(&list, user_id)?;
+        let (token, hash) = self.new_invite();
+        list.accounts[idx].password_hash = DISABLED_PASSWORD_HASH.to_string();
+        list.accounts[idx].invite_token_hash = Some(hash);
+        list.accounts[idx].invite_expires_at = Some(iso(now + INVITE_TTL_SECS));
+        list.accounts[idx].updated_at = iso(now);
+        list.version += 1;
+        self.save_accounts(&list).map_err(AuthError::Store)?;
+        self.revoked()
+            .revoke_user(user_id)
+            .map_err(AuthError::Store)?;
+        Ok(token)
+    }
+
+    /// Complete first-login: consume an `invite_token` and set the initial
+    /// password (ADR-076 §决策 6 `POST /api/auth/first-login`).
+    ///
+    /// Single-use — the invite is burned (hash cleared) on success. An
+    /// unknown, expired or already-spent token is one indistinguishable
+    /// [`AuthError::InvalidCredentials`], so the endpoint never enumerates
+    /// accounts. Returns a token pair (the caller is now logged in).
+    pub fn first_login(
+        &self,
+        invite_token: &str,
+        new_password: &str,
+        now: i64,
+    ) -> Result<TokenPair, AuthError> {
+        let hash = invite_hash(invite_token);
+        let mut list = self.load_accounts().map_err(AuthError::Store)?;
+        let idx = list
+            .accounts
+            .iter()
+            .position(|a| {
+                a.invite_token_hash.as_deref() == Some(hash.as_str()) && a.disabled_at.is_none()
+            })
+            .ok_or(AuthError::InvalidCredentials)?;
+
+        // Expiry is checked against the stored deadline, not the token.
+        let expired = list.accounts[idx]
+            .invite_expires_at
+            .as_deref()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|t| t.timestamp() < now)
+            .unwrap_or(true);
+        if expired {
+            return Err(AuthError::InvalidCredentials);
+        }
+
+        self.policy
+            .validate(new_password)
+            .map_err(AuthError::Policy)?;
+        let hash = password::hash_password(new_password).map_err(AuthError::Store)?;
+
+        let stamp = iso(now);
+        let acc = &mut list.accounts[idx];
+        acc.password_hash = hash;
+        acc.password_changed_at = stamp.clone();
+        acc.updated_at = stamp;
+        acc.invite_token_hash = None;
+        acc.invite_expires_at = None;
+        acc.last_login_at = Some(iso(now));
+        list.version += 1;
+        let (user_id, role) = (acc.user_id.clone(), acc.role);
+        self.save_accounts(&list).map_err(AuthError::Store)?;
+        Ok(self.mint(&user_id, role, now))
+    }
+
+    fn index_of(&self, list: &AccountListFile, user_id: &str) -> Result<usize, AuthError> {
+        list.accounts
+            .iter()
+            .position(|a| a.user_id == user_id)
+            .ok_or(AuthError::InvalidCredentials)
+    }
+
+    fn admin_count(&self, list: &AccountListFile) -> usize {
+        list.accounts
+            .iter()
+            .filter(|a| a.role == Role::Admin && a.disabled_at.is_none())
+            .count()
+    }
+
+    /// Mint an `(invite_token, sha256_hash)` pair. Only the hash is stored
+    /// (ADR-076 §决策 6: the token is a bearer secret, the store keeps no
+    /// way to recover it).
+    fn new_invite(&self) -> (String, String) {
+        let token = random_hex16();
+        let hash = invite_hash(&token);
+        (token, hash)
     }
 }
 
@@ -449,11 +782,32 @@ fn iso(now: i64) -> String {
         .unwrap_or_default()
 }
 
-/// 16 random bytes as lowercase hex — refresh-family entropy.
+/// 16 random bytes as lowercase hex — refresh-family / invite entropy.
 fn random_hex16() -> String {
     let mut bytes = [0u8; 16];
     rand::fill(&mut bytes[..]);
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// SHA-256 hex of an `invite_token` — the only form persisted
+/// (ADR-076 §决策 6). Kept short deliberately: the invite is a 24h
+/// single-use bearer secret, so a fast digest is enough (no KDF) —
+/// the token itself is 128 bits of CSPRNG output, not a guessable
+/// password.
+fn invite_hash(token: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(token.as_bytes());
+    hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// Whether a byte is allowed in a username (ADR-076 §决策 1:
+/// "lowercase letters, digits, `-` and `_`").
+fn is_username_byte(b: u8) -> bool {
+    b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_'
 }
 
 /// A hash of a throwaway random password, computed once, verified against
@@ -514,6 +868,8 @@ mod tests {
             updated_at: stamp,
             last_login_at: None,
             disabled_at: None,
+            invite_token_hash: None,
+            invite_expires_at: None,
         };
         let list = AccountListFile {
             version: 1,
@@ -582,7 +938,12 @@ mod tests {
 
         let second = svc.refresh(&first.refresh_token, now + 1).unwrap();
         assert_ne!(first.refresh_token, second.refresh_token);
-        assert_eq!(svc.verify_access(&second.access_token, now + 1).unwrap().user_id, uid);
+        assert_eq!(
+            svc.verify_access(&second.access_token, now + 1)
+                .unwrap()
+                .user_id,
+            uid
+        );
 
         // Replaying the spent token is the leak signal: it kills every
         // family for the user, including the live descendant.
@@ -693,7 +1054,9 @@ mod tests {
         let tampered: String = chars.into_iter().collect();
         assert!(matches!(
             svc.verify_access(&tampered, 1_001),
-            Err(AuthError::Token(TokenError::BadSignature | TokenError::Malformed))
+            Err(AuthError::Token(
+                TokenError::BadSignature | TokenError::Malformed
+            ))
         ));
     }
 
@@ -761,6 +1124,79 @@ mod tests {
         assert!(mixed.validate("Abcd1234").is_ok());
     }
 
+    /// ADR-076 §决策 6: the invite is 24h-bound and single-use. Expiry is
+    /// checked against the stored deadline, and an unparseable deadline is
+    /// treated as expired (fail closed) — never as "no deadline".
+    #[test]
+    fn invite_expiry_is_enforced() {
+        let dir = tmp_dir("invite-expiry");
+        let svc = AuthService::new(&dir, PasswordPolicy::default(), None).unwrap();
+        let now = 1_700_000_000;
+        let (_, invite) = svc
+            .create_account("alice", "Alice", None, Role::User, now)
+            .unwrap();
+        let invite = invite.expect("passwordless create mints an invite");
+
+        // Just inside the window → activates.
+        assert!(
+            svc.first_login(&invite, "s3cret123", now + INVITE_TTL_SECS - 1)
+                .is_ok()
+        );
+
+        // Re-mint and step past the deadline → refused, indistinguishable
+        // from any other bad invite.
+        let (bob, invite2) = svc
+            .create_account("bob", "Bob", None, Role::User, now)
+            .unwrap();
+        let invite2 = invite2.expect("invite minted");
+        let err = svc
+            .first_login(&invite2, "s3cret123", now + INVITE_TTL_SECS + 1)
+            .unwrap_err();
+        assert!(matches!(err, AuthError::InvalidCredentials), "got {err:?}");
+
+        // Fail-closed: a garbage stored deadline must not read as "no expiry".
+        let mut list = svc.load_accounts().unwrap();
+        let acc = list
+            .accounts
+            .iter_mut()
+            .find(|a| a.user_id == bob.user_id)
+            .unwrap();
+        acc.invite_expires_at = Some("not-a-timestamp".into());
+        svc.save_accounts(&list).unwrap();
+        let err = svc.first_login(&invite2, "s3cret123", now).unwrap_err();
+        assert!(matches!(err, AuthError::InvalidCredentials), "got {err:?}");
+    }
+
+    /// ADR-076 §决策 6: `reset-password` mints a fresh single-use invite,
+    /// clears the password (the reset flow *is* first-login), and logs the
+    /// previous holder out by revoking every refresh family.
+    #[test]
+    fn reset_password_mints_single_use_invite_and_kills_families() {
+        let (svc, uid) = service_with_user("reset-pwd", "alice", "oldpass12");
+        let now = 1_700_000_000;
+        let pair = svc.login("alice", "oldpass12", now).unwrap();
+
+        let invite = svc.reset_password(&uid, now).unwrap();
+
+        // The old refresh token is dead (all families revoked).
+        assert!(matches!(
+            svc.refresh(&pair.refresh_token, now).unwrap_err(),
+            AuthError::Revoked
+        ));
+        // The old password no longer works — the hash was cleared.
+        assert!(matches!(
+            svc.login("alice", "oldpass12", now).unwrap_err(),
+            AuthError::InvalidCredentials
+        ));
+        // The invite activates a new password, and is then burned.
+        assert!(svc.first_login(&invite, "newpass12", now).is_ok());
+        assert!(matches!(
+            svc.first_login(&invite, "again1234", now).unwrap_err(),
+            AuthError::InvalidCredentials
+        ));
+        assert!(svc.login("alice", "newpass12", now).is_ok());
+    }
+
     #[test]
     fn signing_secret_survives_a_restart() {
         let dir = tmp_dir("secret-persist");
@@ -773,5 +1209,64 @@ mod tests {
         let principal = restarted.verify_access(&pair.access_token, 1_001).unwrap();
         assert_eq!(principal.user_id, "u-1");
         assert!(principal.is_admin());
+    }
+
+    /// ADR-076 §决策 1: the display fields live on `UserAccount`, so
+    /// `update_account` persists them into `accounts.json` — the authority
+    /// `sync_profiles` re-derives the public view from. `None` fields are
+    /// untouched, an empty `avatar` clears, and a whitespace `display_name`
+    /// is ignored rather than blanking the name.
+    #[test]
+    fn update_account_applies_the_display_patch() {
+        let (svc, uid) = service_with_user("profile-patch", "alice", "alicepass1");
+        let now = 1_700_000_000;
+
+        let account = svc
+            .update_account(
+                &uid,
+                ProfilePatch {
+                    display_name: Some("  Alice A  ".into()),
+                    language: Some("zh-CN".into()),
+                    timezone: Some("Asia/Shanghai".into()),
+                    city: Some("上海".into()),
+                    avatar: Some("assets/avatar-01.png".into()),
+                    custom: Some([("theme".into(), "dark".into())].into()),
+                    ..Default::default()
+                },
+                now,
+            )
+            .unwrap();
+        assert_eq!(account.display_name, "Alice A");
+        assert_eq!(account.language, "zh-CN");
+        assert_eq!(account.timezone, "Asia/Shanghai");
+        assert_eq!(account.city.as_deref(), Some("上海"));
+        assert_eq!(account.avatar.as_deref(), Some("assets/avatar-01.png"));
+        assert_eq!(
+            account.custom.get("theme").map(String::as_str),
+            Some("dark")
+        );
+        // Untouched fields keep their seeded values.
+        assert_eq!(account.country, None);
+        assert_eq!(account.builtin_avatar, None);
+
+        // Everything is in the store (the authority), not just the return value.
+        let stored = svc.load_accounts().unwrap().find(&uid).unwrap().clone();
+        assert_eq!(stored.language, "zh-CN");
+        assert_eq!(stored.avatar.as_deref(), Some("assets/avatar-01.png"));
+
+        // Empty avatar clears; whitespace display_name is ignored.
+        let account = svc
+            .update_account(
+                &uid,
+                ProfilePatch {
+                    display_name: Some("   ".into()),
+                    avatar: Some(String::new()),
+                    ..Default::default()
+                },
+                now,
+            )
+            .unwrap();
+        assert_eq!(account.display_name, "Alice A");
+        assert_eq!(account.avatar, None);
     }
 }

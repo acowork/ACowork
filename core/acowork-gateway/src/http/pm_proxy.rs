@@ -26,25 +26,23 @@
 //!
 //! | 路径 | 策略 |
 //! |------|------|
-//! | `/api/pm/*`（REST，Desktop） | **覆盖** `X-Actor` 为可信身份 `human`（Desktop 会话用户）。客户端自报的 `X-Actor`（如伪造 `agent:xxx`）被丢弃 |
+//! | `/api/pm/*`（REST，Desktop） | **覆盖** `X-Actor` 为可信身份。`multi_user` 下 = token 身份（`AuthContext.effective_user_id`）；`local` 下回退常量 `human`。客户端自报的 `X-Actor`（如伪造 `agent:xxx`）被丢弃 |
 //! | `/api/pm/mcp`（MCP，Agent） | **校验** `X-MCP-Actor`：agent_id ∈ Gateway `installed_agents` → 透传（可信）；否则**剥离**（→ 匿名，仅只读工具，设计 §9.3） |
 //!
-//! 安全语义：REST 面只允许人类操作（`created_by`/reviewer = `human`）；Agent
-//! 身份只能经 MCP `X-MCP-Actor` 表达，且必须通过 Gateway Agent 目录校验。
+//! 安全语义：REST 面只允许人类操作（`created_by`/reviewer = 真实 user_id）；
+//! Agent 身份只能经 MCP `X-MCP-Actor` 表达，且必须通过 Gateway Agent 目录校验。
 
+use axum::Router;
 use axum::body::Bytes;
-use axum::extract::{Path, RawQuery, State};
+use axum::extract::{Extension, Path, RawQuery, State};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
-use axum::Router;
 
 use crate::gateway::state::GatewayState;
+use crate::http::auth_middleware::{AuthContext, trusted_rest_actor};
 use crate::http::proxy::{is_hop_by_hop_header, runtime_http_client};
 use crate::http::routes::AppState;
-
-/// Desktop 会话用户的可信身份（设计 §9.2：`created_by: "human" | "agent:xxx"`）。
-const TRUSTED_HUMAN_ACTOR: &str = "human";
 
 /// Build the PM reverse-proxy router.
 ///
@@ -63,14 +61,19 @@ async fn pm_proxy_handler(
     RawQuery(query): RawQuery,
     headers: HeaderMap,
     method: Method,
+    auth: Option<Extension<AuthContext>>,
     body: Bytes,
 ) -> Response {
+    // ADR-076 §决策 10: under `multi_user` the REST actor is the token
+    // identity; under `local` there is no `AuthContext` (the middleware is
+    // a no-op) and we fall back to the `human` constant (§决策 12).
+    let actor = trusted_rest_actor(auth.as_ref().map(|Extension(c)| c));
     // 读取 PM 进程实际绑定端口 + 身份注入所需状态（supervisor 在 PM ready 后写入）。
     let (port, trusted_headers) = {
         let gw = state.gateway_state.read().await;
         let port = gw.pm_process.as_ref().map(|p| p.port);
         let is_mcp = rest == "mcp" || rest.starts_with("mcp/");
-        let trusted = build_trusted_headers(&headers, is_mcp, &gw);
+        let trusted = build_trusted_headers(&headers, is_mcp, &gw, &actor);
         (port, trusted)
     };
     let Some(port) = port else {
@@ -140,13 +143,20 @@ async fn pm_proxy_handler(
     }
 }
 
-/// 构造转发 header（ADR-064 Phase 3 身份注入）。
+/// Construct the forwarding headers (ADR-064 Phase 3 identity injection).
 ///
-/// - **REST 路径**（`is_mcp = false`）：丢弃客户端自报 `X-Actor`，注入可信
-///   `X-Actor: human`——杜绝伪造 `agent:xxx` 冒充 Agent。
-/// - **MCP 路径**（`is_mcp = true`）：校验 `X-MCP-Actor`——agent_id 在 Gateway
-///   `installed_agents` 中视为可信透传；否则剥离（→ 匿名，仅只读工具）。
-fn build_trusted_headers(headers: &HeaderMap, is_mcp: bool, gw: &GatewayState) -> HeaderMap {
+/// - **REST path** (`is_mcp = false`): drop the client-claimed `X-Actor` and
+///   inject `actor` — the token identity under `multi_user`, the `human`
+///   constant under `local` (ADR-076 §决策 10 / §决策 12).
+/// - **MCP path** (`is_mcp = true`): validate `X-MCP-Actor` — agent_id in
+///   Gateway `installed_agents` passes through; otherwise strip (→ anonymous,
+///   read-only tools only).
+fn build_trusted_headers(
+    headers: &HeaderMap,
+    is_mcp: bool,
+    gw: &GatewayState,
+    actor: &str,
+) -> HeaderMap {
     let mut out = HeaderMap::new();
     for (name, value) in headers.iter() {
         if is_hop_by_hop_header(name) {
@@ -171,18 +181,18 @@ fn build_trusted_headers(headers: &HeaderMap, is_mcp: bool, gw: &GatewayState) -
             }
         }
     }
-    if !is_mcp {
-        out.insert("x-actor", HeaderValue::from_static(TRUSTED_HUMAN_ACTOR));
+    if !is_mcp && let Ok(header) = HeaderValue::from_str(actor) {
+        out.insert("x-actor", header);
     }
     out
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
-    use axum::body::{to_bytes, Body};
+    use axum::body::{Body, to_bytes};
     use axum::extract::Path;
     use axum::http::{Request, StatusCode};
     use axum::routing::get;
@@ -191,7 +201,7 @@ mod tests {
 
     use crate::gateway::state::GatewayState;
     use crate::http::auth::HttpAuth;
-    use crate::http::routes::{build_router, AppState};
+    use crate::http::routes::{AppState, build_router};
     use crate::lifecycle::pm_supervisor::PmProcessState;
 
     /// 构造最小 `AppState`（与 `routes.rs::tests::test_app_state` 等价）。
@@ -212,10 +222,81 @@ mod tests {
         )
     }
 
+    /// `multi_user` `AppState` (ADR-076 §决策 12): the account system is on,
+    /// so the auth middleware injects an `AuthContext` on authenticated
+    /// requests. Returns the state plus the data dir for seeding.
+    fn multi_user_app_state() -> AppState {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "acowork-test-pm-proxy-mu-{}-{}",
+            std::process::id(),
+            unique
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let gw_state = GatewayState::new(&dir.to_string_lossy());
+        let mut st = AppState::new(
+            Arc::new(RwLock::new(gw_state)),
+            Arc::new(HttpAuth::new(false)),
+        );
+        st.auth_mode = crate::auth::AuthMode::MultiUser;
+        st.auth_service = Some(Arc::new(
+            crate::auth::AuthService::new(&dir, Default::default(), None).unwrap(),
+        ));
+        st
+    }
+
+    /// Seed one account (`u-alice` / password `s3cret123`) and return a valid
+    /// access token for it.
+    fn seed_and_login(state: &AppState) -> String {
+        use acowork_core::account::{AccountListFile, Role, UserAccount};
+        let svc = state.auth_service.clone().unwrap();
+        let account = UserAccount {
+            user_id: "u-alice".into(),
+            username: "alice".into(),
+            display_name: "Alice".into(),
+            role: Role::User,
+            password_hash: crate::account::password::hash_password_with(
+                "s3cret123",
+                argon2::Params::new(8, 1, 1, Some(32)).unwrap(),
+            )
+            .unwrap(),
+            password_changed_at: "t".into(),
+            password_expires_at: None,
+            language: "en".into(),
+            timezone: "UTC".into(),
+            city: None,
+            country: None,
+            occupation: None,
+            avatar: None,
+            builtin_avatar: None,
+            communication_style: None,
+            custom: Default::default(),
+            created_at: "t".into(),
+            updated_at: "t".into(),
+            last_login_at: None,
+            disabled_at: None,
+            invite_token_hash: None,
+            invite_expires_at: None,
+        };
+        svc.save_accounts(&AccountListFile {
+            version: 1,
+            accounts: vec![account],
+        })
+        .unwrap();
+        svc.login("alice", "s3cret123", crate::auth::token::now_unix())
+            .unwrap()
+            .access_token
+    }
+
     /// 在 `127.0.0.1:0` 起一个 mock PM 服务（路径不带 `/api` 前缀），返回端口。
     async fn start_mock_pm_server() -> u16 {
         let app = axum::Router::new()
-            .route("/projects", get(|| async { axum::Json(serde_json::json!([])) }))
+            .route(
+                "/projects",
+                get(|| async { axum::Json(serde_json::json!([])) }),
+            )
             .route(
                 "/tasks/{tid}",
                 get(|Path(tid): Path<String>| async move {
@@ -227,7 +308,9 @@ mod tests {
             .expect("bind mock PM server");
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move {
-            axum::serve(listener, app).await.expect("mock PM server runs");
+            axum::serve(listener, app)
+                .await
+                .expect("mock PM server runs");
         });
         port
     }
@@ -403,7 +486,9 @@ mod tests {
             .expect("bind echo PM server");
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move {
-            axum::serve(listener, app).await.expect("echo PM server runs");
+            axum::serve(listener, app)
+                .await
+                .expect("echo PM server runs");
         });
         port
     }
@@ -497,6 +582,36 @@ mod tests {
         );
     }
 
+    /// ADR-076 §决策 10: under `multi_user` the REST actor is the *token*
+    /// identity, not the `human` constant. A forged `X-Actor` is still
+    /// dropped, and the injected value is the authenticated `user_id`.
+    #[tokio::test]
+    async fn rest_path_injects_token_identity_under_multi_user() {
+        let state = multi_user_app_state();
+        let token = seed_and_login(&state);
+        let port = start_echo_pm_server().await;
+        set_pm_process(&state, port).await;
+
+        let router = build_router(state);
+        let request = Request::builder()
+            .method("GET")
+            .uri("/api/pm/echo-headers")
+            .header("Authorization", format!("Bearer {token}"))
+            .header("X-Actor", "agent:com.evil")
+            .body(Body::empty())
+            .expect("build request");
+        let response = router.oneshot(request).await.expect("router responds");
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let echoed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+        assert_eq!(
+            echoed["x-actor"],
+            serde_json::json!("u-alice"),
+            "multi_user REST actor must be the token identity, got: {echoed}"
+        );
+    }
+
     /// MCP 路径：可信 agent（已安装）的 `X-MCP-Actor` 透传。
     #[tokio::test]
     async fn mcp_path_passes_trusted_actor() {
@@ -527,12 +642,8 @@ mod tests {
         let port = start_echo_pm_server().await;
         set_pm_process(&state, port).await;
 
-        let echoed = proxy_echo_headers(
-            state,
-            "/api/pm/mcp",
-            &[("X-MCP-Actor", "com.evil.ghost")],
-        )
-        .await;
+        let echoed =
+            proxy_echo_headers(state, "/api/pm/mcp", &[("X-MCP-Actor", "com.evil.ghost")]).await;
 
         assert!(
             echoed.get("x-mcp-actor").is_none(),

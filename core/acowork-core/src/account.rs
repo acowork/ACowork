@@ -115,6 +115,17 @@ pub struct UserAccount {
     /// its `user_id` and session ownership are preserved.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disabled_at: Option<String>,
+
+    // ── First-login invite (ADR-076 §决策 6) ──
+    /// SHA-256 hex of the one-time `invite_token` an admin minted (via
+    /// `POST /api/users/{id}/reset-password` or account creation without a
+    /// password). `None` = no pending activation. Burned (set to `None`) the
+    /// moment `POST /api/auth/first-login` consumes it, so it is single-use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invite_token_hash: Option<String>,
+    /// When the pending `invite_token` expires (ISO 8601, 24h).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invite_expires_at: Option<String>,
 }
 
 impl UserAccount {
@@ -267,6 +278,8 @@ mod tests {
             updated_at: "2026-10-15T00:00:00Z".into(),
             last_login_at: None,
             disabled_at: None,
+            invite_token_hash: None,
+            invite_expires_at: None,
         }
     }
 

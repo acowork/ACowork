@@ -2071,10 +2071,14 @@ def run_pm_suite(http, base):
                         "description": "e2e member flow"})
     if r.status_code == 200:
         pid = r.json().get("id")
-        if r.json().get("members") == []:
-            ok("human-created project starts with empty members")
+        # ADR-076 §决策 11: the creator auto-joins members with kind=user
+        # (REST proxy injects X-Actor: human in local mode), so a
+        # human-created project starts with exactly that one member.
+        members = r.json().get("members") or []
+        if [m.get("instance_id") for m in members] == ["human"]:
+            ok("human-created project has the creator as sole member")
         else:
-            fail(f"members should be [] for human create, got {r.json().get('members')}")
+            fail(f"members should be ['human'] for human create, got {members}")
     else:
         fail(f"project create: HTTP {r.status_code} {r.text[:200]}")
         return
@@ -2171,10 +2175,13 @@ def run_pm_suite(http, base):
         fail(f"remove member: HTTP {r.status_code} {r.text[:200]}")
         return
 
-    # 独立 PM 进程磁盘持久化：跨请求重新读，状态必须一致
+    # 独立 PM 进程磁盘持久化：跨请求重新读，状态必须一致。
+    # ADR-076 §决策 11: 只剩创建者（human）成员，agent 成员已移除。
     r = http.get(f"{base}/api/pm/projects/{pid}")
-    if r.status_code == 200 and r.json().get("members") == []:
-        ok("project persisted with empty members (cross-request re-read)")
+    if r.status_code == 200 and [
+        m.get("instance_id") for m in (r.json().get("members") or [])
+    ] == ["human"]:
+        ok("project persisted with only the creator member (cross-request re-read)")
     else:
         fail(f"persisted project: HTTP {r.status_code} {r.text[:200]}")
 

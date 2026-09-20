@@ -3,8 +3,8 @@
 //! The Gateway struct is the top-level orchestrator that ties together
 //! gRPC server, lifecycle manager, package manager, and vault.
 
-pub mod state;
 pub mod node_manager;
+pub mod state;
 
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -13,9 +13,9 @@ use crate::config::GatewayConfig;
 use crate::cron::CronStore;
 use crate::error::GatewayError;
 use crate::gateway::state::GatewayState;
-use crate::interaction_store::InteractionStore;
-use crate::handlers::server::SharedState;
 use crate::gateway::state::SYSTEM_AGENT_ID;
+use crate::handlers::server::SharedState;
+use crate::interaction_store::InteractionStore;
 
 /// Returns true when `agent_root` contains at least one directory whose
 /// name parses as a UUIDv4 AND that directory contains a `manifest.toml`.
@@ -91,8 +91,7 @@ async fn dispatch_bundled_agent_install(
         .into_inner();
 
     let registry_dir = config.package_registry_dir();
-    std::fs::create_dir_all(&registry_dir)
-        .map_err(|e| format!("create registry dir: {}", e))?;
+    std::fs::create_dir_all(&registry_dir).map_err(|e| format!("create registry dir: {}", e))?;
     let registry_path = registry_dir.join(format!("{}.agent", agent_id));
     std::fs::write(&registry_path, &bytes).map_err(|e| format!("write registry entry: {}", e))?;
 
@@ -134,7 +133,6 @@ async fn dispatch_bundled_agent_install(
     // and the same path is reused by later `ensure` calls.
     Ok(())
 }
-
 
 /// Gateway — the top-level orchestrator
 ///
@@ -206,6 +204,20 @@ impl Gateway {
         // one could ever log in, so boot must fail rather than serve a
         // Gateway nobody can authenticate against.
         let auth_mode = config.effective_auth_mode();
+        // ADR-076 §决策 12: an explicit mode that disagrees with the bind
+        // inference is allowed (explicit always wins) but suspicious — warn
+        // so a `--auth-mode local` behind a `0.0.0.0` bind is never silent.
+        if config.auth_mode.is_some() {
+            let inferred = crate::auth::resolve_auth_mode(None, None, &config.http.host);
+            if inferred != auth_mode {
+                tracing::warn!(
+                    explicit = %auth_mode,
+                    inferred = %inferred,
+                    bind_host = %config.http.host,
+                    "explicit auth_mode overrides the bind-address inference (ADR-076 §决策 12)"
+                );
+            }
+        }
         let auth_service = if auth_mode.is_multi_user() {
             let svc = crate::auth::AuthService::new(
                 std::path::Path::new(&data_dir),
@@ -277,9 +289,7 @@ impl Gateway {
                     return None; // don't kill self
                 }
                 match &mqtt_marker {
-                    Some(marker) if cmdline.contains(marker.as_str()) => {
-                        Some((pid, cmdline))
-                    }
+                    Some(marker) if cmdline.contains(marker.as_str()) => Some((pid, cmdline)),
                     _ => None,
                 }
             })
@@ -384,33 +394,22 @@ impl Gateway {
         //               and the per-node `is_ready` control gate).
         // Optional:
         //   * embedding - fall back to a remote embedder if missing
-        let vault_handle = bootstrap_registry.register(
-            "vault",
-            crate::bootstrap::ReadinessKind::Required,
-        );
-        let mqtt_handle = bootstrap_registry.register(
-            "mqtt",
-            crate::bootstrap::ReadinessKind::Required,
-        );
-        let publisher_handle = bootstrap_registry.register(
-            "publisher",
-            crate::bootstrap::ReadinessKind::Required,
-        );
-        let embed_handle = bootstrap_registry.register(
-            "embedding",
-            crate::bootstrap::ReadinessKind::Optional,
-        );
+        let vault_handle =
+            bootstrap_registry.register("vault", crate::bootstrap::ReadinessKind::Required);
+        let mqtt_handle =
+            bootstrap_registry.register("mqtt", crate::bootstrap::ReadinessKind::Required);
+        let publisher_handle =
+            bootstrap_registry.register("publisher", crate::bootstrap::ReadinessKind::Required);
+        let embed_handle =
+            bootstrap_registry.register("embedding", crate::bootstrap::ReadinessKind::Optional);
 
         // Construct the orchestrator with the same instance_id as the
         // Gateway so the snapshot's `instance_id` field stays consistent
         // across the Gateway's lifetime.
         let instance_id = shared_state.read().await.instance_id.clone();
-        let bootstrap_orchestrator = crate::bootstrap::BootstrapOrchestrator::new(
-            instance_id,
-            bootstrap_registry.clone(),
-        );
-        shared_state.write().await.bootstrap.orchestrator =
-            Some(bootstrap_orchestrator.clone());
+        let bootstrap_orchestrator =
+            crate::bootstrap::BootstrapOrchestrator::new(instance_id, bootstrap_registry.clone());
+        shared_state.write().await.bootstrap.orchestrator = Some(bootstrap_orchestrator.clone());
         // ADR-059 Phase 5.4: stash the vault handle on the shared
         // state so the HTTP vault lock/unlock handlers can demote
         // (mark_booting) and restore (mark_ready) vault readiness
@@ -504,8 +503,7 @@ impl Gateway {
                         // (process-level readiness; model loading is
                         // tracked by the supervisor, not the bootstrap
                         // registry).
-                        embed_handle
-                            .mark_ready(Some("embed process spawned".to_string()));
+                        embed_handle.mark_ready(Some("embed process spawned".to_string()));
                         embed_supervisor_cfg =
                             Some(crate::lifecycle::embed_supervisor::EmbedSupervisorConfig {
                                 data_dir,
@@ -808,10 +806,7 @@ impl Gateway {
         if let (Some(sup_cfg), Some(shared_arc)) =
             (embed_supervisor_cfg.take(), Some(shared_state.clone()))
         {
-            crate::lifecycle::embed_supervisor::start_embed_supervisor(
-                sup_cfg,
-                shared_arc,
-            );
+            crate::lifecycle::embed_supervisor::start_embed_supervisor(sup_cfg, shared_arc);
         }
 
         // ADR-055 §6.7 (Phase 4): the LSP relay is NO LONGER hosted
@@ -901,9 +896,14 @@ impl Gateway {
                     }
                     Some(h)
                 }
-                Err(e) => { tracing::error!(%e, "MQTT broker failed"); None }
+                Err(e) => {
+                    tracing::error!(%e, "MQTT broker failed");
+                    None
+                }
             }
-        } else { None };
+        } else {
+            None
+        };
 
         // ADR-XXX Debug: Share broker handle with HTTP debug endpoints so they can
         // trigger graceful shutdown for connection-recovery tests.
@@ -1015,7 +1015,7 @@ impl Gateway {
                 let bootstrap_registry_for_cb = bootstrap_registry_for_dispatch.clone();
                 let operation_store_for_cb = operation_store_for_dispatch.clone();
                 let node_replay_guard_for_cb = node_replay_guard_for_cb.clone();
-                 tokio::spawn(async move {
+                tokio::spawn(async move {
                     let client = slot.lock().await.clone();
                     let node_control = node_control_slot.lock().await.clone();
                     // ADR-059 follow-up: bundle every dispatch dependency
@@ -1064,7 +1064,9 @@ impl Gateway {
             };
             match publisher_result {
                 Ok(c) => {
-                    tracing::info!("MQTT Gateway client connected (persistent subscriptions handled by ConnAck handler)");
+                    tracing::info!(
+                        "MQTT Gateway client connected (persistent subscriptions handled by ConnAck handler)"
+                    );
                     let client = Arc::new(c.clone());
                     // ADR-059 §7.2: attach the replay guard so the poll
                     // task stamps gateway (re)connections — dispatch uses
@@ -1090,9 +1092,14 @@ impl Gateway {
                     mqtt_handle.mark_ready(Some("client connected".to_string()));
                     Some(client)
                 }
-                Err(e) => { tracing::warn!(%e, "MQTT Gateway client failed"); None }
+                Err(e) => {
+                    tracing::warn!(%e, "MQTT Gateway client failed");
+                    None
+                }
             }
-        } else { None };
+        } else {
+            None
+        };
 
         // ADR-033: Start MQTT Global Resources Publisher.
         // Publishes providers, models, MCP catalog, searches, embedding models
@@ -1104,36 +1111,36 @@ impl Gateway {
         // dev_mode vault auto-unlock task and (b) the local-node
         // supervisor completion can independently call `handle.mark_ready()`
         // once their respective preconditions are satisfied.
-        let mqtt_publisher_trigger: Option<crate::mqtt::MqttPublisherTrigger> = if let Some(ref client) = mqtt_gw_client {
-            let publisher = crate::mqtt::MqttGlobalResourcesPublisher::new(
-                client.as_ref().clone(),
-                shared_state.clone(),
-            );
-            let handle = publisher.start();
-            let trigger = handle.create_trigger();
-            tracing::info!("MQTT Global Resources Publisher started");
-            // Store the handle so the ready barrier can be raised by the
-            // vault auto-unlock task and the local-node supervisor.
-            shared_state.write().await.mqtt_publisher_handle = Some(handle);
-            // ADR-059 Phase 1.2: the publisher is a required subsystem.
-            // Marking it ready here is intentionally conservative: the
-            // publisher's own deferred-publish loop only emits the FIRST
-            // retained snapshot once `mark_ready(true)` is raised, so
-            // the bootstrap snapshot can transition to READY before any
-            // provider payload has been released.
-            publisher_handle.mark_ready(Some("publisher started".to_string()));
+        let mqtt_publisher_trigger: Option<crate::mqtt::MqttPublisherTrigger> =
+            if let Some(ref client) = mqtt_gw_client {
+                let publisher = crate::mqtt::MqttGlobalResourcesPublisher::new(
+                    client.as_ref().clone(),
+                    shared_state.clone(),
+                );
+                let handle = publisher.start();
+                let trigger = handle.create_trigger();
+                tracing::info!("MQTT Global Resources Publisher started");
+                // Store the handle so the ready barrier can be raised by the
+                // vault auto-unlock task and the local-node supervisor.
+                shared_state.write().await.mqtt_publisher_handle = Some(handle);
+                // ADR-059 Phase 1.2: the publisher is a required subsystem.
+                // Marking it ready here is intentionally conservative: the
+                // publisher's own deferred-publish loop only emits the FIRST
+                // retained snapshot once `mark_ready(true)` is raised, so
+                // the bootstrap snapshot can transition to READY before any
+                // provider payload has been released.
+                publisher_handle.mark_ready(Some("publisher started".to_string()));
 
-            // ADR-080: spawn the advertise-host IP-change watchdog.
-            // Subscribes to OS interface-change events (NotifyAddrChange
-            // / netlink / SCDynamicStore via `if-watch`); on any change
-            // it re-runs the UDP-trick IP detector and, if the LAN IP
-            // drifted, refreshes `pm_mcp_url` / `doc_mcp_url` and
-            // triggers a fresh retained `acowork/global/mcps` so every
-            // Runtime rewrites its `agent_mcp.json`. Runs regardless of
-            // whether `advertise_host` was pinned — a pin fixes only the
-            // initial value, not future IP drift.
-            let watchdog_cfg =
-                crate::lifecycle::advertise_watchdog::AdvertiseWatchdogConfig {
+                // ADR-080: spawn the advertise-host IP-change watchdog.
+                // Subscribes to OS interface-change events (NotifyAddrChange
+                // / netlink / SCDynamicStore via `if-watch`); on any change
+                // it re-runs the UDP-trick IP detector and, if the LAN IP
+                // drifted, refreshes `pm_mcp_url` / `doc_mcp_url` and
+                // triggers a fresh retained `acowork/global/mcps` so every
+                // Runtime rewrites its `agent_mcp.json`. Runs regardless of
+                // whether `advertise_host` was pinned — a pin fixes only the
+                // initial value, not future IP drift.
+                let watchdog_cfg = crate::lifecycle::advertise_watchdog::AdvertiseWatchdogConfig {
                     http_port: http_config.port,
                     pm_mcp_path: if self.config.pm.auto_inject_mcp {
                         Some(self.config.pm.mcp_http_path.clone())
@@ -1146,14 +1153,16 @@ impl Gateway {
                         None
                     },
                 };
-            crate::lifecycle::advertise_watchdog::spawn_advertise_watchdog(
-                shared_state.clone(),
-                trigger.clone(),
-                watchdog_cfg,
-            );
+                crate::lifecycle::advertise_watchdog::spawn_advertise_watchdog(
+                    shared_state.clone(),
+                    trigger.clone(),
+                    watchdog_cfg,
+                );
 
-            Some(trigger)
-        } else { None };
+                Some(trigger)
+            } else {
+                None
+            };
 
         // Keep a clonable trigger for the dev-mode vault auto-unlock
         // task (below). The handle's `mark_ready()` is invoked via the
@@ -1168,20 +1177,19 @@ impl Gateway {
         // republishes on every orchestrator change (READY / DEGRADED /
         // FAILED / SHUTTING_DOWN). The handle is bound for the rest of
         // `run()`: dropping it would abort the publish loop.
-        let _bootstrap_publisher_handle: Option<
-            crate::mqtt::BootstrapPublisherHandle,
-        > = if let Some(ref client) = mqtt_gw_client {
-            let handle = crate::mqtt::BootstrapPublisher::start(
-                crate::mqtt::BootstrapPublisherOptions {
-                    client: client.as_ref(),
-                    orchestrator: bootstrap_orchestrator.clone(),
-                },
-            );
-            tracing::info!("MQTT Bootstrap publisher started (acowork/global/bootstrap)");
-            Some(handle)
-        } else {
-            None
-        };
+        let _bootstrap_publisher_handle: Option<crate::mqtt::BootstrapPublisherHandle> =
+            if let Some(ref client) = mqtt_gw_client {
+                let handle = crate::mqtt::BootstrapPublisher::start(
+                    crate::mqtt::BootstrapPublisherOptions {
+                        client: client.as_ref(),
+                        orchestrator: bootstrap_orchestrator.clone(),
+                    },
+                );
+                tracing::info!("MQTT Bootstrap publisher started (acowork/global/bootstrap)");
+                Some(handle)
+            } else {
+                None
+            };
 
         // ADR-033: Start cron scheduler (uses MQTT for Intent delivery).
         // Must be started AFTER MQTT client is available.
@@ -1306,33 +1314,34 @@ impl Gateway {
         } else {
             None
         };
-        let local_node_supervisor: Option<std::sync::Arc<crate::gateway::node_manager::LocalNodeSupervisor>> =
-            if mqtt_broker_started && self.config.local_node.enabled {
-                match crate::gateway::node_manager::ensure_local_node(
-                    mqtt_config.port,
-                    &self.config.packages_dir,
-                    node_registry.clone(),
-                    local_node_token,
-                    self.config.node_proxy_port,
-                    self.config.node_lsp_relay_port,
-                )
-                .await
-                {
-                    Ok(supervisor) => Some(supervisor),
-                    Err(e) => {
-                        tracing::warn!(error = %e, "Local node agent supervision failed");
-                        None
-                    }
+        let local_node_supervisor: Option<
+            std::sync::Arc<crate::gateway::node_manager::LocalNodeSupervisor>,
+        > = if mqtt_broker_started && self.config.local_node.enabled {
+            match crate::gateway::node_manager::ensure_local_node(
+                mqtt_config.port,
+                &self.config.packages_dir,
+                node_registry.clone(),
+                local_node_token,
+                self.config.node_proxy_port,
+                self.config.node_lsp_relay_port,
+            )
+            .await
+            {
+                Ok(supervisor) => Some(supervisor),
+                Err(e) => {
+                    tracing::warn!(error = %e, "Local node agent supervision failed");
+                    None
                 }
-            } else if mqtt_broker_started && !self.config.local_node.enabled {
-                tracing::info!(
-                    "Local node agent disabled by [local_node] enabled=false \
+            }
+        } else if mqtt_broker_started && !self.config.local_node.enabled {
+            tracing::info!(
+                "Local node agent disabled by [local_node] enabled=false \
                      (or --no-spawn-local-node); relying on externally-started nodes"
-                );
-                None
-            } else {
-                None
-            };
+            );
+            None
+        } else {
+            None
+        };
 
         // ADR-055 §6.11: Fix 1 follow-up — raise the publisher ready barrier
         // once the local node has enrolled, regardless of whether the
@@ -1354,9 +1363,7 @@ impl Gateway {
                         if let Some(ref h) = st.mqtt_publisher_handle {
                             h.mark_ready();
                         }
-                        tracing::info!(
-                            "Publisher ready barrier raised by local node online event"
-                        );
+                        tracing::info!("Publisher ready barrier raised by local node online event");
                         return;
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -1441,9 +1448,7 @@ impl Gateway {
                         // pre-ADR-009 gate in
                         // `auto_install_bundled_agents`); production
                         // installs arrive through the registry.
-                        tracing::debug!(
-                            "Skipping bundled System Agent install (dev_mode=false)"
-                        );
+                        tracing::debug!("Skipping bundled System Agent install (dev_mode=false)");
                     } else if let Some(bundled_dir) = Self::find_bundled_agents_dir() {
                         let system_agent_src = bundled_dir.join("system-agent");
                         if system_agent_src.join("manifest.toml").exists() {
@@ -1451,10 +1456,8 @@ impl Gateway {
                                 "System Agent not found in install table — dispatching bundled install to the node"
                             );
                             let Some(local_node_id) =
-                                crate::mqtt::node_registry::local_node_id(
-                                    &local_node_registry,
-                                )
-                                .await
+                                crate::mqtt::node_registry::local_node_id(&local_node_registry)
+                                    .await
                             else {
                                 tracing::warn!(
                                     "No gateway-managed node is online —                                      skipping bundled System Agent install                                      (a dispatch cannot be routed without it)"
@@ -1473,9 +1476,8 @@ impl Gateway {
                                     // Wait for the node to finish the
                                     // download/install and re-publish its
                                     // inventory.
-                                    let install_deadline =
-                                        tokio::time::Instant::now()
-                                            + std::time::Duration::from_secs(30);
+                                    let install_deadline = tokio::time::Instant::now()
+                                        + std::time::Duration::from_secs(30);
                                     while sa_state
                                         .read()
                                         .await
@@ -1483,10 +1485,8 @@ impl Gateway {
                                         .is_none()
                                         && tokio::time::Instant::now() < install_deadline
                                     {
-                                        tokio::time::sleep(
-                                            std::time::Duration::from_millis(200),
-                                        )
-                                        .await;
+                                        tokio::time::sleep(std::time::Duration::from_millis(200))
+                                            .await;
                                     }
                                 }
                                 Err(e) => tracing::warn!(
@@ -1556,21 +1556,14 @@ impl Gateway {
                 };
 
                 match nc
-                    .start_agent(
-                        &sa_node_id,
-                        &sa_instance_id,
-                        &sa_agent_id,
-                        false,
-                    )
+                    .start_agent(&sa_node_id, &sa_instance_id, &sa_agent_id, false)
                     .await
                 {
                     Ok(event) => {
-                        if let Err(e) =
-                            crate::mqtt::node_control::NodeControlClient::check_reply(
-                                &sa_agent_id,
-                                &event,
-                            )
-                        {
+                        if let Err(e) = crate::mqtt::node_control::NodeControlClient::check_reply(
+                            &sa_agent_id,
+                            &event,
+                        ) {
                             tracing::warn!("Failed to auto-start System Agent: {}", e);
                         } else {
                             let mut gw = sa_state.write().await;
@@ -1621,16 +1614,21 @@ impl Gateway {
             let unlock_state = shared_state.clone();
             let unlock_republish = unlock_republish_trigger;
             tokio::spawn(async move {
-                let vault_boot_handle =
-                    match unlock_state.read().await.bootstrap.vault_readiness_handle.clone() {
-                        Some(h) => h,
-                        None => {
-                            tracing::error!(
-                                "Vault readiness handle not registered; dev-mode auto-unlock skipped"
-                            );
-                            return;
-                        }
-                    };
+                let vault_boot_handle = match unlock_state
+                    .read()
+                    .await
+                    .bootstrap
+                    .vault_readiness_handle
+                    .clone()
+                {
+                    Some(h) => h,
+                    None => {
+                        tracing::error!(
+                            "Vault readiness handle not registered; dev-mode auto-unlock skipped"
+                        );
+                        return;
+                    }
+                };
                 match crate::vault::unlock_vault_and_mark_ready(
                     unlock_state,
                     vault_boot_handle.clone(),
@@ -1647,9 +1645,8 @@ impl Gateway {
                         // provider credentials — a required subsystem
                         // in Failed drops the aggregated phase to
                         // FAILED.
-                        vault_boot_handle.mark_failed(Some(format!(
-                            "vault auto-unlock failed: {e}"
-                        )));
+                        vault_boot_handle
+                            .mark_failed(Some(format!("vault auto-unlock failed: {e}")));
                     }
                 }
             });

@@ -38,6 +38,7 @@ pub fn auth_routes() -> Router<AppState> {
         .route("/api/auth/refresh", post(refresh))
         .route("/api/auth/logout", post(logout))
         .route("/api/auth/change-password", post(change_password))
+        .route("/api/auth/first-login", post(first_login))
         .route("/api/auth/me", get(me))
 }
 
@@ -58,6 +59,14 @@ pub struct ChangePasswordRequest {
     pub new_password: String,
 }
 
+/// ADR-076 §决策 6: consume a one-time `invite_token` and set the initial
+/// password. Public (whitelisted) — the caller has no token pair yet.
+#[derive(Debug, Deserialize)]
+pub struct FirstLoginRequest {
+    pub invite_token: String,
+    pub new_password: String,
+}
+
 /// The account system is only reachable in `multi_user` mode.
 fn service(state: &AppState) -> Result<Arc<AuthService>, ApiError> {
     state.auth_service.clone().ok_or_else(|| {
@@ -71,12 +80,11 @@ impl From<AuthError> for ApiError {
             // Unknown user / wrong password / disabled / bad token / revoked
             // are all "you are not who you claim" from the caller's side.
             // Deliberately uniform: the response must not enumerate users.
-            AuthError::InvalidCredentials => {
-                ApiError::unauthorized("invalid username or password")
-            }
+            AuthError::InvalidCredentials => ApiError::unauthorized("invalid username or password"),
             AuthError::Token(t) => ApiError::unauthorized(&t.to_string()),
             AuthError::Revoked => ApiError::unauthorized("token revoked"),
             AuthError::Policy(m) => ApiError::unprocessable_entity(&m),
+            AuthError::Conflict(m) => ApiError::conflict(&m),
             AuthError::Store(m) => ApiError::internal(&m),
         }
     }
@@ -150,6 +158,21 @@ async fn me(
     Ok(Json(AccountView::from(&account)))
 }
 
+/// `POST /api/auth/first-login` — activate an invited account
+/// (ADR-076 §决策 6).
+///
+/// Public (no bearer token): the whole point is that the account has no
+/// password yet. The `invite_token` is single-use and 24h-bound.
+async fn first_login(
+    State(state): State<AppState>,
+    Json(req): Json<FirstLoginRequest>,
+) -> Result<Json<TokenPair>, ApiError> {
+    let auth = service(&state)?;
+    let pair = blocking(move || auth.first_login(&req.invite_token, &req.new_password, now_unix()))
+        .await?;
+    Ok(Json(pair))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,7 +207,11 @@ mod tests {
     /// Seed `accounts.json` with one account whose hash uses weak Argon2
     /// params (verification reads the params back from the PHC string, so
     /// this is both fast and honest).
-    fn seed_account(svc: &AuthService, username: &str, role: acowork_core::account::Role) -> String {
+    fn seed_account(
+        svc: &AuthService,
+        username: &str,
+        role: acowork_core::account::Role,
+    ) -> String {
         use acowork_core::account::{AccountListFile, UserAccount};
         let user_id = format!("u-{username}");
         let account = UserAccount {
@@ -212,6 +239,8 @@ mod tests {
             updated_at: "t".into(),
             last_login_at: None,
             disabled_at: None,
+            invite_token_hash: None,
+            invite_expires_at: None,
         };
         svc.save_accounts(&AccountListFile {
             version: 1,
@@ -238,7 +267,9 @@ mod tests {
     }
 
     async fn body_json(resp: axum::response::Response) -> serde_json::Value {
-        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
         serde_json::from_slice(&bytes).unwrap()
     }
 
@@ -294,11 +325,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 
         // Health is reachable pre-login.
-        let resp = router
-            .clone()
-            .oneshot(get("/health", None))
-            .await
-            .unwrap();
+        let resp = router.clone().oneshot(get("/health", None)).await.unwrap();
         assert_ne!(resp.status(), StatusCode::UNAUTHORIZED);
 
         // Login → a token pair.

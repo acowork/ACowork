@@ -3,6 +3,7 @@
 //! All API routes are defined here. Handlers are split into sub-modules
 //! per domain (agents, vault, config, chat, etc.).
 
+use axum::extract::Request;
 use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, State},
@@ -11,17 +12,16 @@ use axum::{
     response::{IntoResponse, Response},
     routing::get,
 };
-use axum::extract::Request;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use crate::gateway::state::GatewayState;
-use crate::http::auth::HttpAuth;
 use crate::auth::AuthMode;
 use crate::auth::service::AuthService;
-use acowork_core::operation::{OperationId, OperationRecord, OperationState};
+use crate::gateway::state::GatewayState;
+use crate::http::auth::HttpAuth;
 use acowork_core::StructuredErrorBody;
+use acowork_core::operation::{OperationId, OperationRecord, OperationState};
 
 /// Global body-size cap applied at the root of the Gateway's
 /// merged router. See [`api_router`] for why we override axum's 2 MiB
@@ -84,10 +84,7 @@ pub struct AppState {
 
 impl AppState {
     /// Create a new AppState with default models cache
-    pub fn new(
-        gateway_state: SharedHttpState,
-        auth: Arc<HttpAuth>,
-    ) -> Self {
+    pub fn new(gateway_state: SharedHttpState, auth: Arc<HttpAuth>) -> Self {
         Self {
             gateway_state,
             auth,
@@ -118,7 +115,10 @@ async fn log_request_origin(req: Request, next: Next) -> axum::response::Respons
         .unwrap_or("<none>");
     let method = req.method().clone();
     let uri = req.uri().clone();
-    let msg = format!("HTTP request: origin={} method={} uri={}", origin, method, uri);
+    let msg = format!(
+        "HTTP request: origin={} method={} uri={}",
+        origin, method, uri
+    );
     tracing::info!("{}", msg);
     let response = next.run(req).await;
     let acao = response
@@ -126,7 +126,11 @@ async fn log_request_origin(req: Request, next: Next) -> axum::response::Respons
         .get("access-control-allow-origin")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("<none>");
-    let msg = format!("HTTP response: status={} access-control-allow-origin={}", response.status(), acao);
+    let msg = format!(
+        "HTTP response: status={} access-control-allow-origin={}",
+        response.status(),
+        acao
+    );
     tracing::info!("{}", msg);
     response
 }
@@ -248,7 +252,16 @@ pub fn build_router(state: AppState) -> Router {
         // diagnostic panel. Remote Desktops reach this over the same
         // HTTP surface as everything else (P2-1).
         .merge(crate::http::services_api::services_routes())
-        .merge(crate::http::users_api::users_routes())
+        // ADR-076 §决策 6: `/api/users` is presentation-only CRUD in
+        // `local` mode; under `multi_user` the credential-aware
+        // `account_api` takes over the same paths (never both — an axum
+        // double registration of one path panics). Avatar routes are
+        // mode-independent.
+        .merge(match &state.auth_service {
+            Some(_) => crate::http::account_api::account_routes(),
+            None => crate::http::users_api::users_routes(),
+        })
+        .merge(crate::http::users_api::user_avatar_routes())
         .merge(crate::http::embedding_api::embedding_routes())
         .merge(crate::embedding_providers::embedding_providers_routes())
         .merge(crate::http::fs_browse::fs_routes())
@@ -468,7 +481,8 @@ pub async fn check_expected_version(
         .gateway_state
         .read()
         .await
-        .bootstrap.orchestrator
+        .bootstrap
+        .orchestrator
         .as_ref()
         .map(|o| o.snapshot().version)
         .unwrap_or(0);
@@ -520,8 +534,7 @@ impl IntoResponse for ApiError {
         // forgets to populate it, so the client still gets a valid
         // HTTP response rather than axum panicking on a status-code
         // conversion.
-        let status = StatusCode::from_u16(self.code)
-            .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        let status = StatusCode::from_u16(self.code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
         (status, Json(self)).into_response()
     }
 }
@@ -567,6 +580,16 @@ impl ApiError {
         Self {
             error: msg.to_string(),
             code: 401,
+            structured: None,
+        }
+    }
+
+    /// 403 — authenticated but not permitted (e.g. a non-admin calling an
+    /// admin-only account-management route).
+    pub fn forbidden(msg: &str) -> Self {
+        Self {
+            error: msg.to_string(),
+            code: 403,
             structured: None,
         }
     }
@@ -629,11 +652,7 @@ impl ApiError {
     ///   - `structured` = machine-readable protocol body. Callers pick
     ///     a `StructuredErrorCode` that classifies the failure for
     ///     client-side retry / rendering decisions.
-    pub fn structured(
-        status: StatusCode,
-        message: &str,
-        body: StructuredErrorBody,
-    ) -> Self {
+    pub fn structured(status: StatusCode, message: &str, body: StructuredErrorBody) -> Self {
         Self {
             error: message.to_string(),
             code: status.as_u16(),
@@ -708,9 +727,9 @@ mod tests {
             .expect("build request");
         let mut request = request;
         let peer: std::net::SocketAddr = "192.168.1.20:54321".parse().unwrap();
-        request.extensions_mut().insert(
-            axum::extract::connect_info::ConnectInfo(peer),
-        );
+        request
+            .extensions_mut()
+            .insert(axum::extract::connect_info::ConnectInfo(peer));
         let response = router.oneshot(request).await.expect("router responds");
         assert_eq!(response.status(), StatusCode::OK);
     }
@@ -730,9 +749,9 @@ mod tests {
             .expect("build request");
         let mut request = request;
         let peer: std::net::SocketAddr = "203.0.113.9:54321".parse().unwrap();
-        request.extensions_mut().insert(
-            axum::extract::connect_info::ConnectInfo(peer),
-        );
+        request
+            .extensions_mut()
+            .insert(axum::extract::connect_info::ConnectInfo(peer));
         let response = router.oneshot(request).await.expect("router responds");
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
@@ -753,9 +772,9 @@ mod tests {
             .expect("build request");
         let mut request = request;
         let peer: std::net::SocketAddr = "127.0.0.1:54321".parse().unwrap();
-        request.extensions_mut().insert(
-            axum::extract::connect_info::ConnectInfo(peer),
-        );
+        request
+            .extensions_mut()
+            .insert(axum::extract::connect_info::ConnectInfo(peer));
         let response = router.oneshot(request).await.expect("router responds");
         assert_eq!(response.status(), StatusCode::OK);
     }
@@ -818,7 +837,10 @@ mod tests {
         let state = AppState::new(gw_state, Arc::new(HttpAuth::new(true)));
         let resp = system_status(State(state)).await;
         assert_eq!(resp.mqtt_username.as_deref(), Some("desktop"));
-        let password = resp.mqtt_password.as_deref().expect("password exposed when auth on");
+        let password = resp
+            .mqtt_password
+            .as_deref()
+            .expect("password exposed when auth on");
         assert_eq!(password.len(), 64, "256-bit hex token");
 
         // MQTT auth enabled but HttpAuth off → no password to hand out.
@@ -913,7 +935,12 @@ mod tests {
         assert_eq!(err.code, 504);
         assert_eq!(err.error, "node did not answer");
         // Protocol layer: structured body preserved untouched.
-        let (structured_code, structured_phase_detail, structured_retry_after_ms, structured_retry_count) = {
+        let (
+            structured_code,
+            structured_phase_detail,
+            structured_retry_after_ms,
+            structured_retry_count,
+        ) = {
             let s = err
                 .structured
                 .as_ref()
@@ -981,4 +1008,3 @@ mod tests {
         assert!(structured_err.structured.is_some());
     }
 }
-

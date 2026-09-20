@@ -5,8 +5,8 @@ use axum::extract::{Path, State};
 use axum::Json;
 
 use crate::types::{
-    AttachmentId, CreateTask, ProjectId, ReparentTask, ReviewStatus, Task, TaskFilter, TaskId,
-    UpdateTask,
+    AttachmentId, CreateTask, MemberKind, ProjectId, ReparentTask, ReviewStatus, Task, TaskFilter,
+    TaskId, UpdateTask,
 };
 
 use super::ApiState;
@@ -59,7 +59,11 @@ pub async fn create(
         .get("x-actor")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("unknown");
-    let task = state.store.create_task(&pid, input, created_by).await?;
+    // ADR-076 §决策 11: REST 面 = 人类操作面 → creator 恒为 User。
+    let task = state
+        .store
+        .create_task_as(&pid, input, created_by, MemberKind::User)
+        .await?;
     Ok(Json(task))
 }
 

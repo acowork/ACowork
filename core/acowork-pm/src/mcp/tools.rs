@@ -27,9 +27,9 @@ use crate::error::{PmError, Result};
 use crate::mcp::{AgentDirectory, AgentInfo, McpState};
 use crate::store::tree::{PmStore, TreePmStore};
 use crate::types::{
-    CreateProject, CreateTask, Dependency, Priority, ProjectId, ProjectStatus, ReparentTask,
-    ReviewStatus, Task, TaskFilter, TaskId, TaskResponse, TaskSort, TaskStatus, TaskType,
-    UpdateTask, deserialize_clearable,
+    CreateProject, CreateTask, Dependency, MemberKind, Priority, ProjectId, ProjectStatus,
+    ReparentTask, ReviewStatus, Task, TaskFilter, TaskId, TaskResponse, TaskSort, TaskStatus,
+    TaskType, UpdateTask, deserialize_clearable,
 };
 
 /// 工具分发入口（由 `POST /mcp` 的 `tools/call` 调用）。
@@ -131,6 +131,16 @@ fn parse_args<T: for<'de> Deserialize<'de>>(name: &str, args: Value) -> Result<T
 /// 的合法取值之一，见 `types.rs` 文档：`human` 或 agent instance UUID）。
 /// 非 instance_id，不应发起 Gateway 查询。
 const HUMAN_CREATOR: &str = "human";
+
+/// 项目创建者是否为人类账号（ADR-076 §决策 11）。
+///
+/// 创建者始终自动入 `members` 并带 `kind`；`User` 创建者不在 Agent 目录里，
+/// 不应发起 Gateway `/api/agents/{user_id}` 查询（会 404）。
+fn creator_is_user(p: &crate::types::Project) -> bool {
+    p.members
+        .iter()
+        .any(|m| m.instance_id == p.created_by && m.kind == MemberKind::User)
+}
 
 /// 查 `instance_id` 对应的 Agent 元信息。
 ///
@@ -336,7 +346,7 @@ async fn pm_list_projects(state: &McpState, args: Value) -> Result<Value> {
 
     let projects = state.store.list_projects().await?;
     // 先过滤可见项目，再一次性批量查 created_by 的 agent 元信息
-    // （去重 + 限流并发；"human" 哨兵在 batch 内跳过）。
+    // （去重 + 限流并发；"human" 哨兵在 batch 内跳过，User 创建者跳过）。
     let visible: Vec<_> = projects
         .into_iter()
         .filter(|p| {
@@ -344,7 +354,11 @@ async fn pm_list_projects(state: &McpState, args: Value) -> Result<Value> {
                 || !matches!(p.status, ProjectStatus::Archived | ProjectStatus::Completed)
         })
         .collect();
-    let created_by_ids: Vec<String> = visible.iter().map(|p| p.created_by.clone()).collect();
+    let created_by_ids: Vec<String> = visible
+        .iter()
+        .filter(|p| !creator_is_user(p))
+        .map(|p| p.created_by.clone())
+        .collect();
     let meta = batch_lookup_agent_meta(state.agent_dir.as_ref(), created_by_ids).await;
 
     let out: Vec<Value> = visible
@@ -377,17 +391,26 @@ async fn pm_get_project(state: &McpState, args: Value) -> Result<Value> {
         .ok_or_else(|| PmError::ProjectNotFound(a.project_id.to_string()))?;
     let count = state.store.project_task_count(&a.project_id);
 
-    // 批量查：created_by + 全部 members（去重 + 限流并发；"human" 哨兵跳过）。
+    // 批量查：created_by + Agent 类 members（去重 + 限流并发；`"human"` 哨兵
+    // 与 User 成员跳过——User 成员是 ADR-076 人类账号，不在 Agent 目录里）。
     let mut ids: Vec<String> = Vec::with_capacity(1 + p.members.len());
     ids.push(p.created_by.clone());
-    ids.extend(p.members.iter().map(|m| m.instance_id.clone()));
+    ids.extend(
+        p.members
+            .iter()
+            .filter(|m| m.kind == MemberKind::Agent)
+            .map(|m| m.instance_id.clone()),
+    );
     let meta = batch_lookup_agent_meta(state.agent_dir.as_ref(), ids).await;
     let cb_meta = meta.get(&p.created_by);
 
     let mut v = project_to_value(p.clone(), count, cb_meta);
     let mut members = Vec::with_capacity(p.members.len());
     for m in &p.members {
-        let info = meta.get(&m.instance_id);
+        // User 成员（ADR-076）不在 Agent 目录里 → 元信息恒为 None。
+        let info = (m.kind == MemberKind::Agent)
+            .then(|| meta.get(&m.instance_id))
+            .flatten();
         // 投影规则：
         // - `agent_id` / `name` / `role` 来自 AgentDirectory（缓存命中 / 即时兜底）
         // - 任一字段 AgentDirectory 拿不到 → `null`（与 `NoopAgentDirectory`
@@ -396,6 +419,7 @@ async fn pm_get_project(state: &McpState, args: Value) -> Result<Value> {
         // - `added_at` 来自 ProjectMember 自身
         members.push(json!({
             "instance_id": m.instance_id,
+            "kind": m.kind,
             "agent_id": info.map(|i| &i.agent_id),
             "name": info.map(|i| &i.name),
             "role": info.and_then(|i| i.role.as_ref()),
@@ -531,10 +555,17 @@ async fn pm_create_project(state: &McpState, actor: &str, args: Value) -> Result
         description: a.description,
         metadata: Default::default(),
     };
-    let p = state.store.create_project(input, actor).await?;
-    // creator 通常是 "human"（人类手动创建项目）→ lookup 短路返回 None，
-    // meta 会是 null；agent 创建项目（罕见）则拿到对应 agent 元信息。
-    let cb_meta = lookup_agent_meta(state.agent_dir.as_ref(), Some(&p.created_by)).await;
+    let p = state
+        .store
+        .create_project_as(input, actor, MemberKind::Agent)
+        .await?;
+    // 创建者始终入 members 并带 `kind`：User 创建者（真实 user_id）不在 Agent
+    // 目录里 → 跳过查询，meta 为 null（ADR-076 §决策 11）。
+    let cb_meta = if creator_is_user(&p) {
+        None
+    } else {
+        lookup_agent_meta(state.agent_dir.as_ref(), Some(&p.created_by)).await
+    };
     Ok(project_to_value(p, 0, cb_meta.as_ref()))
 }
 
@@ -583,7 +614,10 @@ async fn pm_create_task(state: &McpState, actor: &str, args: Value) -> Result<Va
         assignee: a.assignee,
         due_at: a.due_at,
     };
-    let task = state.store.create_task(&a.project_id, input, actor).await?;
+    let task = state
+        .store
+        .create_task_as(&a.project_id, input, actor, MemberKind::Agent)
+        .await?;
     task_to_value(&state.store, state.agent_dir.as_ref(), task).await
 }
 

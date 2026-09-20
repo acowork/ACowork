@@ -45,9 +45,9 @@ use tokio::fs;
 use crate::config::PmConfig;
 use crate::error::{PmError, Result};
 use crate::types::{
-    AttachmentId, AttachmentMeta, CreateProject, CreateTask, DependencyKind, Priority, Project,
-    ProjectId, ProjectMember, ProjectStatus, ReparentTask, ReviewStatus, Task, TaskFilter, TaskId,
-    TaskResult, TaskSort, TaskStatus, UpdateProject, UpdateTask,
+    AttachmentId, AttachmentMeta, CreateProject, CreateTask, DependencyKind, MemberKind, Priority,
+    Project, ProjectId, ProjectMember, ProjectStatus, ReparentTask, ReviewStatus, Task, TaskFilter,
+    TaskId, TaskResult, TaskSort, TaskStatus, UpdateProject, UpdateTask,
 };
 
 use super::atomic::{
@@ -67,7 +67,24 @@ use super::index::{TaskEntry, TaskIndex};
 pub trait PmStore: Send + Sync {
     // ── Project operations ─────────────────────────────────────────
 
-    async fn create_project(&self, input: CreateProject, created_by: &str) -> Result<Project>;
+    /// Create a project, deriving the creator's kind from the value
+    /// (`human`/`unknown` → [`MemberKind::User`], else `Agent`).
+    ///
+    /// ponytail: a *convenience* for callers that only hold an actor string
+    /// (tests, legacy paths). Production code MUST use [`Self::create_project_as`]
+    /// with an explicit kind — a bare `user_id` is a UUID and therefore
+    /// indistinguishable from an `instance_id` by value (ADR-076 §决策 11).
+    async fn create_project(&self, input: CreateProject, created_by: &str) -> Result<Project> {
+        let kind = MemberKind::from_actor(created_by);
+        self.create_project_as(input, created_by, kind).await
+    }
+    /// Create a project with the creator's identity kind stated explicitly.
+    async fn create_project_as(
+        &self,
+        input: CreateProject,
+        created_by: &str,
+        created_by_kind: MemberKind,
+    ) -> Result<Project>;
     async fn get_project(&self, id: &ProjectId) -> Result<Option<Project>>;
     async fn list_projects(&self) -> Result<Vec<Project>>;
     async fn update_project(&self, id: &ProjectId, input: UpdateProject) -> Result<Project>;
@@ -92,7 +109,19 @@ pub trait PmStore: Send + Sync {
     // ── Task operations ─────────────────────────────────────────────
 
     async fn create_task(&self, project_id: &ProjectId, input: CreateTask, created_by: &str)
-        -> Result<Task>;
+        -> Result<Task> {
+        let kind = MemberKind::from_actor(created_by);
+        self.create_task_as(project_id, input, created_by, kind).await
+    }
+    /// Create a task with the creator's identity kind stated explicitly
+    /// (drives `review_status`: `User` → `NotRequired`, `Agent` → `Pending`).
+    async fn create_task_as(
+        &self,
+        project_id: &ProjectId,
+        input: CreateTask,
+        created_by: &str,
+        created_by_kind: MemberKind,
+    ) -> Result<Task>;
     async fn get_task(&self, id: &TaskId) -> Result<Option<Task>>;
     async fn find_tasks(&self, filter: &TaskFilter) -> Result<Vec<Task>>;
     async fn update_task(&self, id: &TaskId, input: UpdateTask) -> Result<Task>;
@@ -491,23 +520,22 @@ fn priority_rank(p: Priority) -> u8 {
 impl PmStore for TreePmStore {
     // ── Projects ───────────────────────────────────────────────────
 
-    async fn create_project(
+    async fn create_project_as(
         &self,
         input: CreateProject,
         created_by: &str,
+        created_by_kind: MemberKind,
     ) -> Result<Project> {
         let id = ProjectId::generate();
         let now = Utc::now();
-        // 创建者自动成为成员（agent 实例）：否则 Agent 建项目后无法给自己
-        // 指派任务（联动指派要求 assignee ∈ members），形成死锁。
-        // human 创建者不进入 members（成员 = Agent 实例）。
-        let mut members = Vec::new();
-        if created_by != "human" {
-            members.push(ProjectMember {
-                instance_id: created_by.to_string(),
-                added_at: now,
-            });
-        }
+        // 创建者自动成为成员（ADR-076 §决策 11）：否则创建者建项目后无法
+        // 给自己指派任务（联动指派要求 assignee ∈ members），形成死锁。
+        // 人类与 Agent 创建者都入 members，按 `kind` 区分身份（无特例）。
+        let members = vec![ProjectMember {
+            instance_id: created_by.to_string(),
+            kind: created_by_kind,
+            added_at: now,
+        }];
         let project = Project {
             id: id.clone(),
             title: input.title,
@@ -632,6 +660,7 @@ impl PmStore for TreePmStore {
         }
         project.members.push(ProjectMember {
             instance_id: instance_id.to_string(),
+            kind: MemberKind::Agent,
             added_at: Utc::now(),
         });
         project.updated_at = Utc::now();
@@ -690,11 +719,12 @@ impl PmStore for TreePmStore {
 
     // ── Tasks ──────────────────────────────────────────────────────
 
-    async fn create_task(
+    async fn create_task_as(
         &self,
         project_id: &ProjectId,
         input: CreateTask,
         created_by: &str,
+        created_by_kind: MemberKind,
     ) -> Result<Task> {
         // 校验项目存在 + 联动指派（assignee 非空必须是项目成员）
         let project = self.read_project(project_id).await?;
@@ -759,7 +789,8 @@ impl PmStore for TreePmStore {
         }
 
         // 人类创建 → 直接生效（NotRequired）；Agent 创建 → 待审核（Pending）
-        let review_status = if created_by == "human" {
+        // ADR-076 §决策 11: 按身份类型判定，而非 `"human"` 字面量特例。
+        let review_status = if created_by_kind == MemberKind::User {
             ReviewStatus::NotRequired
         } else {
             ReviewStatus::Pending
@@ -2111,9 +2142,10 @@ mod tests {
 
     // ── 项目成员 + 联动指派 ──────────────────────────────────────────
 
-    /// agent 创建项目 → 自动成为成员；human 创建 → members 为空。
+    /// agent / human 创建项目 → 创建者都自动成为成员（ADR-076 §决策 11），
+    /// 按 `kind` 区分身份。
     #[tokio::test]
-    async fn creator_is_auto_member_when_agent() {
+    async fn creator_is_auto_member_for_agent_and_human() {
         let store = TreePmStore::new(test_config()).await.unwrap();
         let inst = "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d";
 
@@ -2126,7 +2158,9 @@ mod tests {
             .unwrap();
         assert_eq!(p_agent.members.len(), 1);
         assert_eq!(p_agent.members[0].instance_id, inst);
+        assert_eq!(p_agent.members[0].kind, MemberKind::Agent);
 
+        // ADR-076 §决策 11: 人类创建者也入 members（成员化，无特例）。
         let p_human = store
             .create_project(
                 CreateProject { title: "by-human".into(), description: "".into(), metadata: Default::default() },
@@ -2134,7 +2168,50 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(p_human.members.is_empty(), "human creator is not a member");
+        assert_eq!(p_human.members.len(), 1, "human creator is now a member");
+        assert_eq!(p_human.members[0].instance_id, "human");
+        assert_eq!(p_human.members[0].kind, MemberKind::User);
+    }
+
+    /// ADR-076 §决策 11: `create_*_as` 的显式 `kind` 驱动 review_status 与
+    /// 成员 kind —— 真实 user_id（UUID）不会被误判为 Agent。
+    #[tokio::test]
+    async fn explicit_kind_drives_review_status_and_member_kind() {
+        let store = TreePmStore::new(test_config()).await.unwrap();
+        let user_id = "9b1c0f2e-1111-4a2b-8c3d-000000000001"; // 形似 UUID 的 user_id
+        let instance = "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d";
+
+        // User 创建项目（显式 User）→ 成员 kind=User；其任务 review_status=NotRequired。
+        let p = store
+            .create_project_as(
+                CreateProject { title: "P".into(), description: "".into(), metadata: Default::default() },
+                user_id,
+                MemberKind::User,
+            )
+            .await
+            .unwrap();
+        assert_eq!(p.members[0].kind, MemberKind::User);
+
+        let t_user = store
+            .create_task_as(&p.id, create_task_input("by-user"), user_id, MemberKind::User)
+            .await
+            .unwrap();
+        assert_eq!(
+            t_user.review_status,
+            ReviewStatus::NotRequired,
+            "User-created task needs no review"
+        );
+
+        // Agent 创建任务（显式 Agent）→ review_status=Pending。
+        let t_agent = store
+            .create_task_as(&p.id, create_task_input("by-agent"), instance, MemberKind::Agent)
+            .await
+            .unwrap();
+        assert_eq!(
+            t_agent.review_status,
+            ReviewStatus::Pending,
+            "Agent-created task needs review"
+        );
     }
 
     /// 成员增删往返 + 重复添加 409 + 移除不存在成员 404。
@@ -2151,19 +2228,21 @@ mod tests {
         let inst = "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d";
 
         let updated = store.add_project_member(&p.id, inst).await.unwrap();
-        assert_eq!(updated.members.len(), 1);
-        assert_eq!(updated.members[0].instance_id, inst);
+        // ADR-076 §决策 11: 创建者（human）已是成员，故加 inst 后为 2 人。
+        assert_eq!(updated.members.len(), 2);
+        assert!(updated.members.iter().any(|m| m.instance_id == inst));
         // 持久化后重新读取
         let reloaded = store.get_project(&p.id).await.unwrap().unwrap();
-        assert_eq!(reloaded.members.len(), 1, "member must persist to project.json");
+        assert_eq!(reloaded.members.len(), 2, "member must persist to project.json");
 
         // 重复添加 → MemberAlreadyExists
         let err = store.add_project_member(&p.id, inst).await.unwrap_err();
         assert!(matches!(err, PmError::MemberAlreadyExists(_)));
 
-        // 移除 → 成员消失
+        // 移除 → inst 消失，仅剩创建者
         let updated = store.remove_project_member(&p.id, inst).await.unwrap();
-        assert!(updated.members.is_empty());
+        assert_eq!(updated.members.len(), 1);
+        assert!(!updated.members.iter().any(|m| m.instance_id == inst));
 
         // 移除不存在的成员 → MemberNotFound
         let err = store.remove_project_member(&p.id, inst).await.unwrap_err();
@@ -2291,7 +2370,11 @@ mod tests {
         store.submit_task(&t.id, "done", vec![], inst).await.unwrap();
         store.review_task(&t.id, true, "human").await.unwrap();
         let updated = store.remove_project_member(&p.id, inst).await.unwrap();
-        assert!(updated.members.is_empty(), "member removable after tasks done");
+        // ADR-076 §决策 11: 移除 inst 后仅剩创建者（human）成员。
+        assert!(
+            !updated.members.iter().any(|m| m.instance_id == inst),
+            "member removable after tasks done"
+        );
     }
 
     /// 旧 `project.json` 无 `members` 字段 → 读出空数组（零迁移）。

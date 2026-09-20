@@ -64,6 +64,20 @@ pub const USER_SCOPE_HEADER: &str = "x-user-id";
 /// Scope value meaning "no filtering" — the administrator view.
 pub const SCOPE_ALL: &str = "*";
 
+/// ADR-076 §决策 10: the trusted REST actor forwarded to PM / Doc.
+///
+/// Under `multi_user` this is the authenticated identity
+/// ([`AuthContext::effective_user_id`]); under `local` the middleware is a
+/// no-op and inserts no [`AuthContext`], so the caller falls back to the
+/// legacy `human` constant (§决策 12 — the whole account system is off).
+pub const LOCAL_HUMAN_ACTOR: &str = "human";
+
+/// Resolve the REST actor to inject on the PM / Doc reverse-proxy paths.
+pub fn trusted_rest_actor(auth: Option<&AuthContext>) -> String {
+    auth.map(|c| c.effective_user_id().to_string())
+        .unwrap_or_else(|| LOCAL_HUMAN_ACTOR.to_string())
+}
+
 /// Derive the Runtime-side session scope from an authenticated identity.
 ///
 /// A plain user is always themselves; `as_user` applies only to an
@@ -364,17 +378,24 @@ mod tests {
                 .route("/api/agents", get(echo_scope))
                 // Write endpoint, for the read-only guard on `as_user`.
                 .route("/api/agents/{sid}", axum::routing::delete(echo_scope))
-                .layer(axum::middleware::from_fn_with_state(state(multi), auth_middleware))
+                .layer(axum::middleware::from_fn_with_state(
+                    state(multi),
+                    auth_middleware,
+                ))
         };
         let call = |uri: &str, token: Option<&str>| {
-            let mut b = Request::builder().uri(uri).header(USER_SCOPE_HEADER, "u-victim");
+            let mut b = Request::builder()
+                .uri(uri)
+                .header(USER_SCOPE_HEADER, "u-victim");
             if let Some(t) = token {
                 b = b.header("authorization", format!("Bearer {t}"));
             }
             b.body(Body::empty()).unwrap()
         };
         let body_of = |resp: Response| async move {
-            axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap()
+            axum::body::to_bytes(resp.into_body(), 1 << 20)
+                .await
+                .unwrap()
         };
 
         // Local mode: forged header is dropped, nothing injected.
@@ -426,7 +447,10 @@ mod tests {
             b.body(Body::empty()).unwrap()
         };
         let resp = app(true)
-            .oneshot(write("/api/agents/sess-1?as_user=u-alice", Some(&admin_token)))
+            .oneshot(write(
+                "/api/agents/sess-1?as_user=u-alice",
+                Some(&admin_token),
+            ))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);

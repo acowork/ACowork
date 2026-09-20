@@ -158,6 +158,60 @@ run_meta_layout_redline() {
     echo "Session meta layout red line: OK"
 }
 
+# ADR-076 §决策 3/4: identity injection has exactly one trusted writer —
+# `auth_middleware`. The reverse proxy forwards inbound headers verbatim, so
+# any other `x-user-id` write is a client-asserted identity that could claim
+# another user's sessions. Both the constant (`USER_SCOPE_HEADER`) and the raw
+# literal (`"x-user-id"`) may only appear in their definition site and in tests
+# (both live in auth_middleware.rs) — matching the literal too closes the hole
+# where a new writer spells the header out as a string and bypasses the lint.
+run_gateway_auth_scope_redline() {
+    echo "Checking ADR-076 identity-injection red line..."
+    local root="$SCRIPT_DIR/../core/acowork-gateway/src"
+    local offenders
+    offenders=$(grep -rnE '(USER_SCOPE_HEADER|"x-user-id")' --include='*.rs' "$root" \
+        | grep -vE "^$root/http/auth_middleware\.rs:" \
+        || true)
+    if [ -n "$offenders" ]; then
+        echo "ERROR: x-user-id scope header (constant or literal) referenced outside auth_middleware.rs (ADR-076 §决策 4):"
+        echo "$offenders"
+        echo "The Gateway reverse proxy must never assert a user identity itself —"
+        echo "the scope is injected once, in auth_middleware, from the verified token."
+        exit 1
+    fi
+    echo "Identity-injection red line: OK"
+}
+
+# ADR-076 §决策 12: the account API exists only under `AUTH_MODE=multi_user`.
+# Its routes must stay behind an `auth_service.is_some()` branch, so `local`
+# mode returns 404 rather than exposing a gated-but-registered surface.
+run_gateway_auth_mode_redline() {
+    echo "Checking ADR-076 auth-mode routing red line..."
+    local routes="$SCRIPT_DIR/../core/acowork-gateway/src/http/routes.rs"
+    # Every `auth_routes()` / `account_api` registration line must sit inside a
+    # branch whose scrutinee (`state.auth_service`) is within the preceding 4
+    # lines — i.e. a `match &state.auth_service { Some(_) => …, None => … }`.
+    local offenders
+    offenders=$(awk '
+        { ctx[NR % 5] = $0 }
+        /auth_api::auth_routes|account_api::/ {
+            ok = 0
+            for (i = 1; i <= 4; i++) {
+                if (ctx[(NR - i) % 5] ~ /auth_service|AuthMode|auth_mode/) ok = 1
+            }
+            if (!ok) print FILENAME ":" NR ": " $0
+        }
+    ' "$routes" || true)
+    if [ -n "$offenders" ]; then
+        echo "ERROR: auth routes registered without an auth_mode branch (ADR-076 §决策 12):"
+        echo "$offenders"
+        echo "Register them only when the account system is active — an unregistered"
+        echo "route cannot be reached by a future auth-middleware mistake."
+        exit 1
+    fi
+    echo "Auth-mode routing red line: OK"
+}
+
 run_clippy() {
     echo "Running cargo clippy..."
     cargo clippy --all-targets -- -D warnings
@@ -209,6 +263,8 @@ case "$MODE" in
     check)
         run_gateway_fs_redline
         run_meta_layout_redline
+        run_gateway_auth_scope_redline
+        run_gateway_auth_mode_redline
         run_check
         ;;
     clippy)
@@ -228,6 +284,8 @@ case "$MODE" in
         run_mqtt_redline
         run_gateway_fs_redline
         run_meta_layout_redline
+        run_gateway_auth_scope_redline
+        run_gateway_auth_mode_redline
         run_check
         run_clippy
         run_test
