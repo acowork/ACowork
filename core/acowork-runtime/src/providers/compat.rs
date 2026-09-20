@@ -222,6 +222,10 @@ impl ErrorClass {
             "not supported",
             "unsupported",
             "invalid parameter",
+            // Volcengine Ark puts the code straight into `error.code` with no
+            // space ("InvalidParameter"), so the marker above never matched and
+            // its 400s were surfaced without ever trying the fallback ladder.
+            "invalidparameter",
             "invalid request",
             "invalid argument",
         ];
@@ -772,6 +776,14 @@ mod tests {
         );
         assert_eq!(
             ErrorClass::classify("invalid request: extra field `temperature` not permitted"),
+            ErrorClass::RequestSchema,
+        );
+        // Volcengine Ark error body (verbatim, trimmed): the code has no space,
+        // and `param` is empty so the message alone can't say which field.
+        assert_eq!(
+            ErrorClass::classify(
+                r#"{"error":{"code":"InvalidParameter","message":"A parameter specified in the request is not valid Request id: 021789901337591a6cdd8247c48d753298cd4bcf5eec90e452d6d","param":"","type":"BadRequest"}}"#
+            ),
             ErrorClass::RequestSchema,
         );
         assert_eq!(

@@ -73,6 +73,7 @@ fn test_available_providers_roundtrip() {
             custom: false,
             models: vec![],
             api_key: String::new(),
+            account_id: String::new(),
         }],
     };
 

@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { ChatMessage, ContextUsageInfo, TokenUsage, ToolApprovalNeededEvent, PaginatedMessages, ConversationEntry, SessionStatus, AskQuestionEvent, EventClearedEvent, ModelEntry, TodoItem, AttachedItem } from "../lib/types";
+import type { ChatMessage, ContextUsageInfo, TokenUsage, ToolApprovalNeededEvent, PaginatedMessages, ConversationEntry, SessionStatus, AskQuestionEvent, EventClearedEvent, ModelEntry, TodoItem, AttachedItem, ProviderAccount } from "../lib/types";
 import { toWireAttachedItems } from "../lib/types";
 import { isAtTail } from "../lib/paginationUtils";
 import { useAgentStore } from "./agentStore";
@@ -408,6 +408,11 @@ interface SessionChatState {
   model: string | null;
   /** Per-session selected provider */
   provider: string | null;
+  /**
+   * Multi-account: the `account_id` of `provider` this session uses.
+   * `null` = the provider's first account (legacy / single-key sessions).
+   */
+  providerAccountId: string | null;
   /** Current model chars/token ratio from API calibration */
   ratio: number | null;
   /** Per-session reasoning effort override (frontend display only, source of truth is Runtime) */
@@ -492,6 +497,7 @@ const DEFAULT_SESSION_STATE: SessionChatState = {
   queuedMessages: [],
   model: null,
   provider: null,
+  providerAccountId: null,
   ratio: null,
   reasoningEffort: null,
   temperature: null,
@@ -573,6 +579,7 @@ function makeInitialSessionState(agent: AgentState): SessionChatState {
     ...DEFAULT_SESSION_STATE,
     model: agent.preferredModel,
     provider: agent.preferredProvider,
+    providerAccountId: null,
   };
 }
 
@@ -762,6 +769,12 @@ interface ChatStore {
    */
   bootstrapVersion: number;
   availableModels: ModelEntry[];
+  /**
+   * Accounts (API keys) per provider, for the model picker's account level.
+   * Keyed by provider id; a provider absent here (or with one entry) does not
+   * get an account level in the menu.
+   */
+  providerAccounts: Record<string, ProviderAccount[]>;
 
   // ---- Actions ----
   sendMessage: (content: string, agentId: string, command?: string, attachedItems?: AttachedItem[]) => Promise<void>;
@@ -781,10 +794,11 @@ interface ChatStore {
   /** Remove a session's cached state (e.g. on session delete) */
   removeSessionState: (agentId: string, sessionId: string) => void;
   trimMessagesTo: (agentId: string, count: number) => void;
-  setCurrentModel: (model: string, provider: string, agentId: string) => void;
+  setCurrentModel: (model: string, provider: string, agentId: string, accountId?: string) => void;
   /** ADR-076 §决策 4: switch the session's workspace over authenticated HTTP. */
   setSessionWorkspace: (agentId: string, sessionId: string, workspaceId: string) => void;
   setAvailableModels: (models: ModelEntry[]) => void;
+  setProviderAccounts: (accounts: Record<string, ProviderAccount[]>) => void;
   /** Set per-session reasoning effort override (auto/off/low/medium/high) */
   setReasoningEffort: (effort: string, agentId: string) => void;
   /**
@@ -1335,6 +1349,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   transitionLog: [],
   bootstrapVersion: 0,
   availableModels: [],
+  providerAccounts: {},
 
   getActiveSessionId: (agentId: string) => {
     return getAgentState(get(), agentId).activeSessionId;
@@ -1717,6 +1732,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         queuedMessages: [],
         model: null,
         provider: null,
+        providerAccountId: null,
         ratio: null,
         reasoningEffort: null,
         temperature: null,
@@ -1990,9 +2006,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     });
   },
 
-  setCurrentModel: (model: string, provider: string, agentId: string) => {
+  setCurrentModel: (model: string, provider: string, agentId: string, accountId?: string) => {
     const sessionId = getAgentState(get(), agentId).activeSessionId;
-    log.debug("[ChatStore:DEBUG] setCurrentModel called", { model, provider, agentId, sessionId });
+    log.debug("[ChatStore:DEBUG] setCurrentModel called", { model, provider, agentId, accountId, sessionId });
     if (!sessionId) return;
 
     // Resolve new model's default reasoning effort from availableModels.
@@ -2000,10 +2016,14 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     // sync with the MQTT model_confirmed handler.
     const defaultEffort = resolveDefaultReasoningEffort(get().availableModels, model, provider);
 
-    // Update session model + reset reasoningEffort to new model's default
+    // Update session model + reset reasoningEffort to new model's default.
+    // `accountId` picks WHICH API key of this provider the session uses
+    // (null = the provider's first account) — the Runtime persists it in the
+    // session meta so the choice survives a restart.
     set((state) => updateSessionState(state, agentId, sessionId, {
       model,
       provider,
+      providerAccountId: accountId ?? null,
       reasoningEffort: defaultEffort,
     }));
     // Update agent's default model (new sessions inherit this)
@@ -2018,8 +2038,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     // per-session Provider instance from it. Without it, switching to a
     // model served by a different provider (e.g. deepseek → minimax) would
     // keep the previous base_url and yield 401s.
+    // `account_id` selects the API key when the provider holds several
+    // (multi-account, was the MQTT payload's `account_id`).
     sessionControl
-      .patchSessionConfig(agentId, sessionId, { model, provider })
+      .patchSessionConfig(agentId, sessionId, { model, provider, account_id: accountId ?? undefined })
       .catch((err: unknown) => log.warn("[ChatStore] model switch failed:", err));
   },
 
@@ -2076,6 +2098,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   },
   setAvailableModels: (models: ModelEntry[]) => {
     set({ availableModels: models });
+  },
+  setProviderAccounts: (accounts: Record<string, ProviderAccount[]>) => {
+    set({ providerAccounts: accounts });
   },
   continueExecution: async (agentId: string) => {
     try {
@@ -3580,6 +3605,7 @@ export function handleMessageEvent(
       const mqttConfig: SessionConfigInput = {
         model: typeof data.model_id === "string" && data.model_id ? data.model_id : null,
         provider: typeof data.provider_id === "string" && data.provider_id ? data.provider_id : null,
+        account: typeof data.account_id === "string" && data.account_id ? data.account_id : null,
         reasoning_effort: typeof data.reasoning_effort === "string" && data.reasoning_effort ? data.reasoning_effort : null,
         temperature: typeof data.temperature === "number" && !Number.isNaN(data.temperature) ? data.temperature : null,
         // ADR-074: prost `optional uint64` presence → `number | null`.

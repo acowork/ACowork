@@ -126,7 +126,7 @@ async fn get_avatar(
     }
     let dir = match install_dir(&state, &id).await {
         Ok(dir) => dir,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
 
     let manifest_path = dir.join("manifest.toml");
@@ -158,7 +158,7 @@ async fn get_avatar_file(
     }
     let dir = match install_dir(&state, &id).await {
         Ok(dir) => dir,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     if !has_avatar_extension(&query.path) {
         return bad_request(&format!(
@@ -183,7 +183,7 @@ async fn list_avatar_assets(
     // id. Returning both keeps the response self-describing.
     let info = match installed_agent(&state, &id).await {
         Ok(info) => info,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let dir = PathBuf::from(&info.install_path);
 
@@ -253,7 +253,7 @@ async fn put_manifest_avatar(
     // actual package this instance belongs to, not the URL instance id.
     let info = match installed_agent(&state, &id).await {
         Ok(info) => info,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let dir = PathBuf::from(&info.install_path);
 
@@ -319,7 +319,7 @@ async fn upload_package_file(
     }
     let info = match installed_agent(&state, &id).await {
         Ok(info) => info,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let dir = PathBuf::from(&info.install_path);
 
@@ -400,7 +400,7 @@ async fn delete_avatar_file(
     }
     let info = match installed_agent(&state, &id).await {
         Ok(info) => info,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let dir = PathBuf::from(&info.install_path);
     if !has_avatar_extension(&query.path) {
@@ -434,26 +434,28 @@ async fn delete_avatar_file(
 /// not host the instance. The cloned `agent_id` field carries the
 /// PACKAGE identity — distinct from the URL's `id` path variable
 /// (which is the runtime instance identity).
-async fn installed_agent(state: &NodeHttpState, id: &str) -> Result<crate::state::InstalledAgent, Response> {
+async fn installed_agent(state: &NodeHttpState, id: &str) -> Result<crate::state::InstalledAgent, Box<Response>> {
     let node = state.node.read().await;
     match node.installed_agents.get(id) {
         Some(info) => Ok(info.clone()),
-        None => Err((
-            StatusCode::NOT_FOUND,
-            [(header::CONTENT_TYPE, "application/json")],
-            Json(serde_json::json!({
-                "error": "agent not installed on this node",
-                "id": id,
-            }))
-            .to_string(),
-        )
-            .into_response()),
+        None => Err(Box::new(
+            (
+                StatusCode::NOT_FOUND,
+                [(header::CONTENT_TYPE, "application/json")],
+                Json(serde_json::json!({
+                    "error": "agent not installed on this node",
+                    "id": id,
+                }))
+                .to_string(),
+            )
+                .into_response(),
+        )),
     }
 }
 
 /// The instance's package directory, or the `404` to return when this
 /// node does not host the instance (ADR-073: keyed by instance id).
-async fn install_dir(state: &NodeHttpState, id: &str) -> Result<PathBuf, Response> {
+async fn install_dir(state: &NodeHttpState, id: &str) -> Result<PathBuf, Box<Response>> {
     Ok(PathBuf::from(&installed_agent(state, id).await?.install_path))
 }
 

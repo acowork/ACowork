@@ -944,6 +944,7 @@ impl SessionManager {
     ) -> SessionState {
         let mut initial_model = conversation.as_ref().and_then(|c| c.model());
         let mut initial_provider = conversation.as_ref().and_then(|c| c.provider());
+        let initial_account = conversation.as_ref().and_then(|c| c.account_id());
 
         // Fall back to Runtime-internal default when the session has no
         // explicit model/provider (new agent, first session ever created).
@@ -1093,6 +1094,9 @@ impl SessionManager {
         }
         if let Some(p) = initial_provider.as_ref() {
             session_state.set_provider(p.clone());
+        }
+        if let Some(a) = initial_account.as_ref() {
+            session_state.set_account_id(a.clone());
         }
 
         // ADR-060 §6.1: restore the persisted todo snapshot from meta so a
@@ -2314,7 +2318,10 @@ After installation, ask the user to re-enable the MCP server.",
             let mut vault = self.core.provider_key_vault.write().unwrap();
             vault.clear();
             for entry in provider_key_vault {
-                vault.insert(entry.provider_id, entry.api_key);
+                vault
+                    .entry(entry.provider_id.clone())
+                    .or_default()
+                    .push(entry);
             }
         }
     }
@@ -2340,6 +2347,7 @@ After installation, ask the user to re-enable the MCP server.",
         session_id: &str,
         model: String,
         provider: Option<String>,
+        account_id: Option<String>,
     ) -> Result<()> {
         tracing::info!(
             session_id = %session_id,
@@ -2388,6 +2396,7 @@ After installation, ask the user to re-enable the MCP server.",
             let delta = crate::agent::session_config::SessionConfigDelta {
                 model: Some(model.clone()),
                 provider: provider.clone(),
+                account_id: account_id.clone(),
                 ..Default::default()
             };
             conv.apply_config(&delta);
@@ -4655,7 +4664,7 @@ mod tests {
 
         // User switches S1 to model-A / provider-X.
         manager
-            .route_model_switch(&s1, "model-A".to_string(), Some("provider-X".to_string()))
+            .route_model_switch(&s1, "model-A".to_string(), Some("provider-X".to_string()), None)
             .unwrap();
 
         // The per-session snapshot must reflect the switch IMMEDIATELY
@@ -4746,6 +4755,7 @@ mod tests {
                 workspace_id: None,
                 model: None,
                 provider: None,
+                account_id: None,
                 reasoning_effort: None,
                 temperature: None,
                 context_window: None,

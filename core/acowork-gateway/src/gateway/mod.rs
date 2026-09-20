@@ -1324,6 +1324,7 @@ impl Gateway {
                 local_node_token,
                 self.config.node_proxy_port,
                 self.config.node_lsp_relay_port,
+                &self.config.data_dir,
             )
             .await
             {

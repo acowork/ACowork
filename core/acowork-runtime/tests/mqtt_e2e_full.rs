@@ -762,6 +762,7 @@ fn integration_providers_retained_persists_to_agent_provider_json() {
                     compact_model: String::new(),
                     custom: false,
                     api_key: "sk-ant-secret-key".into(), // wire-only; must NOT persist
+                    account_id: String::new(),
                 },
                 ProviderRef {
                     id: "openai".into(),
@@ -771,6 +772,7 @@ fn integration_providers_retained_persists_to_agent_provider_json() {
                     compact_model: String::new(),
                     custom: false,
                     api_key: String::new(),
+                    account_id: String::new(),
                 },
             ],
         };

@@ -12,6 +12,7 @@ author = "ACowork Team"
 runtime_version = "0.1.0"
 system = true
 dev = false
+avatar = "assets/avatar.png"
 
 # System Agent has broad permissions
 [[permissions]]

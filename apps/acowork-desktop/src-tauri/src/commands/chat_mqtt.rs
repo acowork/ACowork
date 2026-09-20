@@ -317,6 +317,7 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
                     "session_id": config.session_id,
                     "title": config.title,
                     "provider_id": config.provider_id,
+                    "account_id": config.account_id,
                     "model_id": config.model_id,
                     "reasoning_effort": config.reasoning_effort,
                     "temperature": config.temperature,

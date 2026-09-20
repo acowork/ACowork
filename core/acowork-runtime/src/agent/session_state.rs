@@ -337,6 +337,9 @@ pub struct SessionState {
     pub(crate) model: Option<String>,
     /// Per-session provider selection (ADR-012).
     pub(crate) provider: Option<String>,
+    /// Per-session account selection (multi-account, ADR-012): which API key
+    /// of `provider` this session uses. `None` = provider's first account.
+    pub(crate) account_id: Option<String>,
     /// Current model chars/token ratio (calibrated from API feedback).
     /// Updated after each LLM call via `calibrate_from_usage`.
     pub(crate) model_ratio: Option<f64>,
@@ -391,6 +394,7 @@ impl SessionState {
             is_compacted: false,
             model: None,
             provider: None,
+            account_id: None,
             model_ratio: None,
             reasoning_effort: None,
             temperature: None,
@@ -528,6 +532,16 @@ impl SessionState {
     /// Set the per-session provider (ADR-012).
     pub fn set_provider(&mut self, provider: String) {
         self.provider = Some(provider);
+    }
+
+    /// Get the per-session account selection (multi-account, ADR-012).
+    pub fn account_id(&self) -> Option<&str> {
+        self.account_id.as_deref()
+    }
+
+    /// Set the per-session account selection (multi-account, ADR-012).
+    pub fn set_account_id(&mut self, account_id: String) {
+        self.account_id = Some(account_id);
     }
 
     /// Get the current model chars/token ratio (from API calibration).

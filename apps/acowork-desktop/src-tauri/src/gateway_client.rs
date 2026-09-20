@@ -668,7 +668,7 @@ impl GatewayClient {
     pub async fn add_key(
         &self,
         provider: &str,
-        key: &str,
+        keys: &[crate::commands::vault::AddProviderKey],
         base_url: Option<&str>,
         default_model: Option<&str>,
         models: Option<&[String]>,
@@ -676,7 +676,24 @@ impl GatewayClient {
         compact_model: Option<&str>,
         custom: bool,
     ) -> Result<OperationAck> {
-        let mut body = serde_json::json!({ "provider": provider, "key": key });
+        let keys_json: Vec<serde_json::Value> = keys
+            .iter()
+            .map(|k| {
+                serde_json::json!({
+                    "alias": k.alias,
+                    "key": k.key,
+                })
+            })
+            .collect();
+        let mut body = serde_json::json!({
+            "provider": provider,
+            "keys": keys_json,
+        });
+        // Preserve the legacy single-key field for old Gateway builds
+        // that haven't been upgraded yet — first key only.
+        if let Some(first) = keys.first() {
+            body["key"] = serde_json::Value::String(first.key.clone());
+        }
         if custom {
             body["custom"] = serde_json::Value::Bool(true);
         }
@@ -718,11 +735,49 @@ impl GatewayClient {
         parse_gateway_response(resp).await
     }
 
-    /// `DELETE /api/providers/:provider`
-    pub async fn remove_key(&self, provider: &str) -> Result<GenericMessageResponse> {
+    /// `DELETE /api/providers/:provider` (legacy: drops every account for the
+/// provider) or `DELETE /api/providers/:provider/keys/:account_id`
+/// (drops a single account).
+    pub async fn remove_key(
+        &self,
+        provider: &str,
+        account_id: Option<&str>,
+    ) -> Result<GenericMessageResponse> {
+        let url = match account_id {
+            Some(aid) => format!("{}/api/providers/{}/keys/{}", self.base_url, provider, aid),
+            None => format!("{}/api/providers/{}", self.base_url, provider),
+        };
+        let resp = self.client.delete(url).send().await?;
+        parse_gateway_response(resp).await
+    }
+
+    /// `PATCH /api/providers/:provider/keys/:account_id` — edit an existing
+    /// account's alias and/or key. None on either field is a no-op (the
+    /// Gateway returns 400 if both are missing — propagate that error).
+    /// Used by the harness edit dialog so users can rename or rotate keys
+    /// without losing the account's UUID.
+    pub async fn update_account_key(
+        &self,
+        provider: &str,
+        account_id: &str,
+        alias: Option<&str>,
+        key: Option<&str>,
+    ) -> Result<GenericMessageResponse> {
+        let mut body = serde_json::Map::new();
+        if let Some(a) = alias {
+            body.insert("alias".into(), serde_json::Value::String(a.to_string()));
+        }
+        if let Some(k) = key {
+            body.insert("key".into(), serde_json::Value::String(k.to_string()));
+        }
+        let url = format!(
+            "{}/api/providers/{}/keys/{}",
+            self.base_url, provider, account_id
+        );
         let resp = self
             .client
-            .delete(format!("{}/api/providers/{}", self.base_url, provider))
+            .patch(url)
+            .json(&serde_json::Value::Object(body))
             .send()
             .await?;
         parse_gateway_response(resp).await
@@ -736,7 +791,7 @@ impl GatewayClient {
     pub async fn update_key(
         &self,
         provider: &str,
-        key: Option<&str>,
+        keys: &[crate::commands::vault::AddProviderKey],
         base_url: Option<&str>,
         default_model: Option<&str>,
         models: Option<&[String]>,
@@ -744,10 +799,20 @@ impl GatewayClient {
         compact_model: Option<&str>,
     ) -> Result<GenericMessageResponse> {
         let mut body = serde_json::Map::new();
-        if let Some(k) = key
-            && !k.is_empty()
-        {
-            body.insert("key".to_string(), serde_json::Value::String(k.to_string()));
+        // Multi-account entries. The Gateway appends each non-empty
+        // entry as a fresh vault account; existing accounts are
+        // preserved.
+        if !keys.is_empty() {
+            let arr: Vec<serde_json::Value> = keys
+                .iter()
+                .map(|k| {
+                    serde_json::json!({
+                        "alias": k.alias,
+                        "key": k.key,
+                    })
+                })
+                .collect();
+            body.insert("keys".to_string(), serde_json::Value::Array(arr));
         }
         if let Some(url) = base_url {
             body.insert(
@@ -1059,6 +1124,13 @@ pub struct ExportPackageResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VaultKeyEntry {
     pub provider: String,
+    /// Stable account UUID — use this for subsequent add/update/remove.
+    /// Empty for legacy single-key rows.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub account_id: String,
+    /// User-facing label for this account. Empty for legacy single-key rows.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub alias: String,
     pub key_preview: String,
     /// Configured base URL (if any)
     #[serde(default, skip_serializing_if = "Option::is_none")]

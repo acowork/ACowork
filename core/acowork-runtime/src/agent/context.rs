@@ -753,13 +753,35 @@ impl ContextBuilder {
         ChatRequest {
             model,
             messages,
-            temperature: Some(self.temperature.unwrap_or(DEFAULT_TEMPERATURE) as f64),
+            temperature: Some(round_temperature(
+                self.temperature.unwrap_or(DEFAULT_TEMPERATURE),
+            )),
             max_tokens,
             tools: self.tool_definitions.clone(),
             reasoning_effort: self.reasoning_effort.clone(),
             thinking_mode: self.thinking_mode.clone(),
         }
     }
+}
+
+/// Widen an `f32` temperature to `f64` for the wire, dropping the binary
+/// representation artifacts.
+///
+/// `ContextBuilder::temperature` is an `f32` (it comes from the `f32`
+/// session/agent config), so a plain `as f64` cast exposes the float
+/// expansion: `0.1_f32 as f64 == 0.10000000149011612`. Volcengine Ark
+/// validates the *decimal places* of `temperature` and rejects anything
+/// below 2 — `glm-5.3-flash` returns `400 InvalidParameter` for `0.123`
+/// and for the `f32` artifact, while accepting `0.12`. Other models on the
+/// very same endpoint (deepseek / doubao) accept the expansion, which is
+/// why the bug only showed up on GLM.
+///
+/// ponytail: 2 decimals is exactly the resolution the Desktop already
+/// selects and displays (`toFixed(2)`), so nothing expressible in the UI is
+/// lost. If a UI ever offers finer steps, the provider-side limit must be
+/// re-probed before widening this.
+fn round_temperature(t: f32) -> f64 {
+    (f64::from(t) * 100.0).round() / 100.0
 }
 
 /// Build a [`PatchError::TypeMismatch`] for a section patch whose value
@@ -926,6 +948,31 @@ mod tests {
             request.messages[0].cache_control,
             Some(acowork_core::providers::traits::CacheControl::Ephemeral)
         );
+    }
+
+    /// Regression test: the built request's temperature must not carry the
+    /// `f32`→`f64` expansion artifacts, and must stay within the 2 decimal
+    /// places Volcengine Ark's `glm-5.3-flash` accepts (`0.123` → 400,
+    /// `0.12` → 200).
+    #[test]
+    fn test_build_chat_request_rounds_temperature_for_wire() {
+        let manifest = test_manifest();
+        let history = HistoryManager::new(10000);
+
+        for (input, expected) in [
+            (0.1_f32, "0.1"),
+            (0.3, "0.3"),
+            (0.7, "0.7"),
+            (0.15, "0.15"),
+            // Would be rejected verbatim; must go out as 0.12.
+            (0.123, "0.12"),
+        ] {
+            let mut builder = ContextBuilder::new("You are a helper.".to_string());
+            builder.set_temperature(Some(input));
+            let request = builder.build(&manifest, &history, None, None, 32_768);
+            let wire = serde_json::json!(request.temperature);
+            assert_eq!(wire.to_string(), expected, "input {input}");
+        }
     }
 
     #[test]

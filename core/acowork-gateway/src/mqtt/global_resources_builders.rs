@@ -25,6 +25,18 @@ use acowork_core::protocol::{McpTransportDef, ProtocolType};
 use crate::gateway::state::GatewayState;
 use crate::util::preview_key;
 
+/// Whether a provider with **no** vault account is still published to
+/// runtimes.
+///
+/// Only local providers (ollama, lmstudio…) are keyless by design: the
+/// runtime treats an empty `api_key` as "no auth", which those endpoints
+/// accept. A keyless non-local provider cannot be called, and publishing it
+/// plants a phantom entry in every Runtime's `agent_provider.json` that can
+/// even become the session's active provider.
+fn publish_keyless_provider(id: &str) -> bool {
+    crate::http::models_api::is_local_provider(id)
+}
+
 /// Build `AvailableProviders` from the GatewayState resource cache.
 ///
 /// "Available" = all providers in the cache. Phase 2+ will filter to only
@@ -32,31 +44,105 @@ use crate::util::preview_key;
 /// performed here so both MQTT and HTTP channels see the same key.
 pub(crate) fn build_available_providers(gw: &GatewayState) -> AvailableProviders {
     let cache = &gw.resource_cache.provider_list;
-    let providers: Vec<ProviderRef> = cache
-        .providers
-        .iter()
-        .map(|p| {
-            // Decrypt the provider's API key from the Gateway's Vault.
-            // Empty string when no key is configured (e.g. local Ollama).
-            // MQTT broker is localhost-only so it's safe to publish the
-            // decrypted key in the retained payload — see mqtt.md §3.1.1.
-            let api_key = gw
-                .vault
-                .get_provider(&p.id)
-                .map(|entry| entry.api_key)
-                .unwrap_or_default();
-            // DIAG: log the byte range about to be published to MQTT so
-            // we can correlate this preview with the `build_provider_for`
-            // + `OpenAI streaming request prepared` lines on the runtime
-            // side. If this preview matches the runtime's prefix, the
-            // corruption is upstream of the publisher (vault layer).
+    let mut providers: Vec<ProviderRef> = Vec::new();
+    for p in &cache.providers {
+        // Decrypt every account key for this provider; one ProviderRef
+        // per `(provider, account)` pair. `vault.list_keys()` returns
+        // one row per account, so this is a 1:N fan-out.
+        //
+        // `None` = enumeration failed, so we cannot tell whether keys
+        // exist. Fall back to the historical "publish without key"
+        // behaviour rather than dropping a possibly-usable provider.
+        let accounts = match gw.vault.list_keys() {
+            Ok(entries) => Some(
+                entries
+                    .into_iter()
+                    .filter(|e| e.provider == p.id)
+                    .collect::<Vec<_>>(),
+            ),
+            Err(e) => {
+                tracing::warn!(
+                    provider_id = %p.id,
+                    error = %e,
+                    "global_resources: failed to enumerate vault accounts; emitting single ProviderRef without key"
+                );
+                None
+            }
+        };
+
+        // A non-local provider with no vault account cannot be called by any
+        // Runtime (the wire carries an empty `api_key` = "no auth"), and
+        // publishing it plants a keyless phantom in every Runtime's
+        // `agent_provider.json` — where it can even become the session's
+        // active provider while being invisible (and undeletable) in the
+        // Desktop. Skip it. Local providers (ollama, lmstudio…) are keyless
+        // by design and must still be published.
+        if accounts.as_ref().is_some_and(|a| a.is_empty()) && !publish_keyless_provider(&p.id) {
+            tracing::debug!(
+                provider_id = %p.id,
+                "global_resources: skipping non-local provider with no vault account"
+            );
+            continue;
+        }
+
+        // Decide which `(account_id, api_key)` tuples to emit. Local
+        // providers have no real key but still want a row, so we emit
+        // one empty entry for them.
+        let accounts = accounts.unwrap_or_default();
+        let emit: Vec<(String, String)> = if accounts.is_empty() {
+            vec![(String::new(), String::new())]
+        } else {
+            accounts
+                .into_iter()
+                .map(|a| (a.account_id, a.key_preview))
+                .collect()
+        };
+
+        // We need the *decrypted* keys, not previews. Re-resolve from
+        // the vault by (provider, account_id) so the wire payload
+        // matches the historical "decrypt before publish" contract.
+        // `vault.get_provider` returns the first account when no
+        // account_id is given; for multi-account providers we look up
+        // each account explicitly.
+        let decrypted_keys: Vec<(String, String)> = if p.id.is_empty() {
+            Vec::new()
+        } else {
+            // Build (account_id, decrypted_key) pairs. For the local
+            // case (no accounts), emit one ("", "") row.
+            if emit.len() == 1 && emit[0].0.is_empty() {
+                vec![(String::new(), String::new())]
+            } else {
+                emit.iter()
+                    .map(|(account_id, _preview)| {
+                        let api_key = match gw.vault.get_account(&p.id, account_id) {
+                            Ok(entry) => entry.api_key,
+                            Err(e) => {
+                                tracing::warn!(
+                                    provider_id = %p.id,
+                                    account_id = %account_id,
+                                    error = %e,
+                                    "global_resources: failed to decrypt account key; emitting empty"
+                                );
+                                String::new()
+                            }
+                        };
+                        (account_id.clone(), api_key)
+                    })
+                    .collect()
+            }
+        };
+
+        for (account_id, api_key) in decrypted_keys {
+            // DIAG: log the byte range about to be published to MQTT
+            // so we can correlate this preview with the runtime side.
             tracing::info!(
                 provider_id = %p.id,
+                account_id = %account_id,
                 api_key_len = api_key.len(),
                 api_key_prefix = %preview_key(&api_key),
                 "global_resources: building ProviderRef for AvailableProviders snapshot"
             );
-            ProviderRef {
+            providers.push(ProviderRef {
                 id: p.id.clone(),
                 base_url: p.base_url.clone(),
                 protocol_type: map_protocol_type(&p.protocol_type).into(),
@@ -87,9 +173,10 @@ pub(crate) fn build_available_providers(gw: &GatewayState) -> AvailableProviders
                 compact_model: p.compact_model.clone().unwrap_or_default(),
                 custom: p.custom,
                 api_key,
-            }
-        })
-        .collect();
+                account_id,
+            });
+        }
+    }
 
     AvailableProviders {
         version: cache.version,
@@ -356,6 +443,16 @@ pub(crate) fn map_mcp_transport(t: &McpTransportDef) -> acowork_core::mqtt_proto
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only local providers may be published without a key; a keyless
+    /// non-local provider must not reach the runtimes.
+    #[test]
+    fn test_publish_keyless_provider_only_for_local() {
+        assert!(publish_keyless_provider("ollama"));
+        assert!(publish_keyless_provider("lmstudio"));
+        assert!(!publish_keyless_provider("volcengine-agent-plan"));
+        assert!(!publish_keyless_provider("custom-volcengine-agent-plan"));
+    }
 
     #[test]
     fn test_map_protocol_type() {

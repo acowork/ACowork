@@ -90,6 +90,8 @@ export function patchSessionConfig(
   patch: {
     model?: string;
     provider?: string;
+    /** Multi-account: which API key of the provider (empty = first). */
+    account_id?: string;
     reasoning_effort?: string;
     title?: string;
     temperature?: number;

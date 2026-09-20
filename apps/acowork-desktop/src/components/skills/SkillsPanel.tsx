@@ -130,7 +130,7 @@ export function SkillsPanel({ textHidden }: { textHidden?: boolean } = {}) {
       >
         {/* Dropdown menu */}
         {open && (
-          <div className="absolute bottom-full left-0 mb-1 w-60 rounded-md border border-zinc-200 bg-modal-surface shadow-lg dark:border-zinc-700" style={{ zIndex: 100 }}>
+          <div className="absolute bottom-full left-0 mb-1 w-60 rounded-md border border-border-outer bg-modal-surface shadow-lg" style={{ zIndex: 100 }}>
             {/* Menu title */}
             <div className="px-3 pt-2.5 pb-1">
               <h2 className="text-sm font-normal text-text-secondary ">
@@ -139,7 +139,7 @@ export function SkillsPanel({ textHidden }: { textHidden?: boolean } = {}) {
             </div>
 
             {/* Skills list */}
-            <div className="max-h-56 overflow-y-auto py-1">
+            <div className="max-h-[420px] overflow-y-auto py-1">
               {loading && skills.length === 0 ? (
                 <div className="py-4 text-center text-xs text-text-tertiary">{t("skillsPanel.loading")}</div>
               ) : skills.length === 0 ? (
@@ -192,7 +192,7 @@ export function SkillsPanel({ textHidden }: { textHidden?: boolean } = {}) {
             </div>
 
             {/* Divider */}
-            <div className="border-t border-zinc-200 dark:border-zinc-700" />
+            <div className="border-t border-border-divider" />
 
             {/* Import Skills button */}
             <button
@@ -209,7 +209,7 @@ export function SkillsPanel({ textHidden }: { textHidden?: boolean } = {}) {
       {/* Import Dialog */}
       {importDialogOpen && (
         <div className="fixed inset-0 z-[200] flex items-center justify-center bg-modal-overlay">
-          <div className="w-96 rounded-md border border-zinc-200 bg-modal-surface p-6 shadow-xl dark:border-zinc-700">
+          <div className="w-96 rounded-md border border-border-outer bg-modal-surface p-6 shadow-xl">
             {/* Header */}
             <div className="mb-4 flex items-center justify-between">
               <h3 className="text-sm font-semibold text-text ">

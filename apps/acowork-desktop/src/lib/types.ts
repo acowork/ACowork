@@ -326,6 +326,10 @@ export type ModelCapabilitiesMap = Record<string, ModelCapabilitiesInfo>;
 /** Vault key entry (masked) */
 export interface VaultKeyEntry {
   provider: string;
+  /** Stable account UUID. Use this in subsequent add/update/remove calls. */
+  account_id?: string;
+  /** User-facing label for this account. Empty for legacy single-key rows. */
+  alias?: string;
   key_preview: string;
   /** Optional base URL override for this provider */
   base_url?: string;
@@ -341,6 +345,20 @@ export interface VaultKeyEntry {
   local?: boolean;
   /** Whether this is a user-defined custom provider (not listed in models.dev) */
   custom?: boolean;
+}
+
+/**
+ * One credential (account) of a provider, as shown in the model picker's
+ * account level. A provider may hold many accounts (same provider_id,
+ * distinct account_id), each with its own API key.
+ */
+export interface ProviderAccount {
+  /** Stable account UUID (Vault entry key). */
+  accountId: string;
+  /** User-facing label, editable. Falls back to the provider id when unset. */
+  alias: string;
+  /** Masked API key (last 4 chars) — tells duplicate aliases apart. */
+  preview: string;
 }
 
 /** Gateway config response */

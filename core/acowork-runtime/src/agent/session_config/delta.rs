@@ -21,6 +21,9 @@ use serde::{Deserialize, Serialize};
 pub struct SessionConfigDelta {
     pub model: Option<String>,
     pub provider: Option<String>,
+    /// Multi-account: selected account for `provider` (selects the API key).
+    /// `None` = provider's first account (pre-multi-account behaviour).
+    pub account_id: Option<String>,
     pub workspace_id: Option<String>,
     pub reasoning_effort: Option<String>,
     pub temperature: Option<f32>,
@@ -44,6 +47,8 @@ pub struct SessionConfigDelta {
 pub struct SessionConfigSnapshot {
     pub model: Option<String>,
     pub provider: Option<String>,
+    /// Multi-account: selected account for `provider`. `None` = first account.
+    pub account_id: Option<String>,
     pub workspace_id: Option<String>,
     pub reasoning_effort: Option<String>,
     pub temperature: Option<f32>,

@@ -25,8 +25,12 @@
 //! networks). See [`LOCAL_GATEWAY_HOST`].
 //! 2. **Reuse window** — the Gateway client is already subscribed to
 //!    `acowork/nodes/+/status`; wait a short window for a retained
-//!    `online` — an externally-managed local node (e.g. systemd) is
-//!    reused instead of spawning a duplicate.
+//!    `online` from THIS machine's node (persisted anchor first, then
+//!    a same-hostname scan — see `local_node_id`), reusing it instead
+//!    of spawning a duplicate. `gateway_managed` alone is NOT enough:
+//!    a remote LAN node carries the marker too (2026-09-20 incident —
+//!    the local node was never spawned because a node spawned on
+//!    another machine hijacked the reuse check).
 //! 3. **Spawn + reaper** — the supervisor task owns the `Child`,
 //!    reaps it on exit, and respawns after a retry delay (re-checking
 //!    the registry first: another instance may have taken over).
@@ -235,6 +239,120 @@ fn cleanup_orphaned_local_nodes(mqtt_port: u16) -> usize {
     pids.len()
 }
 
+// ── Own-machine node identity anchor (ADR-075 D5 amendment) ──────────
+//
+// ADR-075 D5 identified the Gateway's own-machine node as "the online
+// node with `gateway_managed == true`" — an assumption that breaks in
+// a LAN (`--remote`) fleet: a node spawned by the Gateway on ANOTHER
+// machine carries `gateway_managed = true` too, and once it reconnects
+// within the reuse window the Gateway believed the local node was
+// already up and skipped the spawn (2026-09-20 incident: the Mac's own
+// node never started because the Windows node hijacked the reuse
+// check).
+//
+// The anchor removes the guesswork: whichever node_id this Gateway
+// resolved as its own-machine node last is persisted to
+// `{data_dir}/local_node.json` and wins on the next boot; the
+// same-hostname scan inside `local_node_id` is only the migration
+// fallback.
+
+/// `{data_dir}/local_node.json` — the persisted own-machine node id.
+fn local_node_anchor_path(data_dir: &str) -> std::path::PathBuf {
+    std::path::Path::new(data_dir).join("local_node.json")
+}
+
+/// Persisted content of `local_node.json`.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PersistedLocalNode {
+    node_id: String,
+    #[serde(default)]
+    recorded_at: Option<String>,
+}
+
+/// Load the persisted own-machine node id. `None` when never recorded
+/// or unreadable — never fatal, the same-hostname fallback applies.
+pub(crate) fn load_persisted_local_node_id(data_dir: &str) -> Option<String> {
+    let path = local_node_anchor_path(data_dir);
+    let content = std::fs::read_to_string(&path).ok()?;
+    match serde_json::from_str::<PersistedLocalNode>(&content) {
+        Ok(record) if !record.node_id.is_empty() => Some(record.node_id),
+        Ok(_) => None,
+        Err(e) => {
+            tracing::warn!(path = %path.display(), error = %e, "local_node.json corrupt — ignoring");
+            None
+        }
+    }
+}
+
+/// Persist the own-machine node id (best-effort: a failed write only
+/// costs the next boot an extra same-hostname scan).
+pub(crate) fn persist_local_node_id(data_dir: &str, node_id: &str) {
+    let path = local_node_anchor_path(data_dir);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let record = PersistedLocalNode {
+        node_id: node_id.to_string(),
+        recorded_at: Some(chrono::Utc::now().to_rfc3339()),
+    };
+    match serde_json::to_string_pretty(&record) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(&path, json) {
+                tracing::debug!(
+                    path = %path.display(),
+                    error = %e,
+                    "Could not persist local node anchor"
+                );
+            }
+        }
+        Err(e) => tracing::debug!(error = %e, "Could not serialize local node anchor"),
+    }
+}
+
+/// Read `node_id` out of the Node Agent's own identity file
+/// (`{node_home}/identity.json`). Only the id is extracted — the file
+/// also carries the node's long-lived credential, which stays on the
+/// node side.
+fn read_node_identity_id(identity_path: &std::path::Path) -> Option<String> {
+    let content = std::fs::read_to_string(identity_path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&content).ok()?;
+    value
+        .get("node_id")?
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+}
+
+/// Learn the spawned child's node_id from its identity file (written
+/// at startup, before the MQTT connect) and record it as the anchor:
+/// in-memory on the registry + persisted to `{data_dir}/local_node.json`.
+async fn learn_and_persist_local_node_id(
+    node_registry: SharedNodeRegistry,
+    data_dir: String,
+) {
+    // The child writes identity.json — possibly reusing the existing
+    // file — within milliseconds of spawn; poll briefly to cover a
+    // cold first boot and torn writes.
+    let identity_path = acowork_core::node::default_node_home().join("identity.json");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(node_id) = read_node_identity_id(&identity_path) {
+            node_registry.write().await.set_local_node_anchor(&node_id);
+            persist_local_node_id(&data_dir, &node_id);
+            tracing::info!(node_id = %node_id, "Recorded local node identity anchor");
+            return;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            tracing::debug!(
+                path = %identity_path.display(),
+                "Node identity file not readable — local node anchor not recorded (same-hostname fallback applies)"
+            );
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 /// Ensure a local node agent is running; supervise it forever.
 ///
 /// Called from `Gateway::run` AFTER the MQTT broker + Gateway MQTT
@@ -246,6 +364,9 @@ fn cleanup_orphaned_local_nodes(mqtt_port: u16) -> usize {
 /// one-time enrollment token when MQTT auth is enabled, forwarded to
 /// the child via `--token` and swapped for the long-lived node_token at
 /// enroll time (None keeps the credential-less spawn).
+///
+/// `data_dir` holds the own-machine node anchor (`local_node.json`) —
+/// see the section comment above.
 pub async fn ensure_local_node(
     mqtt_port: u16,
     packages_dir: &str,
@@ -253,7 +374,18 @@ pub async fn ensure_local_node(
     local_token: Option<String>,
     proxy_port: Option<u16>,
     lsp_relay_port: Option<u16>,
+    data_dir: &str,
 ) -> std::io::Result<Arc<LocalNodeSupervisor>> {
+    // Step 0: pin the persisted own-machine node id so the reuse
+    // window below can only ever match THIS machine's node — never a
+    // remote gateway-managed one.
+    if let Some(anchor) = load_persisted_local_node_id(data_dir) {
+        node_registry
+            .write()
+            .await
+            .set_local_node_anchor(&anchor);
+    }
+
     // Step 1: kill orphans from a previous Gateway run (they carry our
     // `--gateway-managed` marker — user-managed nodes never match).
     let orphans = cleanup_orphaned_local_nodes(mqtt_port);
@@ -264,13 +396,20 @@ pub async fn ensure_local_node(
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
 
-    // Step 2: reuse window — an `online` gateway-managed node (externally
-    // managed) wins over spawning our own.
+    // Step 2: reuse window — an `online` node OF THIS MACHINE (a
+    // survivor of a previous Gateway run, or externally managed) wins
+    // over spawning our own.
     let deadline = tokio::time::Instant::now() + REUSE_WINDOW;
     let mut reused = false;
     while tokio::time::Instant::now() < deadline {
-        if local_node_id(&node_registry).await.is_some() {
-            tracing::info!("Local node agent already online — reusing it");
+        if let Some(resolved) = local_node_id(&node_registry).await {
+            tracing::info!(node_id = %resolved, "Local node agent already online — reusing it");
+            // First successful resolution on this machine records the
+            // anchor (e.g. right after an upgrade — no
+            // `local_node.json` exists yet).
+            if load_persisted_local_node_id(data_dir).as_deref() != Some(resolved.as_str()) {
+                persist_local_node_id(data_dir, &resolved);
+            }
             reused = true;
             break;
         }
@@ -282,13 +421,20 @@ pub async fn ensure_local_node(
         spawn_and_supervise(
             mqtt_port,
             packages_dir,
-            node_registry,
+            node_registry.clone(),
             supervisor.clone(),
             local_token.as_deref(),
             proxy_port,
             lsp_relay_port,
         )
         .await?;
+        // Background: learn the child's node_id from its identity file
+        // and record it as the anchor (a fast restart before the record
+        // lands just falls back to the same-hostname scan).
+        tokio::spawn(learn_and_persist_local_node_id(
+            node_registry,
+            data_dir.to_string(),
+        ));
     }
     Ok(supervisor)
 }
@@ -499,8 +645,8 @@ async fn collect_node_registry_via_mqtt(
 }
 
 /// Resolve the Gateway's own-machine node id from the broker's retained
-/// topics (ADR-075 D5): `gateway_managed == true` && online, newest
-/// `last_updated` wins.
+/// topics (ADR-075 D5): the online `gateway_managed` node reporting the
+/// Gateway machine's hostname, newest `last_updated` wins.
 ///
 /// Why the CLI needs this: `--node` defaults to "the Gateway's own
 /// machine", but the node id is a UUID minted by the Node — a standalone
@@ -509,6 +655,10 @@ async fn collect_node_registry_via_mqtt(
 /// `acowork/nodes/local/...`), so falling back to it would publish into
 /// a topic nobody receives: the command would silently never arrive.
 /// Failure is loud instead (ADR-075 Q2).
+///
+/// The hostname gate assumes the CLI runs on the Gateway's machine (the
+/// documented usage); from a remote shell the default is unresolvable —
+/// pass `--node <node_id>` explicitly.
 pub async fn resolve_local_node_via_mqtt(
     mqtt_host: &str,
     mqtt_port: u16,
@@ -932,7 +1082,45 @@ pub async fn stop_agent_via_mqtt(
 
 #[cfg(test)]
 mod tests {
-    use super::extract_node_agent_id;
+    use super::*;
+
+    #[test]
+    fn read_node_identity_id_extracts_only_the_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("identity.json");
+        std::fs::write(
+            &path,
+            r#"{"node_id":"id-1","node_name":"mac","gateway_managed":true,"node_token":"secret"}"#,
+        )
+        .unwrap();
+        assert_eq!(read_node_identity_id(&path).as_deref(), Some("id-1"));
+
+        // Missing / malformed / empty id → None (anchor degrades to
+        // the hostname fallback, never a bogus id).
+        std::fs::write(&path, r#"{"node_name":"mac"}"#).unwrap();
+        assert_eq!(read_node_identity_id(&path), None);
+        std::fs::write(&path, "not json").unwrap();
+        assert_eq!(read_node_identity_id(&path), None);
+        assert_eq!(read_node_identity_id(&dir.path().join("absent.json")), None);
+    }
+
+    #[test]
+    fn local_node_anchor_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = dir.path().to_string_lossy().to_string();
+        assert_eq!(load_persisted_local_node_id(&data_dir), None);
+
+        persist_local_node_id(&data_dir, "id-1");
+        assert_eq!(
+            load_persisted_local_node_id(&data_dir).as_deref(),
+            Some("id-1")
+        );
+
+        // Corruption is swallowed (the next boot just falls back to
+        // the same-hostname scan).
+        std::fs::write(local_node_anchor_path(&data_dir), "{oops").unwrap();
+        assert_eq!(load_persisted_local_node_id(&data_dir), None);
+    }
 
     #[test]
     fn extract_installed_agent_id() {

@@ -425,7 +425,14 @@ pub(crate) async fn phase_b_init_session(
                 vault.clear();
                 for p in &available.providers {
                     if !p.api_key.is_empty() {
-                        vault.insert(p.id.clone(), p.api_key.clone());
+                        vault
+                            .entry(p.id.clone())
+                            .or_default()
+                            .push(acowork_core::protocol::ProviderKeyEntry {
+                                provider_id: p.id.clone(),
+                                account_id: p.account_id.clone(),
+                                api_key: p.api_key.clone(),
+                            });
                     }
                 }
                 tracing::info!(

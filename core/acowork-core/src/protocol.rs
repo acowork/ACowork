@@ -28,7 +28,7 @@ fn default_max_output_tokens_limit() -> u64 {
 ///
 /// Used by BudgetGuard for cost-aware token budgeting.
 /// Values are in USD per 1M tokens.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModelCostInfo {
     /// Input cost per million tokens (USD)
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -42,7 +42,7 @@ pub struct ModelCostInfo {
 ///
 /// Describes what input/output formats the model supports.
 /// Used for future multimodal routing decisions.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModelModalities {
     /// Input modalities (e.g. "text", "image", "audio", "video")
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -61,7 +61,7 @@ pub struct ModelModalities {
 /// Design principle: carry as much models.dev data as possible to
 /// avoid future protocol changes. All new fields are optional with
 /// serde defaults for backward compatibility.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModelCapabilitiesInfo {
     // ── Limit (core, always populated from models.dev) ──
     /// Context window size (total tokens: input + output)
@@ -287,12 +287,21 @@ pub struct McpListItem {
 
 /// Provider key entry — delivered by Gateway to Runtime via AgentHelloResult.
 ///
+/// One entry per `(provider, account)` pair: when a provider has
+/// multiple accounts the Gateway sends one row per account, all with
+/// their own `account_id`. Runtime addresses each account by its UUID;
+/// `provider_id` alone is ambiguous for multi-account providers.
+///
 /// Always delivered in full on every AgentHello (no version check).
 /// Runtime stores this ONLY in memory, never persisted to disk.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderKeyEntry {
     /// Provider identifier
     pub provider_id: String,
+    /// Stable account UUID. Use this together with `provider_id` to
+    /// address a specific account; matches the `account_id` returned
+    /// by `GET /api/providers`.
+    pub account_id: String,
     /// Decrypted API key
     pub api_key: String,
 }

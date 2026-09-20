@@ -6,8 +6,9 @@ import { needsApiKey, keyPlaceholder, isLocalProvider } from "../../lib/provider
 import { fetchProviderModels, discoverModels, fetchProviders } from "../../lib/gateway-api";
 import { ModelMultiSelect } from "./ModelMultiSelect";
 import { ProviderPicker } from "./ProviderPicker";
+import { parseOfflineJson, OFFLINE_JSON_EXAMPLE } from "./offlineJson";
 import { useTranslation } from "../../i18n/useTranslation";
-import { ChevronLeft } from "lucide-react";
+import { ChevronLeft, Minus, Plus } from "lucide-react";
 import { ErrorBox } from "../common/ErrorBox";
 
 interface AddProviderFlowProps {
@@ -43,7 +44,14 @@ export function AddProviderFlow({
 
   // ── Add-dialog state ──
   const [selectedProvider, setSelectedProvider] = useState<string>(initialProvider ?? "");
-  const [newKey, setNewKey] = useState("");
+  /** Multi-key entries: each row = {alias, key} pair. Always at least one
+   *  row. New rows are appended on `+`, the last row can never be
+   *  removed so we always keep at least one editable input. Hard cap
+   *  protects the dialog from runaway state — beyond this the list
+   *  becomes scrollable. */
+  const [newKeyEntries, setNewKeyEntries] = useState<{ alias: string; key: string }[]>([
+    { alias: "", key: "" },
+  ]);
   const [newBaseUrl, setNewBaseUrl] = useState(initialProviderEntry?.api ?? "");
   const [newModels, setNewModels] = useState<string[]>([]);
   const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
@@ -54,11 +62,20 @@ export function AddProviderFlow({
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
 
+  /** Upper bound on the number of key entries the dialog will accept.
+   *  `ponytail: ceiling for UX, not enforced on the backend. Lift if
+   *  power users legitimately need > 256 accounts per provider. */
+  const MAX_KEY_ENTRIES = 256;
+
   // ── Custom-provider dialog state ──
   const [customProviderName, setCustomProviderName] = useState("");
   const [customProviderId, setCustomProviderId] = useState("");
   const [customBaseUrl, setCustomBaseUrl] = useState("");
-  const [customApiKey, setCustomApiKey] = useState("");
+  /** Same multi-entry shape as `newKeyEntries` — the custom-provider
+   *  step uses the same UI primitive. */
+  const [customKeyEntries, setCustomKeyEntries] = useState<{ alias: string; key: string }[]>([
+    { alias: "", key: "" },
+  ]);
   const [customModels, setCustomModels] = useState<string[]>([]);
   const [customAvailableModels, setCustomAvailableModels] = useState<ModelInfo[]>([]);
   const [customModelsLoading, setCustomModelsLoading] = useState(false);
@@ -66,11 +83,23 @@ export function AddProviderFlow({
   const [customTesting, setCustomTesting] = useState(false);
   const [customModelCaps, setCustomModelCaps] = useState<Record<string, ModelCapabilitiesInfo>>({});
   const [customExpandedModels, setCustomExpandedModels] = useState<Set<string>>(new Set());
+  // Manual JSON import — escape hatch when the upstream base URL has no
+  // /models endpoint. Mirrors the offline_providers.json model-spec shape
+  // so the user can paste entries from the model vendor's docs verbatim.
+  const [customJsonInput, setCustomJsonInput] = useState("");
+  const [customJsonError, setCustomJsonError] = useState<string | null>(null);
 
   // ── Derived ──
   const selectedProviderIsLocal = useMemo(
     () => isLocalProvider(selectedProvider),
     [selectedProvider],
+  );
+  // Custom providers must keep their `custom` flag through the Connect path,
+  // otherwise re-adding one (e.g. a custom provider whose last account was
+  // removed) would silently drop it out of the Custom group into Remote.
+  const selectedProviderIsCustom = useMemo(
+    () => dynamicProviders.find((p) => p.id === selectedProvider)?.custom ?? false,
+    [dynamicProviders, selectedProvider],
   );
 
   // ── Data fetching ──
@@ -107,7 +136,7 @@ export function AddProviderFlow({
     if (initialProvider) {
       setSelectedProvider(initialProvider);
       setNewBaseUrl(initialProviderEntry?.api ?? "");
-      setNewKey("");
+      setNewKeyEntries([{ alias: "", key: "" }]);
       setNewModels([]);
       setNewModelCaps({});
       setNewExpandedModels(new Set());
@@ -130,7 +159,7 @@ export function AddProviderFlow({
   const handleConnect = (providerId: string, entry: ProviderListEntry) => {
     setSelectedProvider(providerId);
     setNewBaseUrl(entry.api ?? "");
-    setNewKey("");
+    setNewKeyEntries([{ alias: "", key: "" }]);
     setNewModels([]);
     setNewModelCaps({});
     setNewExpandedModels(new Set());
@@ -149,21 +178,30 @@ export function AddProviderFlow({
     setCustomProviderName("");
     setCustomProviderId("");
     setCustomBaseUrl("");
-    setCustomApiKey("");
+    setCustomKeyEntries([{ alias: "", key: "" }]);
     setCustomModels([]);
     setCustomAvailableModels([]);
     setCustomDiscoverError(null);
     setCustomModelCaps({});
     setCustomExpandedModels(new Set());
+    setCustomJsonInput("");
+    setCustomJsonError(null);
     setStep("custom");
   };
 
   // ── Save handlers ──
   const handleAdd = async () => {
-    if (!selectedProviderIsLocal && needsApiKey(selectedProvider) && !newKey.trim()) {
+    // Strip empty trailing rows; require at least one non-empty key.
+    const validEntries = newKeyEntries
+      .map((e) => ({ alias: e.alias.trim(), key: e.key.trim() }))
+      .filter((e) => e.key.length > 0);
+    if (!selectedProviderIsLocal && needsApiKey(selectedProvider) && validEntries.length === 0) {
       setTestResult({ success: false, message: t("harness.pleaseEnterApiKey") });
       return;
     }
+    const keysPayload = validEntries.length > 0
+      ? validEntries
+      : [{ alias: "", key: "" }]; // local providers send one empty entry
 
     // Local providers: skip key test, save directly
     if (selectedProviderIsLocal) {
@@ -171,7 +209,7 @@ export function AddProviderFlow({
       try {
         await invoke("add_key", {
           provider: selectedProvider,
-          key: "",
+          keys: keysPayload,
           baseUrl: newBaseUrl || undefined,
           defaultModel: undefined,
           models: newModels.length > 0 ? newModels : undefined,
@@ -188,35 +226,61 @@ export function AddProviderFlow({
       return;
     }
 
-    // Remote providers: test key first
+    // Remote providers: test the first non-empty key, then save all.
+    // The single-key test only validates connectivity — additional keys
+    // are saved verbatim and assumed to be equivalent. This matches the
+    // legacy single-key UX where one test round-trip covers the whole
+    // provider.
+    const firstKey = validEntries[0].key;
     setTesting(true);
     setTestResult(null);
+
+    // Snapshot this provider's existing accounts so the cleanup below removes
+    // exactly what this test added. A bare `remove_key(provider)` would wipe
+    // the user's already-configured keys of the same provider (and the error
+    // path would leave the test key behind).
+    const before = await invoke<VaultKeyEntry[]>("list_keys").catch(() => []);
+    const knownAccountIds = new Set(
+      before.filter((k) => k.provider === selectedProvider).map((k) => k.account_id),
+    );
+    const cleanupTestKeys = async () => {
+      const after = await invoke<VaultKeyEntry[]>("list_keys").catch(() => []);
+      for (const k of after) {
+        if (k.provider === selectedProvider && k.account_id && !knownAccountIds.has(k.account_id)) {
+          await invoke("remove_key", { provider: selectedProvider, accountId: k.account_id }).catch(() => {});
+        }
+      }
+    };
+
     try {
       await invoke("add_key", {
         provider: selectedProvider,
-        key: newKey,
+        keys: [{ alias: validEntries[0].alias, key: firstKey }],
         baseUrl: newBaseUrl || undefined,
+        custom: selectedProviderIsCustom || undefined,
       });
       await fetchProviderModels(selectedProvider);
       setTestResult({ success: true, message: t("harness.apiKeyValid") });
-      await invoke("remove_key", { provider: selectedProvider });
     } catch (e: any) {
       const errorMsg = e?.message || e?.toString() || "Test failed";
       setTestResult({ success: false, message: errorMsg });
+      await cleanupTestKeys();
       setTesting(false);
       return;
     }
+    await cleanupTestKeys();
     setTesting(false);
 
     // Save
     try {
       await invoke("add_key", {
         provider: selectedProvider,
-        key: newKey,
+        keys: keysPayload,
         baseUrl: newBaseUrl || undefined,
         defaultModel: undefined,
         models: newModels.length > 0 ? newModels : undefined,
         compactModel: newCompactModel || undefined,
+        custom: selectedProviderIsCustom || undefined,
       });
       window.dispatchEvent(new CustomEvent('models-added'));
       onSuccess();
@@ -232,14 +296,40 @@ export function AddProviderFlow({
     setCustomModelsLoading(true);
     setCustomDiscoverError(null);
     setCustomAvailableModels([]);
+    // Probe with the first non-empty key; custom providers without a key
+    // can still call `/models` on OpenAI-compatible endpoints.
+    const probeKey = customKeyEntries.find((e) => e.key.trim().length > 0)?.key.trim();
     try {
-      const models = await discoverModels(url, customApiKey.trim() || undefined);
+      const models = await discoverModels(url, probeKey);
       setCustomAvailableModels(models);
     } catch (e: any) {
       setCustomDiscoverError(e?.message || String(e));
     } finally {
       setCustomModelsLoading(false);
     }
+  };
+
+  const handleImportCustomJson = () => {
+    const raw = customJsonInput.trim();
+    if (!raw) return;
+    setCustomJsonError(null);
+    const result = parseOfflineJson(raw);
+    if (!result) {
+      setCustomJsonError(t("harness.customJsonParseError"));
+      return;
+    }
+    // Replace discovered list. Keep previously selected IDs only if they
+    // still exist in the new list — otherwise the user would silently lose
+    // selections without explanation.
+    setCustomAvailableModels(result.models);
+    setCustomModelCaps((prev) => ({ ...result.caps, ...prev }));
+    setCustomModels((prev) => prev.filter((id) => result.models.some((m) => m.id === id)));
+    setCustomDiscoverError(null);
+  };
+
+  const handleUseExampleJson = () => {
+    setCustomJsonInput(OFFLINE_JSON_EXAMPLE);
+    if (customJsonError) setCustomJsonError(null);
   };
 
   const handleAddCustom = async () => {
@@ -254,10 +344,16 @@ export function AddProviderFlow({
       return;
     }
     setCustomTesting(true);
+    const customValidEntries = customKeyEntries
+      .map((e) => ({ alias: e.alias.trim(), key: e.key.trim() }))
+      .filter((e) => e.key.length > 0);
+    const customKeysPayload = customValidEntries.length > 0
+      ? customValidEntries
+      : [{ alias: "", key: "" }];
     try {
       await invoke("add_key", {
         provider: id,
-        key: customApiKey.trim() || "",
+        keys: customKeysPayload,
         baseUrl: url,
         models: customModels.length > 0 ? customModels : undefined,
         modelCapabilities: customModels.length > 0 ? customModelCaps : undefined,
@@ -320,21 +416,70 @@ export function AddProviderFlow({
               {/* Provider display (read-only) */}
               <div>
                 <label className="mb-1 block text-xs text-text-tertiary">{t("harness.provider")}</label>
-                <div className="w-full rounded-md border border-zinc-200 bg-zinc-50 px-3 py-2 text-xs dark:border-zinc-700 dark:bg-zinc-900 ">
+                <div className="w-full rounded-md border border-border-outer bg-zinc-50 px-3 py-2 text-xs  dark:bg-zinc-900">
                   {selectedProviderName}
                 </div>
               </div>
 
-              {/* API Key */}
+              {/* API Keys — one row per account, +/- to add/remove.
+                  Hard cap of MAX_KEY_ENTRIES rows. List becomes scrollable
+                  past ~5 entries so the dialog height stays stable. */}
               {needsApiKey(selectedProvider) && (
                 <div>
-                  <label className="mb-1 block text-xs text-text-tertiary">{t("harness.apiKey")}</label>
-                  <StyledInput
-                    type="password"
-                    value={newKey}
-                    onChange={(e) => setNewKey(e.target.value)}
-                    placeholder={keyPlaceholder(selectedProvider)}
-                  />
+                  <div className="mb-1 flex items-baseline justify-between">
+                    <label className="block text-xs text-text-tertiary">{t("harness.apiKey")}</label>
+                    <span className="text-[10px] text-text-tertiary">
+                      {t("harness.accountLabel", { defaultValue: "alias" })}
+                    </span>
+                  </div>
+                  <div className="max-h-[200px] space-y-1.5 overflow-y-auto pr-1">
+                    {newKeyEntries.map((entry, idx) => (
+                      <div key={idx} className="flex items-center gap-1.5">
+                        <StyledInput
+                          type="text"
+                          value={entry.alias}
+                          onChange={(e) => {
+                            const next = [...newKeyEntries];
+                            next[idx] = { ...next[idx], alias: e.target.value };
+                            setNewKeyEntries(next);
+                          }}
+                          placeholder="alias"
+                          className="w-[110px] shrink-0"
+                        />
+                        <StyledInput
+                          type="password"
+                          value={entry.key}
+                          onChange={(e) => {
+                            const next = [...newKeyEntries];
+                            next[idx] = { ...next[idx], key: e.target.value };
+                            setNewKeyEntries(next);
+                          }}
+                          placeholder={keyPlaceholder(selectedProvider)}
+                          className="flex-1"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setNewKeyEntries(newKeyEntries.filter((_, i) => i !== idx))}
+                          disabled={newKeyEntries.length <= 1}
+                          aria-label="Remove key"
+                          className="shrink-0 rounded p-1 text-text-tertiary hover:bg-zinc-100 disabled:opacity-30 disabled:hover:bg-transparent dark:hover:bg-zinc-700"
+                        >
+                          <Minus className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setNewKeyEntries([...newKeyEntries, { alias: "", key: "" }])
+                    }
+                    disabled={newKeyEntries.length >= MAX_KEY_ENTRIES}
+                    className="mt-1.5 flex items-center gap-1 text-xs text-text-tertiary hover:text-text-primary disabled:opacity-30 disabled:hover:text-text-tertiary"
+                  >
+                    <Plus className="h-3.5 w-3.5" />
+                    {t("harness.addKey", { defaultValue: "Add key" })}
+                  </button>
                 </div>
               )}
 
@@ -428,16 +573,118 @@ export function AddProviderFlow({
                 />
               </div>
 
-              {/* API Key (optional) */}
+              {/* API Keys (optional) — same multi-entry shape as the add step. */}
               <div>
-                <label className="mb-1 block text-xs text-text-tertiary">{t("harness.apiKey")} <span className="text-text-tertiary">({t("harness.optional")})</span></label>
-                <StyledInput
-                  type="password"
-                  value={customApiKey}
-                  onChange={(e) => setCustomApiKey(e.target.value)}
-                  placeholder="sk-..."
-                />
+                <div className="mb-1 flex items-baseline justify-between">
+                  <label className="block text-xs text-text-tertiary">
+                    {t("harness.apiKey")} <span className="text-text-tertiary">({t("harness.optional")})</span>
+                  </label>
+                  <span className="text-[10px] text-text-tertiary">
+                    {t("harness.accountLabel", { defaultValue: "alias" })}
+                  </span>
+                </div>
+                <div className="max-h-[200px] space-y-1.5 overflow-y-auto pr-1">
+                  {customKeyEntries.map((entry, idx) => (
+                    <div key={idx} className="flex items-center gap-1.5">
+                      <StyledInput
+                        type="text"
+                        value={entry.alias}
+                        onChange={(e) => {
+                          const next = [...customKeyEntries];
+                          next[idx] = { ...next[idx], alias: e.target.value };
+                          setCustomKeyEntries(next);
+                        }}
+                        placeholder="alias"
+                        className="w-[110px] shrink-0"
+                      />
+                      <StyledInput
+                        type="password"
+                        value={entry.key}
+                        onChange={(e) => {
+                          const next = [...customKeyEntries];
+                          next[idx] = { ...next[idx], key: e.target.value };
+                          setCustomKeyEntries(next);
+                        }}
+                        placeholder="sk-..."
+                        className="flex-1"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setCustomKeyEntries(customKeyEntries.filter((_, i) => i !== idx))}
+                        disabled={customKeyEntries.length <= 1}
+                        aria-label="Remove key"
+                        className="shrink-0 rounded p-1 text-text-tertiary hover:bg-zinc-100 disabled:opacity-30 disabled:hover:bg-transparent dark:hover:bg-zinc-700"
+                      >
+                        <Minus className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setCustomKeyEntries([...customKeyEntries, { alias: "", key: "" }])
+                  }
+                  disabled={customKeyEntries.length >= MAX_KEY_ENTRIES}
+                  className="mt-1.5 flex items-center gap-1 text-xs text-text-tertiary hover:text-text-primary disabled:opacity-30 disabled:hover:text-text-tertiary"
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                  {t("harness.addKey", { defaultValue: "Add key" })}
+                </button>
               </div>
+
+              {/* Manual JSON import — fallback when the upstream base URL
+                  has no /models endpoint. Mirrors offline_providers.json's
+                  model-spec shape so the user can paste vendor docs verbatim. */}
+              <details className="rounded-md border border-border-divider">
+                <summary className="cursor-pointer select-none px-3 py-1.5 text-xs text-text-tertiary hover:text-text-primary">
+                  {t("harness.customJsonInputLabel", { defaultValue: "Or import model JSON" })}
+                </summary>
+                <div className="space-y-1.5 border-t border-border-divider p-3">
+                  <p className="text-[10px] text-text-tertiary">
+                    {t("harness.customJsonImportHint", {
+                      defaultValue: "Same shape as offline_providers.json — see the formatted example below.",
+                    })}
+                  </p>
+                  {/* Pretty-printed demo — gives users something to copy
+                      from so they know where the schema starts and ends. */}
+                  <pre className="max-h-[160px] overflow-auto rounded-md bg-zinc-50 px-2 py-1.5 font-mono text-[10px] text-text-tertiary dark:bg-zinc-900">
+                    {OFFLINE_JSON_EXAMPLE}
+                  </pre>
+                  <div className="flex justify-end">
+                    <button
+                      type="button"
+                      onClick={handleUseExampleJson}
+                      className="text-[10px] text-text-tertiary hover:text-text-primary"
+                    >
+                      {t("harness.customJsonUseExample", { defaultValue: "Use this example" })}
+                    </button>
+                  </div>
+                  <textarea
+                    value={customJsonInput}
+                    onChange={(e) => {
+                      setCustomJsonInput(e.target.value);
+                      if (customJsonError) setCustomJsonError(null);
+                    }}
+                    placeholder={t("harness.customJsonInputPlaceholder", {
+                      defaultValue: "Paste model JSON here, or click \"Use this example\" above",
+                    })}
+                    rows={5}
+                    className="w-full resize-y rounded-md border border-border-divider bg-transparent px-2 py-1.5 font-mono text-[11px] outline-none focus:border-zinc-400 dark:focus:border-zinc-500"
+                  />
+                  {customJsonError && <ErrorBox message={customJsonError} />}
+                  <div className="flex justify-end">
+                    <button
+                      type="button"
+                      onClick={handleImportCustomJson}
+                      disabled={!customJsonInput.trim()}
+                      className="rounded-md bg-zinc-200 px-3 py-1.5 text-xs font-medium text-text hover:bg-zinc-300 disabled:opacity-50 dark:bg-zinc-700 dark:hover:bg-zinc-600"
+                    >
+                      {t("harness.customJsonImport", { defaultValue: "Import" })}
+                    </button>
+                  </div>
+                </div>
+              </details>
 
               {/* Model discovery status */}
               {customModelsLoading && (
@@ -476,7 +723,7 @@ export function AddProviderFlow({
         </div>
 
         {/* Footer */}
-        <div className="shrink-0 flex items-center justify-between gap-2 border-t border-zinc-100 dark:border-zinc-800 px-6 py-4">
+        <div className="shrink-0 flex items-center justify-between gap-2 border-t border-border-divider px-6 py-4">
           {/* Status on the left */}
           <div className="flex-1 min-w-0">
             {step === "add" && testResult && testResult.success && (

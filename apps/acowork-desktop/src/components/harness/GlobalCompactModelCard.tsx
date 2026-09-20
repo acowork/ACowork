@@ -18,6 +18,50 @@ export interface GlobalCompactModelCardProps {
   providers: ProviderListEntry[];
 }
 
+/** One entry in the dropdown — stable order, deduped by `provider::model`. */
+export interface CompactModelOption {
+  key: string;
+  providerId: string;
+  modelId: string;
+}
+
+/** Build (provider, model) options from configured keys, in stable order.
+ *
+ *  Data model reminder: `keys` is a flat list of provider accounts.
+ *  A provider (e.g. deepseek) can have N accounts (N = number of API
+ *  keys the user added); every account for that provider shares the
+ *  SAME `models` array — model catalog is a property of the provider,
+ *  not the account. So iterating `keys` naively emits the same
+ *  `provider::model` key once per account (e.g. 2 deepseek accounts
+ *  with `models: ["deepseek-flash"]` → 2× "deepseek::deepseek-flash"
+ *  options), which makes React warn and reconcile-loop.
+ *
+ *  This picker operates on the (provider, model) axis only — the
+ *  account dimension is irrelevant at this level (Runtime handles
+ *  account routing when the request actually fires). So dedupe by
+ *  `${provider}::${model}` and keep first occurrence's order. */
+export function buildCompactModelOptions(
+  keys: VaultKeyEntry[],
+): CompactModelOption[] {
+  const out: CompactModelOption[] = [];
+  const seen = new Set<string>();
+  for (const k of keys) {
+    const modelIds =
+      k.models && k.models.length > 0
+        ? k.models
+        : k.default_model
+          ? [k.default_model]
+          : [];
+    for (const modelId of modelIds) {
+      const key = `${k.provider}::${modelId}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ key, providerId: k.provider, modelId });
+    }
+  }
+  return out;
+}
+
 /**
  * "Global default compact model" — top of the Providers Tab.
  *
@@ -64,25 +108,7 @@ export function GlobalCompactModelCard({
   }, [refresh]);
 
   // Build (provider, model) options from configured keys, in stable order.
-  const options = useMemo(() => {
-    const out: { key: string; providerId: string; modelId: string }[] = [];
-    for (const k of keys) {
-      const modelIds =
-        k.models && k.models.length > 0
-          ? k.models
-          : k.default_model
-            ? [k.default_model]
-            : [];
-      for (const modelId of modelIds) {
-        out.push({
-          key: `${k.provider}::${modelId}`,
-          providerId: k.provider,
-          modelId,
-        });
-      }
-    }
-    return out;
-  }, [keys]);
+  const options = useMemo(() => buildCompactModelOptions(keys), [keys]);
 
   const providerNameById = useMemo(() => {
     const m = new Map<string, string>();
@@ -154,7 +180,7 @@ export function GlobalCompactModelCard({
         onToggle={() => setOpen((v) => !v)}
         title={t("harness.globalCompactModel.title")}
         ariaLabel={t("harness.globalCompactModel.title")}
-        bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset p-3 dark:border-zinc-700"
+        bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset p-3"
       >
         <div className="space-y-2">
           <p className="text-[11px] text-text-tertiary ">
