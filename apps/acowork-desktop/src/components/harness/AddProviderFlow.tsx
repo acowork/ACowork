@@ -127,20 +127,44 @@ export function AddProviderFlow({
   }, []);
 
   // ── Effects ──
-  // On open: fetch providers + keys, apply initialStep
+  // On open: wipe every form field, then re-apply the initial step.
+  // Without the wipe, re-opening the dialog (or switching tabs away and
+  // back) leaks the last session's state into the new one — e.g. typing a
+  // custom provider name, closing, and re-opening would show the old
+  // name pre-filled. Mirrors `if (!open) return null` below, which only
+  // unmounts the visual shell; React keeps the hook state alive.
   useEffect(() => {
     if (!open) return;
+    // Wipe add-step state.
+    setSelectedProvider(initialProvider ?? "");
+    setNewBaseUrl(initialProviderEntry?.api ?? "");
+    setNewKeyEntries([{ alias: "", key: "" }]);
+    setNewModels([]);
+    setAvailableModels([]);
+    setNewModelCaps({});
+    setNewExpandedModels(new Set());
+    setNewCompactModel("");
+    setTesting(false);
+    setTestResult(null);
+    // Wipe custom-step state.
+    setCustomProviderName("");
+    setCustomProviderId("");
+    setCustomBaseUrl("");
+    setCustomKeyEntries([{ alias: "", key: "" }]);
+    setCustomModels([]);
+    setCustomAvailableModels([]);
+    setCustomModelsLoading(false);
+    setCustomDiscoverError(null);
+    setCustomTesting(false);
+    setCustomModelCaps({});
+    setCustomExpandedModels(new Set());
+    setCustomJsonInput("");
+    setCustomJsonError(null);
+
     fetchKeys();
     loadProviders();
     setStep(initialStep);
     if (initialProvider) {
-      setSelectedProvider(initialProvider);
-      setNewBaseUrl(initialProviderEntry?.api ?? "");
-      setNewKeyEntries([{ alias: "", key: "" }]);
-      setNewModels([]);
-      setNewModelCaps({});
-      setNewExpandedModels(new Set());
-      setTestResult(null);
       setModelsLoading(true);
       fetchModels(initialProvider).then((models) => {
         setAvailableModels(models);
