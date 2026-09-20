@@ -715,7 +715,21 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
                                 // total for the latest call so they sum exactly to
                                 // the value the user sees in the context-usage popover
                                 // instead of the per-section `token_estimate` heuristic.
-                                realTotalTokens={contextUsage?.total_tokens ?? undefined}
+                                //
+                                // Only after the first real LLM call (`iteration` >= 1, the
+                                // runtime's per-session LLM-call counter). Before then,
+                                // `context_usage.total_tokens` is a history-only estimate
+                                // (the runtime's `emit_session_state` uses `live_tokens`,
+                                // which excludes the system prompt / tool defs), so scaling
+                                // the assembled section byte-shares by it produces wildly
+                                // small per-section numbers (a 3.4 KB system prompt shown
+                                // as ~15 tok). Without the anchor, DebugPanel falls back to
+                                // the self-consistent per-section `token_estimate`.
+                                realTotalTokens={
+                                  contextUsage && (contextUsage.iteration ?? 0) > 0
+                                    ? contextUsage.total_tokens
+                                    : undefined
+                                }
                               />
                             ))}
                           </ListBox>
