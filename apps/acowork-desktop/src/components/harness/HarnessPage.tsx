@@ -5,10 +5,11 @@ import { cn } from "../../lib/utils";
 import { inputBase } from "../../lib/ui-styles";
 import { StyledInput } from "../common/StyledInput";
 import { Dropdown } from "../common/Dropdown";
+import { ProviderLogo } from "../common/ProviderLogo";
 import { isLocalProvider } from "../../lib/providers";
 import { fetchProviderModels } from "../../lib/gateway-api";
 import { getGatewayUrl } from "../../lib/config";
-import { Monitor, MousePointer, Package, Search, Globe, BookOpen, FileText, PenTool, Star, Plus, CheckCircle2, Download, XCircle, Loader2 } from "lucide-react";
+import { Monitor, MousePointer, Package, Search, Globe, BookOpen, FileText, PenTool, Star, Plus, CheckCircle2, Download, XCircle, Loader2, Minus } from "lucide-react";
 import { useMcpStore, type McpInstallRunResponse } from "../../stores/mcpStore";
 import { MCP_PRESETS, presetToServerConfig } from "../../lib/mcp-presets";
 import { SearchTab } from "./SearchTab";
@@ -78,7 +79,26 @@ function ProvidersTab() {
   const [addFlowEntry, setAddFlowEntry] = useState<ProviderListEntry | undefined>(undefined);
 
   // Edit dialog state
-  const [editKey, setEditKey] = useState("");
+  /** Existing accounts for the provider being edited. `originalAlias`
+ *  is snapshotted at dialog open so we can detect a change on save
+ *  without re-reading from `keys` (which may shift if other code
+ *  refetches). `key` stays empty unless the user wants to rotate;
+ *  a non-empty value at save time triggers `update_account_key`.
+ *  Entries removed from this list dispatch `remove_key` on save. */
+  const [editExistingEntries, setEditExistingEntries] = useState<
+    { accountId: string; originalAlias: string; alias: string; key: string }[]
+  >([]);
+  /** accountIds snapshotted at dialog open. Any id present here but
+ *  missing from `editExistingEntries` at save time was removed by
+ *  the user via the inline minus button and needs a DELETE call. */
+  const [editOriginalAccountIds, setEditOriginalAccountIds] = useState<string[]>([]);
+  /** New accounts to add when saving the edit dialog. Each row is
+ *  `{alias, key}`; the first row always exists so the UI has at
+ *  least one editable input. `ponytail: hard ceiling for UX, lift if needed. */
+  const [editKeyEntries, setEditKeyEntries] = useState<
+    { alias: string; key: string }[]
+  >([{ alias: "", key: "" }]);
+  const EDIT_MAX_KEY_ENTRIES = 256;
   const [editBaseUrl, setEditBaseUrl] = useState("");
   const [editModels, setEditModels] = useState<string[]>([]);
   const [editAvailableModels, setEditAvailableModels] = useState<ModelInfo[]>([]);
@@ -150,10 +170,32 @@ function ProvidersTab() {
     }
   }, []);
 
-  const handleRemove = async (provider: string) => {
-    if (!confirm(t("harness.removeKeyConfirm", { provider }))) return;
+  // Group configured keys by provider so the list shows one row per
+  // provider with an "N keys" badge, not N near-duplicate rows. Order
+  // follows the first appearance of each provider in `keys`.
+  const keysByProvider = useMemo(() => {
+    const order: string[] = [];
+    const map = new Map<string, VaultKeyEntry[]>();
+    for (const k of keys) {
+      const list = map.get(k.provider);
+      if (list) list.push(k);
+      else {
+        map.set(k.provider, [k]);
+        order.push(k.provider);
+      }
+    }
+    return order.map((provider) => ({
+      provider,
+      accounts: map.get(provider) ?? [],
+    }));
+  }, [keys]);
+
+  // Remove the entire provider entry — drops every key in one call.
+  // Per-account edits/removes still happen inside the edit dialog.
+  const handleRemoveProvider = async (provider: string, count: number) => {
+    if (!confirm(t("harness.removeProviderConfirm", { provider, count }))) return;
     try {
-      await invoke("remove_key", { provider });
+      await invoke("remove_key", { provider, accountId: undefined });
       await fetchKeys();
     } catch (e) {
       alert(`${t("harness.failedRemoveKey")}: ${e}`);
@@ -181,7 +223,22 @@ function ProvidersTab() {
   const handleEdit = async (provider: string) => {
     const keyEntry = keys.find((k) => k.provider === provider);
     const dynamicProvider = dynamicProviders.find((p) => p.id === provider);
-    setEditKey(keyEntry?.key_preview ?? "");
+    // Snapshot every existing account for this provider into the dialog
+    // state. The user can rename, rotate keys, or remove any of these
+    // inline. Originals are kept for change detection on save.
+    const providerAccounts = keys.filter(
+      (k) => k.provider === provider && k.account_id,
+    );
+    setEditExistingEntries(
+      providerAccounts.map((k) => ({
+        accountId: k.account_id as string,
+        originalAlias: k.alias || "",
+        alias: k.alias || "",
+        key: "",
+      })),
+    );
+    setEditOriginalAccountIds(providerAccounts.map((k) => k.account_id as string));
+    setEditKeyEntries([{ alias: "", key: "" }]);
     setEditBaseUrl(keyEntry?.base_url ?? dynamicProvider?.api ?? "");
     const configuredModels = keyEntry?.models?.length ? keyEntry.models : keyEntry?.default_model ? [keyEntry.default_model] : [];
     setEditModels(configuredModels);
@@ -212,30 +269,71 @@ function ProvidersTab() {
   const handleEditSave = async () => {
     if (!showEditDialog) return;
     try {
+      const provider = showEditDialog;
+
+      // 1. Removed accounts: any accountId in the original snapshot that's
+      //    no longer in `editExistingEntries` was dropped by the user
+      //    via the inline minus button. Dispatch DELETE for each.
+      const survivingIds = new Set(editExistingEntries.map((e) => e.accountId));
+      for (const accountId of editOriginalAccountIds) {
+        if (!survivingIds.has(accountId)) {
+          await invoke("remove_key", { provider, accountId });
+        }
+      }
+
+      // 2. Per-account changes: each surviving entry's alias is
+      //    compared to its original; if the user supplied a non-empty
+      //    key we treat that as a key rotation. Both go through PATCH
+      //    on a single round-trip per changed account.
+      for (const entry of editExistingEntries) {
+        const aliasChanged = entry.alias.trim() !== entry.originalAlias;
+        const keyChanged = entry.key.trim().length > 0;
+        if (!aliasChanged && !keyChanged) continue;
+        await invoke("update_account_key", {
+          provider,
+          accountId: entry.accountId,
+          alias: aliasChanged ? entry.alias.trim() : null,
+          key: keyChanged ? entry.key.trim() : null,
+        });
+      }
+
+      // 3. New accounts: rows the user appended but doesn't have an
+      //    accountId. Empty rows are dropped server-side too, so we
+      //    filter here for clarity.
+      const newKeys = editKeyEntries
+        .map((e) => ({ alias: e.alias.trim(), key: e.key.trim() }))
+        .filter((e) => e.key.length > 0);
+
+      const keyEntry = keys.find((k) => k.provider === provider);
+      const isLocal = isLocalProvider(provider);
+      const isCustom = keyEntry?.custom ?? false;
+
+      // 4. Provider-level config (base_url / models / compact_model /
+      //    capabilities) + appending new accounts all land in the same
+      //    `update_key` invoke. The Gateway handler applies them
+      //    atomically against the in-memory state before releasing
+      //    the lock. Always invoked: the Gateway treats undefined
+      //    fields as "preserve existing", so a no-op save is cheap and
+      //    keeps the call path uniform.
       const updatePayload: Record<string, unknown> = {
-        provider: showEditDialog,
+        provider,
+        keys: newKeys,
         baseUrl: editBaseUrl || undefined,
         defaultModel: undefined,
         models: editModels.length > 0 ? editModels : undefined,
       };
-      // Only include key if user actually typed a new one (not the masked preview)
-      const keyEntry = keys.find((k) => k.provider === showEditDialog);
-      if (editKey && editKey !== keyEntry?.key_preview) {
-        updatePayload.key = editKey;
-      }
-      // For local/custom providers, send per-model capabilities
-      const isLocal = isLocalProvider(showEditDialog);
-      const isCustom = keyEntry?.custom ?? false;
       if ((isLocal || isCustom) && editModels.length > 0 && Object.keys(editModelCaps).length > 0) {
         updatePayload.modelCapabilities = editModelCaps;
       }
-      // Include compact_model if set
+      // Include compact_model if set; explicitly null otherwise so the
+      // Gateway clears the field when the user empties it.
       if (editCompactModel) {
         updatePayload.compactModel = editCompactModel;
       } else {
-        updatePayload.compactModel = null;  // Explicitly clear if empty
+        updatePayload.compactModel = null;
       }
       await invoke("update_key", updatePayload);
+
       setShowEditDialog(null);
       await fetchKeys();
       await fetchConfig();
@@ -263,27 +361,30 @@ function ProvidersTab() {
           <ExpandableRow
             open={configuredOpen}
             onToggle={() => setConfiguredOpen((v) => !v)}
-            title={t("harness.configuredProviders", { count: keys.length })}
-            ariaLabel={t("harness.configuredProviders", { count: keys.length })}
+            title={t("harness.configuredProviders", { count: keysByProvider.length })}
+            ariaLabel={t("harness.configuredProviders", { count: keysByProvider.length })}
             bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset"
           >
             <ListBox variant="plain">
-              {keys.map((keyEntry) => {
-                const provider = dynamicProviders.find((p) => p.id === keyEntry.provider);
-                const providerName = provider?.name || keyEntry.provider;
-                const isLocal = keyEntry.local || isLocalProvider(keyEntry.provider);
-                const isCustom = keyEntry.custom || provider?.custom;
-                const isDefault = config?.default_provider === keyEntry.provider;
+              {keysByProvider.map(({ provider, accounts }) => {
+                const providerMeta = dynamicProviders.find((p) => p.id === provider);
+                const providerName = providerMeta?.name || provider;
+                const isLocal = accounts[0]?.local || isLocalProvider(provider);
+                const isCustom = accounts[0]?.custom || providerMeta?.custom;
+                const isDefault = config?.default_provider === provider;
+                // Per-provider model list lives on every account entry
+                // (same value across accounts); surface the first one.
+                const first = accounts[0];
 
                 return (
                   <ListRow
-                    key={keyEntry.provider}
+                    key={provider}
                     trailing={
                       <div className="flex shrink-0 items-center gap-1.5">
                         <Tooltip content={isDefault ? t("harness.defaultProvider") : t("harness.setDefaultProvider")} variant="plain">
                           <button
                             type="button"
-                            onClick={() => handleSetDefaultProvider(keyEntry.provider)}
+                            onClick={() => handleSetDefaultProvider(provider)}
                             aria-label={t("harness.setDefaultProvider")}
                             className={cn(
                               "rounded p-0.5",
@@ -297,14 +398,14 @@ function ProvidersTab() {
                         </Tooltip>
                         <button
                           type="button"
-                          onClick={() => handleEdit(keyEntry.provider)}
+                          onClick={() => handleEdit(provider)}
                           className="rounded btn-solid px-2 py-0.5 text-xs"
                         >
                           {t("harness.edit")}
                         </button>
                         <button
                           type="button"
-                          onClick={() => handleRemove(keyEntry.provider)}
+                          onClick={() => handleRemoveProvider(provider, accounts.length)}
                           className="rounded btn-solid px-2 py-0.5 text-xs"
                         >
                           {t("harness.remove")}
@@ -313,6 +414,7 @@ function ProvidersTab() {
                     }
                   >
                     <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                      <ProviderLogo providerId={provider} size={12} />
                       <span className="truncate text-xs font-medium text-text-secondary ">{providerName}</span>
                       <span className="text-xs" style={{ color: "var(--color-accent)" }}>{t("harness.active")}</span>
                       {isCustom ? (
@@ -328,21 +430,23 @@ function ProvidersTab() {
                           </span>
                         </Tooltip>
                       ) : (
-                        <span className="text-[11px] text-text-tertiary">{t("harness.key")}: {keyEntry.key_preview}</span>
+                        <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] text-text-secondary dark:bg-zinc-700">
+                          {t("harness.keysCount", { count: accounts.length })}
+                        </span>
                       )}
                     </div>
                     <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5">
-                      {keyEntry.models?.length ? (
-                        <span className="text-[11px] text-text-tertiary">{keyEntry.models.join(", ")}</span>
-                      ) : keyEntry.default_model ? (
-                        <span className="text-[11px] text-text-tertiary">{keyEntry.default_model}</span>
+                      {first?.models?.length ? (
+                        <span className="text-[11px] text-text-tertiary">{first.models.join(", ")}</span>
+                      ) : first?.default_model ? (
+                        <span className="text-[11px] text-text-tertiary">{first.default_model}</span>
                       ) : (
                         <span className="text-[11px] text-text-tertiary">—</span>
                       )}
-                      {keyEntry.compact_model && (
+                      {first?.compact_model && (
                         <Tooltip content={t("harness.compactModelHint")} variant="plain">
                           <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] text-text-secondary dark:bg-zinc-700 ">
-                            {t("harness.compact")}: {keyEntry.compact_model}
+                            {t("harness.compact")}: {first?.compact_model}
                           </span>
                         </Tooltip>
                       )}
@@ -401,13 +505,101 @@ function ProvidersTab() {
             <div className="space-y-2">
               {!isLocalProvider(showEditDialog) && (
                 <div>
-                  <label className="mb-1 block text-xs text-text-tertiary">{t("harness.apiKey")}</label>
-                  <StyledInput
-                    type="password"
-                    value={editKey}
-                    onChange={(e) => setEditKey(e.target.value)}
-                    placeholder={t("harness.enterNewApiKey")}
-                  />
+                  <div className="mb-1 flex items-baseline justify-between">
+                    <label className="block text-xs text-text-tertiary">{t("harness.apiKey")}</label>
+                    <span className="text-[10px] text-text-tertiary">
+                      {t("harness.accountLabel", { defaultValue: "alias" })}
+                    </span>
+                  </div>
+                  <div className="max-h-[200px] space-y-1.5 overflow-y-auto pr-1">
+                    {/* Existing accounts — editable inline. Remove from
+                        this list drops the account on save. Empty key
+                        leaves the stored value untouched; non-empty
+                        rotates it. */}
+                    {editExistingEntries.map((entry, idx) => (
+                      <div key={entry.accountId} className="flex items-center gap-1.5">
+                        <StyledInput
+                          type="text"
+                          value={entry.alias}
+                          onChange={(e) => {
+                            const next = [...editExistingEntries];
+                            next[idx] = { ...next[idx], alias: e.target.value };
+                            setEditExistingEntries(next);
+                          }}
+                          placeholder="alias"
+                          className="w-[110px] shrink-0"
+                        />
+                        <StyledInput
+                          type="password"
+                          value={entry.key}
+                          onChange={(e) => {
+                            const next = [...editExistingEntries];
+                            next[idx] = { ...next[idx], key: e.target.value };
+                            setEditExistingEntries(next);
+                          }}
+                          placeholder={t("harness.leaveBlankToKeep", {
+                            defaultValue: "leave blank to keep",
+                          })}
+                          className="flex-1"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setEditExistingEntries(editExistingEntries.filter((e) => e.accountId !== entry.accountId))}
+                          aria-label="Remove account"
+                          className="shrink-0 rounded p-1 text-text-tertiary hover:bg-zinc-100 dark:hover:bg-zinc-700"
+                        >
+                          <Minus className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    ))}
+                    {/* New accounts — appended at the bottom. Disabled
+                        when the only row is already empty (otherwise the
+                        UI has no editable surface). */}
+                    {editKeyEntries.map((entry, idx) => (
+                      <div key={`new-${idx}`} className="flex items-center gap-1.5">
+                        <StyledInput
+                          type="text"
+                          value={entry.alias}
+                          onChange={(e) => {
+                            const next = [...editKeyEntries];
+                            next[idx] = { ...next[idx], alias: e.target.value };
+                            setEditKeyEntries(next);
+                          }}
+                          placeholder="alias"
+                          className="w-[110px] shrink-0"
+                        />
+                        <StyledInput
+                          type="password"
+                          value={entry.key}
+                          onChange={(e) => {
+                            const next = [...editKeyEntries];
+                            next[idx] = { ...next[idx], key: e.target.value };
+                            setEditKeyEntries(next);
+                          }}
+                          placeholder={t("harness.enterNewApiKey")}
+                          className="flex-1"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setEditKeyEntries(editKeyEntries.filter((_, i) => i !== idx))}
+                          disabled={editKeyEntries.length <= 1}
+                          aria-label="Remove key"
+                          className="shrink-0 rounded p-1 text-text-tertiary hover:bg-zinc-100 disabled:opacity-30 disabled:hover:bg-transparent dark:hover:bg-zinc-700"
+                        >
+                          <Minus className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setEditKeyEntries([...editKeyEntries, { alias: "", key: "" }])}
+                    disabled={editKeyEntries.length >= EDIT_MAX_KEY_ENTRIES}
+                    className="mt-1.5 flex items-center gap-1 text-xs text-text-tertiary hover:text-text-primary disabled:opacity-30 disabled:hover:text-text-tertiary"
+                  >
+                    <Plus className="h-3.5 w-3.5" />
+                    {t("harness.addKey", { defaultValue: "Add key" })}
+                  </button>
                 </div>
               )}
 

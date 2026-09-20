@@ -14,8 +14,8 @@ import { fetchProviderModels } from "../../lib/gateway-api";
 import { startAgentAndSyncUI } from "../../lib/agent-start";
 import { toolbarButton } from "../../lib/ui-styles";
 import { AddProviderFlow } from "../harness/AddProviderFlow";
-import { Bot, Play, Send, ChevronDown, ChevronRight, ChevronLeft, ChevronsDown, ChevronsUp, Wrench, AlertTriangle, X, Square, Plus, Layers, Loader, Pencil, Paperclip, Image, Brain, Circle, CircleDot, Clipboard, Upload } from "lucide-react";
-import type { ChatMessage, VaultKeyEntry, ModelEntry } from "../../lib/types";
+import { Bot, Play, Send, ChevronDown, ChevronRight, ChevronLeft, ChevronsDown, ChevronsUp, Wrench, AlertTriangle, X, Square, Plus, Layers, Loader, Pencil, Paperclip, Image, Brain, Circle, CircleDot, Clipboard, Upload, Check, Search } from "lucide-react";
+import type { ChatMessage, VaultKeyEntry, ModelEntry, ProviderAccount } from "../../lib/types";
 import { ContextUsageIcon } from "./ContextUsageIcon";
 import { blockIndexOfRawMessage } from "./messageFolder";
 import { PlaceholderBar } from "./PlaceholderBar";
@@ -25,6 +25,7 @@ import { useLiveStream, getChatAdapterSession, releaseAdapterSession } from "./c
 import { useChatListAdapter } from "./chatListAdapter";
 import { useScrollController } from "./useScrollController";
 import { ContextMenu, useContextMenu } from "../common/ContextMenu";
+import { ProviderLogo } from "../common/ProviderLogo";
 import { useToast } from "../common/ToastProvider";
 
 /**
@@ -700,6 +701,7 @@ export function ChatPanel() {
   const phase = getProcessingPhase(sessionStatus);
   const currentModel = sessionState?.model ?? null;
   const currentProvider = sessionState?.provider ?? null;
+  const currentAccountId = sessionState?.providerAccountId ?? null;
   const currentReasoningEffort = sessionState?.reasoningEffort ?? null;
 
   // User profile fields — subscribed at ChatPanel level and passed as props
@@ -727,6 +729,8 @@ export function ChatPanel() {
   // the "X seconds until auto-reconnect" countdown.
   const mqttStaleSince = useChatStore((s) => s.staleSince);
   const availableModels = useChatStore((s) => s.availableModels);
+  // Accounts per provider — feeds the model menu's account level.
+  const providerAccounts = useChatStore((s) => s.providerAccounts);
   // Mirrored from this agent's `SessionConfig.llm_availability` retained
   // MQTT topic. Per-agent: each Runtime publishes its own value, and a
   // banner should reflect the CURRENTLY selected agent — not some other
@@ -746,6 +750,7 @@ export function ChatPanel() {
     setCurrentModel,
     setReasoningEffort,
     setAvailableModels,
+    setProviderAccounts,
     continueExecution,
     resolveApproval,
     resolveApprovalByToolCallId,
@@ -988,8 +993,26 @@ export function ChatPanel() {
     try {
       const keys = await invoke<VaultKeyEntry[]>("list_keys");
 
-      // Build (provider, configuredModelIds, modelCapabilities) tuples, skipping empty entries
-      const entries = keys.map(key => ({
+      // Accounts per provider — drives the model menu's account level.
+      const accountsByProvider: Record<string, ProviderAccount[]> = {};
+      for (const key of keys) {
+        if (!key.account_id) continue;
+        (accountsByProvider[key.provider] ??= []).push({
+          accountId: key.account_id,
+          alias: key.alias?.trim() || key.provider,
+          preview: key.key_preview ?? "",
+        });
+      }
+      setProviderAccounts(accountsByProvider);
+
+      // Build (provider, configuredModelIds, modelCapabilities) tuples, skipping empty entries.
+      // `models` is provider-level config shared by every account of that
+      // provider, so collapse the per-account rows first — otherwise a
+      // 3-key provider would refetch the same model list 3 times.
+      const byProvider = new Map<string, VaultKeyEntry>();
+      for (const key of keys) if (!byProvider.has(key.provider)) byProvider.set(key.provider, key);
+
+      const entries = [...byProvider.values()].map(key => ({
         provider: key.provider,
         modelIds: key.models?.length
           ? key.models
@@ -1028,7 +1051,7 @@ export function ChatPanel() {
     } catch {
       // Gateway may not be running
     }
-  }, [setAvailableModels]);
+  }, [setAvailableModels, setProviderAccounts]);
 
   useEffect(() => {
     loadModels();
@@ -2720,9 +2743,11 @@ export function ChatPanel() {
                   wrapperRef={modelBtnRef}
                   textHidden={textHidden.model}
                   models={availableModels}
+                  accountsByProvider={providerAccounts}
                   currentModel={currentModel}
                   currentProvider={currentProvider}
-                  onSelect={(m, p) => selectedAgentId && setCurrentModel(m, p, selectedAgentId)}
+                  currentAccountId={currentAccountId}
+                  onSelect={(m, p, a) => selectedAgentId && setCurrentModel(m, p, selectedAgentId, a)}
                   btnId="model"
                 />
               )}
@@ -2889,20 +2914,30 @@ function UnsupportedImageDialog({
   );
 }
 
-/** Popup-style model selector with provider shown in gray */
+/**
+ * Model selector popup. Models are grouped by provider (sticky header);
+ * when a provider holds more than one API key, picking a model drills into
+ * an account level (`provider → model → account`) instead of silently using
+ * the first key. Single-key providers keep the flat two-level behaviour.
+ */
 function ModelMenu({
   models,
+  accountsByProvider,
   currentModel,
   currentProvider,
+  currentAccountId,
   onSelect,
   textHidden,
   wrapperRef: externalRef,
   btnId,
 }: {
   models: { name: string; provider: string; tool_call?: boolean; reasoning?: boolean; input_modalities?: string[] }[];
+  /** Accounts per provider id; provider missing or single-entry = no account level */
+  accountsByProvider: Record<string, ProviderAccount[]>;
   currentModel: string | null;
   currentProvider: string | null;
-  onSelect: (model: string, provider: string) => void;
+  currentAccountId: string | null;
+  onSelect: (model: string, provider: string, accountId?: string) => void;
   textHidden?: boolean;
   /** Optional external ref merged with the internal click-outside ref */
   wrapperRef?: React.Ref<HTMLDivElement>;
@@ -2912,38 +2947,185 @@ function ModelMenu({
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const [showAddDialog, setShowAddDialog] = useState(false);
+  /** Set while drilling into a multi-key provider's accounts. */
+  const [pending, setPending] = useState<{ name: string; provider: string } | null>(null);
+  const [search, setSearch] = useState("");
   const internalRef = useRef<HTMLDivElement>(null);
   const ref = useMergedRef(internalRef, externalRef);
 
-  // Calculate menu width based on longest model name + provider
+  // Calculate menu width based on the longest model row OR the longest
+  // provider sticky header — whichever is wider. Provider moved to the
+  // header so the row calc dropped its term, but the header itself
+  // (logo + uppercase provider name + padding) can exceed the row for
+  // long ids like `minimax-cn-coding-plan`.
+  // Ponytail — ceiling: ~max(modelName * 7.5 + 74px, providerName * 7px + 42px).
   const menuWidth = useMemo(() => {
-    const CHAR_WIDTH = 7.5; // Approximate px per character for text-xs
-    const PADDING = 30; // Left + right padding (12.5px each side)
-    const GAP = 12; // Space between model and provider (~2 chars)
+    const CHAR_WIDTH = 7.5; // px per char for text-xs (model rows)
+    const HEADER_CHAR_WIDTH = 7.5; // px per char for text-[10px] uppercase + tracking-wide
+    const PADDING = 24; // px-3 on each side
+    const ROW_CHROME = 50; // feature icons + chevron + gaps on model rows
+    const HEADER_CHROME = 18; // 12 logo + 6 gap, before the provider name
     let maxWidth = 0;
 
     for (const m of models) {
       const displayName = m.name.includes('/') && m.name.split('/')[0].length < m.name.split('/').slice(1).join('/').length
         ? m.name.split('/').slice(1).join('/')
         : m.name;
-      const itemWidth = displayName.length * CHAR_WIDTH + m.provider.length * CHAR_WIDTH + GAP + PADDING;
-      if (itemWidth > maxWidth) maxWidth = itemWidth;
+      const rowWidth = displayName.length * CHAR_WIDTH + ROW_CHROME + PADDING;
+      const headerWidth = HEADER_CHROME + m.provider.length * HEADER_CHAR_WIDTH + PADDING;
+      maxWidth = Math.max(maxWidth, rowWidth, headerWidth);
     }
 
     return Math.max(maxWidth, 180); // Minimum 180px
   }, [models]);
 
-  // Close on outside click
+  // Close on outside click — also resets drill-down state so the fly-out
+  // doesn't reappear stale on the next open.
   useEffect(() => {
     if (!open) return;
     const handler = (e: MouseEvent) => {
       if (internalRef.current && !internalRef.current.contains(e.target as Node)) {
-        setOpen(false);
+        closeMenu();
       }
     };
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
   }, [open]);
+
+  // Above this many rows the list gets a filter box; below it the box is noise.
+  const SEARCH_THRESHOLD = 8;
+
+  const closeMenu = () => {
+    cancelClose();
+    setOpen(false);
+    setPending(null);
+    setSearch("");
+  };
+
+  // Hover-to-open plumbing for the account fly-out. A short delay gives
+  // the cursor time to cross the gap between row and fly-out without
+  // firing a close.
+  const flyoutRef = useRef<HTMLDivElement>(null);
+  const rowRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
+  const closeTimerRef = useRef<number | null>(null);
+  const cancelClose = () => {
+    if (closeTimerRef.current !== null) {
+      window.clearTimeout(closeTimerRef.current);
+      closeTimerRef.current = null;
+    }
+  };
+  const scheduleClose = () => {
+    cancelClose();
+    closeTimerRef.current = window.setTimeout(() => {
+      setPending(null);
+      closeTimerRef.current = null;
+    }, 120);
+  };
+
+  // Fly-out placement. Anchored to the row's viewport rect (so it stays
+  // glued to the row when the list scrolls), positioned via fixed coords
+  // so the menu's `overflow-hidden` doesn't clip it.
+  // Direction = down if there's room below the row, else up. If neither
+  // side fits, pick the larger one.
+  const [flyoutPos, setFlyoutPos] = useState<{
+    top: number;
+    left: number;
+    direction: "down" | "up";
+  } | null>(null);
+
+  const query = search.trim().toLowerCase();
+
+  // Models grouped by provider, insertion order preserved (provider is the
+  // menu's first level, so a flat list no longer has to repeat it per row).
+  const groups = useMemo(() => {
+    const map = new Map<string, typeof models>();
+    for (const m of models) {
+      if (query && !m.name.toLowerCase().includes(query) && !m.provider.toLowerCase().includes(query)) continue;
+      const bucket = map.get(m.provider);
+      if (bucket) bucket.push(m);
+      else map.set(m.provider, [m]);
+    }
+    return Array.from(map.entries());
+  }, [models, query]);
+
+  // `pending` now drives a side fly-out, not a panel swap — so the search
+  // box stays scoped to the main model list, and `accounts` / `visibleAccounts`
+  // are only consumed by the fly-out (which shows every account of the
+  // picked model without re-applying the query).
+  const accounts = pending ? (accountsByProvider[pending.provider] ?? []) : [];
+  const visibleAccounts = accounts;
+  const showSearch = models.length > SEARCH_THRESHOLD;
+
+  // Fly-out placement effect — runs after `accounts` is in scope so the
+  // height estimate is accurate. Anchored to the row's viewport rect so
+  // it stays glued when the list scrolls. Direction picks the side with
+  // enough room, else the larger side.
+  useLayoutEffect(() => {
+    if (!pending) {
+      setFlyoutPos(null);
+      return;
+    }
+    // Estimate fly-out height: ~36px per account row + ~50px chrome,
+    // capped by the scrollable list's max-h-[420px]. If wrong by a few
+    // px the next paint re-measures via the actual DOM rect.
+    const flyoutHeight = Math.min(accounts.length * 36 + 50, 420);
+    const compute = () => {
+      const row = rowRefs.current.get(`${pending.name}::${pending.provider}`);
+      if (!row) return;
+      const rowRect = row.getBoundingClientRect();
+      const spaceBelow = window.innerHeight - rowRect.bottom;
+      const spaceAbove = rowRect.top;
+
+      let direction: "down" | "up";
+      let top: number;
+      if (flyoutHeight <= spaceBelow) {
+        direction = "down";
+        top = rowRect.top;
+      } else if (flyoutHeight <= spaceAbove) {
+        direction = "up";
+        top = rowRect.bottom - flyoutHeight;
+      } else if (spaceBelow >= spaceAbove) {
+        direction = "down";
+        top = rowRect.top;
+      } else {
+        direction = "up";
+        top = rowRect.bottom - flyoutHeight;
+      }
+      setFlyoutPos({ top, left: rowRect.right + 4, direction });
+    };
+    compute();
+    window.addEventListener("scroll", compute, true);
+    window.addEventListener("resize", compute);
+    return () => {
+      window.removeEventListener("scroll", compute, true);
+      window.removeEventListener("resize", compute);
+    };
+  }, [pending, accounts.length]);
+
+  // Last-used account per provider — display hint only, never a preselection
+  // (the user always clicks). Local storage because it is pure UI memory of
+  // this machine, not session state.
+  const lastUsedAccount = (provider: string) => {
+    try { return localStorage.getItem(`acowork:last-account:${provider}`); } catch { return null; }
+  };
+
+  const pickModel = (name: string, provider: string) => {
+    const list = accountsByProvider[provider] ?? [];
+    if (list.length > 1) {
+      setPending({ name, provider });
+      setSearch("");
+      return;
+    }
+    onSelect(name, provider, list[0]?.accountId);
+    closeMenu();
+  };
+
+  const pickAccount = (accountId: string) => {
+    if (!pending) return;
+    try { localStorage.setItem(`acowork:last-account:${pending.provider}`, accountId); } catch { /* ignore */ }
+    onSelect(pending.name, pending.provider, accountId);
+    closeMenu();
+  };
 
   const modelDisplayName = (() => {
     if (!currentModel || !currentModel.includes('/')) return currentModel ?? t("chatPanel.modelFallback");
@@ -2961,13 +3143,17 @@ function ModelMenu({
       tipClass="tb-model-tip"
       tooltip={t("chatPanel.selectModel")}
       open={open}
-      onToggle={() => setOpen(!open)}
+      onToggle={() => (open ? closeMenu() : setOpen(true))}
       wrapperRef={ref}
       textHidden={textHidden}
       btnId={btnId}
     >
       {/* Popup menu */}
       {open && (
+        <>
+        {/* Main panel — model list. Always shown. The account fly-out
+            (below) anchors to the same `bottom-full` baseline, so the
+            two panels share a top edge without manual offset maths. */}
         <div
           className={cn(
             "absolute bottom-full left-0 z-50 mb-1 overflow-hidden rounded-md border shadow-lg",
@@ -2982,49 +3168,92 @@ function ModelMenu({
             </h2>
           </div>
 
-          {/* Model list */}
-          <div className="max-h-[240px] overflow-y-auto py-1">
-            {models.map((m) => {
-              const isActive = m.name === currentModel && m.provider === currentProvider;
-              return (
-                <button
-                  key={`${m.name}::${m.provider}`}
-                  type="button"
-                  onClick={() => {
-                    onSelect(m.name, m.provider);
-                    setOpen(false);
-                  }}
-                  className={cn(
-                    "flex w-full items-center justify-between px-3 py-1.5 text-xs font-medium transition-colors",
-                    isActive
-                      ? "text-[var(--color-accent)]"
-                      : "text-text-secondary hover:bg-zinc-50  dark:hover:bg-zinc-700/50",
-                  )}
-                >
-                  <span className="flex items-center gap-1 min-w-0">
-                    <span className={cn("font-medium truncate")} style={isActive ? { color: "var(--color-accent)" } : undefined}>
-                      {/* Strip provider prefix from model name if format is provider/model and model is longer */}
-                      {(() => {
-                        if (!m.name.includes('/')) return m.name;
-                        const parts = m.name.split('/');
-                        const prefix = parts[0];
-                        const modelName = parts.slice(1).join('/');
-                        // Only strip if model name is longer than prefix (avoid stripping model/provider)
-                        return modelName.length > prefix.length ? modelName : m.name;
-                      })()}
-                    </span>
-                    <span className="flex items-center gap-0.5 ml-2">
-                      {m.tool_call && <Wrench size={10} className="text-text-tertiary" />}
-                      {m.reasoning && <Brain size={10} className="text-purple-400" />}
-                      {m.input_modalities?.includes('image') && <Image size={10} className="text-blue-400" />}
-                    </span>
-                  </span>
-                  <span className="text-[10px] text-text-tertiary  shrink-0 ml-2">
-                    {m.provider}
-                  </span>
-                </button>
-              );
-            })}
+          {/* Filter — only worth showing once the list is long */}
+          {showSearch && (
+            <div className="px-3 pb-1.5">
+              <div className="flex items-center gap-1.5 rounded-md border border-border-divider px-2 py-1">
+                <Search size={11} className="shrink-0 text-text-tertiary" />
+                <input
+                  autoFocus
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder={t("chatPanel.modelMenuSearchModel")}
+                  className="w-full bg-transparent text-xs text-text-primary outline-none placeholder:text-text-tertiary"
+                />
+              </div>
+            </div>
+          )}
+
+          {/* Level 1: grouped model list (level 2 — accounts — flies out on
+              the right; this panel no longer swaps to show it). */}
+          <div className="max-h-[420px] overflow-y-auto py-1">
+            {groups.length === 0 ? (
+              <div className="px-3 py-2 text-xs text-text-tertiary">{t("chatPanel.modelMenuNoMatch")}</div>
+            ) : (
+              groups.map(([provider, providerModels], groupIdx) => (
+                <div key={provider}>
+                  {/* Divider between provider sections (color from --color-border-divider).
+                      Suppressed for the first group so the menu top edge stays flush. */}
+                  {groupIdx > 0 && <div className="border-t border-border-divider" />}
+                  {/* Sticky so the provider stays visible while its models scroll */}
+                  <div className="sticky top-0 z-10 flex items-center gap-1.5 bg-modal-surface px-3 py-1 text-[10px] font-semibold uppercase tracking-wide text-text-tertiary">
+                    <ProviderLogo providerId={provider} size={12} />
+                    <span className="truncate">{provider}</span>
+                  </div>
+                  {providerModels.map((m) => {
+                    const isActive = m.name === currentModel && m.provider === currentProvider;
+                    const drillsDown = (accountsByProvider[m.provider]?.length ?? 0) > 1;
+                    return (
+                      <button
+                        key={`${m.name}::${m.provider}`}
+                        type="button"
+                        ref={(el) => {
+                          const k = `${m.name}::${m.provider}`;
+                          if (el) rowRefs.current.set(k, el);
+                          else rowRefs.current.delete(k);
+                        }}
+                        onClick={() => pickModel(m.name, m.provider)}
+                        onMouseEnter={
+                          drillsDown
+                            ? () => {
+                                cancelClose();
+                                setPending({ name: m.name, provider: m.provider });
+                              }
+                            : undefined
+                        }
+                        onMouseLeave={drillsDown ? scheduleClose : undefined}
+                        className={cn(
+                          "flex w-full items-center justify-between pl-5 pr-3 py-1.5 text-xs font-medium transition-colors",
+                          isActive
+                            ? "text-[var(--color-accent)]"
+                            : "text-text-secondary hover:bg-zinc-50  dark:hover:bg-zinc-700/50",
+                        )}
+                      >
+                        <span className="flex items-center gap-1 min-w-0">
+                          <span className={cn("font-medium truncate")} style={isActive ? { color: "var(--color-accent)" } : undefined}>
+                            {/* Strip provider prefix from model name if format is provider/model and model is longer */}
+                            {(() => {
+                              if (!m.name.includes('/')) return m.name;
+                              const parts = m.name.split('/');
+                              const prefix = parts[0];
+                              const modelName = parts.slice(1).join('/');
+                              // Only strip if model name is longer than prefix (avoid stripping model/provider)
+                              return modelName.length > prefix.length ? modelName : m.name;
+                            })()}
+                          </span>
+                          <span className="flex items-center gap-0.5 ml-2">
+                            {m.tool_call && <Wrench size={10} className="text-text-tertiary" />}
+                            {m.reasoning && <Brain size={10} className="text-purple-400" />}
+                            {m.input_modalities?.includes('image') && <Image size={10} className="text-blue-400" />}
+                          </span>
+                        </span>
+                        {drillsDown && <ChevronRight size={12} className="shrink-0 ml-2 text-text-tertiary" />}
+                      </button>
+                    );
+                  })}
+                </div>
+              ))
+            )}
           </div>
 
           {/* Divider */}
@@ -3035,7 +3264,7 @@ function ModelMenu({
             type="button"
             onClick={() => {
               setShowAddDialog(true);
-              setOpen(false);
+              closeMenu();
             }}
             className="mx-3 mt-2 mb-2.5 flex w-[calc(100%-1.5rem)] items-center justify-center gap-1.5 rounded-md bg-zinc-100 px-3 py-[var(--ui-btn-py)] text-xs font-medium text-text-secondary transition-colors hover:bg-zinc-200 hover:text-zinc-900 dark:bg-white/10  dark:hover:bg-white/15 dark:hover:text-zinc-100"
           >
@@ -3043,6 +3272,69 @@ function ModelMenu({
             {t("chatPanel.addModel")}
           </button>
         </div>
+
+        {/* Level 2 fly-out — accounts for the multi-key model the user
+            drilled into. Anchored to the same `bottom-full` baseline as
+            the main panel so the two top edges align without manual
+            offset. Rendered as a sibling (not a child) so the main
+            panel's `overflow-hidden` doesn't clip it. No back button:
+            the main panel stays visible and clicking another multi-key
+            row swaps this fly-out to the new model. */}
+        {pending && (
+          <div
+            ref={flyoutRef}
+            onMouseEnter={cancelClose}
+            onMouseLeave={scheduleClose}
+            className="fixed z-50 overflow-hidden rounded-md border shadow-lg border-zinc-200 bg-modal-surface dark:border-border-outer"
+            style={{
+              top: flyoutPos?.top ?? 0,
+              left: flyoutPos?.left ?? 0,
+              width: "200px",
+              visibility: flyoutPos ? "visible" : "hidden",
+            }}
+          >
+            <div className="max-h-[420px] overflow-y-auto py-1.5">
+              {visibleAccounts.length === 0 ? (
+                <div className="px-3 py-2 text-xs text-text-tertiary">{t("chatPanel.modelMenuNoMatch")}</div>
+              ) : (
+                visibleAccounts.map((a) => {
+                  const isActive =
+                    a.accountId === currentAccountId &&
+                    pending.name === currentModel &&
+                    pending.provider === currentProvider;
+                  const isLastUsed = lastUsedAccount(pending.provider) === a.accountId;
+                  return (
+                    <button
+                      key={a.accountId}
+                      type="button"
+                      onClick={() => pickAccount(a.accountId)}
+                      className={cn(
+                        "flex w-full items-center justify-between px-3 py-1.5 text-xs font-medium transition-colors",
+                        isActive
+                          ? "text-[var(--color-accent)]"
+                          : "text-text-secondary hover:bg-zinc-50  dark:hover:bg-zinc-700/50",
+                      )}
+                    >
+                      <span className="flex min-w-0 items-center gap-1">
+                        <span className="truncate font-medium">{a.alias}</span>
+                        {isLastUsed && !isActive && (
+                          <span className="shrink-0 text-[10px] text-text-tertiary">
+                            {t("chatPanel.modelMenuLastUsed")}
+                          </span>
+                        )}
+                      </span>
+                      <span className="ml-2 flex shrink-0 items-center gap-1">
+                        <span className="text-[10px] text-text-tertiary">{a.preview}</span>
+                        {isActive && <Check size={12} />}
+                      </span>
+                    </button>
+                  );
+                })
+              )}
+            </div>
+          </div>
+        )}
+        </>
       )}
 
       {/* Add Provider Flow */}

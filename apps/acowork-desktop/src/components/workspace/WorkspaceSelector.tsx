@@ -210,7 +210,7 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden }: { dropDi
             </div>
 
             {/* Workspace list */}
-            <div className="max-h-56 overflow-y-auto py-1">
+            <div className="max-h-[420px] overflow-y-auto py-1">
               {/* Agent Home — always first, cannot be deleted */}
               <button
                 onClick={async () => {

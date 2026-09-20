@@ -139,7 +139,7 @@ export function SkillsPanel({ textHidden }: { textHidden?: boolean } = {}) {
             </div>
 
             {/* Skills list */}
-            <div className="max-h-56 overflow-y-auto py-1">
+            <div className="max-h-[420px] overflow-y-auto py-1">
               {loading && skills.length === 0 ? (
                 <div className="py-4 text-center text-xs text-text-tertiary">{t("skillsPanel.loading")}</div>
               ) : skills.length === 0 ? (

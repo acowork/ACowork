@@ -7,6 +7,7 @@ import { useTranslation } from "../../i18n/useTranslation";
 import { getGatewayUrl } from "../../lib/config";
 import { cn } from "../../lib/utils";
 import { Search, Plus, ChevronsDown, RefreshCw, Check, AlertCircle } from "lucide-react";
+import { ProviderLogo } from "../common/ProviderLogo";
 
 interface ProviderPickerProps {
   providers: ProviderListEntry[];
@@ -204,9 +205,11 @@ export function ProviderPicker({ providers, keys, onConnect, onAddCustom, onCata
     return { localProviders: local, remoteProviders: remote, customProviders: custom };
   }, [providers]);
 
-  // Remote providers not yet configured, search-filtered (rows under "可用"
-  // must never include already-configured keys).
-  const remoteAvailable = remoteProviders.filter((p) => !keys.some((k) => k.provider === p.id));
+  // Every provider stays listed, configured or not: one provider can hold
+  // several accounts, so "has a key" no longer means "done" — re-clicking it
+  // ADDS another account. Configured rows just carry a count badge.
+  const configuredCount = (providerId: string) => keys.filter((k) => k.provider === providerId).length;
+  const remoteAvailable = remoteProviders;
   const normalizedTerm = providerSearchTerm.trim().toLowerCase();
   const filteredRemoteProviders = normalizedTerm
     ? remoteAvailable.filter(
@@ -214,9 +217,9 @@ export function ProviderPicker({ providers, keys, onConnect, onAddCustom, onCata
       )
     : remoteAvailable;
 
-  // Unconfigured (available) providers per group + remote display window (first 5 when >5).
-  const availableCustom = customProviders.filter((p) => !keys.some((k) => k.provider === p.id));
-  const availableLocal = localProviders.filter((p) => !keys.some((k) => k.provider === p.id));
+  // Providers per group + remote display window (first 5 when >5).
+  const availableCustom = customProviders;
+  const availableLocal = localProviders;
   const availableRemote = remoteAvailable.length;
   const remoteLimitReached = !providerSearchTerm.trim() && !showAllRemote && filteredRemoteProviders.length > 5;
   const displayedRemote = remoteLimitReached ? filteredRemoteProviders.slice(0, 5) : filteredRemoteProviders;
@@ -247,14 +250,22 @@ export function ProviderPicker({ providers, keys, onConnect, onAddCustom, onCata
                 <ListRow
                   key={providerId}
                   surface="inset"
+                  leading={<ProviderLogo providerId={providerId} size={16} />}
                   trailing={
-                    <button
-                      type="button"
-                      onClick={() => onConnect(providerId, item)}
-                      className="rounded-md bg-zinc-100 px-3 py-1 text-xs font-medium text-text-secondary hover:bg-zinc-200 dark:bg-zinc-700  dark:hover:bg-zinc-600"
-                    >
-                      {t("harness.connect")}
-                    </button>
+                    <div className="flex items-center gap-2">
+                      {configuredCount(providerId) > 0 && (
+                        <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] text-text-secondary dark:bg-zinc-700">
+                          {t("harness.accountsConfigured", { count: configuredCount(providerId) })}
+                        </span>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => onConnect(providerId, item)}
+                        className="rounded-md bg-zinc-100 px-3 py-1 text-xs font-medium text-text-secondary hover:bg-zinc-200 dark:bg-zinc-700  dark:hover:bg-zinc-600"
+                      >
+                        {t("harness.connect")}
+                      </button>
+                    </div>
                   }
                 >
                   <span className="block truncate text-xs font-medium text-text-secondary ">{providerName}</span>
@@ -294,14 +305,22 @@ export function ProviderPicker({ providers, keys, onConnect, onAddCustom, onCata
                   <ListRow
                     key={providerId}
                     surface="inset"
+                    leading={<ProviderLogo providerId={providerId} size={16} />}
                     trailing={
-                      <button
-                        type="button"
-                        onClick={() => onConnect(providerId, item)}
-                        className="rounded-md bg-zinc-100 px-3 py-1 text-xs font-medium text-text-secondary hover:bg-zinc-200 dark:bg-zinc-700  dark:hover:bg-zinc-600"
-                      >
-                        {t("harness.connect")}
-                      </button>
+                      <div className="flex items-center gap-2">
+                        {configuredCount(providerId) > 0 && (
+                          <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] text-text-secondary dark:bg-zinc-700">
+                            {t("harness.accountsConfigured", { count: configuredCount(providerId) })}
+                          </span>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => onConnect(providerId, item)}
+                          className="rounded-md bg-zinc-100 px-3 py-1 text-xs font-medium text-text-secondary hover:bg-zinc-200 dark:bg-zinc-700  dark:hover:bg-zinc-600"
+                        >
+                          {t("harness.connect")}
+                        </button>
+                      </div>
                     }
                   >
                     <span className="block truncate text-xs font-medium text-text-secondary ">{providerName}</span>
@@ -420,14 +439,22 @@ export function ProviderPicker({ providers, keys, onConnect, onAddCustom, onCata
                       <ListRow
                         key={providerId}
                         surface="inset"
+                        leading={<ProviderLogo providerId={providerId} size={16} />}
                         trailing={
-                          <button
-                            type="button"
-                            onClick={() => onConnect(providerId, item)}
-                            className="rounded-md bg-zinc-100 px-3 py-1 text-xs font-medium text-text-secondary hover:bg-zinc-200 dark:bg-zinc-700  dark:hover:bg-zinc-600"
-                          >
-                            {t("harness.addKey")}
-                          </button>
+                          <div className="flex items-center gap-2">
+                            {configuredCount(providerId) > 0 && (
+                              <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] text-text-secondary dark:bg-zinc-700">
+                                {t("harness.accountsConfigured", { count: configuredCount(providerId) })}
+                              </span>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => onConnect(providerId, item)}
+                              className="rounded-md bg-zinc-100 px-3 py-1 text-xs font-medium text-text-secondary hover:bg-zinc-200 dark:bg-zinc-700  dark:hover:bg-zinc-600"
+                            >
+                              {t("harness.addKey")}
+                            </button>
+                          </div>
                         }
                       >
                         <span className="block truncate text-xs font-medium text-text-secondary ">{providerName}</span>
