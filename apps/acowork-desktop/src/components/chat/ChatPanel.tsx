@@ -2671,7 +2671,7 @@ export function ChatPanel() {
               `chatPanel.${getInputPlaceholderKey(gatewayStatus, effectiveConnection, !!activeSkill, sending)}`,
             )}
             disabled={inputDisabled}
-            className="w-full resize-none border-0 bg-transparent p-3 pb-2 outline-none placeholder:text-text-disabled  disabled:cursor-not-allowed disabled:opacity-50 max-h-48 overflow-y-auto min-h-[4.5rem]"
+            className="w-full resize-none border-0 bg-transparent p-3 pb-2 outline-none placeholder:text-text-disabled  disabled:cursor-not-allowed disabled:opacity-50 max-h-48 overflow-y-auto min-h-[5rem]"
             style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}
             onKeyDown={(e) => {
               if (e.key !== "Enter" || e.shiftKey) return;
@@ -2915,6 +2915,41 @@ function UnsupportedImageDialog({
 }
 
 /**
+ * Group flat `models` into `[provider, model[]]` pairs sorted
+ * alphabetically (case-insensitive) by provider, then by model name.
+ *
+ * Stable ordering matters because the menu has a hover-fly-out anchored
+ * to a specific row's viewport rect; if providers reshuffle on every
+ * vault reload, the fly-out's cached position desyncs from the row the
+ * user is actually hovering (deepseek used to jump from first to last).
+ *
+ * `query` filters both `model.name` and `model.provider` (case-insensitive
+ * substring) — empty string disables the filter.
+ *
+ * Exported for unit testing; the ModelMenu's own useMemo is the only
+ * call site.
+ */
+export function groupModelsByProvider<
+  T extends { name: string; provider: string },
+>(
+  models: T[],
+  query: string,
+): Array<readonly [string, T[]]> {
+  const q = query.trim().toLowerCase();
+  const map = new Map<string, T[]>();
+  for (const m of models) {
+    if (q && !m.name.toLowerCase().includes(q) && !m.provider.toLowerCase().includes(q)) continue;
+    const bucket = map.get(m.provider);
+    if (bucket) bucket.push(m);
+    else map.set(m.provider, [m]);
+  }
+  const cmp = (a: string, b: string) => a.toLowerCase().localeCompare(b.toLowerCase());
+  return Array.from(map.entries())
+    .map(([provider, ms]) => [provider, [...ms].sort((a, b) => cmp(a.name, b.name))] as const)
+    .sort(([a], [b]) => cmp(a, b));
+}
+
+/**
  * Model selector popup. Models are grouped by provider (sticky header);
  * when a provider holds more than one API key, picking a model drills into
  * an account level (`provider → model → account`) instead of silently using
@@ -3035,18 +3070,10 @@ function ModelMenu({
 
   const query = search.trim().toLowerCase();
 
-  // Models grouped by provider, insertion order preserved (provider is the
-  // menu's first level, so a flat list no longer has to repeat it per row).
-  const groups = useMemo(() => {
-    const map = new Map<string, typeof models>();
-    for (const m of models) {
-      if (query && !m.name.toLowerCase().includes(query) && !m.provider.toLowerCase().includes(query)) continue;
-      const bucket = map.get(m.provider);
-      if (bucket) bucket.push(m);
-      else map.set(m.provider, [m]);
-    }
-    return Array.from(map.entries());
-  }, [models, query]);
+  // Models grouped by provider, sorted alphabetically (case-insensitive)
+  // by provider first, then by model name within each provider. See
+  // `groupModelsByProvider` for why stable ordering is required here.
+  const groups = useMemo(() => groupModelsByProvider(models, query), [models, query]);
 
   // `pending` now drives a side fly-out, not a panel swap — so the search
   // box stays scoped to the main model list, and `accounts` / `visibleAccounts`
@@ -3100,7 +3127,7 @@ function ModelMenu({
       window.removeEventListener("scroll", compute, true);
       window.removeEventListener("resize", compute);
     };
-  }, [pending, accounts.length]);
+  }, [pending, accounts.length, models]);
 
   // Last-used account per provider — display hint only, never a preselection
   // (the user always clicks). Local storage because it is pure UI memory of
