@@ -14,7 +14,7 @@ import { fetchProviderModels } from "../../lib/gateway-api";
 import { startAgentAndSyncUI } from "../../lib/agent-start";
 import { toolbarButton } from "../../lib/ui-styles";
 import { AddProviderFlow } from "../harness/AddProviderFlow";
-import { Bot, Play, Send, ChevronDown, ChevronRight, ChevronLeft, ChevronsDown, ChevronsUp, Wrench, AlertTriangle, X, Square, Plus, Layers, Loader, Pencil, Paperclip, Image, Brain, Circle, CircleDot, Clipboard, Upload, Check, Search } from "lucide-react";
+import { Bot, Play, Send, ChevronDown, ChevronRight, ChevronLeft, ChevronsDown, ChevronsUp, Wrench, AlertTriangle, X, Square, Plus, Layers, Loader, Pencil, Paperclip, Image, Brain, Circle, CircleDot, Clipboard, Upload, Check, Search, Clock } from "lucide-react";
 import type { ChatMessage, VaultKeyEntry, ModelEntry, ProviderAccount } from "../../lib/types";
 import { ContextUsageIcon } from "./ContextUsageIcon";
 import { blockIndexOfRawMessage } from "./messageFolder";
@@ -3345,8 +3345,12 @@ function ModelMenu({
                       <span className="flex min-w-0 items-center gap-1">
                         <span className="truncate font-medium">{a.alias}</span>
                         {isLastUsed && !isActive && (
-                          <span className="shrink-0 text-[10px] text-text-tertiary">
-                            {t("chatPanel.modelMenuLastUsed")}
+                          <span
+                            title={t("chatPanel.modelMenuLastUsed")}
+                            aria-label={t("chatPanel.modelMenuLastUsed")}
+                            className="inline-flex shrink-0 items-center text-text-tertiary"
+                          >
+                            <Clock size={10} />
                           </span>
                         )}
                       </span>
