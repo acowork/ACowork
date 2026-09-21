@@ -2,7 +2,8 @@
  * ADR-073 §4 unit tests for the remote-mode grouping helper.
  *
  * The sidebar's remote-mode rendering is correct *iff* the partition
- * function emits groups in the right order and never loses agents.
+ * function emits groups in the right order, never loses agents, and never
+ * drops a node (an agent-less node is still a valid, actionable group).
  * These tests pin the contract so future refactors don't silently
  * regress the visual grouping.
  */
@@ -64,15 +65,20 @@ describe("partitionAgentsByNode", () => {
     expect(groups.map((g) => g.nodeId)).toEqual(["n2", "n1"]);
   });
 
-  it("skips nodes that have no agents", () => {
+  it("emits a group for a node with no agents so the node stays reachable", () => {
+    // Regression (ADR-073 §4): the sidebar is the only place an empty node
+    // can be acted on (install its first agent there). Deriving the groups
+    // from the agent buckets made such a node structurally invisible.
     const a1 = agent({ instance_id: "a1", node_id: "n1" });
     const groups = partitionAgentsByNode(
       [a1],
       [node({ node_id: "n1" }), node({ node_id: "n2" })],
     );
 
-    expect(groups).toHaveLength(1);
-    expect(groups[0].nodeId).toBe("n1");
+    expect(groups.map((g) => g.nodeId)).toEqual(["n1", "n2"]);
+    expect(groups[0].agents.map((a) => a.instance_id)).toEqual(["a1"]);
+    expect(groups[1].agents).toEqual([]);
+    expect(groups[1].node?.node_id).toBe("n2");
   });
 
   it("routes agents whose node_id is missing into a trailing 'unknown' bucket", () => {
@@ -109,9 +115,13 @@ describe("partitionAgentsByNode", () => {
     expect(groups[1].agents.map((a) => a.instance_id)).toEqual(["a2"]);
   });
 
-  it("returns an empty array when there are no agents", () => {
-    const groups = partitionAgentsByNode([], [node({ node_id: "n1" })]);
-    expect(groups).toEqual([]);
+  it("emits one agent-less group per node when there are no agents at all", () => {
+    const groups = partitionAgentsByNode(
+      [],
+      [node({ node_id: "n1" }), node({ node_id: "n2" })],
+    );
+    expect(groups.map((g) => g.nodeId)).toEqual(["n1", "n2"]);
+    expect(groups.every((g) => g.agents.length === 0)).toBe(true);
   });
 
   it("keeps each agent's real node_id as the bucket key when the Gateway hasn't reported nodes yet", () => {
