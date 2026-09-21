@@ -242,14 +242,17 @@ admin 右键"以该用户视角查看 session"→ 会话列表变成那个用户
         └── {min(A,B)}/chats/{max(A,B)}/
             ├── conversation.json    # 会话元数据（原子写：temp + rename）
             ├── messages.jsonl       # 消息，append-only
-            └── files/{message_id}_{文件名}   # 附件 blob
+            └── files/
+                ├── {attachment_id}          # 附件 blob（id = UUIDv4）
+                └── {attachment_id}.json     # 元数据：filename / mime / size
 ```
 
 三个名字要记住的约定：
 
 - **配对目录 = min/max 排序**，与"谁先发起"无关。同一对人只会有一个目录（`chat_id = {min}__{max}`）。
 - **`messages.jsonl` 是 append-only 的**：只追加、不原地改写，所以进程被 kill 也不会留下半个文件。读的时候逐行解析，单行损坏只 warn 并跳过——一条烂消息不会让整个会话读不出来。
-- **附件与消息同树**：同一个会话的 blob 在它自己的目录里，天然按会话隔离，删会话 = 删目录。
+- **附件与消息同树**：同一个会话的 blob 在它自己的目录里，天然按会话隔离，删会话 = 删目录。消息里存的是**附件 id 数组**，名字 / mime / 大小一律回查 `{id}.json`——客户端声明不了它没上传过的东西。
+- **已知小块泄漏**：先写 blob 再写元数据，两次写之间崩溃会留下一个没人引用的孤儿文件。上传需要认证、窗口极窄，所以没有后台清扫线程；真要回收就按「没有 sidecar 且早于 N 天」扫 `files/`。
 
 备份建议：`accounts.json` + `auth/secret` 一起备（单独备份前者没用——没有密钥就签不出 token）。**两者都是敏感数据**：`accounts.json` 是明文（password_hash 是 Argon2id，但用户名/角色/时间戳是明文），`auth/secret` 直接决定"能不能伪造任意人的 token"。文件权限建议 `0600`，别进 git。
 
