@@ -98,6 +98,22 @@ pub(crate) fn authorize_read(
     }
 }
 
+/// ADR-076 §决策 4: may this caller change who can read `meta`?
+///
+/// Sharing is the owner's decision, and an unclaimed session has no owner
+/// to make it. [`authorize_write`] only asks whether the caller may
+/// *modify* the session — deliberately permissive for ownerless data, so
+/// nobody is locked out of their pre-account history — but who may
+/// *re-share* it is a narrower question:
+///
+/// * owned session → the owner (already checked by `authorize_write`)
+/// * unclaimed session → an administrator only. Otherwise any account
+///   could flip a shared ownerless session to private and hide it from
+///   everyone, or flip an unclaimed-but-private one back and re-share it.
+fn may_change_visibility(meta: &SessionMeta, scope: &SessionScope) -> bool {
+    meta.user_id.is_some() || matches!(scope, SessionScope::Unfiltered)
+}
+
 /// Authorize a **write** to `sid`. Returns the meta on success.
 pub(crate) fn authorize_write(
     state: &HttpState,
@@ -359,7 +375,14 @@ pub(crate) async fn put_session_visibility(
     Json(body): Json<SetVisibilityBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let scope = scope_from_headers(&headers);
-    authorize_write(&state, &sid, &scope)?;
+    let meta = authorize_write(&state, &sid, &scope)?;
+
+    if !may_change_visibility(&meta, &scope) {
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            "only an administrator may change the visibility of an unowned session",
+        ));
+    }
 
     let ok = session_manager(&state)
         .await?
@@ -702,4 +725,50 @@ pub(crate) async fn post_compress_action(
     )
     .await;
     accepted(&sid, "compress_action", queued)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a meta straight from JSON so the fixture tracks the real
+    /// on-disk shape (and its serde defaults) instead of a literal struct.
+    fn meta(owner: Option<&str>) -> SessionMeta {
+        let raw = serde_json::json!({
+            "version": 1,
+            "session_id": "s",
+            "agent_id": "a",
+            "created_at": "t",
+            "last_active_at": "t",
+            // Required by the struct (no serde default), like a real meta
+            // file written before `message_count` existed.
+            "message_count": 0,
+        });
+        let mut meta: SessionMeta = serde_json::from_value(raw).expect("meta fixture parses");
+        meta.user_id = owner.map(str::to_string);
+        meta
+    }
+
+    /// ADR-076 §决策 4: re-sharing an unclaimed session is an
+    /// administrator's call. `authorize_write` lets any account modify
+    /// ownerless data (pre-account history, the agent's cold-start
+    /// session) — that must not also hand them the share switch, or one
+    /// account could hide a shared session from every other.
+    #[test]
+    fn only_an_admin_may_re_share_an_unowned_session() {
+        let alice = SessionScope::User("u-alice".into());
+
+        assert!(
+            may_change_visibility(&meta(Some("u-alice")), &alice),
+            "an owner decides their own session's visibility"
+        );
+        assert!(
+            !may_change_visibility(&meta(None), &alice),
+            "an unowned session has no owner to decide — not even a reader may"
+        );
+        assert!(
+            may_change_visibility(&meta(None), &SessionScope::Unfiltered),
+            "admin / local mode is never blocked"
+        );
+    }
 }

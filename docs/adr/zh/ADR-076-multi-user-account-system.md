@@ -363,7 +363,16 @@ pub enum SessionVisibility { Public, Private }
 - **有主会话**：创建路径（`create_frontend_session`）在写入 `user_id` 的同时落 `Some(Private)`。**写死在盘上**，不靠读路径推断——因为 `SessionListView.visibility` 会把该值下发给 Desktop 拼 🌐/🔒 图标，如果"实际私有而字段为空"，那个开关就会显示"公开"给一个谁都读不到的会话，正好把唯一的手动逃生口变成谎话。
 - **无主会话**：仍写 `None`（= 公开）。这既保住 local 模式零改动（local 下 `user_id` 恒为 `None`），也保住升级前的历史数据不被追溯隐藏——`is_readable_by` 对无主会话本来就忽略该标志（没有主人可以限制给谁，遵守它只会把会话藏给所有人）。
 
-逐条判定不受影响（表三列语义不变），变的只是"新建的有主会话落在哪一列"。显式 `visibility` 仍可在 `POST /sessions` 的 body 里覆盖创建默认值，per-session 开关照旧是逃生口。
+**无主会话也分两种**（同一个洞的另一半）：
+
+上面只堵了"有主但不表态"。真正让多用户串号的是**无主会话**——`None` 对它读作公开，而 `is_writable_by` 对无主会话同样一律放行（那是为升级前的历史数据准备的：不能因为"没有主人"就把用户锁在自己的历史之外）。于是：
+
+- **agent 冷启动会话**：Runtime 启动时发现磁盘上没有会话，会**自动建一个**（`session_init`，为的是 `/latest-session` 立刻有东西可返、ChatPanel 不空白）。它诞生在任何账号开口之前，**没有任何人可以是它的 owner**。此前它落在"无主 = 公开"那一列 → 在多用户下**每个账号都能读、且都能写**，而 Desktop 的 `selectAgent → /latest-session` 正好会把它返回给每个账号：**第一个用户和第二个用户在同一段对话里打字**。
+- **修法**：把它标成 `Some(Private)`，并让谓词承认"**无主 + Private = 无人认领**"——除 admin 外谁都读不到、谁也都写不了。语义是诚实的：没有主人的私有会话 = 不属于任何人，那就不该交给任何账号。无主 + `None` / `Public` 仍是"公开"，升级前的历史数据与 local 模式因此零改动（local 下调用者 scope 恒为 `Unfiltered`，谓词第一分支直接短路）。
+- **配套**：认领权收窄。`authorize_write` 对无主历史数据是刻意宽松的（否则用户写不了自己的旧会话），但"**谁能重新共享**它"是更窄的问题——否则任一账号都能把一个共享的无主会话一键设为私有藏起来，或把无人认领的私有会话翻回公开再共享。现在 `PUT .../visibility` 对无主会话只认 admin（403），规则落在 `may_change_visibility` 一处。
+- **客户端配套**：`/latest-session` 从 agent 级缓存作答，多用户下只要有两个账号用过这个 agent，它就会返回 404（不接受泄漏 id，见 §决策 4 的 404 语义）。这不是"服务还没起来"，重试治不了——ADR 原文写的行为就是"**让客户端回退到过滤后的列表**"。Desktop 现在照做：`/latest-session` 拿不到时先看自己 scope 过滤后的列表（有行就开最新那条，**不再空转 10 秒**），列表也是空的才建一条自己的（有主 + 私有）。
+
+逐条判定不受影响（表三列语义不变），变的只是"新建的有主会话落在哪一列"与"无主会话按标志分两列"。显式 `visibility` 仍可在 `POST /sessions` 的 body 里覆盖创建默认值，per-session 开关照旧是逃生口。
 
 - **读**（`GET /sessions`、`/sessions/{sid}`、`/sessions/{sid}/messages`、`/sessions/latest`、`/sessions/{sid}/config`）：走 `is_readable_by`。不可读一律 **404**，不用 403——403 会把这个端点变成"某 session 是否存在"的探测器，正是列表过滤要藏起来的信息。
 - **写**（`open` / `close` / `DELETE` / `visibility` / `workspace` / `config` / 全部会话动作）：走 `is_writable_by`，**仅 owner 或 admin**。公开 ≠ 可改：把 session 设为 public 是"让别人能读"，不是"让别人能删"。旧数据 `user_id = None` 的会话（ADR-076 之前创建）**仅** admin / local 可写——不能因为"没有主人"就人人可删。
@@ -1051,8 +1060,10 @@ run_gateway_auth_mode_redline() { ... }    # awk：auth_routes()/account_api 注
 - ✅ `core/acowork-runtime/src/conversation.rs`: `SessionMeta` 序列化含/不含 `user_id` 兼容（无字段的旧 jsonl 仍可加载）；`set_user_id` write-once
 - ✅ `core/acowork-gateway/src/http/auth_middleware.rs`（**已实现，1 项，走真实 `build_router` 层**）：客户端伪造 `x-user-id` 被剥；无 token 401；admin 得到 `*`；`as_user` 收窄 scope；非法 `as_user` → 403
 - ✅ `core/acowork-runtime/src/conversation.rs`（**已实现**）：`SessionScope::from_header_value` 三态（`*` → `Unfiltered`、具体 id → `User`、空/缺失 → `Unfiltered`）；`is_readable_by` / `is_writable_by` 在 `(user_id 归属 × visibility 三态 × scope)` 组合矩阵上的判定；`visibility` 缺省为公开 + 向后兼容
+- ✅ `core/acowork-runtime/src/http/session_control.rs`（**已实现**）：`only_an_admin_may_re_share_an_unowned_session`——`may_change_visibility` 的真值表（owner 可 / 无主会话的普通账号不可 / admin 可），对应 `PUT .../visibility` 对无主会话的 403
+- ✅ `apps/acowork-desktop/src/lib/agent-start.test.ts`（**已实现**）：`opens the caller's newest readable session instead of retrying`（`/latest-session` 404 且自己有会话 → 开自己最新的那条，**一次都不重试**、不新建）+ `creates a session when the account genuinely has none`（两个来源都空 → 建一条自己的）
 - ✅ `core/acowork-runtime/src/agent/session/session_manager.rs`（**已实现**）：`owned_sessions_start_private_and_ownerless_stay_public`——有主会话创建即落盘 `Private`（断言**磁盘 meta**，因为列表/鉴权读的是文件，只存在内存里的值就是 bug），另一账号读不到、owner 与 admin 读得到；无主会话仍写 `None`（local 模式与升级前数据不受影响）
-- ✅ `core/acowork-runtime/src/conversation.rs`（**已实现**）：`visibility_and_ownership_gate_read_and_write`（private 非 owner 读/写均拒；public 非 owner 可读不可写）、`session_scope_from_header_value`（`*` / 具体 id / 缺失三态）、`scan_filters_by_scope_before_paginating`（过滤先于分页，`total_count` 反映可见行数）、`session_meta_visibility_is_absent_by_default_and_means_public`、`set_visibility_persists_and_clears_back_to_public`
+- ✅ `core/acowork-runtime/src/conversation.rs`（**已实现**）：`visibility_and_ownership_gate_read_and_write`（private 非 owner 读/写均拒；public 非 owner 可读不可写；**无主 + Private → 普通账号读/写均拒**，无主 + `None`/`Public` → 可读可写）、`session_scope_from_header_value`（`*` / 具体 id / 缺失三态）、`scan_filters_by_scope_before_paginating`（过滤先于分页，`total_count` 反映可见行数）、`session_meta_visibility_is_absent_by_default_and_means_public`、`set_visibility_persists_and_clears_back_to_public`
 - ✅ 不可读 / 不可写一律 **404 而非 403**（`session_control::not_found` 这一处共享映射）：handler 接线由既有 HTTP server 测试覆盖——`test_session_config_unknown_session_and_visibility_gate`、`test_http_upload_file_docx_lands_with_real_extension`（上传先要 session 存在）
 - ✅ `core/acowork-runtime/src/usecases/session_metadata_impl.rs`：`list_sessions(page, size, scope)` 只返 scope 可见的 session，**且在分页前过滤**（`total_count` 反映可见行数）
 

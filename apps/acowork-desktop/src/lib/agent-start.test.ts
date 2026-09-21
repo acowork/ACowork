@@ -25,12 +25,13 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 const { mockStartAgent, mockWaitForAgentReady, mockFetchLatestSession,
-    mockFetchSessions, mockEnsureLatestInCache, mockOpenSession,
+    mockFetchSessions, mockCreateSession, mockEnsureLatestInCache, mockOpenSession,
     mockFetchWorkspaces, mockEmitAgentConfigRefresh } = vi.hoisted(() => ({
         mockStartAgent: vi.fn(),
         mockWaitForAgentReady: vi.fn(),
         mockFetchLatestSession: vi.fn(),
         mockFetchSessions: vi.fn(),
+        mockCreateSession: vi.fn(),
         mockEnsureLatestInCache: vi.fn(),
         mockOpenSession: vi.fn(),
         mockFetchWorkspaces: vi.fn(),
@@ -52,6 +53,7 @@ vi.mock("../stores/agentStore", () => ({
             waitForAgentReady: mockWaitForAgentReady,
             fetchLatestSession: mockFetchLatestSession,
             fetchSessions: mockFetchSessions,
+            createSession: mockCreateSession,
             agents: mockAgentsState,
         }),
     },
@@ -101,6 +103,7 @@ beforeEach(() => {
     mockWaitForAgentReady.mockReset();
     mockFetchLatestSession.mockReset();
     mockFetchSessions.mockReset();
+    mockCreateSession.mockReset();
     mockEnsureLatestInCache.mockReset();
     mockOpenSession.mockReset();
     mockFetchWorkspaces.mockReset();
@@ -108,6 +111,7 @@ beforeEach(() => {
 
     mockStartAgent.mockResolvedValue(undefined);
     mockWaitForAgentReady.mockResolvedValue(undefined);
+    mockCreateSession.mockResolvedValue(undefined);
     mockEnsureLatestInCache.mockResolvedValue(undefined);
     mockOpenSession.mockResolvedValue(undefined);
     mockFetchWorkspaces.mockResolvedValue(undefined);
@@ -152,5 +156,60 @@ describe("initSessionForAgent — fetchSessions retry", () => {
         const lastFetchOrder =
             mockFetchSessions.mock.invocationCallOrder[1]!;
         expect(openOrder).toBeGreaterThan(lastFetchOrder);
+    });
+});
+
+describe("initSessionForAgent — no readable latest session (ADR-076)", () => {
+    /**
+     * `/latest-session` answers from an agent-wide cache, so under
+     * `multi_user` it 404s as soon as a second account has used this
+     * agent: the cached newest session belongs to them, and the Runtime
+     * refuses to name it rather than leak the id.
+     *
+     * Retrying cannot fix that, and ten seconds of retrying before
+     * giving up is a bad first paint. The caller's own scope-filtered
+     * list can answer immediately, so it is consulted inside the loop.
+     */
+    it("opens the caller's newest readable session instead of retrying", async () => {
+        mockFetchLatestSession.mockResolvedValue(null);
+        mockFetchSessions.mockImplementation(() => {
+            mockAgentsState[AGENT_ID] = {
+                sessions: [{ session_id: SESSION_ID, title: "Mine" }],
+            };
+        });
+
+        await startAgentAndSyncUI(AGENT_ID);
+
+        expect(mockOpenSession).toHaveBeenCalledWith(AGENT_ID, SESSION_ID);
+        // No session was invented, and no retry sleep was spent.
+        expect(mockCreateSession).not.toHaveBeenCalled();
+        expect(mockFetchLatestSession).toHaveBeenCalledTimes(1);
+    });
+
+    /**
+     * The other half of the same state: the list is empty too, and the
+     * startup scan had its full budget to say otherwise. That is the
+     * normal first run under `multi_user` (the agent's cold-start
+     * session has no owner, so it is nobody's) — the account needs a
+     * session of its own rather than a blank chat panel.
+     */
+    it("creates a session when the account genuinely has none", async () => {
+        vi.useFakeTimers();
+        try {
+            mockFetchLatestSession.mockResolvedValue(null);
+            mockFetchSessions.mockImplementation(() => {
+                mockAgentsState[AGENT_ID] = { sessions: [] };
+            });
+
+            const started = startAgentAndSyncUI(AGENT_ID);
+            // Drain the 10-retry budget (9 × 1s sleeps).
+            await vi.advanceTimersByTimeAsync(10_000);
+            await started;
+
+            expect(mockCreateSession).toHaveBeenCalledWith(AGENT_ID);
+            expect(mockOpenSession).not.toHaveBeenCalled();
+        } finally {
+            vi.useRealTimers();
+        }
     });
 });

@@ -44,12 +44,44 @@ async function initSessionForAgent(agentId: string): Promise<void> {
             `elapsed=${Math.round(performance.now() - __i0)}ms`,
         );
         if (latestSession) break;
+
+        // ADR-076 §决策 4: `/latest-session` answers from an agent-wide
+        // cache, so under `multi_user` it names a session the caller may
+        // not read as soon as a second account has used this agent — and
+        // it answers 404 for that, by design, rather than leak the id.
+        // Retrying cannot fix that: the call is wrong, not early. The
+        // caller's own list is scope-filtered by the Runtime, so if it has
+        // rows they are readable *now* and the newest one is the answer.
+        // This is the "fall back to the filtered list" the Runtime's 404
+        // is documented to invite.
+        await useAgentStore.getState().fetchSessions(agentId);
+        const mine = useAgentStore.getState().agents[agentId]?.sessions ?? [];
+        if (mine.length > 0) {
+            // `fetchSessions` sorts by `created_at` desc → [0] is newest.
+            latestSession = {
+                session_id: mine[0]!.session_id,
+                title: mine[0]!.title ?? null,
+            };
+            break;
+        }
+
         if (i < maxRetries - 1) {
             await new Promise((resolve) => setTimeout(resolve, 1000));
         }
     }
 
-    if (!latestSession) return;
+    if (!latestSession) {
+        // Both sources agree and the startup scan had its whole budget to
+        // say otherwise: this account has no session for this agent. That
+        // is the normal first-run state under `multi_user` (the agent's
+        // cold-start session belongs to nobody, so it is not ours either).
+        // Create one — owned by the caller, private from birth — instead of
+        // leaving the chat panel blank. Activation rides the same
+        // `session_created` MQTT event the toolbar's "+" relies on, so
+        // there is nothing to open here.
+        await useAgentStore.getState().createSession(agentId);
+        return;
+    }
 
     // Backend /latest-session is the source of truth — no client-side
     // rememberedSessionId needed.

@@ -1005,6 +1005,25 @@ pub(crate) async fn phase_b_init_session(
         // zero sessions on disk returns found:false / 404 and the
         // frontend ChatPanel stays blank.
         session_manager.set_latest_session(sid.clone(), None);
+
+        // ADR-076 §决策 4: this session has **no owner** — it is created
+        // before any account has spoken to this process, and there is no
+        // request to take an identity from. Mark it `Private` so it reads
+        // as *unclaimed* rather than as *shared*: an ownerless session
+        // with an unset visibility is readable and writable by every
+        // account, which would put the first user and the second user in
+        // the same conversation. `Private` + no owner means "belongs to
+        // nobody", so no account gets it; the first account to open the
+        // frontend creates its own session through `POST /sessions`, owned
+        // and private from birth.
+        //
+        // Local mode is unaffected: there the caller's scope is always
+        // `Unfiltered`, which the predicate short-circuits before any of
+        // this matters.
+        session_manager.set_session_visibility(
+            &sid,
+            Some(crate::conversation::SessionVisibility::Private),
+        );
         sid
     };
     tracing::info!(initial_session_id = %initial_session_id, "Initial session created");

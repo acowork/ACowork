@@ -733,8 +733,13 @@ Gateway 必须鉴权，Runtime 必须校验 owner。ADR-076 §决策 4 把**所�
 
 - **有主会话**（`user_id` 非空）：`POST /sessions` 创建时即落盘 `"private"`。在多用户部署里，
   新建会话默认只有 owner 与 admin 可读，要共享得显式翻开关（或创建时在 body 里传 `visibility`）。
-- **无主会话**（`user_id` 为空：`AUTH_MODE=local`，或 ADR-076 之前的数据）：`None` = 公开。
-  这既是 opt-out 而非 opt-in 的理由——升级不能把历史会话追溯隐藏——也是 `local` 模式零改动的保证。
+- **无主会话**（`user_id` 为空）：按标志分两种。
+  - `None` / `"public"` = 公开（ADR-076 之前的数据，或 `local` 模式）。这既是 opt-out 而非 opt-in 的理由
+    ——升级不能把历史会话追溯隐藏——也是 `local` 模式零改动的保证。
+  - `"private"` = **无人认领**：除 admin 外不可读、不可写。agent 冷启动时自动创建的那个会话就是这种
+    （它诞生在任何账号开口之前，没有 owner 可以归属），标为私有以免被当成"全公司共享会话"交给每个账号。
+
+`PUT /sessions/{sid}/visibility` 对**无主**会话只认 admin（`403`）：谁能被允许"重新共享"一个没有主人的会话，比"谁能改它"更窄。
 
 | `visibility` | 非 owner 能否读 | 非 owner 能否写 |
 |---|---|---|

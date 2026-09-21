@@ -2518,14 +2518,27 @@ impl SessionMeta {
         match scope {
             SessionScope::Unfiltered => true,
             SessionScope::User(uid) => match self.user_id.as_deref() {
-                // An ownerless session cannot be private: there is nobody
-                // to restrict it to, so honouring the flag would hide the
-                // session from everyone — and since any signed-in account
-                // may write an ownerless session (see
-                // [`Self::is_writable_by`]), that would be a one-click
-                // way to hide a shared session from its owner. The flag is
-                // ignored rather than trusted.
-                None => true,
+                // Ownerless sessions are a two-way split, and the split is
+                // the whole reason `None` and `Some(Private)` must not be
+                // collapsed:
+                //
+                //   `None` / `Public` → readable by every account.
+                //     This is pre-ADR-076 data (no owner to restrict it to)
+                //     and local-mode sessions. Hiding them on upgrade would
+                //     strand users outside their own history.
+                //
+                //   `Private` → readable by nobody but an administrator.
+                //     An *unclaimed* session. The agent creates one at cold
+                //     start, before any account has touched the process;
+                //     handing that to every account as a shared session is
+                //     how two users end up typing into the same
+                //     conversation. "Private with no owner" honestly means
+                //     "belongs to no one", so no account gets it.
+                //
+                // Note this is the *explicit* flag, set by the creation
+                // path or an administrator — not something a user can
+                // reach (see `is_writable_by` and `put_session_visibility`).
+                None => !self.visibility.is_some_and(SessionVisibility::is_private),
                 Some(owner) => {
                     !self.visibility.is_some_and(SessionVisibility::is_private)
                         || owner == uid
@@ -2541,16 +2554,21 @@ impl SessionMeta {
     /// session is *visible* to every account but *owned* by exactly one,
     /// so sharing is not the same as handing over the delete button.
     ///
-    /// Sessions with `user_id == None` stay modifiable by any signed-in
-    /// account. That is the pre-ADR-076 behaviour for data that predates
-    /// accounts (and the only sane owner for sessions created in local
-    /// mode before multi-user was switched on) — locking them to admins
-    /// only would strand users outside their own history.
+    /// Ownerless sessions keep the pre-ADR-076 rule — modifiable by any
+    /// signed-in account — for the same reason [`Self::is_readable_by`]
+    /// keeps them readable: that is the behaviour data predating accounts
+    /// (and local mode) depends on, and locking them to admins would
+    /// strand users outside their own history.
+    ///
+    /// The exception is an ownerless session marked `Private`: an
+    /// unclaimed session nobody may read is also one nobody may write, or
+    /// the first user to touch it could flip the flag back and re-share
+    /// it with everyone.
     pub fn is_writable_by(&self, scope: &SessionScope) -> bool {
         match scope {
             SessionScope::Unfiltered => true,
             SessionScope::User(uid) => match self.user_id.as_deref() {
-                None => true,
+                None => !self.visibility.is_some_and(SessionVisibility::is_private),
                 Some(owner) => owner == uid,
             },
         }
@@ -6747,7 +6765,13 @@ mod tests {
             // and still writable by all, so nobody is locked out of their
             // own pre-account history.
             (None, None, true, true, true, true),
-            (None, Some(SessionVisibility::Private), true, true, true, true),
+            (None, Some(SessionVisibility::Public), true, true, true, true),
+            // ...but an ownerless session marked private is *unclaimed*:
+            // nobody but an administrator gets it, in either direction.
+            // This is the agent's cold-start session — see
+            // `is_readable_by`. Collapsing it into the row above is how
+            // two accounts end up sharing one conversation.
+            (None, Some(SessionVisibility::Private), false, false, false, false),
         ];
 
         for (owner, visibility, r_alice, r_bob, w_alice, w_bob) in cases {
