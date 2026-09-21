@@ -13,6 +13,7 @@
 - `core/acowork-runtime/src/agent/loop_session.rs`（session-end distillation 调用方）
 - `core/acowork-runtime/src/agent/session_state.rs`（可选：`SessionStateSnapshot` 扩展）
 - `core/acowork-runtime/src/agent/session/session_task.rs`（初始 ContextUsage 使用新字段）
+- `core/acowork-runtime/src/providers/anthropic.rs`（2026-09-21 追加：`merge_prompt_usage` —— 零跳过的输入必须跨事件合并，见「Usage 跨事件合并」）
 
 ---
 
@@ -245,6 +246,65 @@ tokio::spawn(async move {
 });
 ```
 
+### Usage 跨事件合并（Provider 适配层）
+
+"零跳过"（`prompt_tokens > 0` 才累加）只能保证**不记假数**，不能保证 Provider 的真实值
+能走到这里。`UsageInfo.prompt_tokens` 是各 Provider 解析器从流式事件里拼出来的，而
+"prompt 计数放在哪个事件"在 Anthropic 兼容生态里并不统一 —— 上游 SDK 类型本身就允许两种位置：
+
+| 事件 | SDK 类型 | prompt 相关字段 | 语义 |
+|------|---------|----------------|------|
+| `message_start.message.usage` | `Usage` | `input_tokens` **必填**；`cache_creation_input_tokens` / `cache_read_input_tokens` 可选 | 单次调用的输入计数（规范默认位置） |
+| `message_delta.usage` | `MessageDeltaUsage` | `input_tokens` / 两个 cache 字段均**可选**；`output_tokens` 必填 | **累计（cumulative）** |
+
+官方写在 `message_delta.usage` 上的原话：
+
+> Total input tokens in a request is the summation of `input_tokens`,
+> `cache_creation_input_tokens`, and `cache_read_input_tokens`.
+
+来源：[`usage.py`](https://github.com/anthropics/anthropic-sdk-python/blob/main/src/anthropic/types/usage.py)、
+[`message_delta_usage.py`](https://github.com/anthropics/anthropic-sdk-python/blob/main/src/anthropic/types/message_delta_usage.py)、
+[`raw_message_delta_event.py`](https://github.com/anthropics/anthropic-sdk-python/blob/main/src/anthropic/types/raw_message_delta_event.py)。
+
+两条规范事实决定了适配层的写法：
+
+1. **`message_delta` 携带 prompt 计数是合法的**，不是私有扩展 —— 所以不能把 prompt 计数
+   硬绑在 `message_start` 上；
+2. 该报告是**累计量** —— 所以同一请求内取"最大的非零报告"即可，不需要相加。
+
+`anthropic.rs::merge_prompt_usage` 对**每一个**携带 usage 的事件套用同一条规则：
+
+```rust
+let input = usage.input_tokens.unwrap_or(0) + cache_read + cache_write; // 官方求和公式
+if input > *input_tokens {                                             // 最大的非零报告胜出
+    *input_tokens = input;
+    *cache_read_tokens = cache_read;    // cache 与总量取自同一次报告，保持自洽
+    *cache_write_tokens = cache_write;
+}
+```
+
+取 `max` 而非"后者覆盖"或"求和"，因为：
+
+- 0 是合法值，但语义上是"没报"；`max` 让 0 无法遮蔽另一个事件已上报的值；
+- 报增量（而非累计）的实现会给出更小的值，`max` 不会被它改小；
+- cache 计数与总量同源，不会出现 `total_input` 与 cache 对不上的组合。
+
+**触发案例（2026-09-21）**：MiniMax-M3（provider `minimax-cn-coding-plan`，Anthropic 协议）
+在 `message_start` 里发全 0 的 usage（`input_tokens: 0`，cache 字段为 `null`），真值只出现在
+`message_delta` 上。旧实现只读 `message_start`，于是每次调用 `prompt_tokens` 都是 0，
+再叠加本 ADR 的零跳过规则，`total_input` 永久停滞（`total_output` 照涨）。
+**症状不是本 ADR 的规则错了，而是规则的上游一直在喂 0。**
+该案例同时验证了 delta 报告的累计语义：`cache_read_input_tokens` 单调递增
+（32020 → 32648 → 33217 → 33431 → 33695），每步增量恰好等于上一次的 `input_tokens`。
+
+**残余假设**：`max` 成立的前提是"同一请求的 prompt 计数单调不减"。若某 Provider 在
+`message_delta` 上报的是**未累加的分片量**，且某片大于 `message_start` 的总量，会偏大。
+按规范 delta 是累计量，暂不处理，遇到反例再收紧。
+
+**与 cache 字段的关系**：cache 计数走同一条合并规则（见 ADR-066）。
+旧实现只在 `message_start` 分支更新 cache 计数，Provider 把 cache 报在 `message_delta` 时
+cache 会一起静默归零 —— 与 prompt 计数是同一个 bug 的第二次现形。
+
 ### 准确性约束
 
 ```mermaid
@@ -267,6 +327,7 @@ flowchart TD
 | OpenAI fallback 1（剥离 `stream_options`） | 无 usage 返回 | ⏭ 跳过 input；output 无值也跳过 (output 随 input 一同缺失) |
 | OpenAI fallback 2/3（进一步退化） | 无 usage 返回 | 同上 |
 | Anthropic 正常（`message_start` + `message_delta`） | > 0 | ✅ 正常累加 |
+| Anthropic 兼容实现把 prompt 计数只报在 `message_delta`（如 MiniMax-M3，`message_start` 为全 0） | > 0（跨事件合并后） | ✅ 正常累加（见「Usage 跨事件合并」） |
 | Ollama 正常流式 | 可能为 0（`prompt_eval_count` 缺失） | ⏭ 跳过 input；output 如有 `eval_count` 则累加 output |
 | 本地 Provider / 模拟数据 | 可能为 0 | ⏭ 跳过 |
 
@@ -398,4 +459,15 @@ pub struct SessionStateSnapshot {
 4. **涵盖所有 session 内 LLM 调用**：主循环 + compaction + title + distill
 5. **`compact_with_llm` / `compact_session_title_with_llm` 签名改为返回 `(String, UsageInfo)`**
 6. **项目不保留向后兼容性**：旧 meta JSON 文件中的 `last_input_tokens` / `last_output_tokens` 字段在新版本读取时将被忽略（`#[serde(default)]` 行为）
+7. **Provider 适配层必须跨事件合并 usage**：prompt 计数（含 cache）取流内"最大的非零报告"，
+   禁止把某个计数绑死在单个事件位置上 —— 零跳过规则的输入必须是合并后的值，
+   否则上游喂 0 时本 ADR 的规则会正确地"保护"一个错误的数（见「Usage 跨事件合并」）
+
+---
+
+## 修订记录
+
+| 日期 | 修订 |
+|------|------|
+| 2026-09-21 | 新增「Usage 跨事件合并（Provider 适配层）」：Anthropic 规范依据（`MessageDeltaUsage` 的 prompt 字段合法且为累计量）、`merge_prompt_usage` 规则与残余假设；「已知缺口处理」增补 MiniMax-M3 行；决策追加第 7 条 |
 
