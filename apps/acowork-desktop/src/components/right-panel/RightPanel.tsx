@@ -69,15 +69,12 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
     if (!agent?.activeSessionId) return null;
     return agent.sessionStates[agent.activeSessionId]?.contextUsage ?? null;
   });
-  // ADR-028: fallback data source for the agent-total token display.
-  // The live `contextUsage` push is preferred; this fallback covers the
-  // gap between Runtime start and the first LLM call (when no
-  // `context_usage` event has fired yet for the active session, but the
-  // session-list scan has already stashed historical totals).
-  const agentTokenTotals = useAgentStore((s) => {
-    if (!selectedAgentId) return null;
-    return s.agents[selectedAgentId]?.agentTokenTotals ?? null;
-  });
+  // Regression t-83afab47: agent-scoped cumulative token totals come
+  // exclusively from `contextUsage.agent_total_*`, which every
+  // `session_state` / `ChunkEvent::ContextUsage` push carries via the
+  // Runtime's `patch_agent_totals` helper. No client-side fallback —
+  // when `contextUsage` has not yet reported, the rows render as
+  // "—" so the operator can tell "no data yet" apart from "0".
   const sessionStatus: SessionStatus | null = useChatStore((s) => {
     if (!selectedAgentId) return null;
     const agent = s.agentStates[selectedAgentId];
@@ -947,55 +944,46 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
                       use `py-1`, so an asymmetric `mb-2` would make the
                       line look glued to the row above). */}
                   <div className="my-2 border-t border-border-divider" />
-                  {/* ADR-028: agent-scoped cumulative totals across every LLM
-                      call made by this Runtime process for this agent. These
-                      are agent-level (not session-level) figures, so they
-                      live in the Agent Status panel rather than the session
-                      context panel above. Precedence:
-                        1. live `context_usage` WebSocket push
-                           (contextUsage?.agent_total_input_tokens) — most
-                           authoritative, updated on every LLM call;
-                        2. fallback stashed by
-                           `agentStore.agents[id].agentTokenTotals`,
-                           refreshed on every session-list fetch — covers
-                           the gap before the first LLM call lands, and
-                           remains usable even when no session is active. */}
+                  {/* ADR-028 / ADR-066: agent-scoped cumulative totals across every
+                      LLM call made by this Runtime process for this
+                      agent. These are agent-level (not session-level)
+                      figures, so they live in the Agent Status panel
+                      rather than the session context panel above.
+
+                      Regression t-83afab47: single data source — the
+                      live `contextUsage.agent_total_*` from the
+                      Runtime's `patch_agent_totals` helper. The
+                      previous `agentStore.agents[id].agentTokenTotals`
+                      fallback was removed because HTTP session-list
+                      responses no longer carry `agent_total_*` fields
+                      ("HTTP 拉完整数据, MQTT 推变化数据" rule), and
+                      keeping a stale client-side fallback caused the
+                      Agent Status panel to drift-flicker against the
+                      live push on every `session_state` re-emit. When
+                      `contextUsage` has not yet reported, the rows
+                      render as "—" — distinct from "0". */}
                   <div className="flex justify-between py-1">
                     <span className="text-text-tertiary">{t("rightPanel.agentTotalInputTokens")}</span>
                     <span className="font-mono text-text-secondary ">
-                      {(
-                        contextUsage?.agent_total_input_tokens ??
-                        agentTokenTotals?.input
-                      )?.toLocaleString() ?? "—"}
+                      {contextUsage?.agent_total_input_tokens?.toLocaleString() ?? "—"}
                     </span>
                   </div>
                   <div className="flex justify-between py-1">
                     <span className="text-text-tertiary">{t("rightPanel.agentTotalOutputTokens")}</span>
                     <span className="font-mono text-text-secondary ">
-                      {(
-                        contextUsage?.agent_total_output_tokens ??
-                        agentTokenTotals?.output
-                      )?.toLocaleString() ?? "—"}
+                      {contextUsage?.agent_total_output_tokens?.toLocaleString() ?? "—"}
                     </span>
                   </div>
-                  {/* ADR-066: agent-level cumulative cache totals.  These are
+                  {/* ADR-066: agent-level cumulative cache totals. These are
                       agent-scoped (across every LLM call for this agent), so
-                      they live in the Agent Status panel.  The session-level
+                      they live in the Agent Status panel. The session-level
                       real-time cache hit rate lives in the Session Status
-                      block above — it is NOT duplicated here.  Precedence:
-                        1. live `context_usage` WebSocket push
-                           (contextUsage?.agent_total_cache_read_tokens) —
-                           most authoritative, updated on every LLM call;
-                        2. fallback stashed by
-                           `agentStore.agents[id].agentTokenTotals`,
-                           refreshed on every session-list fetch. */}
+                      block above — it is NOT duplicated here. Same single-
+                      data-source rule as the input/output rows above. */}
                   <div className="flex justify-between py-1">
                     <span className="text-text-tertiary">{t("rightPanel.agentTotalCacheReadTokens")}</span>
                     <span className="font-mono text-text-secondary ">
-                      {(
-                        contextUsage?.agent_total_cache_read_tokens ??
-                        agentTokenTotals?.cacheRead
-                      )?.toLocaleString() ?? "—"}
+                      {contextUsage?.agent_total_cache_read_tokens?.toLocaleString() ?? "—"}
                     </span>
                   </div>
                   {/* ADR-066 §6: cache-write is an Anthropic-only concept.
@@ -1010,10 +998,7 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
                     <div className="flex justify-between py-1">
                       <span className="text-text-tertiary">{t("rightPanel.agentTotalCacheWriteTokens")}</span>
                       <span className="font-mono text-text-secondary ">
-                        {(
-                          contextUsage?.agent_total_cache_write_tokens ??
-                          agentTokenTotals?.cacheWrite
-                        )?.toLocaleString() ?? "—"}
+                        {contextUsage?.agent_total_cache_write_tokens?.toLocaleString() ?? "—"}
                       </span>
                     </div>
                   )}

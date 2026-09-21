@@ -795,9 +795,10 @@ export interface TokenUsage {
  *
  *  Cumulative agent fields (`agent_total_input_tokens`,
  *  `agent_total_output_tokens`) aggregate across every LLM call made by the
- *  Runtime process for this agent. They are the **live** data source — see
- *  the `agentTokenTotals` field on `AgentStorage` for the fallback copy that
- *  rides along in the `GET /api/agents/:id/sessions` response.
+ *  Runtime process for this agent. They are the **single** data source —
+ *  pushed by the Runtime on every `session_state` / `ContextUsage` event
+ *  via the `patch_agent_totals` helper (regression t-83afab47; no client-
+ *  side fallback).
  */
 export interface ContextUsageInfo {
   /**

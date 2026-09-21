@@ -187,22 +187,6 @@ export interface AgentStorage {
   };
   /** Currently loading sessions for this agent */
   isLoading: boolean;
-  /** ADR-028: agent-scoped cumulative token totals — fallback data source
-   *  for the Results Panel when the live `context_usage` WebSocket push
-   *  hasn't fired yet (e.g. fresh Runtime with no LLM calls, or session
-   *  not yet active). Refreshed on every successful session-list fetch.
-   *  `null` = not yet fetched / older Runtime without ADR-028.
-   *
-   *  ADR-066: widened with `cacheRead` and `cacheWrite` so the status
-   *  panel can render cumulative cache-hit / cache-write totals alongside
-   *  input / output. Legacy Runtimes (pre-ADR-066) leave the cache fields
-   *  at `0`, which the UI treats as "no cache activity reported". */
-  agentTokenTotals: {
-    input: number;
-    output: number;
-    cacheRead: number;
-    cacheWrite: number;
-  } | null;
 }
 
 const DEFAULT_PAGINATION = { currentPage: 1, totalPages: 1, totalCount: 0, pageSize: 20 };
@@ -215,7 +199,6 @@ function createStorage(meta: AgentInfo, profile: AgentProfileSettings): AgentSto
     sessionTitle: undefined,
     pagination: { ...DEFAULT_PAGINATION },
     isLoading: false,
-    agentTokenTotals: null,
   };
 }
 
@@ -731,13 +714,13 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
         sessions: SessionInfo[];
         total_count: number;
         total_pages: number;
-        // ADR-028: optional fallback data source for agent-scoped token
-        // totals. Absent on older Runtimes — both fields `undefined`.
-        // ADR-066: cache totals may be present alongside, also optional.
-        agent_total_input_tokens?: number;
-        agent_total_output_tokens?: number;
-        agent_total_cache_read_tokens?: number;
-        agent_total_cache_write_tokens?: number;
+        // Regression t-83afab47: agent_total_* fields are NO LONGER
+        // present in this response. Agent-scoped cumulative totals
+        // live exclusively on the live `context_usage` push path
+        // (every MQTT `session_state` / `ChunkEvent::ContextUsage`
+        // carries them via `patch_agent_totals`). HTTP responses
+        // follow the "HTTP 拉完整数据, MQTT 推变化数据" rule and
+        // therefore do not duplicate data the push already owns.
       };
       const sessions = (data.sessions ?? []).sort(
         (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
@@ -748,25 +731,6 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       }
 
       const title = sessions.length > 0 ? (sessions[0]?.title ?? "") : null;
-
-      // ADR-028: stash the agent-scoped totals as a fallback data source
-      // for the Results Panel. Both fields must be present and finite for
-      // the fallback to be usable; otherwise we leave the previous value
-      // (or `null` on first fetch) in place.
-      //
-      // ADR-066: cache totals follow the same gating — if a legacy Runtime
-      // omits `agent_total_cache_*`, default both to `0` so the status
-      // panel renders "no cache activity reported" rather than `NaN`.
-      const agentTokenTotals =
-        typeof data.agent_total_input_tokens === "number" &&
-        typeof data.agent_total_output_tokens === "number"
-          ? {
-              input: data.agent_total_input_tokens,
-              output: data.agent_total_output_tokens,
-              cacheRead: data.agent_total_cache_read_tokens ?? 0,
-              cacheWrite: data.agent_total_cache_write_tokens ?? 0,
-            }
-          : null;
 
       set((state) =>
         patchAgent(state, agentId, {
@@ -779,7 +743,6 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
             totalCount: data.total_count ?? 0,
             pageSize,
           },
-          agentTokenTotals,
         }),
       );
 

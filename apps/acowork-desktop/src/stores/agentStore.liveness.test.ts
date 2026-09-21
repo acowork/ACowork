@@ -108,7 +108,6 @@ function seedAgent(meta: Partial<AgentInfo>) {
                     pageSize: 20,
                 },
                 isLoading: false,
-                agentTokenTotals: null,
             },
         },
         selectedAgentId: INSTANCE_ID,

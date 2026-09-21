@@ -597,52 +597,21 @@ impl SessionTask {
         // the first LLM round. Only fires when persisted SessionTokens
         // exist and model capabilities are available.
         //
-        // ADR-027: `tokens.last_input` / `tokens.last_output` are now the
-        // raw Provider-reported values (possibly zero from a fallback).
-        // They are passed through to `build_context_usage_from_persisted`
-        // which derives the display percentage locally — the snapshot is
-        // honest about what the last LLM call actually reported.
+        // See `context::build_persisted_ctx_usage` for the
+        // caps-resolution + cumulative-patch sequence this used to
+        // spell out by hand (regression t-83afab47 refactor). `None`
+        // (no persisted tokens / no caps) is a legitimate skip — the
+        // first live `ChunkEvent::ContextUsage` will fill the gap.
         if let Some(ref conv) = agent_loop.session.conversation
-            && let Some(persisted) = conv.tokens()
+            && let Some(ctx) = crate::agent::context::build_persisted_ctx_usage(&agent_loop.core, conv)
+            && let Some(ref tx) = chunk_tx
         {
-            let model_name = agent_loop.session.model.as_deref().unwrap_or("unknown");
-            if let Some(caps) = agent_loop.core.get_model_capabilities(model_name) {
-                let max_output = agent_loop
-                    .core
-                    .max_output_tokens_limit_for_model(model_name);
-                // Pass the full SessionTokens so the cumulative
-                // total_input_tokens / total_output_tokens fields are
-                // populated in the resulting ContextUsageInfo. This lets
-                // the frontend status panel show session-level cumulative
-                // totals on resume, not just per-turn last values.
-                //
-                // ADR-074: pass the session-effective cap (Layer 0 override
-                // over the per-agent chain) — the first usage push must
-                // reflect the per-session window, not the agent window.
-                let resolved = crate::agent::session_config::resolve_effective_context_window(
-                    conv.context_window(),
-                    agent_loop.core.context_window_override,
-                    agent_loop.core.manifest_context_window,
-                    Some(&caps),
-                );
-                let ctx = crate::agent::context::build_context_usage_from_persisted(
-                    &caps,
-                    persisted.last_input,
-                    persisted.last_output,
-                    max_output,
-                    Some(resolved),
-                    Some(&persisted),
-                    conv.llm_call_counter(),
-                );
-                if let Some(ref tx) = chunk_tx {
-                    let _ = tx
-                        .send(SessionChunkEvent {
-                            session_id: session_id.clone(),
-                            event: ChunkEvent::ContextUsage(ctx),
-                        })
-                        .await;
-                }
-            }
+            let _ = tx
+                .send(SessionChunkEvent {
+                    session_id: session_id.clone(),
+                    event: ChunkEvent::ContextUsage(ctx),
+                })
+                .await;
         }
 
         // Saved user message for debug resume re-execution.

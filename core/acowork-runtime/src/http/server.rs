@@ -169,9 +169,11 @@ pub type SharedRagProvider =
 /// need agent-level token totals (`list_sessions`) gracefully degrade
 /// (return 0) when it is still empty.
 ///
-/// ADR-028: the `list_sessions` handler merges disk-scanned totals into
-/// the live atomic counters and reads them back so the response always
-/// carries `agent_total_input_tokens` / `agent_total_output_tokens`.
+/// ADR-028: the `list_sessions` handler still merges disk-scanned
+/// totals into the live atomic counters (cold-start recovery) so the
+/// first post-restart `context_usage` push reflects historical totals.
+/// Since t-83afab47 the merged value is no longer echoed back in the
+/// HTTP response — agent totals live on the live push path only.
 pub type SharedAgentCore = Arc<std::sync::RwLock<Option<Arc<crate::agent::agent_core::AgentCore>>>>;
 
 /// Shared embedding-provider dimension (0 = no provider).
@@ -929,10 +931,15 @@ struct ListSessionsQuery {
 /// (the authoritative source per ADR-024). Supports `page` / `size`
 /// pagination; results are returned sorted by `last_active_at` descending.
 ///
-/// ADR-028: the response top level also carries
-/// `agent_total_input_tokens` / `agent_total_output_tokens`, computed by
-/// scanning every session on disk and merging the totals into the live
-/// `AgentCore` atomic counters (max-merge, idempotent).
+/// ADR-028 / ADR-066 (regression t-83afab47): the response top level
+/// NO LONGER carries `agent_total_*` fields — those live exclusively
+/// on the live `context_usage` push path (every MQTT `session_state`
+/// and `ChunkEvent::ContextUsage` carries them via `patch_agent_totals`).
+/// `list_sessions` still performs the cold-start merge into the live
+/// counters as a side effect (so the first post-restart push reflects
+/// historical totals); the merged value is intentionally not echoed
+/// back on the wire, and the desktop no longer maintains a stale
+/// `agentTokenTotals` fallback that drift-flickers against the push.
 ///
 /// This is the backend for `GET /api/agents/{id}/sessions` via the
 /// Gateway reverse proxy.
@@ -4309,12 +4316,16 @@ mod tests {
         assert_eq!(sessions[0]["title"], "Test Session");
         assert_eq!(sessions[0]["message_count"], 3);
 
-        // ADR-028: response must carry agent-level token totals even
-        // when no session has tokens yet (all zero is valid).
-        assert!(body.get("agent_total_input_tokens").is_some());
-        assert!(body.get("agent_total_output_tokens").is_some());
-        assert_eq!(body["agent_total_input_tokens"], 0);
-        assert_eq!(body["agent_total_output_tokens"], 0);
+        // Regression t-83afab47: agent-level token totals are NOT part of
+        // the HTTP response anymore. They live exclusively on the live
+        // `context_usage` push path (HTTP = initial/refresh snapshot,
+        // MQTT = delta push). The merge into live counters still
+        // happens server-side as a side effect; only the wire shape
+        // changes.
+        assert!(body.get("agent_total_input_tokens").is_none());
+        assert!(body.get("agent_total_output_tokens").is_none());
+        assert!(body.get("agent_total_cache_read_tokens").is_none());
+        assert!(body.get("agent_total_cache_write_tokens").is_none());
 
         // Get messages — read_messages_paginated returns chronological order
         // (oldest → newest within the page) regardless of direction, so
@@ -4332,180 +4343,6 @@ mod tests {
         assert_eq!(body["messages"][1]["role"], "assistant");
         assert_eq!(body["messages"][2]["content"], "Done");
         assert_eq!(body["messages"][2]["role"], "system");
-
-        std::fs::remove_dir_all(&temp_dir).ok();
-    }
-
-    /// ADR-028 regression test: `list_sessions` must aggregate
-    /// `agent_total_input_tokens` / `agent_total_output_tokens` across
-    /// all sessions on disk and include them in the top-level response.
-    #[tokio::test]
-    async fn test_list_sessions_includes_agent_total_tokens() {
-        let temp_dir = std::env::temp_dir().join("acowork-test-runtime-http-agent-totals");
-        let _ = std::fs::remove_dir_all(&temp_dir);
-        std::fs::create_dir_all(&temp_dir).unwrap();
-
-        let conversations_dir = temp_dir.join("conversations");
-
-        // Session 1: 100 input / 200 output tokens.
-        let meta1 = crate::conversation::SessionMeta {
-            version: 3,
-            session_id: "20260101_100000_aaa".to_string(),
-            agent_id: "com.test.agent".to_string(),
-            created_at: "2026-01-01T10:00:00Z".to_string(),
-            title: Some("Session 1".to_string()),
-            workspace_id: None,
-            model: None,
-            provider: None,
-            account_id: None,
-            reasoning_effort: None,
-            temperature: None,
-            context_window: None,
-            todos: None,
-            message_count: 2,
-            last_active_at: "2026-01-01T10:00:01Z".to_string(),
-            tokens: Some(crate::conversation::SessionTokens {
-                last_input: 100,
-                last_output: 200,
-                total_input: 100,
-                total_output: 200,
-                // ADR-066: cache fields default to 0 (this test
-                // focuses on the agent-total-in/out list aggregation
-                // path).
-                ..Default::default()
-            }),
-            llm_call_counter: None,
-            model_ratio: None,
-            last_compaction_offset: None,
-            corrupted: false,
-        };
-        crate::conversation::write_session_meta(&conversations_dir, &meta1).unwrap();
-
-        // Session 2: 300 input / 400 output tokens.
-        let meta2 = crate::conversation::SessionMeta {
-            version: 3,
-            session_id: "20260101_120000_bbb".to_string(),
-            agent_id: "com.test.agent".to_string(),
-            created_at: "2026-01-01T12:00:00Z".to_string(),
-            title: Some("Session 2".to_string()),
-            workspace_id: None,
-            model: None,
-            provider: None,
-            account_id: None,
-            reasoning_effort: None,
-            temperature: None,
-            context_window: None,
-            todos: None,
-            message_count: 1,
-            last_active_at: "2026-01-01T12:00:01Z".to_string(),
-            tokens: Some(crate::conversation::SessionTokens {
-                last_input: 300,
-                last_output: 400,
-                total_input: 300,
-                total_output: 400,
-                // ADR-066: cache fields default to 0 (this test
-                // focuses on the agent-total-in/out list aggregation
-                // path).
-                ..Default::default()
-            }),
-            llm_call_counter: None,
-            model_ratio: None,
-            last_compaction_offset: None,
-            corrupted: false,
-        };
-        crate::conversation::write_session_meta(&conversations_dir, &meta2).unwrap();
-
-        // Empty JSONL files so the sessions are discoverable.
-        for sid in &["20260101_100000_aaa", "20260101_120000_bbb"] {
-            std::fs::write(conversations_dir.join(format!("{}.jsonl", sid)), "").unwrap();
-        }
-
-        let snapshots: SharedSessionSnapshots =
-            std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
-        let latest: SharedLatestSession = std::sync::Arc::new(std::sync::RwLock::new(None));
-        let dispatch_tx: SharedDispatchSender = std::sync::Arc::new(tokio::sync::Mutex::new(None));
-        let embed_dim: SharedEmbedDimension = std::sync::Arc::new(std::sync::RwLock::new(0));
-        let degraded_reasons: SharedDegradation =
-            std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
-        let mqtt_client: SharedMqttClientSlot = std::sync::Arc::new(tokio::sync::Mutex::new(None));
-
-        // Use in-memory token service so the ADR-028 merge semantics work.
-        let token_svc =
-            Arc::new(crate::usecases::agent_token_impl::InMemoryAgentTokenService::new());
-        let session_metadata: Arc<dyn crate::usecases::SessionMetadataService> =
-            Arc::new(crate::usecases::RuntimeSessionMetadataService::new(
-                temp_dir.to_path_buf(),
-                token_svc,
-                snapshots.clone(),
-                latest.clone(),
-            ));
-        let memory_store: SharedMemoryStore = std::sync::Arc::new(std::sync::RwLock::new(None));
-
-        let session_manager_slot: crate::http::server::SharedSessionManagerSlot =
-            std::sync::Arc::new(tokio::sync::RwLock::new(None));
-
-        let server = RuntimeHttpServer::start(
-            temp_dir.clone(),
-            temp_dir.clone(),
-            "com.test.agent".to_string(),
-            TEST_INSTANCE_ID.to_string(), // ADR-073: URL paths address the runtime's UUID instance, not the package name
-            snapshots,
-            latest,
-            dispatch_tx,
-            embed_dim.clone(),
-            degraded_reasons,
-            mqtt_client,
-            Arc::new(tokio::sync::Mutex::new(Some(session_metadata))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(
-                memory_store,
-                embed_dim.clone(),
-            )))),
-            std::sync::Arc::new(std::sync::RwLock::new(None)),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(
-                temp_dir.clone(),
-            )))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(
-                temp_dir.clone(),
-            )))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_git_query(
-                temp_dir.clone(),
-            )))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(
-                temp_dir.clone(),
-            )))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(
-                temp_dir.clone(),
-            )))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(
-                temp_dir.clone(),
-            )))),
-            Arc::new(tokio::sync::Mutex::new(None)),
-            std::sync::Arc::new(std::sync::RwLock::new(None)),
-            std::sync::Arc::new(std::sync::RwLock::new(None)),
-            std::sync::Arc::new(tokio::sync::Mutex::new(None)),
-            new_test_workspace_resolver(),
-            session_manager_slot,
-            std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
-        )
-        .await
-        .expect("server should start");
-
-        // GET /sessions — should aggregate tokens across both sessions.
-        let url = format!("http://127.0.0.1:{}/sessions", server.port);
-        let response = reqwest::get(&url).await.unwrap();
-        assert!(response.status().is_success());
-        let body: serde_json::Value = response.json().await.unwrap();
-
-        // ADR-028: agent totals = sum across all sessions on disk.
-        assert_eq!(body["agent_total_input_tokens"], 400); // 100 + 300
-        assert_eq!(body["agent_total_output_tokens"], 600); // 200 + 400
-        assert_eq!(body["total_count"], 2);
-
-        let sessions = body["sessions"].as_array().unwrap();
-        assert_eq!(sessions.len(), 2);
-        // Sorted by last_active_at desc: Session 2 first.
-        assert_eq!(sessions[0]["session_id"], "20260101_120000_bbb");
-        assert_eq!(sessions[1]["session_id"], "20260101_100000_aaa");
 
         std::fs::remove_dir_all(&temp_dir).ok();
     }

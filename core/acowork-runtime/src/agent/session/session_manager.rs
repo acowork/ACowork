@@ -1179,32 +1179,13 @@ impl SessionManager {
             let provider_name = session_state.provider().map(|s| s.to_string());
 
             // Build context_usage from persisted session tokens (if available).
-            let context_usage = session_state.conversation().and_then(|conv| {
-                let persisted = conv.tokens()?;
-                let m = model_name.as_deref().unwrap_or("unknown");
-                let caps = self.core.get_model_capabilities(m)?;
-                let max_output = self.core.max_output_tokens_limit_for_model(m);
-                // ADR-074: the initial usage snapshot reflects the
-                // session-effective cap (Layer 0 override over the agent
-                // chain) so a resumed session with an override shows its
-                // own window, not the agent window.
-                let resolved = crate::agent::session_config::resolve_effective_context_window(
-                    conv.context_window(),
-                    self.core.context_window_override,
-                    self.core.manifest_context_window,
-                    Some(&caps),
-                );
-                let ctx = crate::agent::context::build_context_usage_from_persisted(
-                    &caps,
-                    persisted.last_input,
-                    persisted.last_output,
-                    max_output,
-                    Some(resolved),
-                    Some(&persisted),
-                    conv.llm_call_counter(),
-                );
-                serde_json::to_string(&ctx).ok()
-            });
+            // See `context::build_persisted_ctx_usage` for the
+            // caps-resolution + cumulative-patch sequence this used to
+            // spell out by hand (regression t-83afab47 refactor).
+            let context_usage = session_state
+                .conversation()
+                .and_then(|conv| crate::agent::context::build_persisted_ctx_usage(&self.core, conv))
+                .and_then(|ctx| serde_json::to_string(&ctx).ok());
 
             if let Ok(mut snap) = session_state.snapshot.write() {
                 snap.model = model_name;
@@ -2639,32 +2620,12 @@ After installation, ask the user to re-enable the MCP server.",
         let Some(conv) = configs.get(session_id) else {
             return;
         };
-        let Some(persisted) = conv.tokens() else {
+        // See `context::build_persisted_ctx_usage` for the
+        // caps-resolution + cumulative-patch sequence this used to
+        // spell out by hand (regression t-83afab47 refactor).
+        let Some(ctx) = crate::agent::context::build_persisted_ctx_usage(&self.core, conv) else {
             return;
         };
-        let model_name = conv.model().unwrap_or_else(|| "unknown".to_string());
-        let Some(caps) = self.core.get_model_capabilities(&model_name) else {
-            return;
-        };
-        let max_output = self.core.max_output_tokens_limit_for_model(&model_name);
-
-        // Session-effective window: Layer 0 override over the per-agent
-        // chain, min'd with the model window (§3.2).
-        let resolved = crate::agent::session_config::resolve_effective_context_window(
-            conv.context_window(),
-            self.core.context_window_override,
-            self.core.manifest_context_window,
-            Some(&caps),
-        );
-        let ctx = crate::agent::context::build_context_usage_from_persisted(
-            &caps,
-            persisted.last_input,
-            persisted.last_output,
-            max_output,
-            Some(resolved),
-            Some(&persisted),
-            conv.llm_call_counter(),
-        );
 
         // (1) Write into the shared runtime snapshot (HTTP pull path).
         if let Some(ref snapshots) = self.config.session_snapshots

@@ -78,50 +78,6 @@ impl AgentTokenService for NoopAgentTokenService {
     }
 }
 
-/// In-memory token service for tests that require token merge semantics.
-#[cfg(test)]
-pub(crate) struct InMemoryAgentTokenService {
-    // ADR-066: 4-tuple mirrors `AgentTokenService::agent_token_totals`.
-    totals: std::sync::Mutex<(u64, u64, u64, u64)>,
-}
-
-#[cfg(test)]
-impl InMemoryAgentTokenService {
-    pub(crate) fn new() -> Self {
-        Self {
-            totals: std::sync::Mutex::new((0, 0, 0, 0)),
-        }
-    }
-}
-
-#[cfg(test)]
-impl AgentTokenService for InMemoryAgentTokenService {
-    fn accumulate_llm_usage(&self, _: &UsageInfo) {}
-    fn merge_token_totals(&self, scanned: (Option<u64>, Option<u64>, Option<u64>, Option<u64>)) {
-        let mut t = self.totals.lock().unwrap();
-        if let Some(input) = scanned.0 {
-            t.0 = t.0.max(input);
-        }
-        if let Some(output) = scanned.1 {
-            t.1 = t.1.max(output);
-        }
-        // ADR-066: cache_read + cache_write follow the same atomic-max
-        // merge pattern as in/out (see ADR-028 §4 for the rationale).
-        if let Some(cache_read) = scanned.2 {
-            t.2 = t.2.max(cache_read);
-        }
-        if let Some(cache_write) = scanned.3 {
-            t.3 = t.3.max(cache_write);
-        }
-    }
-    fn agent_token_totals(&self) -> (u64, u64, u64, u64) {
-        *self.totals.lock().unwrap()
-    }
-    fn session_token_totals(&self, _: &str) -> Option<(u64, u64)> {
-        None
-    }
-}
-
 // ── RuntimeAgentTokenService integration tests ───────────────────────
 //
 // These tests cover the wiring between `RuntimeAgentTokenService` (the

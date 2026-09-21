@@ -11,7 +11,7 @@
 use acowork_core::providers::traits::{ChatMessage, ChatResponse, MessageRole};
 use std::sync::atomic::Ordering;
 
-use crate::agent::context::build_context_usage_from_persisted;
+use crate::agent::context::{build_context_usage_from_persisted, patch_agent_totals};
 use crate::agent::session_state::SessionStatus;
 use crate::error::Result;
 
@@ -152,6 +152,15 @@ impl super::loop_::AgentLoop {
             if let Some(sections) = conv.last_context_usage_sections() {
                 ctx.sections = Some(sections);
             }
+            // ADR-028 / ADR-066: snapshot the agent-scoped cumulative
+            // counters so the `session_state` push carries the same
+            // `agent_total_*` figures as the live LLM-call
+            // `ContextUsage` push. Without this patch the frontend's
+            // `mergeContextUsage` wipes the four fields back to `None`
+            // on every `session_state` re-emit, and the Agent Status
+            // panel's "累计输入 Token" row flickers between the live
+            // value and the stale fallback (session-list fetch cache).
+            patch_agent_totals(&mut ctx, self.core.agent_token_totals());
             let json = serde_json::to_string(&ctx).ok();
             // LOG-001: fires on every emit_session_state (multiple per turn)
             // and only confirms the JSON was built — the value itself is

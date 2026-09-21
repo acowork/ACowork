@@ -53,16 +53,18 @@ impl SessionMetadataService for RuntimeSessionMetadataService {
             .await
             .map_err(|e| RuntimeError::Io(std::io::Error::other(e)))?;
 
-        // ADR-028 / ADR-066: merge disk totals into live counters and
-        // read back.
+        // ADR-028 / ADR-066: merge disk totals into live counters so the
+        // in-memory AtomicU64 counters pick up historical totals
+        // (cold-start recovery, before the first live push). The values
+        // are intentionally NOT echoed into the HTTP response —
+        // agent totals belong on the live `context_usage` push path
+        // only (regression t-83afab47).
         self.agent_token.merge_token_totals((
             Some(disk_in),
             Some(disk_out),
             Some(disk_cache_read),
             Some(disk_cache_write),
         ));
-        let (agent_in, agent_out, agent_cache_read, agent_cache_write) =
-            self.agent_token.agent_token_totals();
 
         let page_sessions: Vec<SessionSummary> = sessions
             .into_iter()
@@ -90,10 +92,6 @@ impl SessionMetadataService for RuntimeSessionMetadataService {
             total_pages,
             page,
             size,
-            agent_total_input_tokens: agent_in,
-            agent_total_output_tokens: agent_out,
-            agent_total_cache_read_tokens: agent_cache_read,
-            agent_total_cache_write_tokens: agent_cache_write,
         })
     }
 

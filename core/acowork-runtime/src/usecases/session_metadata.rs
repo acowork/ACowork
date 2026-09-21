@@ -22,14 +22,23 @@ pub struct SessionSummary {
     pub provider: Option<String>,
 }
 
-/// Response for `list_sessions` — paginated session list with
-/// agent-level cumulative token totals (ADR-028 / ADR-066).
+/// Response for `list_sessions` — paginated session list.
 ///
-/// Cache fields are emitted unconditionally because the runtime
-/// always initialises the agent counters (Commit 2 sets both
-/// `agent_total_cache_read_tokens` and `agent_total_cache_write_tokens`
-/// to `0` on every construction site).  Desktop frontends that do
-/// not yet read these fields stay compatible.
+/// ADR-028 §P3 / ADR-066 §4: agent-level cumulative token totals are
+/// NO LONGER included in this HTTP response. They live exclusively on
+/// the live `context_usage` push path (every MQTT `session_state` and
+/// `ChunkEvent::ContextUsage` carries them via `patch_agent_totals`).
+/// Following the "HTTP 拉完整数据, MQTT 推变化数据" rule, agent
+/// totals are session-listening-time independent of session-list
+/// fetches — the desktop must not maintain a stale `agentTokenTotals`
+/// fallback that drift-flickers against the live push (regression
+/// t-83afab47).
+///
+/// Cold-start recovery still happens here: `list_sessions_impl` calls
+/// `AgentTokenService::merge_token_totals` with the disk-scan result
+/// so the in-memory AtomicU64 counters pick up historical totals
+/// before the first live push. That side effect is invisible on the
+/// wire; only the merge happens, the value is not echoed back.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionsListResponse {
     pub sessions: Vec<SessionSummary>,
@@ -37,12 +46,6 @@ pub struct SessionsListResponse {
     pub total_pages: u32,
     pub page: u32,
     pub size: u32,
-    pub agent_total_input_tokens: u64,
-    pub agent_total_output_tokens: u64,
-    /// ADR-066: cumulative cache-hit tokens (provider-billed as discounted read).
-    pub agent_total_cache_read_tokens: u64,
-    /// ADR-066: cumulative cache-write tokens (provider-billed as upfront write).
-    pub agent_total_cache_write_tokens: u64,
 }
 
 /// Detail view of a single session (panel-4 endpoint).
