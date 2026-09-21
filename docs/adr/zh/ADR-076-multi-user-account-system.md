@@ -1045,12 +1045,12 @@ run_gateway_auth_mode_redline() { ... }    # awk：auth_routes()/account_api 注
 
 ### 7.2 集成测试（e2e）
 
-> 第 1 条的**单元级**覆盖已落地（见 §7.1）；进程级端到端依赖 Phase H。第 2、3 条（改密 / 注销流程）的**单测**已由 `account_api::tests` 覆盖（invite 生命周期 / 非 admin 自我封闭 / 冲突拒绝 / `registration_open` 门控 / 展示字段持久化与头像写穿——`update_account_persists_display_fields`、`avatar_config_writes_through_accounts_under_multi_user`），进程级 e2e 待 Phase H。第 4 条依赖 Phase G（用户聊天，**未落地**）。
+> 第 1 条的**部署面**（拒启动 / 模式 / 落盘）已在 §7.5 做了**进程级**验证，**数据面**（session 过滤）仍是跨进程 e2e 的残余项。第 2、3 条（改密 / 注销流程）的**单测**已由 `account_api::tests` 覆盖（invite 生命周期 / 非 admin 自我封闭 / 冲突拒绝 / `registration_open` 门控 / 展示字段持久化与头像写穿——`update_account_persists_display_fields`、`avatar_config_writes_through_accounts_under_multi_user`）——账号 CRUD 与改密的进程级验证仍待做（§7.5 只覆盖了部署模式，见下）。第 4 条（用户聊天）**已落地并覆盖**。
 
-- ◐ 完整流程：admin 创建 → alice 创建 → alice 创建 session → bob 看不到 alice 的 session → admin 用 `?as_user=alice` 看到（scope 解析 / 过滤 / owner 校验已有单测；跨进程 e2e 待 Phase H）
+- ◐ 完整流程：admin 创建 → alice 创建 → alice 创建 session → bob 看不到 alice 的 session → admin 用 `?as_user=alice` 看到（scope 解析 / 过滤 / owner 校验已有单测；账号创建 → 登录 → 越权拒绝这段也已有 router 级集成测试 `auth_api::tests`，**仅剩**「跨进程」这段——需要 Gateway + Node + Runtime 同时起）
 - 改密流程：alice 改密 → 旧 refresh_token 失效 → 必须重新 login
 - 注销流程：alice DELETE self → alice 无法再 login → 历史 session 仍可被 admin 读
-- 用户聊天：A → B 发文字 + 图片 + 文档 → B 收到 → unread_count 增加 → B read 后清零
+- ✅ 用户聊天：A → B 发文字 + 图片 + 文档 → B 收到 → unread_count 增加 → B read 后清零（**已实现**：`chat_api::tests::send_read_and_list_across_two_accounts` + `attachment_round_trips_from_upload_to_download`，走真实 `build_router`）
 - Vault locked 流程：Vault 锁上后 alice 仍可登录（`password_hash` 在明文的 `accounts.json`），但 admin 想读 `vault/accounts/*.enc` 时报错
 
 ### 7.3 协议兼容性
@@ -1067,7 +1067,7 @@ run_gateway_auth_mode_redline() { ... }    # awk：auth_routes()/account_api 注
 - [x] `visibility` 开关对 **config** 同样生效（走同一个 `authorize_read`）：`test_session_config_unknown_session_and_visibility_gate` 断言 private 时非 owner 读 config → 404、同 owner 翻成 public 后非 owner 读 → 200、且 public 不放开写（PUT → 404）
 - [x] 注销账号后旧 refresh_token → `disable_account` / `reset_password` 调 `revoke_user` → 拒绝（`account_api` 单测断言注销后 login 失败；`AuthService` 单测覆盖 `revoke_user` 命中）
 - [x] admin 用 `as_user` 调 POST（写操作）→ 403（`auth_middleware` 强制点，已单测）
-- [ ] 跨用户聊天路径：`POST /api/users/{A}/chats/{B}/messages` 以 A 身份发送，从 token 拿 from 字段 → from=B 拒绝（Phase G）
+- [x] 跨用户聊天路径：`POST /api/users/{A}/chats/{B}/messages` 以 A 身份发送，从 token 拿 from 字段 → from=B 拒绝（**已实现**：`chat_api::tests::third_party_and_admin_cannot_write_as_someone_else`——第三方与 admin 都不能代写；`upload_attachment` / `download_attachment` 的 self-only 写 + self-or-admin 读由 `attachment_writes_are_self_only_and_reads_are_scoped` 覆盖）
 
 ### 7.5 部署模式测试（决策 12）
 
@@ -1083,18 +1083,20 @@ run_gateway_auth_mode_redline() { ... }    # awk：auth_routes()/account_api 注
   - 显式 `--auth-mode multi_user` + `bind = 127.0.0.1` → `MultiUser`（显式覆盖 bind，仅 warn）
 - 优先级链：CLI > TOML > bind 推断 > default
 
-**集成测试**（`core/acowork-gateway/tests/auth_mode_e2e.rs`，**计划中，Phase H**）：
+**集成测试**（`core/acowork-gateway/tests/auth_mode_e2e.rs`，**已实现，4 个用例**）：
 
-- **local 模式启动**：bind `127.0.0.1` + 无 `bootstrap_admin` → 正常启动；`user_profiles.json` **保持现状**（不升级 schema、不写 sentinel）；`accounts.json` **不存在**；`data_dir/auth/` **不存在**；`GET /api/auth/login` → 404（路由未注册）；`GET /api/users/{self}/chats` → 404
-- **multi_user 模式启动**：bind `0.0.0.0` + 无 `bootstrap_admin` + `accounts.json` 为空 → **拒启动**（`Gateway::new` 返回 `Err`，退出码 != 0，stderr 含 `bootstrap_admin` 提示）
-- **multi_user 模式启动**：bind `0.0.0.0` + 配 `bootstrap_admin` → 正常启动；`GET /api/auth/login` 可达且能拿到 token
-- ◐ **local 模式 session 不过滤**：创建 2 个 session 绑定不同 `user_id` → `GET /sessions` 返回全部 2 条（无 `x-user-id` 头 → `Unfiltered`）——scope 判定已单测，进程级 e2e 待 Phase H
-- ◐ **multi_user 模式 session 过滤**：同上场景 → 普通 user token 只返回自己的 1 条；admin token（`x-user-id: *`）返回 2 条——scope 判定 + 分页前过滤已单测，进程级 e2e 待 Phase H
+> 真起二进制（`target/debug/acowork-gateway --daemon --home <tmp> …`，私有端口 + 私有 `--home`），断言只取"进程级才看得见"的东西：退出码、stderr、端口是否能连、`--home` 落盘。**不引入 HTTP 客户端**——路由注册本身已由 `build_router` 的 in-process 测试覆盖，再加一个客户端只是把同一件事验两遍。
+
+- ✅ **multi_user 拒启动**：空账号表 + 无 `bootstrap_admin` → 退出码 != 0，stderr 含 `bootstrap_admin` 与 `multi_user`，且**不留下** `accounts.json`（`multi_user_without_bootstrap_admin_refuses_to_start`）
+- ✅ **multi_user 正常启动**：从 **TOML**（而非 CLI flag）读 `auth_mode` + `[multi_user.bootstrap_admin]` → 端口可连；`accounts.json` 落盘、含 `root`、且**明文不含** bootstrap 密码（`multi_user_from_config_bootstraps_an_admin_and_serves`）
+- ✅ **local 模式启动**：bind `127.0.0.1` + 无 flag → 正常启动；`accounts.json` **不存在**；`data_dir/auth/` **不存在**（`local_mode_leaves_no_account_state_behind`）；`user_profiles.json` 保持现状（不升级 schema、不写 sentinel）
+- ✅ **显式 local 压过公网 bind**：`--addr 0.0.0.0:<port> --auth-mode local` → 仍是 local，不创建任何账号状态（`an_explicit_local_mode_overrides_a_public_bind`）。这是唯一一个会让服务裸奔的组合，必须在进程级钉死
+- ◐ **local / multi_user 的 session 过滤**：判据（`SessionScope` 三态 / `is_readable_by` / 分页前过滤）已有单测（§7.1）；**跨进程** e2e 需要真起 Runtime + Node，仍未做（见下方"仍未覆盖"）
 
 **已落地的替代覆盖**（Phase C-2 + Phase E，走真实 `build_router`，见 `core/acowork-gateway/src/http/auth_api.rs` 与 `account_api.rs` 的 `tests`）：
-local 模式 `/api/auth/login` → 404、`/api/users` 走展示路由（`/reset-password` → 404）；multi_user 无 token `/api/agents` → 401 而 `/health` 放行；登录 → `/me` 脱敏 → 非 admin `as_user` → 403 → refresh 轮换 → 改密后旧 refresh 失效；bootstrap admin 可登录；**Phase E**：invite 生命周期单次有效（创建无密账号 → first-login 激活 → replay 失败 → 新密码可登录）、invite 24h 过期 + 非法时间戳 fail-closed、`reset-password` 铸新 invite + 清密码 + 杀全部 refresh family、非 admin 只能读/删自己（list / disable / reset → 403）、`registration_open` 开关（关 → 非 admin 建号 403；开 → 可建普通账号但**永不**是 admin）、重名 409、末位 admin 不可 disable（409）。**尚未覆盖**：`Gateway::new` 拒启动的真实进程级验证、session 过滤的**进程级** e2e（判据逻辑已有单测）。
+local 模式 `/api/auth/login` → 404、`/api/users` 走展示路由（`/reset-password` → 404）；multi_user 无 token `/api/agents` → 401 而 `/health` 放行；登录 → `/me` 脱敏 → 非 admin `as_user` → 403 → refresh 轮换 → 改密后旧 refresh 失效；bootstrap admin 可登录；**Phase E**：invite 生命周期单次有效（创建无密账号 → first-login 激活 → replay 失败 → 新密码可登录）、invite 24h 过期 + 非法时间戳 fail-closed、`reset-password` 铸新 invite + 清密码 + 杀全部 refresh family、非 admin 只能读/删自己（list / disable / reset → 403）、`registration_open` 开关（关 → 非 admin 建号 403；开 → 可建普通账号但**永不**是 admin）、重名 409、末位 admin 不可 disable（409）。**本次补上**：`Gateway::new` 拒启动 / 起得来 / local 不留痕 / 显式 local 压过公网 bind——四条的**真实进程级**验证见上（`tests/auth_mode_e2e.rs`）。**仍未覆盖**：session 过滤的跨进程 e2e——它需要同时起 Gateway + Node + Runtime（`?as_user=` 走到 Runtime 的 `authorize_read` 才有意义），成本是一套多进程 harness；判据逻辑本身已在 §7.1 用单测穷举（三态 × 归属 × visibility 矩阵）。
 
-**回归防护**（`dev/ci.sh` 新增 ceiling lint，**已实现**）：实际落地为两条 redline 函数 `run_gateway_auth_scope_redline`（`x-user-id` 只能出现在 `auth_middleware.rs`，防止反代层自行注入身份）与 `run_gateway_auth_mode_redline`（`auth_api::auth_routes` / `account_api::` 的注册必须被 `auth_mode` / `auth_service` 条件保护），已在 `check` / `all` 模式注册并验证过负例。原稿里的 `accounts.json` 分流 lint / session 路由清单 lint 未单独落地——前者由 `account_api` 只在 multi_user 下 `merge` 覆盖（`routes.rs` 的 `match &state.auth_service`），后者由 Runtime 侧 handler 自带 `authorize_read` 覆盖。
+**回归防护**（`dev/ci.sh` 新增 ceiling lint，**已实现**）：实际落地为**三条** redline 函数——本次新增 `run_gateway_chat_path_redline`（§决策 8：`.join("users"|"chats"|"files"|"conversation.json"|"messages.jsonl")` 只允许出现在 `src/chat.rs`，防止第二处自行推导 `min__max` 配对路径——顺序推错的第一个后果就是读到别人的消息）；另两条为 `run_gateway_auth_scope_redline`（`x-user-id` 只能出现在 `auth_middleware.rs`，防止反代层自行注入身份）与 `run_gateway_auth_mode_redline`（`auth_api::auth_routes` / `account_api::` 的注册必须被 `auth_mode` / `auth_service` 条件保护），已在 `check` / `all` 模式注册并验证过负例。原稿里的 `accounts.json` 分流 lint / session 路由清单 lint 未单独落地——前者由 `account_api` 只在 multi_user 下 `merge` 覆盖（`routes.rs` 的 `match &state.auth_service`），后者由 Runtime 侧 handler 自带 `authorize_read` 覆盖。
 
 ```bash
 # 决策 12：local 模式下不得注册 auth/admin 路由——防止后续 PR 误把 multi_user 路由变成无条件注册
@@ -1124,7 +1126,7 @@ grep -nE '"/sessions' core/acowork-runtime/src/http/server.rs
 
 > **进度（本次实施）**：Phase 1-4 的**后端全部完成并测试通过**——`UserAccount` 模型 + Argon2id + `accounts.json` + `/api/auth/*`（含 `/first-login`）+ token 中间件 + bootstrap_admin fail-fast（Phase 1-2）；`SessionMeta.user_id` + `visibility` 开关 + Runtime scope 过滤 + owner 校验 + **会话写路径全量 MQTT→HTTP 迁移**（Phase 3，见 §决策 4 Phase D 实施记录），MQTT 侧**全部用户操作命令**（两批共 16 条：生命周期 8 + 会话动作 8）的 proto 字段 / Runtime 变体 / 命令名映射表已**删除**并重排为连续，`can_write` 下发到前端用于禁用写控件；**Phase 4 账号 CRUD**（`account_api.rs` + `registration_open` 接线 + invite/first-login 生命周期）已完成。Phase 5-7 未动（Desktop UI / 用户聊天 / 进程级 e2e + 手册）。剩余项在各处标了 ⬜ / `**未实现（Phase X）**`。
 >
-> **补充（本次）**：Phase 2 残留（Desktop `authStore` + 全局 fetch 拦截器 + `LoginView` 门禁 + 顶栏账号菜单）与 Phase 5（Sidebar User 折叠分组 + admin 账号管理 UI + `?as_user=` 过滤）已落地，见 §6.5「已实现（Phase 2 残留 + Phase 5，本次）」与「已实现（Phase 5 admin 账号管理 UI + Phase 6 后端，本次）」。Phase 6 的**后端**（`src/chat.rs` 持久化 + `src/http/chat_api.rs`，见 §6.4）与 **Desktop 聊天 UI**（`MessagesView` + `userChatStore` + nav 未读红点 + `requestNavView`，见 §6.5「已实现（Phase 6 Desktop 聊天 UI，本次）」）均已落地并测试；**普通用户发起会话**所需的 `GET /api/users/directory`（§5.5，本次决策）与 `MessagesView` "新会话"选择器一并完成——§决策 8 除附件外已闭环。**附件上传/下载**（§决策 9）也已落地；§决策 8 + 9 至此全部闭环。仍未动：Phase 7（lint + 进程级 e2e + 手册）。
+> **补充（本次）**：Phase 2 残留（Desktop `authStore` + 全局 fetch 拦截器 + `LoginView` 门禁 + 顶栏账号菜单）与 Phase 5（Sidebar User 折叠分组 + admin 账号管理 UI + `?as_user=` 过滤）已落地，见 §6.5「已实现（Phase 2 残留 + Phase 5，本次）」与「已实现（Phase 5 admin 账号管理 UI + Phase 6 后端，本次）」。Phase 6 的**后端**（`src/chat.rs` 持久化 + `src/http/chat_api.rs`，见 §6.4）与 **Desktop 聊天 UI**（`MessagesView` + `userChatStore` + nav 未读红点 + `requestNavView`，见 §6.5「已实现（Phase 6 Desktop 聊天 UI，本次）」）均已落地并测试；**普通用户发起会话**所需的 `GET /api/users/directory`（§5.5，本次决策）与 `MessagesView` "新会话"选择器一并完成——§决策 8 除附件外已闭环。**附件上传/下载**（§决策 9）也已落地；§决策 8 + 9 至此全部闭环。**Phase 7 本次收尾**：进程级 e2e（`tests/auth_mode_e2e.rs`，4 用例，见 §7.5）、第三条 ceiling lint（`run_gateway_chat_path_redline`，见 §7.5 回归防护）、用户手册（[`docs/runbooks/multi-user-accounts.md`](../../runbooks/multi-user-accounts.md)）、协议文档（`http.md` §4.14 / §4.15）。**唯一残余**：session 过滤的跨进程 e2e（需 Gateway + Node + Runtime 三进程 harness；判据逻辑已在 §7.1 穷举单测）。
 
 | Phase | 内容 | 估时 | 状态 |
 |---|---|---|---|
@@ -1134,7 +1136,7 @@ grep -nE '"/sessions' core/acowork-runtime/src/http/server.rs
 | 4 | admin 角色 + `as_user` + bootstrap_admin + 首位 admin 创建 | 0.5 周 | ✅ `as_user` 校验 + 只读守卫 + 数据面；bootstrap_admin / 首位 admin；账号 CRUD（`account_api.rs`）+ `/api/auth/first-login` + `registration_open` 接线均已完成 |
 | 5 | Sidebar User 折叠分组（`partitionAccounts` + UserList.tsx） | 0.5 周 | ✅ 已落地：`partitionAccounts` + `UserList.tsx` + `AgentList` 接入 + admin `?as_user=` 过滤（`viewAsUserId`）+ admin 建号（`CreateAccountModal`）/ 邀请 token（`InviteTokenModal`）/ 禁用 / 重置密码 UI |
 | 6 | 用户-用户聊天（persistence + API + Desktop UI + 附件上传） | 2 周 | ✅ **完成**：`src/chat.rs`（`users/{min}/chats/{max}/conversation.json` + `messages.jsonl`，原子写、尾部翻页、单条坏行跳过、按 user_id 计未读）+ `src/http/chat_api.rs`（4 条路由；读 = self-or-admin，写 = self-only 且 `from` 强制取 token；`peer_display_name` 服务端解析）+ **附件上传/下载**（`files/{id}` + sidecar + `Content-Disposition`/`nosniff` + 每路由 body limit 抬升；见 §决策 9）+ `MessagesView` / `userChatStore`（引用计数轮询 + 待发附件队列）/ `user-chat-api` / nav 未读红点 / `requestNavView` + **发起会话闭环**（`account_api` 的 `GET /api/users/directory` + `MessagesView` "新会话"选择器） |
-| 7 | ceiling lint + 集成测试 + 文档（README / 用户手册） | 1 周 | ◐ 单元测试 + router 集成测试已就位；协议文档（`mqtt.md` 命令树 + `http.md` §5.6 控制面 + ADR-034 §11.2.B）已更新为"MQTT 控制面清空 + 全部迁 HTTP + 字段号重排"；`node_proto_golden.rs` golden 已重算；grep ceiling lint / 端到端 e2e / 用户手册未做 |
+| 7 | ceiling lint + 集成测试 + 文档（README / 用户手册） | 1 周 | ✅ 单元测试 + router 集成测试已就位；**进程级 e2e**（`tests/auth_mode_e2e.rs`，4 用例）落地见 §7.5；**ceiling lint** 落地第三条 `run_gateway_chat_path_redline`（§7.5 回归防护）；**用户手册**：[`docs/runbooks/multi-user-accounts.md`](../../runbooks/multi-user-accounts.md)（配置 / 建号 / Desktop 用法 / 落盘备份 / 状态码 / 排查）；**协议文档**：`http.md` 新增 §4.14 认证与账号 + §4.15 用户间聊天，`mqtt.md` 命令树与 ADR-034 §11.2.B 早前已更新为「MQTT 控制面清空 + 全部迁 HTTP + 字段号重排」，`node_proto_golden.rs` golden 已重算。**残余**：session 过滤的跨进程 e2e（需 Gateway + Node + Runtime 三进程 harness，见 §7.5） |
 
 总计 ~7.5 周。建议分两个 PR 合并：**PR1 = Phase 1-4**（账号 + 隔离 + admin），**PR2 = Phase 5-6**（UI + 聊天），**PR3 = Phase 7**（lint + 文档）。
 

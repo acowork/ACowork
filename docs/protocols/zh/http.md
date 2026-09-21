@@ -494,6 +494,69 @@ Runtime 消费规则：`503` **不更新本地 cache**，按 `Retry-After` 退�
 试；`200` 一定是权威快照（`instance_id` 为空 / `topics` 为空都按正常快
 照处理——空资源是合法状态，不是未就绪）。
 
+### 4.14 认证与账号（ADR-076，仅 `AUTH_MODE=multi_user`）
+
+> **实现**：[`core/acowork-gateway/src/http/auth_api.rs`](../../../core/acowork-gateway/src/http/auth_api.rs)
+> （认证）、[`core/acowork-gateway/src/http/account_api.rs`](../../../core/acowork-gateway/src/http/account_api.rs)
+> （账号管理）；中间件 [`auth_middleware.rs`](../../../core/acowork-gateway/src/http/auth_middleware.rs)
+> **部署与使用**：[多用户账号系统 runbook](../../runbooks/multi-user-accounts.md)
+
+`AUTH_MODE=local` 下**这些路由一条都不注册**（`local` 与 `multi_user` 是两条装配分支，
+见 [`routes.rs`](../../../core/acowork-gateway/src/http/routes.rs)）——因此 `local` 模式下
+任何 `/api/auth/*`、`/api/users/*`（账号语义）请求都是 `404`，而非 `403`。
+
+**免认证路径**（`multi_user` 下也只此几条，其余一律 401）：
+
+| 路径 | 为什么放行 |
+|---|---|
+| `/health` | 探活 |
+| `/api/status` | Desktop 必须先读到 `auth_mode` 才能决定是否渲染登录页 |
+| `/api/auth/login`、`/api/auth/refresh`、`/api/auth/first-login` | 拿 token 之前没有 token |
+| `/api/auth/logout` | access token 已过期的客户端也要能丢掉死会话 |
+
+| 方法 | 路径 | 用途 | 权限 |
+|---|---|---|---|
+| POST | `/api/auth/login` | 用户名 + 密码 → access / refresh token（用户名大小写不敏感） | 公开 |
+| POST | `/api/auth/refresh` | refresh 换新对（**family rotation**：复用旧的 = 连坐撤销整个 family） | 公开 |
+| POST | `/api/auth/logout` | 撤销**本设备**的 refresh family（不连坐其他设备） | 公开 |
+| POST | `/api/auth/first-login` | `invite_token` + 新密码 → 激活账号并登录（一次性，24h 过期） | 公开 |
+| GET | `/api/auth/me` | 当前身份（`AccountView` 脱敏视图，**不含** `password_hash`） | 本人 |
+| POST | `/api/auth/change-password` | 改自己的密码（需旧密码）；成功后**撤销该账号全部 refresh family** | 本人 |
+| GET | `/api/users` | 账号列表 | admin |
+| POST | `/api/users` | 建号；不带 `password` 则返回一次性 `invite_token` | admin（`registration_open = true` 时非 admin 可建 `role = user`，**永不**是 admin） |
+| GET | `/api/users/directory` | 联系人名录：`user_id` / `username` / `display_name`，排除已禁用与自己 | **任何**已认证账号 |
+| GET | `/api/users/{user_id}` | 单账号详情 | admin，或本人 |
+| PUT | `/api/users/{user_id}` | 改展示字段（`None` 不动 / 空串清除）；改 role 时拒绝摘掉末位 admin | admin，或本人（不含 role） |
+| DELETE | `/api/users/{user_id}` | 删除账号 | admin，或本人 |
+| POST | `/api/users/{user_id}/disable` | 禁用：不可登录 + 撤销其全部 refresh token | admin（末位 admin → 409） |
+| POST | `/api/users/{user_id}/reset-password` | 清密码 + 铸新 `invite_token` + 撤销全部 refresh family | admin |
+
+`?as_user=<user_id>`（admin 只读视角）由中间件在**读**方法上接受；带上它做 POST / DELETE → `403`。
+客户端伪造 `X-User-Id` 一律被中间件剥除。
+
+### 4.15 用户间聊天（ADR-076 §决策 8/9，仅 `AUTH_MODE=multi_user`）
+
+> **实现**：[`core/acowork-gateway/src/http/chat_api.rs`](../../../core/acowork-gateway/src/http/chat_api.rs)（路由）
+> + [`core/acowork-gateway/src/chat.rs`](../../../core/acowork-gateway/src/chat.rs)（持久化）
+
+| 方法 | 路径 | 用途 | 权限 |
+|---|---|---|---|
+| GET | `/api/users/{user_id}/chats` | 会话列表（未读数 + 对端 `display_name`，服务端解析） | 自己，或 admin |
+| GET | `/api/users/{user_id}/chats/{chat_id}/messages?offset&limit` | 消息分页（尾部向前） | 自己，或 admin |
+| POST | `/api/users/{user_id}/chats/{chat_id}/messages` | 发消息，body 可带 `attachments: [id]` | **仅自己**（admin 也不能代发） |
+| POST | `/api/users/{user_id}/chats/{chat_id}/read` | 已读回执，清零未读 | 自己，或 admin |
+| POST | `/api/users/{user_id}/chats/{chat_id}/files` | multipart 上传附件 → `{attachment_id}` | **仅自己** |
+| GET | `/api/users/{user_id}/chats/{chat_id}/files/{attachment_id}` | 下载附件 | 自己，或 admin |
+
+约定：
+
+- `chat_id = "{min(A,B)}__{max(A,B)}"`（UUIDv4 中不含 `__`，无歧义）。**配对顺序无关**：非规范
+  `chat_id`、或调用者不是参与方 → `404`（不泄漏该会话是否存在）。
+- **写永远是 self-only**：`from` 由 token 派生，请求体里的 `from` 一律忽略。
+- `GET /api/users/directory` 是"普通用户怎么找到收件人"的答案（见 runbook §4.6 的隐私边界）。
+- 附件上限：`image/*` 25 MiB，其他 100 MiB，超限 `413`。下载 `Content-Type` 取自存储时记录的
+  mime（不信任客户端声明），`Content-Disposition: attachment; filename*=UTF-8''…` 支持 CJK 文件名。
+
 ---
 
 ## 5. Gateway → Runtime 反向代理（需 Runtime 在线）
