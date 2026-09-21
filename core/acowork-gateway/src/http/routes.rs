@@ -258,7 +258,8 @@ pub fn build_router(state: AppState) -> Router {
         // double registration of one path panics). Avatar routes are
         // mode-independent.
         .merge(match &state.auth_service {
-            Some(_) => crate::http::account_api::account_routes(),
+            Some(_) => crate::http::account_api::account_routes()
+                .merge(crate::http::chat_api::chat_routes()),
             None => crate::http::users_api::users_routes(),
         })
         .merge(crate::http::users_api::user_avatar_routes())
@@ -370,6 +371,13 @@ pub struct SystemStatusResponse {
     /// broker CONNECT check accepts for `user:*:desktop:*` clients.
     /// Present only when `mqtt.auth_enabled` is on.
     pub mqtt_password: Option<String>,
+    /// ADR-076 §决策 12: the resolved deployment auth mode
+    /// (`"local"` | `"multi_user"`). The Desktop reads this at boot to
+    /// decide whether to gate the UI behind a login (`multi_user`) or
+    /// skip the account system entirely (`local`). `/api/status` is on
+    /// the auth middleware's public whitelist, so this is reachable
+    /// before any login.
+    pub auth_mode: &'static str,
 }
 
 /// `GET /api/status` — system status
@@ -415,6 +423,7 @@ pub async fn system_status(State(state): State<AppState>) -> Json<SystemStatusRe
             .unwrap_or_else(crate::config::default_mqtt_port),
         mqtt_username,
         mqtt_password,
+        auth_mode: state.auth_mode.as_str(),
     })
 }
 
@@ -580,6 +589,16 @@ impl ApiError {
         Self {
             error: msg.to_string(),
             code: 401,
+            structured: None,
+        }
+    }
+
+    /// 413 — the body is too large for the endpoint's own ceiling (e.g. an
+    /// attachment over ADR-076 §决策 9's image/document limits).
+    pub fn payload_too_large(msg: &str) -> Self {
+        Self {
+            error: msg.to_string(),
+            code: 413,
             structured: None,
         }
     }
@@ -808,6 +827,9 @@ mod tests {
         // MQTT auth off by default → no credentials are exposed.
         assert_eq!(resp.mqtt_username, None);
         assert_eq!(resp.mqtt_password, None);
+        // ADR-076 §决策 12: the resolved mode is exposed for the Desktop's
+        // login gate; the default (loopback) deployment is `local`.
+        assert_eq!(resp.auth_mode, "local");
     }
 
     #[tokio::test]

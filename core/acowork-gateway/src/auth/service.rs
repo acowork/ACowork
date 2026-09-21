@@ -239,6 +239,12 @@ impl AuthService {
         &self.policy
     }
 
+    /// Root of the gateway data directory. Account-private stores (chat
+    /// history, ADR-076 §决策 8) live here, beside `auth/`.
+    pub fn data_dir(&self) -> &Path {
+        &self.data_dir
+    }
+
     /// The lock is never held across a panic-prone section; a poisoned
     /// lock cannot be "reset" meaningfully, so recover the inner value
     /// rather than propagate the panic into every later request.

@@ -40,6 +40,10 @@ use crate::http::routes::{ApiError, AppState};
 /// The account-management routes (merged only under `multi_user`).
 pub fn account_routes() -> Router<AppState> {
     Router::new()
+        // Static segment, so it wins over `/api/users/{user_id}` (matchit 0.8
+        // prefers a literal over a parameter) — `/api/users/directory` is the
+        // contact picker, not a lookup of an account named "directory".
+        .route("/api/users/directory", get(list_directory))
         .route("/api/users", get(list_accounts).post(create_account))
         .route(
             "/api/users/{user_id}",
@@ -90,6 +94,23 @@ pub struct CreateAccountResponse {
 #[derive(Debug, Serialize)]
 pub struct ResetPasswordResponse {
     pub invite_token: String,
+}
+
+/// One row of the contact picker (ADR-076 §决策 8).
+///
+/// A deliberate projection, not `AccountView`: a non-admin gets the three
+/// fields needed to name a recipient and nothing else — no role, no
+/// timestamps, no profile.
+#[derive(Debug, Serialize)]
+pub struct DirectoryEntry {
+    pub user_id: String,
+    pub username: String,
+    pub display_name: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct UserDirectoryResponse {
+    pub users: Vec<DirectoryEntry>,
 }
 
 // ── Guards ─────────────────────────────────────────────────────────────
@@ -162,6 +183,42 @@ async fn list_accounts(
         accounts: list.accounts.iter().map(AccountView::from).collect(),
         version: list.version,
     }))
+}
+
+/// `GET /api/users/directory` — the contact picker's source, for **any**
+/// authenticated caller (ADR-076 §决策 8).
+///
+/// This is the one account listing that is not admin-only, and the exception
+/// is deliberate:
+///
+/// - Display fields are already the deployment's public view —
+///   `user_profiles.json` is rebuilt from `accounts.json` and consumed by
+///   Runtime as `last_user_profile` (ADR-076 §决策 1), so a name is not a
+///   secret here.
+/// - A chat feature with no way to name a recipient is unusable for everyone
+///   who is not an admin, which is everyone it is for.
+///
+/// The exposure is bounded instead: enabled accounts only (a disabled account
+/// cannot log in, so there is nobody to contact — its *history* still lists
+/// it, which is `chat_api`'s job), never the caller themselves, and only
+/// `user_id` / `username` / `display_name`.
+async fn list_directory(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+) -> Result<Json<UserDirectoryResponse>, ApiError> {
+    let auth = service(&state)?;
+    let list = auth.load_accounts().map_err(|e| ApiError::internal(&e))?;
+    let users = list
+        .accounts
+        .iter()
+        .filter(|a| a.disabled_at.is_none() && a.user_id != ctx.user_id)
+        .map(|a| DirectoryEntry {
+            user_id: a.user_id.clone(),
+            username: a.username.clone(),
+            display_name: a.display_name.clone(),
+        })
+        .collect();
+    Ok(Json(UserDirectoryResponse { users }))
 }
 
 /// `POST /api/users` — create an account.
@@ -1024,5 +1081,99 @@ mod tests {
             .await
             .unwrap();
         assert!(json(resp).await["avatar"].is_null());
+    }
+
+    /// `GET /api/users/directory` — the one account listing a non-admin may
+    /// read (ADR-076 §决策 8). Pin the four things that keep it a *bounded*
+    /// exception: it is authenticated, it reaches a non-admin, it is a
+    /// minimal projection, and it does not lose the route to
+    /// `/api/users/{user_id}`.
+    #[tokio::test]
+    async fn user_directory_is_readable_by_any_account_but_bounded() {
+        let dir = temp_dir();
+        let router = build_router(admin_state(&dir));
+        let admin = login(&router, "root", PWD).await;
+
+        let mut carol_id = String::new();
+        for name in ["alice", "carol"] {
+            let resp = router
+                .clone()
+                .oneshot(req(
+                    "POST",
+                    "/api/users",
+                    Some(&format!(
+                        r#"{{"username":"{name}","display_name":"{name}","password":"{PWD}"}}"#
+                    )),
+                    Some(&admin),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::CREATED);
+            let id = json(resp).await["account"]["user_id"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            if name == "carol" {
+                carol_id = id;
+            }
+        }
+        let alice = login(&router, "alice", PWD).await;
+
+        // Still gated: the middleware owns that, not this handler.
+        let resp = router
+            .clone()
+            .oneshot(req("GET", "/api/users/directory", None, None))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        // A non-admin reaches it — 200 (not the 403 they would get from
+        // `GET /api/users/{user_id}`, which is the precedence check).
+        let resp = router
+            .clone()
+            .oneshot(req("GET", "/api/users/directory", None, Some(&alice)))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json(resp).await;
+        let entries = body["users"].as_array().unwrap();
+        let usernames: Vec<&str> = entries
+            .iter()
+            .map(|u| u["username"].as_str().unwrap())
+            .collect();
+        assert!(usernames.contains(&"root"), "admin is contactable: {usernames:?}");
+        assert!(usernames.contains(&"carol"));
+        assert!(!usernames.contains(&"alice"), "caller is not their own contact");
+
+        // Minimal projection — nothing beyond the three named fields.
+        let entry = entries[0].as_object().unwrap();
+        let mut fields: Vec<&str> = entry.keys().map(String::as_str).collect();
+        fields.sort_unstable();
+        assert_eq!(fields, ["display_name", "user_id", "username"]);
+
+        // Disabling removes an account: nobody can log in as them, so there
+        // is nobody to contact.
+        let resp = router
+            .clone()
+            .oneshot(req(
+                "POST",
+                &format!("/api/users/{carol_id}/disable"),
+                None,
+                Some(&admin),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let resp = router
+            .oneshot(req("GET", "/api/users/directory", None, Some(&alice)))
+            .await
+            .unwrap();
+        let usernames: Vec<String> = json(resp).await["users"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|u| u["username"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(usernames, vec!["root".to_string()]);
     }
 }
