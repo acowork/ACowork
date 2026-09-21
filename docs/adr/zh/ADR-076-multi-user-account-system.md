@@ -647,11 +647,24 @@ data_dir/
 
 **kind 集合**：`text` / `image` / `document`（**本期不支持** voice / video / reaction / edit / delete，遵循 YAGNI）。
 
-**附件存储**：
+**附件的传输细节（已实现）**：
+
+- **限额**：`image/*` 25 MiB，其余 100 MiB，按**客户端声明的 mime** 选档——因此 mime 在入库前先被规整（裸 `type/subtype` token 对，否则回落 `application/octet-stream`），这也是它后来被回显成响应头的前提。
+- **body 上限**：Gateway 根路由的 `GLOBAL_BODY_LIMIT` 是 64 MiB，低于 100 MiB 的文档额度，所以上传路由**给自己单独抬到 101 MiB**（`DefaultBodyLimit` 挂在 `chat_routes()` 上，而不是抬全局）。回归测试 `the_upload_route_raises_the_global_body_limit`。
+- **下载**：响应带 `Content-Disposition: attachment` + `X-Content-Type-Options: nosniff`。存储的 mime 是客户端声明的，若允许 inline 渲染，`text/html` 就是一段跑在 Gateway 源上的脚本。图片仍按原 mime 返回（`<img>` 加载不受 `attachment` 影响，能正常显示）。
+- **文件名**：`file_name` 取最后一段路径、剥掉控制字符与引号、截 200 字符；落盘名不受它影响，只因它会被插进 `Content-Disposition`。同时下发 `filename*=`（RFC 5987，UTF-8 百分号编码），CJK 文件名才不会退化成下划线。
+- **读**：附件下载与消息读取同权限（self-or-admin + 必须是参与者），既不是参与者也不是 admin 一律 404——不泄露某个附件是否存在。id 在拼路径前校验为 UUID。
+
+**附件存储（已实现，与原稿的偏差见下）**：
 
 ```text
-data_dir/users/{a_id}/chats/{b_id}/files/{message_id}_{filename}
+data_dir/users/{min(a,b)}/chats/{max(a,b)}/files/{id}       附件本体（{id} = UUIDv4）
+data_dir/users/{min(a,b)}/chats/{max(a,b)}/files/{id}.json  附件元数据（filename / mime / size）
 ```
+
+**为什么不用原稿的 `{message_id}_{filename}`**：① 上传发生在**发送之前**（客户端先传文件拿到 `id`，再发一条引用 `id` 的消息），此时 `message_id` 尚不存在；② 把用户提供的字符串拼进路径同时引入穿越与重名两个问题。落盘名改用不透明 UUID，元数据放 sidecar，**blob 先写、元数据后写**——中间崩溃只会留下一个没人能引用的孤儿 blob，不会留下指向空文件的元数据。
+
+**消息里的附件只有 id**：`POST .../messages` 的 `attachments` 是 **id 数组**，不是对象数组。名字 / mime / size 全部由 `files/{id}.json` 解析后回填，客户端无法声明它没上传过的东西；`kind` 同理由服务端从 mime 推导（`image/*` → `image`，其余 → `document`），不接受客户端传 `kind`——否则一个 PDF 可以被标成图片。
 
 **为什么放 Gateway 而非 Runtime**：用户聊天与 agent 无关，是 Gateway 维度的横向数据；放到 Runtime 会触发 ADR-009 §5.4 边界问题——需要为它新造 Runtime 入口，复杂且无收益。**这是 ADR-009 §5.4 的显式例外**，在本文 §5.4 显式落字。
 
@@ -660,7 +673,7 @@ data_dir/users/{a_id}/chats/{b_id}/files/{message_id}_{filename}
 ```text
 GET    /api/users/{self}/chats                              → 聊天列表（含每个 chat 的 last_message_preview + unread_count）
 GET    /api/users/{self}/chats/{other_user_id}/messages    → 该对话消息分页（offset/limit 同 ADR-050）
-POST   /api/users/{self}/chats/{other_user_id}/messages    {kind, body, attachments[]} → 201 + 消息 id
+POST   /api/users/{self}/chats/{other_user_id}/messages    {body, attachments: [id]} → 201 + 消息全文（含服务端回填的 attachments）
 POST   /api/users/{self}/chats/{other_user_id}/read        → 清空自己的 unread_count
 POST   /api/users/{self}/chats/{other_user_id}/files       multipart → 上传图片/文档，返回 attachment_id
 GET    /api/users/{self}/chats/{other_user_id}/files/{aid} → 下载附件
@@ -854,7 +867,7 @@ require_mixed_case = false
 - **ponytail: `as_user` query 在反代链路上是字符串透传**，未来如果引入 proto 升级需要结构化字段。
 - **未实现**：多设备登录并发 session 限制、密码过期强制改密（本期仅记录 `password_expires_at` 不强制）、账号 lockout（5 次失败 → 15 分钟锁定）——放后续 ADR。
 - **已实现（Phase E）**：`/api/auth/first-login`（`invite_token` 以 SHA-256 落 `accounts.json`，24h 过期、用后即焚）、账号 CRUD（`account_api.rs`）、`registration_open` 接线（`[multi_user].registration_open = true` 时非 admin 亦可创建普通账号，永不创建 admin）。`allow_public_signup`（匿名注册，ADR 里的 demo-only 极端模式）**仍未接线**——它需要把 `/api/users` 加入中间件白名单，属安全面扩大，未做。
-- **已结清：multi_user 下展示字段（language / timezone / avatar …）的单一写入权威**。原先两条写路径各自为政：`PUT /api/users/{id}` 只接 `display_name` + `role`（Desktop 的其余偏好字段被 serde 静默忽略，no-op 不报错），而 `/api/user/avatar-*` 直接改 `user_profiles.json` 里共享的 "active user"——`account_api::sync_profiles` 每次账号变更都从 `accounts.json` **整体重建**该视图，头像变更会被下一次账号变更冲掉，且 multi_user 下 "active user" 本身无意义。现收敛到 `accounts.json` 单权威：`AuthService::update_account` 改收 `ProfilePatch`（全部展示字段；`None` = 不动，空串 avatar = 清除，`display_name` 沿用 trim + 空白忽略契约），`UpdateAccountRequest` 以 `#[serde(flatten)]` 透传；avatar 路由在 multi_user 分支按 `AuthContext.user_id` 写穿 `accounts.json` 后走同一个 `sync_profiles`（local 模式保留 active-user 路径不动）。回归测试：`update_account_applies_the_display_patch`（service 层：patch 语义 + 落盘）、`update_account_persists_display_fields`（HTTP：PUT 展示字段 → 权威读回一致）、`avatar_config_writes_through_accounts_under_multi_user`（先设头像 → 再改 display_name 触发重建 → 头像仍在，旧实现必失败）。**资产归属（已结清）**：头像文件按账号命名空间落 `assets/avatars/{user_id}/`——upload / list 只见自己的命名空间，delete 在 unlink **之前**做归属守卫（路径前缀非本人命名空间 → 403，admin 无 bypass：先经 `PUT /api/users/{id}` 解引用再删；守卫放在 unlink 前是因为"删完再拒"文件已经没了），GET 保持全池可读（头像本就要展示给他人，读隔离不是需求）；local 模式保留 `assets/` 根（单用户无跨用户向量）。user_id 进路径前在边界校验字符集（alnum / `-` / `_`），不信任 token claim 的形状。不做存量迁移——multi_user 无已发布数据（ADR 未评审、Desktop authStore 未接线），legacy `assets/avatar-XX` 路径 GET 仍可读，用户重新上传即迁移。回归测试：`avatar_file_deletes_are_confined_to_the_owner_namespace`（他人 / admin 删 → 403 且文件存活；owner 删 → 200 + 字段经权威清掉）、`avatar_target_dir_is_per_user_under_multi_user_and_shared_under_local`（目录解析 + 越界 user_id 拒绝）。**仍开放**：per-user 上传配额（刷盘）未做，命名空间是其挂点，随 Phase 6 评估。
+- **已结清：multi_user 下展示字段（language / timezone / avatar …）的单一写入权威**。原先两条写路径各自为政：`PUT /api/users/{id}` 只接 `display_name` + `role`（Desktop 的其余偏好字段被 serde 静默忽略，no-op 不报错），而 `/api/user/avatar-*` 直接改 `user_profiles.json` 里共享的 "active user"——`account_api::sync_profiles` 每次账号变更都从 `accounts.json` **整体重建**该视图，头像变更会被下一次账号变更冲掉，且 multi_user 下 "active user" 本身无意义。现收敛到 `accounts.json` 单权威：`AuthService::update_account` 改收 `ProfilePatch`（全部展示字段；`None` = 不动，空串 avatar = 清除，`display_name` 沿用 trim + 空白忽略契约），`UpdateAccountRequest` 以 `#[serde(flatten)]` 透传；avatar 路由在 multi_user 分支按 `AuthContext.user_id` 写穿 `accounts.json` 后走同一个 `sync_profiles`（local 模式保留 active-user 路径不动）。回归测试：`update_account_applies_the_display_patch`（service 层：patch 语义 + 落盘）、`update_account_persists_display_fields`（HTTP：PUT 展示字段 → 权威读回一致）、`avatar_config_writes_through_accounts_under_multi_user`（先设头像 → 再改 display_name 触发重建 → 头像仍在，旧实现必失败）。**资产归属（已结清）**：头像文件按账号命名空间落 `assets/avatars/{user_id}/`——upload / list 只见自己的命名空间，delete 在 unlink **之前**做归属守卫（路径前缀非本人命名空间 → 403，admin 无 bypass：先经 `PUT /api/users/{id}` 解引用再删；守卫放在 unlink 前是因为"删完再拒"文件已经没了），GET 保持全池可读（头像本就要展示给他人，读隔离不是需求）；local 模式保留 `assets/` 根（单用户无跨用户向量）。user_id 进路径前在边界校验字符集（alnum / `-` / `_`），不信任 token claim 的形状。不做存量迁移——multi_user 无已发布数据（ADR 未评审、Desktop authStore 未接线），legacy `assets/avatar-XX` 路径 GET 仍可读，用户重新上传即迁移。回归测试：`avatar_file_deletes_are_confined_to_the_owner_namespace`（他人 / admin 删 → 403 且文件存活；owner 删 → 200 + 字段经权威清掉）、`avatar_target_dir_is_per_user_under_multi_user_and_shared_under_local`（目录解析 + 越界 user_id 拒绝）。**仍开放**：per-user 上传配额（刷盘）未做。Phase 6 已评估：附件上传落地时**没有**顺手补它——配额属于按账号限额的策略层（超限是拒绝还是淘汰旧文件，需要先定），而当前唯一的写者 `store_attachment` 已经按 mime 分档限制单文件大小，两者不是同一件事。挂点仍是 `users/{user_id}/` 命名空间。
 - **ponytail: 公开 session 的分页计数是"可见行数"而非"总行数"**：过滤发生在分页前，所以 `total_count` / `total_pages` 只数调用者能看见的 session。这是有意的——按总数分页会泄漏"别人还有 N 个 session"——但代价是不同用户看到的同一页边界不同，前端**不能**缓存跨用户的分页结果。
 - **已结清：会话控制面的 MQTT 命令已全部删除**（proto 字段 + Runtime 变体 + Gateway/Tauri 映射表），字段号整体重排为连续。协议文档（`mqtt.md` / `http.md` / ADR-034 §11.2.B）已同步为"已删除 + 迁 HTTP"。**仍未结清**：MQTT 事件面的读侧保密性（无 per-user topic ACL，`mqtt.md` §10 已标注为暂缓 / 已知缺口）。
 - **已结清：`meta/` 目录的全量扫已改为进程内内存索引**。原先每次列表都是 `scan_sessions_from_meta` = `read_dir` + 逐文件 `read + serde_json`。实测（2000 个 meta / 1.5 MB，本机 APFS 热缓存）：release **23 ms**、debug **42 ms**，而 `read_dir().count()` 只要 **0.9 ms**——release 仅比 debug 快 1.8×，说明瓶颈是 **2000 次 `open`/`read`/`close` 系统调用（~11 µs/文件），不是 JSON 解析**。真实规模（本机各 agent 1–17 个会话）单次约 0.2 ms，所以当时判断这是**形状**问题（随历史线性增长）而非当下问题。现已按当初写下的升级路径落地：`META_INDEX`（进程内 `HashMap<会话目录, MetaIndex>`，Runtime 一进程一 agent → 生产只有 1 条）持有已排序的 `Vec<(String, SessionMeta)>`，`scan_sessions_async` / `find_latest_session` / `prune_excess_sessions` 读缓存；**写口唯一**是 `write_session_meta`（写完顺手 upsert，不存在"记得失效"这一步），**删口唯一**是 `remove_session_meta`（`delete_session` 与 prune 都收敛到这里）。有效性靠 `read_dir().count()` 探针（不等则重建，自愈）。为正确性加的两处：排序补 `session_id` tie-break（否则缓存索引与重新扫描在毫秒级平局会话上分页边界不一致）、`dev/ci.sh` 的 `run_meta_layout_redline` 把 meta 路径构造限制在 `conversation.rs`（其余仅测试夹具、固定上限、只降不升）。**未落盘成索引文件**——那是第二真相源，已在本 ADR §决策 2 否决。回归测试：`session_index_reflects_funnel_writes_without_rescanning`（同一 meta 被改写时条目数不变，只有写侧 upsert 能让列表看见新值）、`session_index_self_heals_on_out_of_band_meta_change`、`remove_session_meta_drops_the_session_from_the_listing`。
@@ -863,12 +876,15 @@ require_mixed_case = false
 - **已结清：公开会话的"只读打开"**。做法是**观众不激活**（而不是给观众开 `open` 权限）：Desktop `can_write === false` 时输入框禁用 + placeholder 提示"只读会话"，且 `openSession` / `closeTab` 分别跳过 `POST /open` / `POST /close`；历史仍由 `GET /messages`（读授权）加载，事件流由通配 MQTT 订阅在会话真正 Active 时送达。**为什么不开 `open` 读授权**（曾实现又被撤回）：`Active` / `Closed` 是 per-session **全局**状态，观众激活会产生一个"观众无权关（close 是写授权，刻意不让旁观者拆会话）、owner 也不知道被谁占着"的常驻会话——正确回收它需要观察者引用计数，而当前 Runtime 恰好**没有** per-session GC（见上一条）。回归防护：Desktop `src/stores/sessionSharing.test.ts`（可见性乐观翻转 + 回滚；`can_write === false` 时 open / close 零请求）。
 
 - **ponytail: MQTT 事件面没有 per-user 订阅隔离**（读侧保密性缺口）。`session 隔离`只覆盖**写侧**与 **HTTP 读侧**：任何能连上 broker 的客户端理论上可以 SUBSCRIBE 任意 `agents/{id}/sessions/{sid}/messages/#` 看到他人会话的事件流。这是 ceiling——`rumqttd` 0.20 没有 per-topic ACL 能力，**无法在现有 broker 上修复**（用户决策：MQTT 用户身份验证先暂缓）。缓解：broker 默认只 bind `127.0.0.1`（攻击者须先能访问本机回路）。升级路径 = 换 mosquitto（Phase 5b 评估）或给事件面加 token 化订阅代理。已在 [mqtt.md §10](../../protocols/zh/mqtt.md) 标注为"暂缓 / 已知缺口"。
+- **已结清 + 已实现：普通用户"发起"会话**（用户聊天，§决策 8）。原缺口：解析收件人需要一份用户名录，而 `GET /api/users` 是 admin-only，"发消息"入口只挂在 admin-only 的侧栏 `UserList` 右键菜单上（普通用户只看得见自己那一行）——普通用户只能**回复**，无法发起。**决策（用户授权"你来定"）**：新增 `GET /api/users/directory`，**任何已认证账号可读**，返回三字段 `user_id` / `username` / `display_name`，**排除已禁用账号**，**排除调用者自己**。取舍依据：① 这些展示字段本就是部署的公开视图——`user_profiles.json` 从 `accounts.json` 重建后被 Runtime 当 `last_user_profile` 消费（§决策 1），名字在此语境里不是秘密；② 一个无法指认收件人的聊天功能，对**除 admin 外的所有人**（也就是它服务的所有人）不可用，"隐私死锁"比"可枚举用户名"更糟。Desktop 侧 `MessagesView` 左栏头部加"新会话"选择器（联系人来自该端点），admin 的 `UserList` 右键"发消息"降级为快捷方式而非唯一入口。回归测试：`user_directory_is_readable_by_any_account_but_bounded`（普通用户可读 + 禁用账号不出现 + admin 可读）。
+  - **ponytail: 名录对任何认证账号是全量可枚举**（残余 ceiling）。端点不暴露邮箱 / 时区 / 自定义字段，也不暴露 admin 才需要的字段，但 `username` 全集对每个账号可见。个人 / 小团队部署（本 ADR 的目标规模）这是可接受的；要收敛就得上"先按精确 username 查询 / 只回已有会话对手方 / 通讯录邀请制"——都需要一个新的产品决策，不是加个 filter 能解决的。
+- **ponytail: 附件有三处已知 ceiling**（§决策 9，均在代码中就地点标注）。① **blob 无回收**：先写 blob 后写元数据，两次写之间崩溃会留一个没人能引用的孤儿文件；上传本身需要认证，且失败窗口极窄，所以不为此加一个后台清扫线程——真要回收时按"无 sidecar 且早于 N 天"扫 `files/` 即可。② **下载整文件读进内存**：`load_attachment` 返回 `Vec<u8>`，单次上限 100 MiB（本机回路的桌面场景可接受）；要改成流式就换 `tokio::fs::File` + `ReaderStream`，代价是多一个依赖。③ **上传时限按客户端声明的 mime 分档**：把 100 MiB 的文档声明成 `image/png` 只会**更严格**（25 MiB），反向没有漏洞——真正决定处理方式的是存储方自己规整过的 mime，限额只影响接受的体积。
 
 ---
 
 ## 6. 改动清单（按 crate / 文件）
 
-> **实现状态（截至 Phase E 账号 CRUD 落地）**：本节标注 **（已实现）** 的条目已合并并测试通过——core `src/account.rs`；gateway `src/account/store.rs` / `password.rs` / `auth/{mode,token,revoked,service}.rs` / `http/{auth_middleware,auth_api,account_api}.rs` / config `auth_mode` + `[multi_user]` + `effective_auth_mode()` / cli `--auth-mode` / `Gateway::new` 的 bootstrap_admin fail-fast / `proxy.rs` 的 14 条会话控制路由（生命周期 7 + 会话动作 7）；runtime `src/http/session_control.rs` + `conversation.rs` 的 scope/visibility + `agent/session/session_manager.rs` 的 `create_frontend_session` / `resume_session`。**未实现**的条目 = 后续 PR（chat_api / chat persistence / attachments / Desktop `authStore`），属计划范围，非本节遗漏。原稿的 `protocol.rs AccountPublicView` **未新增**——`acowork_core::account::AccountView` 已承担脱敏 API 返回类型，再建一个同类是重复。
+> **实现状态（截至 Phase 6 Desktop 聊天 UI）**：本节标注 **（已实现）** 的条目已合并并测试通过——core `src/account.rs`；gateway `src/account/store.rs` / `password.rs` / `auth/{mode,token,revoked,service}.rs` / `http/{auth_middleware,auth_api,account_api}.rs` / `chat.rs` / `http/chat_api.rs` / config `auth_mode` + `[multi_user]` + `effective_auth_mode()` / cli `--auth-mode` / `Gateway::new` 的 bootstrap_admin fail-fast / `proxy.rs` 的 14 条会话控制路由（生命周期 7 + 会话动作 7）；runtime `src/http/session_control.rs` + `conversation.rs` 的 scope/visibility + `agent/session/session_manager.rs` 的 `create_frontend_session` / `resume_session`；Desktop `authStore` / `authFetch` / `account/*` / `user-list/*` / `lib/user-chat-api.ts` / `stores/userChatStore.ts` / `views/MessagesView.tsx`。**未实现**的条目 = 后续 PR（`chat/attachments`），属计划范围，非本节遗漏。原稿的 `protocol.rs AccountPublicView` **未新增**——`acowork_core::account::AccountView` 已承担脱敏 API 返回类型，再建一个同类是重复。
 ### 6.1 core/acowork-core
 
 - 新增 `src/account.rs`（**已实现**）：`UserAccount`、`Role`、`AccountListFile`、`DISABLED_PASSWORD_HASH`；`UserAccount::to_public_profile()` 产出 `UserProfile` 公开视图
@@ -898,13 +914,13 @@ require_mixed_case = false
 - `src/http/auth_middleware.rs`（**已实现**）：token 校验 + `AuthContext { user_id, role, as_user }` 注入 + `effective_user_id()`；局部白名单 + `OPTIONS` 放行；`as_user` 非 admin → 403
 - `src/http/auth_api.rs`（**已实现**）：`/api/auth/login` `/refresh` `/logout` `/change-password` `/first-login` `/me`（`/first-login` 消费 `invite_token`，随 Phase E 落地）；Argon2 调用全部走 `spawn_blocking`
 - `src/auth/service.rs`（**已实现**）：`AuthService` —— 登录 / 刷新（轮换 + 复用检测）/ 登出 / 改密 / `first_login` / 账号 CRUD（`create_account` / `update_account` / `set_role` / `disable_account` / `reset_password`）/ `verify_access` / `ensure_bootstrap_admin`；`PasswordPolicy`、`BootstrapAdmin`、`AuthError`（含 `Conflict`）、`TokenPair`、`AuthPrincipal`、`ProfilePatch`（展示字段 patch，见 §5.5「已结清」条目）的定义处
-- `src/http/account_api.rs`（**已实现**）：账号 CRUD（`GET/POST /api/users`、`GET/PUT/DELETE /api/users/{id}`、`/disable`、`/reset-password`），multi_user 下取代 `users_api.rs` 的 `/api/users` 路径，并把 `accounts.json` 重新投影为 `user_profiles.json`；`PUT /api/users/{id}` 经 `UpdateAccountRequest`（`#[serde(flatten)] ProfilePatch`）承接全部展示字段
-- `src/http/chat_api.rs`：用户-用户聊天 API
+- `src/http/account_api.rs`（**已实现**）：账号 CRUD（`GET/POST /api/users`、`GET/PUT/DELETE /api/users/{id}`、`/disable`、`/reset-password`），multi_user 下取代 `users_api.rs` 的 `/api/users` 路径，并把 `accounts.json` 重新投影为 `user_profiles.json`；`PUT /api/users/{id}` 经 `UpdateAccountRequest`（`#[serde(flatten)] ProfilePatch`）承接全部展示字段；另有 `GET /api/users/directory`（**任何认证账号**可读的联系人名录，唯一非 admin-only 的账号列表，见 §5.5）
+- `src/http/chat_api.rs`（**已实现**）：用户-用户聊天 API —— `GET /api/users/{user_id}/chats`（按 `last_active_at` 倒序，含 `peer_user_id` / `peer_display_name` / `unread_count` / 预览）、`GET|POST .../chats/{chat_id}/messages`（`offset` 自尾部倒数，默认 50 / 上限 200；body trim 后非空且 ≤ 8000 字符）、`POST .../chats/{chat_id}/read`。读 = self-or-admin（admin "view as" 只读 scope），写 = **self-only**（admin 亦不能代发，`from` 强制取 token 身份）；`chat_id` 非规范、或调用者不是参与者 → 404（不泄露存在性）。`peer_display_name` 由服务端解析（`display_name` → `username` → id）并对整页只读一次账号表——非 admin 读不到 `/api/users`，否则无从给对端打标签
 - `src/account/store.rs`（已实现）：账号权威表 `accounts.json` 读写（原子写：temp + rename）；`src/account/password.rs`（已实现）：Argon2id PHC 哈希 / 校验
 - `src/auth/token.rs`（已实现）：HS256 token 签发 / 校验 / refresh family 管理；签名密钥 `data_dir/auth/secret`（首次启动生成，`0600`）
 - `src/auth/revoked.rs`（已实现）：`revoked_families.txt` 文件管理（`r:{family}` 轮换 / `x:{family}` 显式撤销 / `{user_id}.*` 通配，见决策 3 实施记录）
-- `src/chat/persistence.rs`：`conversation.json` + `conversation.jsonl` 读写
-- `src/chat/attachments.rs`：图片 / 文档附件落盘（`data_dir/users/.../files/`）
+- `src/chat.rs`（**已实现**）：`conversation.json`（`participants` / `last_active_at` / `last_message_preview` 截 80 字符 / `unread` / `version`）+ `messages.jsonl`（append-only）读写。**单文件模块**——原稿的 `src/chat/{persistence,attachments}.rs` 拆分未采用：附件还没落地，先拆两个文件只是目录噪音。配对目录 `users/{min(a,b)}/chats/{max(a,b)}/`（wire 形态 `chat_id = min__max`，id 是 UUIDv4 故 `__` 不会出现在 id 内）；`conversation.json` 原子写（temp + rename）；JSONL 逐行解析，**单行损坏只 warn 不失效**；未读按 `user_id` 计（不按 a/b 位序，避免配对顺序重算时计数漂移）。已知 ceiling（已标 `ponytail:`）：列表按目录全扫，尾部翻页会读整个 JSONL
+- `src/chat/attachments.rs`：**未实现（Phase 6 剩余）**——附件落盘 `data_dir/users/.../files/` + `POST /api/users/{self}/chats/{other}/attachments`。`messages.jsonl` 已预留 `attachments` 字段（当前恒空），属加法扩展
 - `src/auth/mode.rs`（**已实现**）：`AUTH_MODE` 推断 + bind 地址解析 + CLI flag 解析（决策 12）；`pub enum AuthMode { Local, MultiUser }`；`pub fn resolve_auth_mode(cli: Option<AuthMode>, toml: Option<AuthMode>, bind_host: &str) -> AuthMode`；pub `is_loopback_host(host: &str) -> bool` helper（loopback 判定含 `127.0.0.0/8`、`::1`、`localhost`；`0.0.0.0` / `fe80::/10` / LAN IP / 域名 → MultiUser 安全侧）
 
 **修改**：
@@ -944,6 +960,44 @@ require_mixed_case = false
 - 修改 `src/stores/chatStore.ts`：8 个控制调用点 MQTT → HTTP；`closeTab` 在 `can_write === false` 时跳过 `POST /close`
 - 修改 `src/components/chat/ChatPanel.tsx`：`can_write === false` 时禁用输入框 + 只读 placeholder；挂载可见性开关
 - 修改 `src/lib/types.ts`：`SessionInfo` 增加 `visibility` / `can_write`
+
+**已实现（Phase 2 残留 + Phase 5，本次）**：
+- 新增 `src/lib/auth-api.ts`：`/api/auth/*` + `/api/users` 的薄 HTTP 封装（登录 / 刷新 / 登出 / 改密 / me / 账号列表 / 软删除），错误统一为 `AuthApiError(status, message)`
+- 新增 `src/lib/authFetch.ts`：**全局 `fetch` 拦截器**（替代原稿的 `src/lib/api/auth.ts` 逐调用点包装）——只对 Gateway origin 注入 `Authorization`，跳过 `/api/auth/*`，401 → 单飞 refresh → 重放一次；`AUTH_MODE=local` 下纯透传。取舍理由：Desktop 有 ~170 处裸 `fetch(` 调用点，逐点包装极易漏一处（漏点 = multi_user 下静默 401），拦截器保证零遗漏
+- 新增 `src/stores/authStore.ts`：token 管理（`localStorage["acowork.auth.tokens"]`）+ 模式解析（`/api/status` 的 `auth_mode`）+ 单飞 `refreshTokens`；账号切换 / 退出 / 注销 / 改密均**清 token + `window.location.reload()`**（§9 问题 6 的"已登出未登入"中间态 = 重载落 LoginView，沿用仓库既有 `location.reload` 恢复范式，替掉原稿的逐 store reset）
+- 新增 `src/components/account/`：`LoginView`（App 门禁）+ `AccountMenu`（复用 `common/ContextMenu` 弹层：切换账号 / 改密 / 注销 / 用户偏好 / 退出）+ `ChangePasswordModal`
+- 新增 `src/components/user-list/UserList.tsx` + `partitionAccounts.ts`：侧栏 "Users (N)" 折叠分组（admin 列全部账号，普通用户只列自己）；admin 点账号 → `authStore.viewAsUserId` → `agentStore.fetchSessions` 追加 `?as_user=`（只读视图）
+- 修改 `src/components/layout/NavBar.tsx`：头像入口改用 `AccountMenu`（local / 未登录回退到旧"编辑资料"行为）
+- 修改 `src/App.tsx`：`installAuthFetchInterceptor` 在 `main.tsx` 启动期挂载；`logged_out` → LoginView，`unknown`（模式解析中）→ 空面，其余 → AppLayout
+- 修改 `src/lib/types.ts`：`UserAccount` / `AccountListResponse` / `TokenPair` / `AuthMode` / `AuthState` / `Role`；`SystemStatusResponse.auth_mode`
+- 修改 `src/stores/agentStore.ts`：`fetchSessions` 按 `viewAsUserId` 追加 `as_user`
+- 修改 `src/i18n/locales/*`：`account.*` / `userList.*` 键（en / ja / ko / zh-CN / zh-TW）
+- Gateway `src/http/routes.rs`：`GET /api/status` 新增 `auth_mode` 字段（决策 12 的模式探测入口；`/api/status` 本就在中间件白名单）
+- 未做（留后续）：注册 modal（`registration_open` 的 Desktop 入口）、用户-用户聊天 UI（Phase 6 剩余）、附件上传 API + UI
+
+**已实现（Phase 6 Desktop 聊天 UI，本次）**：
+- 新增 `src/views/MessagesView.tsx`：用户聊天视图（左会话列表 + 右会话线程 + 输入框）；`Enter` 发送 / `Shift+Enter` 换行；发送失败把草稿**放回**输入框（不吞用户输入）；会话标题优先用 `GET /chats` 的 `peer_display_name`，新建会话（还没有列表行）回退到 `UserList` 传进来的标签，最后才是裸 id
+- 新增 `src/stores/userChatStore.ts`：`chats` / `activePeerId` / `messages` + `send`（**用 Gateway 的回显**，绝不本地铸造 `ts` / `from`）/ `openChat`（含已读回执；回执失败不影响读消息）/ `startPolling`（**引用计数**的单一 interval：nav 红点与打开中的视图共用一个轮询，不会双倍请求；`release` 幂等以对抗 React 18 双调用 effect）/ `reset`
+- 新增 `src/lib/user-chat-api.ts`：4 条路由的薄封装。**刻意不传 token**——这些路径不在 `/api/auth/*`，由全局拦截器注入 + 401 刷新，在这里再抄一份 token 流转只会更弱；`auth-api.ts` 的 `readError` 改为导出以复用（`{error}` / `{detail}` 解码只留一处）
+- 新增 `src/components/common/MessagesIcon.tsx`：nav 图标的 outline / filled 变体。**刻意不复用 `ChatIcon`**：两个 nav 目标在同一根 40px 竖条里，24px 下必须能分辨
+- 新增 nav 未读红点：由 `userChatStore` 的未读合计驱动，`NavBar` 在 `multi_user` 下挂轮询——消息在用户正看 agent 会话时到达也看得见。`local` 模式下该 nav 项**不渲染**（路由本就不存在，避免"显示然后 404"）
+- 修改 `src/stores/layoutStore.ts` + `src/components/layout/AppLayout.tsx`：新增 `requestNavView(view)` 的 seq 契约（沿用 `workspaceSearchFocusSeq` 的 consume-once 范式）。`currentView` 是 `AppLayout` 的私有 state，侧栏要"跳到收件箱"只能走这个通道
+- 修改 `src/components/user-list/UserList.tsx`：右键菜单新增"发消息给该用户"（自己、已禁用账号不显示），打开线程并切到 `users` 视图
+- 修改 `src/lib/types.ts`：`NavView` 增 `"users"`；新增 `UserChatSummary` / `UserChatMessage` / `UserChatMessagesPage` / `UserDirectoryEntry`（对齐 `ChatSummary` / `ChatMessage`）
+- 新增"新会话"选择器：`MessagesView` 左栏头部按 `GET /api/users/directory` 渲染联系人下拉（端点失败 / 暂无他人 → 不渲染，收件箱降级但**回复仍可用**）；`user-chat-api.ts` 加 `listUserDirectory` / `contactLabel`。admin 的 `UserList` 右键"发消息"保留为快捷方式，不再是唯一入口
+- 修改 `src/i18n/locales/*`：`navBar.users` + `messages.*`（共 11 键 × 5 locale，用脚本逐键核对通过）
+- 附件 UI：composer 的回形针 + 待发附件条（可逐个移除，上传失败的**不入队**）+ 气泡内图片缩略图 / 文件条（点击下载）+ `attachmentObjectUrl` 的 blob 缓存。**图片走 `fetch` + `createObjectURL` 而不是 `<img src="/api/...">`**——下载路由要 Bearer，全局拦截器只拦 `fetch`，把 token 塞进 URL 才是更差的做法
+- 未做（Phase 6 剩余）：无；普通用户发起会话已闭环（见 §5.5，残余 ceiling = 名录全量可枚举）
+
+**已实现（Phase 5 admin 账号管理 UI + Phase 6 后端，本次）**：
+- 新增 `src/components/account/CreateAccountModal.tsx`：admin 建号（username / display_name / 可选 password；不填 → 返回 `invite_token` 走首次登录激活）
+- 新增 `src/components/account/InviteTokenModal.tsx`：`invite_token` 展示 + 复制（24h 过期、用后即焚）。建号与重置密码共用该弹窗
+- 修改 `src/components/user-list/UserList.tsx`：admin 右键菜单接线（禁用 → 确认弹窗 / 重置密码 → `InviteTokenModal` / 以该用户视角查看 → `setViewAsUser`）；分组顶部 `+` 打开 `CreateAccountModal`
+- 修改 `src/lib/auth-api.ts` / `src/stores/authStore.ts`：`createAccount` / `disableAccount` / `resetPassword` / `deleteAccount` + `accounts` 缓存
+- 修改 `src/i18n/locales/*`：本轮新增的 `account.*` / `userList.*` 键在 5 个 locale 中均已补齐（用 `jq` 逐键核对通过）
+- Gateway：新增 `src/chat.rs`（含附件存储：`store_attachment` / `load_attachment` / `content_disposition` / mime 与文件名的入口规整）+ `src/http/chat_api.rs` + `AuthService::data_dir()`；`routes.rs` 新增 `ApiError::payload_too_large`（413）；`routes.rs` 在同一个 `auth_service.is_some()` 分支内 `merge(chat_api::chat_routes())`（`dev/ci.sh` 的 auth-mode 红线扫描通过）
+- Gateway：`src/http/account_api.rs` 新增 `GET /api/users/directory`（**任何认证账号**可读的联系人名录，§5.5）+ `UserDirectoryResponse` / `DirectoryEntry`；`routes.rs` 注册在 `/api/users/{user_id}` **之前**（axum 0.8 本偏好字面量，写在前是为了读代码的人不必知道那条规则）
+- 测试：Gateway 新增 **24** 条。`chat::tests` 16 = 配对规范化 / 未读语义 / 双方可见性 / 尾部翻页 / 坏行跳过 / 预览截断 / 自我对话拒绝 / 非参与者拒读 + 附件 8 条（参与者收敛 / **跨会话不可借用** / 元数据以服务端为准 / 注入式 mime 回落 / 路径不可穿越 / 限额按 mime 分档 / CJK 文件名落 `filename*` / 无正文消息回退到附件名预览）；`http::chat_api::tests` 7 = 收发 + 未读 + admin 只读视图 / 第三方与 admin 越权 / 空 body 与无 token / **附件上传→发送→下载全链路** / **附件读写权限边界** / **限额与空附件 413·422** / **上传路由突破 64 MiB 全局 body 上限**；`http::account_api::tests` 1 = 名录普通用户可读且被有界收窄。`cargo clippy --all-targets -D warnings` 干净，`cargo test -p acowork-gateway --lib` **596 passed**；Desktop `tsc --noEmit` 在改动文件上零错误，`authStore` / `authFetch` / `partitionAccounts` / `userChatStore` **48 passed**
 
 ### 6.6 dev/ci.sh 新增 ceiling lint（**已实现**）
 
@@ -1069,15 +1123,17 @@ grep -nE '"/sessions' core/acowork-runtime/src/http/server.rs
 ## 8. 实施里程碑（建议）
 
 > **进度（本次实施）**：Phase 1-4 的**后端全部完成并测试通过**——`UserAccount` 模型 + Argon2id + `accounts.json` + `/api/auth/*`（含 `/first-login`）+ token 中间件 + bootstrap_admin fail-fast（Phase 1-2）；`SessionMeta.user_id` + `visibility` 开关 + Runtime scope 过滤 + owner 校验 + **会话写路径全量 MQTT→HTTP 迁移**（Phase 3，见 §决策 4 Phase D 实施记录），MQTT 侧**全部用户操作命令**（两批共 16 条：生命周期 8 + 会话动作 8）的 proto 字段 / Runtime 变体 / 命令名映射表已**删除**并重排为连续，`can_write` 下发到前端用于禁用写控件；**Phase 4 账号 CRUD**（`account_api.rs` + `registration_open` 接线 + invite/first-login 生命周期）已完成。Phase 5-7 未动（Desktop UI / 用户聊天 / 进程级 e2e + 手册）。剩余项在各处标了 ⬜ / `**未实现（Phase X）**`。
+>
+> **补充（本次）**：Phase 2 残留（Desktop `authStore` + 全局 fetch 拦截器 + `LoginView` 门禁 + 顶栏账号菜单）与 Phase 5（Sidebar User 折叠分组 + admin 账号管理 UI + `?as_user=` 过滤）已落地，见 §6.5「已实现（Phase 2 残留 + Phase 5，本次）」与「已实现（Phase 5 admin 账号管理 UI + Phase 6 后端，本次）」。Phase 6 的**后端**（`src/chat.rs` 持久化 + `src/http/chat_api.rs`，见 §6.4）与 **Desktop 聊天 UI**（`MessagesView` + `userChatStore` + nav 未读红点 + `requestNavView`，见 §6.5「已实现（Phase 6 Desktop 聊天 UI，本次）」）均已落地并测试；**普通用户发起会话**所需的 `GET /api/users/directory`（§5.5，本次决策）与 `MessagesView` "新会话"选择器一并完成——§决策 8 除附件外已闭环。**附件上传/下载**（§决策 9）也已落地；§决策 8 + 9 至此全部闭环。仍未动：Phase 7（lint + 进程级 e2e + 手册）。
 
 | Phase | 内容 | 估时 | 状态 |
 |---|---|---|---|
 | 1 | `UserAccount` 数据模型 + Argon2id password_hash + Vault 加密扩展字段 | 1 周 | ✅ 模型 / Argon2id / store 完成；Vault 加密扩展字段未做（Vault locked 登录已可用，扩展字段非阻塞） |
-| 2 | `/api/auth/*` + token middleware + `authStore` + 顶栏账号菜单（登录 / 改密 / 注销） | 1 周 | ✅ 后端完成（`AuthService` + 5 条路由 + 中间件 + bootstrap_admin）；Desktop `authStore` / 账号菜单未做 |
+| 2 | `/api/auth/*` + token middleware + `authStore` + 顶栏账号菜单（登录 / 改密 / 注销） | 1 周 | ✅ 后端完成（`AuthService` + 5 条路由 + 中间件 + bootstrap_admin）；Desktop `authStore` / 账号菜单**已完成（本次）**：`authStore` + 全局 `fetch` 拦截器（`authFetch`）+ `LoginView` 门禁 + 顶栏 `AccountMenu` + 改密 modal |
 | 3 | `SessionMeta.user_id` + `visibility` + Runtime scope 过滤 + owner 校验 + 控制面 HTTP 化 | 1.5 周（含 grep ceiling lint） | ✅ schema（`user_id` write-once + `visibility`）+ Gateway 头部卫生（剥/注 `x-user-id`）+ Runtime scope 过滤（分页前）+ 读/写 owner 校验 + **14 条 HTTP 控制路由**（生命周期 7 含 `PUT .../workspace`，会话动作 7）+ `can_write` 下发 + **MQTT 全部用户操作命令删除**（两批共 16 条；proto 字段一并移除并重排为连续）+ Desktop `session-control.ts` + 前端写控件禁用。grep ceiling lint 仍属 Phase 7 |
 | 4 | admin 角色 + `as_user` + bootstrap_admin + 首位 admin 创建 | 0.5 周 | ✅ `as_user` 校验 + 只读守卫 + 数据面；bootstrap_admin / 首位 admin；账号 CRUD（`account_api.rs`）+ `/api/auth/first-login` + `registration_open` 接线均已完成 |
-| 5 | Sidebar User 折叠分组（`partitionAccounts` + UserList.tsx） | 0.5 周 | ⬜ 未开始 |
-| 6 | 用户-用户聊天（persistence + API + Desktop UI + 附件上传） | 2 周 | ⬜ 未开始 |
+| 5 | Sidebar User 折叠分组（`partitionAccounts` + UserList.tsx） | 0.5 周 | ✅ 已落地：`partitionAccounts` + `UserList.tsx` + `AgentList` 接入 + admin `?as_user=` 过滤（`viewAsUserId`）+ admin 建号（`CreateAccountModal`）/ 邀请 token（`InviteTokenModal`）/ 禁用 / 重置密码 UI |
+| 6 | 用户-用户聊天（persistence + API + Desktop UI + 附件上传） | 2 周 | ✅ **完成**：`src/chat.rs`（`users/{min}/chats/{max}/conversation.json` + `messages.jsonl`，原子写、尾部翻页、单条坏行跳过、按 user_id 计未读）+ `src/http/chat_api.rs`（4 条路由；读 = self-or-admin，写 = self-only 且 `from` 强制取 token；`peer_display_name` 服务端解析）+ **附件上传/下载**（`files/{id}` + sidecar + `Content-Disposition`/`nosniff` + 每路由 body limit 抬升；见 §决策 9）+ `MessagesView` / `userChatStore`（引用计数轮询 + 待发附件队列）/ `user-chat-api` / nav 未读红点 / `requestNavView` + **发起会话闭环**（`account_api` 的 `GET /api/users/directory` + `MessagesView` "新会话"选择器） |
 | 7 | ceiling lint + 集成测试 + 文档（README / 用户手册） | 1 周 | ◐ 单元测试 + router 集成测试已就位；协议文档（`mqtt.md` 命令树 + `http.md` §5.6 控制面 + ADR-034 §11.2.B）已更新为"MQTT 控制面清空 + 全部迁 HTTP + 字段号重排"；`node_proto_golden.rs` golden 已重算；grep ceiling lint / 端到端 e2e / 用户手册未做 |
 
 总计 ~7.5 周。建议分两个 PR 合并：**PR1 = Phase 1-4**（账号 + 隔离 + admin），**PR2 = Phase 5-6**（UI + 聊天），**PR3 = Phase 7**（lint + 文档）。
