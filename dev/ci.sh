@@ -212,6 +212,29 @@ run_gateway_auth_mode_redline() {
     echo "Auth-mode routing red line: OK"
 }
 
+# ADR-076 §决策 8: the user-to-user chat store (`src/chat.rs`) owns the pairing
+# layout — `data_dir/users/{min(a,b)}/chats/{max(a,b)}/`. A second place
+# deriving that path would re-implement the min/max ordering, and the first
+# thing an order-dependent re-derivation gets wrong is *whose* messages you
+# are reading. The path is built once, in `chat.rs`.
+run_gateway_chat_path_redline() {
+    echo "Checking ADR-076 chat-path ownership red line..."
+    local root="$SCRIPT_DIR/../core/acowork-gateway/src"
+    local offenders
+    offenders=$(grep -rnE '\.join\("(users|chats|files|conversation\.json|messages\.jsonl)"\)' \
+        --include='*.rs' "$root" \
+        | grep -vE "^$root/chat\.rs:" \
+        || true)
+    if [ -n "$offenders" ]; then
+        echo "ERROR: chat pairing path constructed outside chat.rs (ADR-076 §决策 8):"
+        echo "$offenders"
+        echo "Derive it via chat::pair_dir / chat_id — a hand-rolled path can"
+        echo "disagree with the canonical min__max ordering."
+        exit 1
+    fi
+    echo "Chat-path ownership red line: OK"
+}
+
 run_clippy() {
     echo "Running cargo clippy..."
     cargo clippy --all-targets -- -D warnings
@@ -277,6 +300,7 @@ case "$MODE" in
         run_meta_layout_redline
         run_gateway_auth_scope_redline
         run_gateway_auth_mode_redline
+        run_gateway_chat_path_redline
         run_check
         ;;
     clippy)
@@ -298,6 +322,7 @@ case "$MODE" in
         run_meta_layout_redline
         run_gateway_auth_scope_redline
         run_gateway_auth_mode_redline
+        run_gateway_chat_path_redline
         run_check
         run_clippy
         run_test
