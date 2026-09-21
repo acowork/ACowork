@@ -153,7 +153,7 @@ LLM Provider / Models 全局资源、MCP 目录、嵌入模型、用户档案、
 | 方法 | 路径 | 用途 |
 |---|---|---|
 | GET | `/health` | 健康检查（无鉴权），含 IPC（MQTT）/ CronStore / 磁盘空间 |
-| GET | `/api/status` | 系统状态：版本、运行中 Agent 数、内存占用；`mqtt.auth_enabled` 开启时额外返回 `mqtt_username` / `mqtt_password`（Desktop MQTT 凭据下发，ADR-055 Phase 5a） |
+| GET | `/api/status` | 系统状态：版本、运行中 Agent 数、内存占用；`auth_mode`（`local` / `multi_user`）+ `registration_open`（非 admin 能否建号，账号系统未启用时恒 `false`）；`mqtt.auth_enabled` 开启时额外返回 `mqtt_username` / `mqtt_password`（Desktop MQTT 凭据下发，ADR-055 Phase 5a）。**免认证可读** |
 | GET | `/api/config` | 读取 Gateway 配置 |
 | PUT | `/api/config` | 更新日志级别、日志切分、idle_timeout、默认 provider/model、HF mirror 等（**不含** `[security]` 段——见下） |
 | DELETE | `/api/logs` | 清空日志 |
@@ -510,7 +510,7 @@ Runtime 消费规则：`503` **不更新本地 cache**，按 `Retry-After` 退�
 | 路径 | 为什么放行 |
 |---|---|
 | `/health` | 探活 |
-| `/api/status` | Desktop 必须先读到 `auth_mode` 才能决定是否渲染登录页 |
+| `/api/status` | Desktop 必须先读到 `auth_mode` / `registration_open` 才能决定是否渲染登录页、以及是否给非 admin 显示"邀请账号"入口 |
 | `/api/auth/login`、`/api/auth/refresh`、`/api/auth/first-login` | 拿 token 之前没有 token |
 | `/api/auth/logout` | access token 已过期的客户端也要能丢掉死会话 |
 

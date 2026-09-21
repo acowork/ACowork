@@ -111,6 +111,10 @@ gateway.toml when the account store is empty — refusing to start with no way t
 | `false`（默认） | 403。只有 admin 建号 |
 | `true` | 可以自建，但**永远**是 `role = user`——请求里带 `role = "admin"` 也会被降级 |
 
+注意 `POST /api/users` **始终需要已认证的调用者**：`registration_open = true` 的语义是"任何**已登录**账号都能再邀请一个账号"，不是"任何人都能注册"（匿名注册需要把这条路由移出认证中间件，是无认证攻击面的净扩张，刻意不做）。
+
+Desktop 上这个开关的表现：开着时，`Users (N)` 分组顶部的 `+` 对**所有**账号可见；关着时只有 admin 看得到。开关状态由 `GET /api/status` 的 `registration_open` 字段下发——账号系统没启用时它恒为 `false`，所以不会出现"按钮在、点了 403"。
+
 关着是默认值：让任意能连上的人自建账号，等于把"谁能用这台机"的决定权交出去。
 
 ### 3.2 两种建号方式
@@ -189,6 +193,8 @@ curl -X POST http://127.0.0.1:19876/api/users \
 | 普通用户 | 只有自己 |
 
 admin 在该分组顶部 `+` 建号；右键某一行有：以该用户视角查看 session / 禁用 / 重置密码 / 删除 / 发消息。
+
+普通用户通常看不到 `+`（建号是 admin 的事）；但若运维打开了 `[multi_user].registration_open = true`，他们的分组顶部也会出现 `+`——这是"邀请一位同事"的入口，建出来的账号恒为 `role = user`，且他们**看不到**自己创建的账号（普通用户的分组只列自己），凭证靠弹窗里的 `invite_token` 交付。
 
 ### 4.4 以某人视角看 session（`?as_user=`）
 
