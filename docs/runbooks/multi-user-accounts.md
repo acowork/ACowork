@@ -35,7 +35,7 @@ acowork-gateway --daemon --home ~/.acowork/acowork-gateway
 | 身份 | 无。谁连上就是"本机用户" | 账号 + 密码，JWT（access / refresh） |
 | 登录页 | 不出现（Desktop 直接进主界面） | 首次启动即出现 |
 | 路由 | `/api/auth/*`、`/api/users/*`（账号管理）、用户聊天**未注册** → 404 | 全部注册，无 token → 401（`/health`、`/api/status` 与登录/刷新/登出/首次登录这几条除外） |
-| 会话可见性 | 不过滤，看到全部 | 只看自己的；admin 可用 `?as_user=` 只读查看 |
+| 会话可见性 | 不过滤，看到全部 | 只看自己的；admin 可用 `?as_user=` 只读查看。**新建会话默认私有**（🔒），要给别人看就点输入框工具行的 🌐 开关 |
 | 落盘 | 不创建 `accounts.json`，不创建 `data/auth/` | 两者都创建 |
 | 用户档案 | 沿用旧的 `user_profiles.json` | 同上，**不升级 schema** |
 
@@ -283,7 +283,8 @@ admin 右键"以该用户视角查看 session"→ 会话列表变成那个用户
 | `GET /api/auth/login` → 404 | `local` 模式（路由未注册）。这是预期，不是 bug |
 | 改了密码，另一台设备被踢 | 预期：改密杀掉全部 refresh family |
 | 聊天附件上传 413 | 图片 >25 MiB 或文档 >100 MiB |
-| 用户能登录但看不到任何 session | 正常：`multi_user` 只显示自己的。历史 session 的 `user_id` 为空时按"公开"处理（见 §7.4 兼容性） |
+| 用户能登录但看不到任何 session | 正常：`multi_user` 只显示自己的。历史 session 的 `user_id` 为空时按"公开"处理 |
+| 别人的账号看不到我刚建的会话 | **预期**：新建会话默认私有（🔒）。要共享就点输入框工具行的 🌐 开关 |
 | admin 用 `as_user` 想改点东西 → 403 | 设计如此：`as_user` 只读 |
 
 ---

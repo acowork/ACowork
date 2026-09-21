@@ -900,6 +900,24 @@ impl SessionManager {
         // list can never observe an ownerless session it just created.
         conv.set_user_id(user_id.map(|u| u.to_string()));
 
+        // ADR-076 §决策 4: an owned session starts **private**.
+        //
+        // `visibility: None` reads as *public* (`is_readable_by`), and it
+        // used to also be what an identified creator got by omission — so
+        // in a multi-user deployment every account could read every new
+        // session, including the ones with the system agent. `None` should
+        // only mean what it has to: sessions that predate accounts, which
+        // have no owner to restrict them to (the flag is ignored for those
+        // anyway). An owned session's creator always knows who it is, so
+        // it gets the conservative value explicitly at birth.
+        //
+        // The per-session switch is still the way out, and because the
+        // value is on disk rather than implied, that switch now shows the
+        // truth instead of claiming "public" for a session nobody can read.
+        if user_id.is_some() {
+            conv.set_visibility(Some(crate::conversation::SessionVisibility::Private));
+        }
+
         // ADR-043: Spawn config + state change relays.
         if let Some(chunk_tx) = self.config.chunk_tx.clone() {
             crate::startup::subsystems::spawn_config_change_relay(
@@ -4798,5 +4816,101 @@ mod tests {
         // Deleting the last remaining session clears latest entirely.
         manager.delete_session(survivor_id).await;
         assert_eq!(manager.latest_session(), None);
+    }
+
+    // ── New-session visibility default (ADR-076 §决策 4) ──────────────
+    //
+    // Bug history: `create_frontend_session` stamped only the owner, so a
+    // session created by an identified account kept `visibility: None` —
+    // and `None` reads as *public*. In a multi-user deployment that meant
+    // every account could read every new session, including the ones with
+    // the system agent, until someone noticed a lock icon was missing.
+    //
+    // Fix: an owned session is stamped `private` at birth. `None` stays
+    // reserved for sessions that predate accounts (no owner to restrict
+    // them to — `is_readable_by` ignores the flag for those), which is
+    // also what local mode produces, so local mode is unchanged.
+    //
+    // Asserted on the **disk** meta, not the in-memory handle: the listing
+    // and authorization paths read the file, so a value that only lives in
+    // memory is the bug, not the fix.
+    #[tokio::test]
+    async fn owned_sessions_start_private_and_ownerless_stay_public() {
+        use crate::conversation::{SessionScope, SessionVisibility, read_session_meta};
+
+        let mut config = crate::config::RuntimeConfig::default();
+        // The default `work_dir` is empty, which would write meta files
+        // relative to the test runner's CWD. Keep this hermetic.
+        let work_dir = std::env::temp_dir().join(format!("acowork-visibility-{}", Uuid::new_v4()));
+        config.work_dir = work_dir.to_string_lossy().to_string();
+
+        let manifest = acowork_core::AgentManifest::from_toml(
+            r#"
+            agent_id = "com.test.visibility_default"
+            version = "1.0.0"
+            name = "Test visibility default"
+            description = "Pin the new-session visibility default"
+            author = "test"
+            runtime_version = "0.1.0"
+
+            [llm]
+            provider = "mock"
+            model = "test-model"
+            "#,
+        )
+        .unwrap();
+        let provider =
+            Arc::new(acowork_core::providers::mock::MockProvider::single_text("test"));
+        let core = Arc::new(AgentCore::new(
+            config,
+            manifest,
+            provider,
+            Vec::<crate::agent::agent_core::BuiltinToolEntry>::new(),
+        ));
+
+        let mut manager = SessionManager::new(core, SessionManagerConfig::default());
+        // `create_frontend_session` resolves a workspace, so the resolver
+        // has to exist even though this test never switches one.
+        manager.set_resolver(Arc::new(std::sync::RwLock::new(
+            WorkspaceResolver::new_for_test(vec![]),
+        )));
+        let conversations = work_dir.join("conversations");
+
+        // An identified account creates a session: private, and not
+        // readable by another account.
+        let owned = manager
+            .create_frontend_session(None, None, None, Some("u-alice"))
+            .await
+            .expect("create owned session");
+        let meta = read_session_meta(&conversations, &owned).expect("read owned meta");
+        assert_eq!(meta.user_id.as_deref(), Some("u-alice"));
+        assert_eq!(
+            meta.visibility,
+            Some(SessionVisibility::Private),
+            "an owned session must be stamped private at creation"
+        );
+        assert!(meta.is_readable_by(&SessionScope::User("u-alice".to_string())));
+        assert!(
+            !meta.is_readable_by(&SessionScope::User("u-bob".to_string())),
+            "another account must not be able to read a new session"
+        );
+        // admin (unfiltered scope) still sees everything.
+        assert!(meta.is_readable_by(&SessionScope::Unfiltered));
+
+        // No owner (local mode, or data predating accounts): absent, i.e.
+        // public — the pre-ADR-076 behaviour must survive.
+        let ownerless = manager
+            .create_frontend_session(None, None, None, None)
+            .await
+            .expect("create ownerless session");
+        let meta = read_session_meta(&conversations, &ownerless).expect("read ownerless meta");
+        assert_eq!(meta.user_id, None);
+        assert_eq!(
+            meta.visibility, None,
+            "local mode must keep writing nothing — absent means public"
+        );
+        assert!(meta.is_readable_by(&SessionScope::User("u-bob".to_string())));
+
+        let _ = std::fs::remove_dir_all(&work_dir);
     }
 }

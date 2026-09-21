@@ -185,7 +185,10 @@ pub(crate) async fn post_create_session(
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    // ADR-076 §决策 4: visibility defaults to public, i.e. absent on disk.
+    // ADR-076 §决策 4: a session created by an identified account is
+    // private from birth (stamped in `create_frontend_session`); an
+    // ownerless one (local mode) stays public. An explicit `visibility` in
+    // the body still wins — this is the creation-time override.
     if let Some(visibility) = body.visibility {
         sm.lock()
             .await

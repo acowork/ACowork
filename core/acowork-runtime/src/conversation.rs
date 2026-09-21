@@ -278,15 +278,27 @@ pub struct AttachedFolderMeta {
 /// authenticated user, a [`Private`](Self::Private) one only by its owner
 /// (or an administrator).
 ///
-/// **Absent means public.** `SessionMeta.visibility` is
-/// `Option<SessionVisibility>` with `skip_serializing_if = "Option::is_none"`,
-/// so an unset visibility is identical on disk to a pre-ADR-076 file and
-/// a pre-ADR-076 session stays readable — upgrading must not retroactively
-/// hide every existing session from its user.
+/// **Absent means public** — but only absent *and* ownerless.
+///
+/// `SessionMeta.visibility` is `Option<SessionVisibility>` with
+/// `skip_serializing_if = "Option::is_none"`, so an unset visibility is
+/// byte-identical on disk to a pre-ADR-076 file. That is the whole point:
+/// upgrading must not retroactively hide every existing session from its
+/// user, and those sessions have no owner to restrict them to anyway
+/// (`is_readable_by` ignores the flag when `user_id` is absent).
+///
+/// A session created by an identified account is **not** left absent: the
+/// creation path stamps `Private` (ADR-076 §决策 4). `None` therefore
+/// means "predates accounts, or local mode" — never "a new session whose
+/// creator nobody bothered to ask" — which is why this value stopped
+/// being the multi-user default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SessionVisibility {
-    /// Readable by any authenticated user (the default).
+    /// Readable by any authenticated user.
+    ///
+    /// The default only where no owner exists to restrict it to; an owned
+    /// session is created `Private` and must be shared deliberately.
     Public,
     /// Readable only by the owning account (and administrators).
     Private,
@@ -2498,6 +2510,10 @@ impl SessionMeta {
     /// An unset (`None`) visibility is public: every signed-in account
     /// may read it. Only an explicit `private` restricts reading to the
     /// owning account.
+    ///
+    /// In practice `None` now shows up only on sessions with no owner
+    /// (pre-ADR-076 data, or local mode): the creation path stamps
+    /// `Private` on anything it can attribute to an account.
     pub fn is_readable_by(&self, scope: &SessionScope) -> bool {
         match scope {
             SessionScope::Unfiltered => true,

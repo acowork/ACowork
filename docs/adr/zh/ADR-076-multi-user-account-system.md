@@ -57,7 +57,7 @@
 | admin 角色 | 无（OS 用户即 admin） | `role = Admin`，`GET /api/users` 全量 |
 | session 隔离 | `SessionMeta.user_id` 写入但 **read 不过滤**（无 `x-user-id` 头 → `Unfiltered`） | read 路径强制过滤（admin 除外）；`visibility = Private` 时非 owner 视为不存在（404） |
 | session 控制面 | 同一条 HTTP 路由（Runtime 视为 `Unfiltered`） | HTTP + token 鉴权；create 记录 owner |
-| session `visibility` 默认 | `None`（公开，不过滤） | `None`（公开，不过滤）—— 升级不改变既有会话可见性，见 §决策 4 |
+| session `visibility` 默认 | `None`（公开，不过滤） | **有主会话 = `Private`（创建时落盘）；无主会话 = `None`（公开）**——见 §决策 4「默认值的两种含义」 |
 | `?as_user=` | 路由不注册 | admin-only 只读视图 |
 | `/api/auth/*` 路由 | **不注册** | 全部注册 |
 | 用户-用户聊天 | **不注册** `data_dir/users/` 不创建 | `/api/users/{self}/chats/*` 全量 |
@@ -336,7 +336,8 @@ pub struct SessionMeta {
     /// 创建后不改（write-once）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_id: Option<String>,
-    /// ADR-076: 可见性开关。None 与 `Public` 等价 —— 缺省即公开。
+    /// ADR-076: 可见性开关。None 与 `Public` 等价 —— 但只对**无主**会话如此；
+    /// 创建路径给有主会话显式落 `Private`（见 §决策 4「默认值的两种含义」）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visibility: Option<SessionVisibility>,
 }
@@ -352,6 +353,17 @@ pub enum SessionVisibility { Public, Private }
 | owner | 可读可写 | 可读可写 |
 | 其他 user | 可读 | **404**（不可读、不可写） |
 | local（无头） | 可读可写 | 可读可写 |
+
+**默认值的两种含义**（本次修正）：
+
+`visibility = None` 在谓词里读作 public，而它原先同时背了两种含义：①「ADR-076 之前的遗留会话」②「新建时没表态」。第二含义在多用户下是个实打实的洞——绑 `0.0.0.0` 的部署里，alice 新建的每一段对话（含 system agent）**默认 bob 可读**，要等到有人发现锁图标没亮。
+
+现在拆开：
+
+- **有主会话**：创建路径（`create_frontend_session`）在写入 `user_id` 的同时落 `Some(Private)`。**写死在盘上**，不靠读路径推断——因为 `SessionListView.visibility` 会把该值下发给 Desktop 拼 🌐/🔒 图标，如果"实际私有而字段为空"，那个开关就会显示"公开"给一个谁都读不到的会话，正好把唯一的手动逃生口变成谎话。
+- **无主会话**：仍写 `None`（= 公开）。这既保住 local 模式零改动（local 下 `user_id` 恒为 `None`），也保住升级前的历史数据不被追溯隐藏——`is_readable_by` 对无主会话本来就忽略该标志（没有主人可以限制给谁，遵守它只会把会话藏给所有人）。
+
+逐条判定不受影响（表三列语义不变），变的只是"新建的有主会话落在哪一列"。显式 `visibility` 仍可在 `POST /sessions` 的 body 里覆盖创建默认值，per-session 开关照旧是逃生口。
 
 - **读**（`GET /sessions`、`/sessions/{sid}`、`/sessions/{sid}/messages`、`/sessions/latest`、`/sessions/{sid}/config`）：走 `is_readable_by`。不可读一律 **404**，不用 403——403 会把这个端点变成"某 session 是否存在"的探测器，正是列表过滤要藏起来的信息。
 - **写**（`open` / `close` / `DELETE` / `visibility` / `workspace` / `config` / 全部会话动作）：走 `is_writable_by`，**仅 owner 或 admin**。公开 ≠ 可改：把 session 设为 public 是"让别人能读"，不是"让别人能删"。旧数据 `user_id = None` 的会话（ADR-076 之前创建）**仅** admin / local 可写——不能因为"没有主人"就人人可删。
@@ -479,7 +491,7 @@ GET /api/agents/{id}/sessions?as_user=<user_id>
 - **MQTT 控制命令已删（此项已结清）**：全部用户操作命令（生命周期 8 条 + 会话动作 8 条）的 proto 字段、Runtime 变体与映射表已全部删除，字段号随后**整体重排为连续**（开发期无兼容需求，不留空号）。`ControlCommand` 现只余 `Intent` + `ActiveHeartbeat` 两条非用户动作。
 - **`PUT .../config` 不做 `route_*` 回退**：MQTT 时代的 `ModelSwitchAction` / `ReasoningEffortAction` 在 `apply_config` 报错时会回退到 `SessionManager::route_model_switch` / `route_reasoning_effort`（覆盖"会话不在 config service 内存表里"这种场景）。HTTP `PUT .../config` 没有这条回退，直接 500。实际不可达：这三个控件都绑定 `activeSessionId`，而活跃会话必在表里；且迁移前 `setSessionContextWindow` 就已经是无回退的裸 `PUT .../config`，与邻居保持一致优于与死掉的 MQTT 路径保持一致。
 - **`GET /sessions/latest` 对非 owner 多一次往返**：见上文安全检查点。缓存值不解 scope。曾经的理由是"解 scope 需要一次全量扫描"——该前提已被 `meta/` 内存索引推翻（见 §5.5「已结清：`meta/` 目录的全量扫」），现在解 scope 只是对已排序行的内存过滤，不再需要新缓存。**行为暂不改**：本轮是纯性能改动，改 `/latest` 的可见性语义要有自己的测试与文档；升级路径已开放——用 `with_meta_index` 取调用者可见的最新行即可。
-- **`visibility` 开关已有 UI（此项已结清）**：`SessionVisibilityToggle` 挂在输入框工具行，仅 owner 可点（`can_write === false` 渲染为 disabled）。**per-agent 默认可见性仍未做且刻意留白**——agent 是 Gateway 级共享对象，per-agent 默认值 = 影响所有账号新建会话的策略，与"我自己的新会话默认私有"（用户级偏好）不同层级，需先决定层级。
+- **`visibility` 开关已有 UI（此项已结清）**：`SessionVisibilityToggle` 挂在输入框工具行，仅 owner 可点（`can_write === false` 渲染为 disabled）。**新会话默认值已结清（本次）**：有主会话创建即 `Private`，无主（local / 升级前数据）维持 `None` = 公开——见 §决策 4「默认值的两种含义」。原先那句「per-agent 默认可见性仍未做且刻意留白」**问题已消解**：被留白的是「admin 能否强制某个 agent 的会话可见性」，那是一个 admin 级策略（"这个 agent 的对话是团队共享日志"），与"新会话默认私有"不是同一层，也不再有需求把它当成默认值的替代品；真要做得是 `accounts.json`/配置里的 admin 字段，届时另立决策。
 - **会话内存回收与会话生命周期解耦（未解决，独立议题）**：`SessionManager::evict_idle_sessions` 定义了但**全仓无调用者**（死代码）；实际回收只有 agent 级自动休眠（`process::exit`），而它的续期含**全局** `ActiveHeartbeat`（任何 Desktop 选中该 agent 都续期，不带 user 身份）。因此"观众不该激活会话"是与该缺口直接相关的设计约束：不再给这个没有 per-session GC 的系统增加参与者。详见 §5.5。
 
 ### 决策 5：管理员角色 — `role = "admin"` 绕过过滤 + 特殊权限
@@ -1039,6 +1051,7 @@ run_gateway_auth_mode_redline() { ... }    # awk：auth_routes()/account_api 注
 - ✅ `core/acowork-runtime/src/conversation.rs`: `SessionMeta` 序列化含/不含 `user_id` 兼容（无字段的旧 jsonl 仍可加载）；`set_user_id` write-once
 - ✅ `core/acowork-gateway/src/http/auth_middleware.rs`（**已实现，1 项，走真实 `build_router` 层**）：客户端伪造 `x-user-id` 被剥；无 token 401；admin 得到 `*`；`as_user` 收窄 scope；非法 `as_user` → 403
 - ✅ `core/acowork-runtime/src/conversation.rs`（**已实现**）：`SessionScope::from_header_value` 三态（`*` → `Unfiltered`、具体 id → `User`、空/缺失 → `Unfiltered`）；`is_readable_by` / `is_writable_by` 在 `(user_id 归属 × visibility 三态 × scope)` 组合矩阵上的判定；`visibility` 缺省为公开 + 向后兼容
+- ✅ `core/acowork-runtime/src/agent/session/session_manager.rs`（**已实现**）：`owned_sessions_start_private_and_ownerless_stay_public`——有主会话创建即落盘 `Private`（断言**磁盘 meta**，因为列表/鉴权读的是文件，只存在内存里的值就是 bug），另一账号读不到、owner 与 admin 读得到；无主会话仍写 `None`（local 模式与升级前数据不受影响）
 - ✅ `core/acowork-runtime/src/conversation.rs`（**已实现**）：`visibility_and_ownership_gate_read_and_write`（private 非 owner 读/写均拒；public 非 owner 可读不可写）、`session_scope_from_header_value`（`*` / 具体 id / 缺失三态）、`scan_filters_by_scope_before_paginating`（过滤先于分页，`total_count` 反映可见行数）、`session_meta_visibility_is_absent_by_default_and_means_public`、`set_visibility_persists_and_clears_back_to_public`
 - ✅ 不可读 / 不可写一律 **404 而非 403**（`session_control::not_found` 这一处共享映射）：handler 接线由既有 HTTP server 测试覆盖——`test_session_config_unknown_session_and_visibility_gate`、`test_http_upload_file_docx_lands_with_real_extension`（上传先要 session 存在）
 - ✅ `core/acowork-runtime/src/usecases/session_metadata_impl.rs`：`list_sessions(page, size, scope)` 只返 scope 可见的 session，**且在分页前过滤**（`total_count` 反映可见行数）
