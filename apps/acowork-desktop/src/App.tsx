@@ -4,8 +4,10 @@ import { invoke } from "@tauri-apps/api/core";
 import { AppLayout } from "./components/layout/AppLayout";
 import { SplashScreen } from "./components/layout/SplashScreen";
 import { OnboardingFlow } from "./components/onboarding/OnboardingFlow";
+import { LoginView } from "./components/account/LoginView";
 import { ToastProvider } from "./components/common/ToastProvider";
 import { ErrorBoundary } from "./components/common/ErrorBoundary";
+import { useAuthStore } from "./stores/authStore";
 import { initMqttListener } from "./stores/chatStore";
 import { initWorkspaceFsListener } from "./lib/workspaceFsEvents";
 import { initDocTreeChangeListener } from "./lib/docFsEvents";
@@ -23,6 +25,16 @@ function App() {
   });
 
   const [gatewayReady, setGatewayReady] = useState(isRecoveryReload);
+
+  // ADR-076 §决策 12: resolve the deployment auth mode once the Gateway is
+  // reachable, and restore a stored session under multi_user. Runs for the
+  // recovery-reload path too (gatewayReady starts true).
+  useEffect(() => {
+    if (!gatewayReady || !onboardingDone) return;
+    void useAuthStore.getState().init();
+  }, [gatewayReady, onboardingDone]);
+
+  const authStatus = useAuthStore((s) => s.status);
 
   // Clear the recovery flag after mount so it doesn't affect future loads.
   // Also re-register the MQTT listener: recovery reload skips SplashScreen
@@ -91,6 +103,13 @@ function App() {
       <ToastProvider>
         {!onboardingDone ? (
           <OnboardingFlow onComplete={() => setOnboardingDone(true)} />
+        ) : authStatus === "logged_out" ? (
+          <LoginView />
+        ) : authStatus === "unknown" ? (
+          // Gateway is reachable but the auth mode has not resolved yet —
+          // a brief window (one `/api/status` round-trip). Show a bare
+          // surface rather than flashing the main UI before LoginView.
+          <div className="flex h-screen w-screen items-center justify-center bg-app" />
         ) : (
           <AppLayout />
         )}

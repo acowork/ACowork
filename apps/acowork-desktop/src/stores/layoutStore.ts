@@ -1,5 +1,7 @@
 import { create } from "zustand";
 
+import type { NavView } from "../lib/types";
+
 /** Right panel tabs — keep in sync with AppLayout.PanelTab. */
 export type PanelTab = "debug" | "status" | "setup" | "tools" | "memory" | "workspace";
 
@@ -64,6 +66,17 @@ interface LayoutState {
      * not flood the store at refresh-rate cadence.
      */
     setFilePanelBounds: (bounds: FilePanelBounds) => void;
+
+    /**
+     * Monotonically-increasing counter for "switch the main area" requests
+     * raised from outside `AppLayout` (e.g. the sidebar `UserList` opening a
+     * user chat, ADR-076 §决策 8). `AppLayout` owns `currentView`, so a peer
+     * component cannot set it directly; same consume-once ref contract as
+     * `workspacePanelRequestSeq`. Read `navViewRequest` for the payload.
+     */
+    navViewRequestSeq: number;
+    navViewRequest: NavView | null;
+    requestNavView: (view: NavView) => void;
 }
 
 export const useLayoutStore = create<LayoutState>((set) => ({
@@ -89,4 +102,12 @@ export const useLayoutStore = create<LayoutState>((set) => ({
 
     filePanelBounds: { left: 0, right: 0, mounted: false },
     setFilePanelBounds: (bounds) => set({ filePanelBounds: bounds }),
+
+    navViewRequestSeq: 0,
+    navViewRequest: null,
+    requestNavView: (view) =>
+        set((state) => ({
+            navViewRequest: view,
+            navViewRequestSeq: state.navViewRequestSeq + 1,
+        })),
 }));

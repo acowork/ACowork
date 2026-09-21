@@ -1,12 +1,16 @@
-import { type ComponentType } from "react";
+import { type ComponentType, useEffect } from "react";
 import type { NavView } from "../../lib/types";
-import { UserAvatar } from "../common/UserAvatar";
-import { Tooltip } from "../common/Tooltip";
 import { NavButton } from "../common/NavButton";
 import { OutlineSettingsIcon, FilledSettingsIcon } from "../common/SettingsIcon";
 import { OutlineChatIcon, FilledChatIcon } from "../common/ChatIcon";
-import { useUserProfileStore } from "../../stores/userProfileStore";
+import {
+  OutlineMessagesIcon,
+  FilledMessagesIcon,
+} from "../common/MessagesIcon";
+import { AccountMenu } from "../account/AccountMenu";
 import { useSettingsStore } from "../../stores/settingsStore";
+import { useAuthStore } from "../../stores/authStore";
+import { useUserChatStore } from "../../stores/userChatStore";
 import { useTranslation } from "../../i18n/useTranslation";
 
 interface NavBarProps {
@@ -18,6 +22,7 @@ interface NavBarProps {
 
 const topNavItems: { view: NavView; icon: ComponentType<{ className?: string }>; i18nKey: string }[] = [
   { view: "chat", icon: OutlineChatIcon, i18nKey: "navBar.chat" },
+  { view: "users", icon: OutlineMessagesIcon, i18nKey: "navBar.users" },
   { view: "projects", icon: OutlineProjectsIcon, i18nKey: "navBar.projects" },
   { view: "docs", icon: OutlineDocsIcon, i18nKey: "navBar.docs" },
   { view: "harness", icon: OutlineHarnessIcon, i18nKey: "navBar.harness" },
@@ -138,11 +143,47 @@ function FilledProjectsIcon({ className }: { className?: string }) {
   );
 }
 
+/** Messages icon with the inbox unread badge (ADR-076 §决策 8). */
+function MessagesNavIcon({ filled, unread }: { filled: boolean; unread: number }) {
+  const Icon = filled ? FilledMessagesIcon : OutlineMessagesIcon;
+  return (
+    <span className="relative flex items-center justify-center">
+      <Icon className="h-6 w-6" />
+      {unread > 0 && (
+        <span
+          className="absolute -right-1.5 -top-1 min-w-[14px] rounded-full px-1 text-center text-[9px] font-medium leading-[14px] text-white"
+          style={{ backgroundColor: "var(--color-accent)" }}
+        >
+          {unread > 99 ? "99+" : unread}
+        </span>
+      )}
+    </span>
+  );
+}
+
 export function NavBar({ currentView, onViewChange, onAvatarClick }: NavBarProps) {
   const { t } = useTranslation();
-  const profile = useUserProfileStore((s) => s.profile);
   const { theme, osTheme } = useSettingsStore();
   const isDark = theme === "dark" || (theme === "system" && osTheme === "dark");
+  // The user inbox only exists under `AUTH_MODE=multi_user` (ADR-076 §决策 12);
+  // under `local` its routes are not even registered, so the entry is hidden
+  // rather than shown-then-404.
+  const multiUser = useAuthStore((s) => s.mode) === "multi_user";
+  const navItems = multiUser
+    ? topNavItems
+    : topNavItems.filter((item) => item.view !== "users");
+  // Unread lives on the nav item, not inside the inbox view: a message that
+  // arrives while the user is in an agent chat has to be noticeable.
+  const unread = useUserChatStore((s) =>
+    s.chats.reduce((total, chat) => total + chat.unread_count, 0),
+  );
+
+  useEffect(() => {
+    if (!multiUser) return;
+    const store = useUserChatStore.getState();
+    void store.refreshChats();
+    return store.startPolling();
+  }, [multiUser]);
 
   return (
     <nav
@@ -150,25 +191,12 @@ export function NavBar({ currentView, onViewChange, onAvatarClick }: NavBarProps
       role="navigation"
       aria-label={t("navBar.ariaLabelMainNavigation")}
     >
-      {/* User avatar — click to edit profile (WeChat-style top placement) */}
-      <Tooltip content={t("navBar.editProfile")} variant="plain" position="right">
-        <button
-          onClick={onAvatarClick}
-          className="mb-3 flex items-center justify-center rounded-md transition-colors duration-150 hover:ring-2 hover:ring-zinc-400 dark:hover:ring-zinc-500"
-          aria-label={t("navBar.editProfile")}
-        >
-          <UserAvatar
-            displayName={profile.displayName}
-            avatarUrl={profile.backendAvatarUrl ?? null}
-            builtinAvatarId={profile.backendBuiltinAvatarId ?? null}
-            size={40}
-            className="shrink-0"
-          />
-        </button>
-      </Tooltip>
+      {/* User avatar — account menu under multi_user (ADR-076 §决策 7),
+          otherwise the historical "edit profile" entry. */}
+      <AccountMenu onOpenProfile={onAvatarClick} />
 
       {/* Top navigation items */}
-      {topNavItems.map(({ view, icon: Icon, i18nKey }) => (
+      {navItems.map(({ view, icon: Icon, i18nKey }) => (
         <NavButton
           key={view}
           active={currentView === view}
@@ -179,6 +207,8 @@ export function NavBar({ currentView, onViewChange, onAvatarClick }: NavBarProps
           {currentView === view ? (
             view === "chat" ? (
               <FilledChatIcon className="h-6 w-6" />
+            ) : view === "users" ? (
+              <MessagesNavIcon filled unread={unread} />
             ) : view === "harness" ? (
               <FilledHarnessIcon className="h-6 w-6" />
             ) : view === "docs" ? (
@@ -189,7 +219,9 @@ export function NavBar({ currentView, onViewChange, onAvatarClick }: NavBarProps
               <FilledSettingsIcon className="h-6 w-6" />
             )
           ) : (
-            view === "projects" ? (
+            view === "users" ? (
+              <MessagesNavIcon filled={false} unread={unread} />
+            ) : view === "projects" ? (
               <OutlineProjectsIcon className="h-6 w-6" isDark={isDark} />
             ) : (
               <Icon className="h-6 w-6" />

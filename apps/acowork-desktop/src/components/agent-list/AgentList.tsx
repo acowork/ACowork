@@ -19,6 +19,7 @@ import { isProcessing, instanceIdOf, type AgentInfo, type CloneResponse, type No
 import { startAgentAndSyncUI } from "../../lib/agent-start";
 import { fetchNodes } from "../../lib/gateway-api";
 import { partitionAgentsByNode, nodeDisplayName } from "./partitionAgentsByNode";
+import { UserList } from "../user-list/UserList";
 import {
   ContextMenu,
   useContextMenu,
@@ -667,6 +668,9 @@ export function AgentList({ width }: AgentListProps) {
             {agentsList.length === 0 ? t("agentList.noAgentsInstalled") : t("agentList.noMatchingAgents")}
           </div>
         )}
+
+        {/* ADR-076 §决策 7: account group, below the agent groups. */}
+        <UserList />
       </div>
 
       <div ref={addMenuRef} className="relative p-1.5">

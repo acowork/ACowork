@@ -75,6 +75,9 @@ export interface SystemStatusResponse {
   uptime_secs: number;
   /** ADR-055 D3: MQTT broker port for dynamic discovery (L3-6). */
   mqtt_port: number;
+  /** ADR-076 §决策 12: resolved deployment auth mode. `undefined` when the
+   *  Gateway is older than ADR-076 (treated as `local` — no login gate). */
+  auth_mode?: AuthMode;
 }
 
 /** Node Agent entry — matches Gateway HTTP API GET /api/nodes (ADR-055 §6.13.3). */
@@ -868,7 +871,7 @@ export interface ContextUsageInfo {
 }
 
 /** Navigation view type */
-export type NavView = "chat" | "harness" | "docs" | "projects" | "settings";
+export type NavView = "chat" | "users" | "harness" | "docs" | "projects" | "settings";
 
 /** Theme type */
 export type Theme = "light" | "dark" | "system";
@@ -1677,8 +1680,127 @@ export interface UpdateUserRequest {
   custom?: Record<string, string>;
 }
 
-// ── MCP types ────────────────────────────────────────────────────────
+// ── Account system (ADR-076) ─────────────────────────────────────────
 
+/**
+ * Login role — matches `acowork_core::account::Role`
+ * (serde `rename_all = "snake_case"` → `"user"` / `"admin"`).
+ */
+export type Role = "user" | "admin";
+
+/**
+ * Redacted account record — matches `acowork_core::account::AccountView`.
+ * Returned by `GET /api/auth/me` and `GET /api/users` (admin-only). The
+ * credential fields (`password_hash` / `password_salt`) are never
+ * serialised — this is the only shape the UI sees.
+ */
+export interface UserAccount {
+  user_id: string;
+  username: string;
+  display_name: string;
+  role: Role;
+  language: string;
+  timezone: string;
+  city?: string;
+  country?: string;
+  occupation?: string;
+  avatar?: string;
+  builtin_avatar?: string;
+  communication_style?: string;
+  custom?: Record<string, string>;
+  created_at: string;
+  updated_at: string;
+  last_login_at?: string;
+  disabled_at?: string;
+}
+
+/** Response from `GET /api/users` (admin-only) — matches `AccountListResponse`. */
+export interface AccountListResponse {
+  accounts: UserAccount[];
+}
+
+/**
+ * One row of `GET /api/users/{id}/chats` — matches
+ * `acowork_gateway::http::chat_api::ChatSummary` (ADR-076 §决策 8).
+ */
+export interface UserChatSummary {
+  /** Canonical `min__max` pair id used by the message routes. */
+  chat_id: string;
+  peer_user_id: string;
+  /** Server-resolved label (`display_name` → `username` → id). */
+  peer_display_name: string;
+  /** Unix seconds. */
+  last_active_at: number;
+  last_message_preview: string;
+  unread_count: number;
+}
+
+/** One attachment of a message — matches `acowork_gateway::chat::Attachment`. */
+export interface ChatAttachment {
+  /** UUID minted by the Gateway; the only thing a client ever sends back. */
+  id: string;
+  filename: string;
+  mime: string;
+  size: number;
+}
+
+/** One line of `messages.jsonl` — matches `acowork_gateway::chat::ChatMessage`. */
+export interface UserChatMessage {
+  /** Unix seconds, assigned by the Gateway. */
+  ts: number;
+  /** Author user id — always the verified sender, never client-supplied. */
+  from: string;
+  /** `"text"` / `"image"` / `"document"`, derived by the Gateway. */
+  kind: string;
+  body: string;
+  /** Resolved server-side from the ids the sender uploaded. */
+  attachments?: ChatAttachment[];
+}
+
+/** Response from `GET /api/users/{id}/chats/{chat_id}/messages`. */
+export interface UserChatMessagesPage {
+  chat_id: string;
+  /** Chronological within the page, oldest first. */
+  messages: UserChatMessage[];
+  total: number;
+  offset: number;
+  limit: number;
+}
+
+/**
+ * One row of `GET /api/users/directory` (ADR-076 §决策 8) — the contact
+ * picker's source. Enabled accounts only, never the caller; the Gateway
+ * decides the projection (no role, no profile fields).
+ */
+export interface UserDirectoryEntry {
+  user_id: string;
+  username: string;
+  display_name: string;
+}
+
+/** Token pair — matches `acowork_gateway::auth::service::TokenPair`. */
+export interface TokenPair {
+  access_token: string;
+  refresh_token: string;
+  token_type: string;
+  expires_in: number;
+}
+
+/** ADR-076 §决策 12: deployment auth mode exposed by `GET /api/status`. */
+export type AuthMode = "local" | "multi_user";
+
+/** Lifecycle of the Desktop auth session (ADR-076 §决策 6 / 7). */
+export type AuthState =
+  /** Mode not yet resolved (Gateway not reached) — render nothing gated. */
+  | "unknown"
+  /** `AUTH_MODE=local` — account system is a no-op, no login gate. */
+  | "disabled"
+  /** `multi_user` and no valid token — must log in. */
+  | "logged_out"
+  /** `multi_user` with a token pair held in memory / storage. */
+  | "logged_in";
+
+// ── MCP types ────────────────────────────────────────────────────────
 /** MCP transport type — matches McpTransportDef in acowork_core::protocol */
 export type McpTransportDef = "stdio" | "http" | "sse";
 

@@ -5,9 +5,14 @@ import "./i18n"; // i18n initialization (must run before any useTranslation call
 import "./styles/globals.css";
 import { initMonaco } from "./lib/monacoBootstrap";
 import { installMainThreadProbe, installLongTaskObserver } from "./lib/mainThreadProbe";
+import { installAuthFetchInterceptor } from "./lib/authFetch";
 // ponytail: diagnostic — remove once the slow-start report is root-caused.
 installMainThreadProbe();
 installLongTaskObserver();
+
+// ADR-076 §决策 3: attach the login token to every Gateway request and
+// rotate it on 401. Installed before App renders so no child fetch escapes.
+installAuthFetchInterceptor();
 
 // ═══ Bundled fonts (macOS uses -apple-system → SF Pro natively;
 // Win/Linux fall through to Inter / Noto Sans SC below) ═══

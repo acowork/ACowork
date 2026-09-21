@@ -36,6 +36,7 @@ import {
 import { SettingsPage } from "../settings/SettingsPage";
 import { HarnessPage } from "../harness/HarnessPage";
 import { ProjectsView } from "../../views/ProjectsView";
+import { MessagesView } from "../../views/MessagesView";
 import { DocsView } from "../../views/DocsView";
 import { MqttDebugControls } from "../debug/MqttDebugControls";
 import { Tooltip } from "../common/Tooltip";
@@ -795,6 +796,20 @@ export function AppLayout() {
     setCurrentView(view);
   }, []);
 
+  // Views opened from outside the nav bar (e.g. the sidebar UserList starting
+  // a user conversation, ADR-076 §决策 8). `currentView` is local state, so
+  // the request travels through the layout store's seq contract and is
+  // consumed exactly once — same pattern as the workspace-search focus
+  // request in `WorkspaceExplorer`.
+  const navViewRequestSeq = useLayoutStore((s) => s.navViewRequestSeq);
+  const consumedNavViewRequestRef = useRef(0);
+  useEffect(() => {
+    if (navViewRequestSeq <= consumedNavViewRequestRef.current) return;
+    consumedNavViewRequestRef.current = navViewRequestSeq;
+    const target = useLayoutStore.getState().navViewRequest;
+    if (target) setCurrentView(target);
+  }, [navViewRequestSeq]);
+
   // Sidebar resize handlers
   const handleMouseMove = useCallback((e: MouseEvent) => {
     e.preventDefault();
@@ -1051,6 +1066,12 @@ export function AppLayout() {
         {currentView === "settings" && (
           <div className="flex flex-1 overflow-hidden rounded-xl bg-page-bg">
             <SettingsPage initialTab={settingsInitialTab} />
+          </div>
+        )}
+
+        {currentView === "users" && (
+          <div className="flex flex-1 overflow-hidden rounded-xl bg-page-bg">
+            <MessagesView />
           </div>
         )}
 

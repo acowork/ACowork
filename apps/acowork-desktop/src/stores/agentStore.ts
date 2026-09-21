@@ -7,6 +7,7 @@ import { instanceIdOf, isProcessing } from "../lib/types";
 import { getGatewayUrl } from "../lib/config";
 import { fetchNodes as fetchNodesApi } from "../lib/gateway-api";
 import { useChatStore } from "./chatStore";
+import { useAuthStore } from "./authStore";
 import { useWorkspaceStore } from "./workspaceStore";
 import { useFileTreeStore } from "./fileTree";
 import { log } from "../lib/logger";
@@ -737,8 +738,12 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
     });
 
     try {
+      // ADR-076 §决策 5: an admin viewing another user's sessions appends
+      // `?as_user=`; the Gateway only honors it for admin tokens on GET.
+      const viewAs = useAuthStore.getState().viewAsUserId;
+      const asUser = viewAs ? `&as_user=${encodeURIComponent(viewAs)}` : "";
       const resp = await fetch(
-        `${getGatewayUrl()}/api/agents/${agentId}/sessions?page=${currentPage}&size=${pageSize}`,
+        `${getGatewayUrl()}/api/agents/${agentId}/sessions?page=${currentPage}&size=${pageSize}${asUser}`,
       );
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const data = (await resp.json()) as {
