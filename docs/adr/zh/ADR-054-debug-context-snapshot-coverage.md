@@ -542,7 +542,8 @@ export const SECTION_ORDER = [
 **问题**：步骤 4 实现用 `Arc::new(req.history.messages().to_vec())` 每轮全量深拷贝 history，与 §3.1/§6 声明的"`Arc::clone` 浅引用共享底层 buffer"不符——`HistoryManager::messages()` 返回 `&[ChatMessage]` 切片，无法浅引用。
 
 **修复**：
-- `agent/history.rs`：`messages: Vec<ChatMessage>` → `Arc<Vec<ChatMessage>>`；所有 11 处修改点（append / extend / load_restored / clear / truncate_to / trim_fifo / emergency_trim / fit_to_budget_lossless / abandon_tool_result / retrieve_tool_result / replace_middle_with_summary）改经 `Arc::make_mut`（copy-on-write）；`messages_mut()` 签名不变（内部 make_mut），`messages()` 签名不变（返回 `as_slice()`）。
+- `agent/history.rs`：`messages: Vec<ChatMessage>` → `Arc<Vec<ChatMessage>>`；所有修改点（append / extend / load_restored / clear / truncate_to / abandon_tool_result / retrieve_tool_result / replace_middle_with_summary）改经 `Arc::make_mut`（copy-on-write）；`messages_mut()` 签名不变（内部 make_mut），`messages()` 签名不变（返回 `as_slice()`）。
+  - 注：清单中原列的 `trim_fifo` / `emergency_trim`（ADR-061 删除）与 `fit_to_budget_lossless`（2026-09 恢复期裁剪撤销时删除）三个修改点已不存在。
 - 新增 `HistoryManager::messages_arc() -> Arc<Vec<ChatMessage>>`（O(1) 克隆）；`observer_impl.rs` 快照改为持有该浅引用，**不再 to_vec**。
 - 语义：多个 iteration 之间 messages 未修改时共享同一底层 buffer（零拷贝）；修改时 COW 复制一次；非 debug 模式 refcount==1 走 `Arc::get_mut` 快速路径零复制。
 - 新增测试：`messages_arc_is_shallow_and_copy_on_write`（共享 + COW + ptr_eq 断言）、`messages_arc_survives_rewind_truncate`（rewind 后旧快照仍持有完整历史）。

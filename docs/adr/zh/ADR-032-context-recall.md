@@ -1514,7 +1514,7 @@ fn resolve_keep_recent_n(&self) -> usize {
 | **Fix #2 (2026-07-18)** | `core/acowork-runtime/src/agent/loop_context.rs:417-431` | **`compact_history_if_needed` fallback 不再调 compress_tool_results** (修订后) | 0 / -4 | |
 | ~~C4~~ 删除 | ~~`core/acowork-runtime/src/agent/loop_context.rs:843-865`~~ | ~~`pre_trim_and_compress` ~~（**已删除，**2026-07-18 修订） | ~~+15 / -5~~ | 预算兑底路径不再压 tool_result |
 | ~~C4~~ 删除 | ~~`core/acowork-runtime/src/tools/builtin/todo_write.rs`~~ | ~~完成事件发送（**已重定义**2026-07-18: 原 todos 触发取消, 改为 assistant 长消息触发）~~ | ~~+25~~ | 本 ADR 原设计已被取消 |
-| C5 | `core/acowork-runtime/src/agent/session/session_manager.rs:728-740` | `build_initial_session_state` restore 路径: `load_restored` 后调用 `compress_tool_results` + `recalibrate_tokens`;压缩先于 `fit_to_budget_lossless` 执行(压缩优先覆盖更多头部空间) | +24 / 0 | |
+| ~~C5~~ 删除 | ~~`core/acowork-runtime/src/agent/session/session_manager.rs:728-740`~~ | ~~`build_initial_session_state` restore 路径: `load_restored` 后调用 `compress_tool_results` + `recalibrate_tokens`;压缩先于 `fit_to_budget_lossless` 执行~~ | ~~+24 / 0~~ | **已废弃（2026-09）**：`compress_tool_results` 与 `fit_to_budget_lossless` 均已从恢复路径移除，当前 restore 只做 `load_restored` + `restore_anchor` |
 | **Fix #5 (2026-07-18)** | `docs/adr/zh/ADR-032-context-recall.md` | 本文档修订 | 大量 | |
 | **合计（修订后估算）** | | | **~1100 / -220** | 净增 ~880 LOC |
 
@@ -1735,11 +1735,13 @@ C4 拆为三个子 commit 顺序发布：
 
 ### Phase 5（C5）：restore 路径压缩
 
+> **已废弃（2026-09）**：本节描述的 restore 期 tool-result 压缩与 `fit_to_budget_lossless` 均未保留。当前 restore 路径只做 `load_restored` + `restore_anchor`（见 `session_manager.rs::build_initial_session_state`），超限统一由 active session 的 `trim_history_to_budget` → `compact_history_if_needed(force=true)`（LLM 摘要压缩）按阈值兜底，失败则 fail-closed。原因：message 级无损裁剪会丢语义。
+
 **目标**：`build_initial_session_state` 中 restore JSONL 历史后立即 re-apply in-memory 压缩，确保 session 重启前后 LLM 看到的"近期 raw 上下文"连续（core principle #6）。
 
 **验证**：
 - `test_session_resume` 集成测试继续通过（压缩不影响 restore 的正确性——restore 只处理纯 Tool 消息，不碰 compaction_summary / Assistant / User）
-- 压缩先于 `fit_to_budget_lossless`：即先压缩 oversized tool result（无损恢复头部空间），再执行 message 级裁剪（有损）
+- ~~压缩先于 `fit_to_budget_lossless`：即先压缩 oversized tool result（无损恢复头部空间），再执行 message 级裁剪（有损）~~ **已废弃（2026-09）**：恢复路径不再执行 tool-result 压缩，也不再执行 `fit_to_budget_lossless`——两者都丢语义
 - token 计数：compress 后 `recalibrate_tokens` 使 token 计数反映 placeholder 大小
 
 **风险**：低。纯 in-memory 追加调用，不影响 JSONL 持久化、不影响 session 创建、不影响正常运行时。与 C5 前行为唯一差异：restored 历史中 oversized tool result 被压缩 placeholder 替代（LLM 在 restore 后第一轮看到的上下文略小，但对质量无影响——能 recall）。
