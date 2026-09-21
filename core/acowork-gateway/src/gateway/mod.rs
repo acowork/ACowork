@@ -930,6 +930,15 @@ impl Gateway {
         // server starts.
         let operation_store_shared = crate::operation_store::OperationStore::new_shared();
 
+        // Inventory trigger slot — populated by the notifier startup
+        // below. The dispatcher dereferences it on every inventory
+        // mutation. `None` until the notifier starts (only matters
+        // during the brief window before the MQTT broker accepts
+        // connections, when no inventory messages can flow anyway).
+        let inventory_trigger_slot: std::sync::Arc<
+            tokio::sync::Mutex<Option<crate::mqtt::InventoryNotifierTrigger>>,
+        > = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+
         let mqtt_gw_client: Option<Arc<crate::mqtt::GatewayMqttClient>> = if mqtt_broker_started {
             let reg_for_dispatch = runtime_http_registry.clone();
             let agent_reg_for_dispatch = agent_registry.clone();
@@ -974,6 +983,7 @@ impl Gateway {
             // would otherwise consume the original, which must stay
             // available for `set_replay_guard` after connect.
             let node_replay_guard_for_cb = node_replay_guard.clone();
+            let inventory_trigger_for_cb = inventory_trigger_slot.clone();
             let callback: crate::mqtt::MqttMessageCallback = Arc::new(move |topic, payload| {
                 // Plain-text dispatch (http_port, status, ready, …)
                 let slot = slot_for_cb.clone();
@@ -989,9 +999,11 @@ impl Gateway {
                 let bootstrap_registry_for_cb = bootstrap_registry_for_dispatch.clone();
                 let operation_store_for_cb = operation_store_for_dispatch.clone();
                 let node_replay_guard_for_cb = node_replay_guard_for_cb.clone();
+                let inventory_trigger_for_cb = inventory_trigger_for_cb.clone();
                  tokio::spawn(async move {
                     let client = slot.lock().await.clone();
                     let node_control = node_control_slot.lock().await.clone();
+                    let inventory_trigger = inventory_trigger_for_cb.lock().await.clone();
                     // ADR-059 follow-up: bundle every dispatch dependency
                     // into one context instead of a growing argument list.
                     // `client` / `node_control` / the token stores are moved
@@ -1010,6 +1022,14 @@ impl Gateway {
                         bootstrap_registry: Some(bootstrap_registry_for_cb),
                         operation_store: Some(operation_store_for_cb),
                         node_replay_guard: node_replay_guard_for_cb,
+                        // Inventory trigger is cloned from the slot at
+                        // dispatch time (see `inventory_trigger` above).
+                        // The slot starts `None` and gets populated
+                        // when the notifier starts below; a missed
+                        // signal during that brief startup window is
+                        // harmless — the inventory can't change before
+                        // the broker is accepting messages anyway.
+                        inventory_trigger,
                     };
                     crate::mqtt::dispatch::handle_message(&topic, &payload, &dispatch_ctx);
                 });
@@ -1136,6 +1156,37 @@ impl Gateway {
         // explicit republish on first provider-key visibility.
         let unlock_republish_trigger = mqtt_publisher_trigger.clone();
 
+        // Inventory-change signal notifier. Wakes on every mutation to
+        // `installed_agents` (node install completion, node retained
+        // replay, empty-payload clear, HTTP uninstall) and publishes an
+        // non-retained `acowork/desktop/inventory` signal (see
+        // `mqtt::inventory_notifier` for why both choices matter).
+        // Subscribers (Desktop App) refetch `GET /api/agents` on each
+        // signal — replaces the prior 30s `setInterval` fallback in the
+        // AgentList sidebar.
+        //
+        // The trigger is also written into `inventory_trigger_slot` so
+        // the dispatch layer (which started before this point) can
+        // dereference it on every inventory aggregation.
+        //
+        // The handle is bound for the rest of `run()`: `tokio` detaches
+        // a `JoinHandle` on drop rather than aborting it, so the loop
+        // would survive either way, but holding it keeps the loop's
+        // lifetime explicit and local to this block.
+        let (inventory_trigger, _inventory_notifier_handle): (
+            Option<crate::mqtt::InventoryNotifierTrigger>,
+            Option<crate::mqtt::InventoryNotifierHandle>,
+        ) = if let Some(ref client) = mqtt_gw_client {
+            let notifier = crate::mqtt::MqttInventoryNotifier::new(client.as_ref().clone());
+            let handle = notifier.start();
+            let trigger = notifier.create_trigger();
+            *inventory_trigger_slot.lock().await = Some(trigger.clone());
+            tracing::info!("MQTT Inventory Notifier started");
+            (Some(trigger), Some(handle))
+        } else {
+            (None, None)
+        };
+
         // ADR-059 Phase 1.2: start the bootstrap snapshot publisher
         // once the MQTT client exists. It seeds the retained
         // `acowork/global/bootstrap` topic immediately (BOOTING) and
@@ -1241,6 +1292,7 @@ impl Gateway {
                 log_reload_handle,
                 mqtt_gw_client,
                 mqtt_publisher_trigger,
+                inventory_trigger,
                 Some(runtime_http_registry),
                 Some(agent_registry),
                 node_control,

@@ -174,6 +174,34 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
             return; // Not a DataEnvelope; do not fall through
         }
 
+        // ── Inventory-change signal ──
+        //
+        // The Gateway publishes a **non-retained** signal on
+        // `acowork/desktop/inventory` whenever its aggregated
+        // `installed_agents` table mutates (a Node finishes an install /
+        // uninstall, a Node replays its retained inventory on reconnect,
+        // HTTP DELETE /api/agents/{id}). The payload is just a
+        // millisecond timestamp — no inventory data. We forward it as an
+        // `inventory-changed` Tauri event and the AgentList sidebar
+        // refetches `GET /api/agents`, which is the authoritative list.
+        //
+        // It is deliberately NOT retained: it is a change *event*, not
+        // state. The catch-up for changes we missed while disconnected
+        // is the refetch on each MQTT connect edge
+        // (`applyConnectionTransition` in chatStore.ts).
+        if msg.topic == "acowork/desktop/inventory" {
+            tracing::debug!(
+                "[MQTT] inventory-change signal received ({} bytes)",
+                msg.payload.len()
+            );
+            let ts_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            let _ = app_handle.emit("inventory-changed", serde_json::json!({ "ts_ms": ts_ms }));
+            return;
+        }
+
         // Try to decode as DataEnvelope protobuf
         let envelope = match DataEnvelope::decode(&msg.payload[..]) {
             Ok(e) => e,

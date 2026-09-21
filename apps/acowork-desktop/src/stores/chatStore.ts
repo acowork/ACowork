@@ -767,6 +767,28 @@ interface ChatStore {
    * flip the dot gray, plus a UI focus to "force" it).
    */
   bootstrapVersion: number;
+  /**
+   * "The Gateway's agent inventory may have changed" counter. Bumped on
+   * two events, both of which make the AgentList sidebar's cached
+   * `GET /api/agents` result suspect:
+   *
+   * 1. Every `acowork/desktop/inventory` signal the Gateway emits when
+   *    its aggregated `installed_agents` table mutates (a Node finishes
+   *    an install/uninstall, a Node replays its retained inventory on
+   *    reconnect, or HTTP `DELETE /api/agents/{id}` drops an entry).
+   * 2. Every MQTT transition into `connected` — i.e. the initial
+   *    subscribe and every reconnect. The signal is a live,
+   *    **non-retained** message (see the Gateway's
+   *    `mqtt/inventory_notifier.rs` for why), so a change that lands
+   *    while the Desktop is disconnected would otherwise be lost. The
+   *    connection edge is the catch-up: it also closes the window
+   *    between the sidebar's mount fetch and the first subscribe.
+   *
+   * The sidebar refetches on every bump, so this replaces the previous
+   * 30 s `setInterval` polling fallback that left the sidebar stale
+   * until a tab-switch remount or the next poll tick.
+   */
+  inventoryVersion: number;
   availableModels: ModelEntry[];
   /**
    * Accounts (API keys) per provider, for the model picker's account level.
@@ -1009,6 +1031,9 @@ let _mqttStatusUnlisten: (() => void) | null = null;
 // ADR-059: `bootstrap-state` listener — bumps `bootstrapVersion` on every
 // retained snapshot. Held for `disposeMqttListener` cleanup.
 let _bootstrapUnlisten: (() => void) | null = null;
+// Inventory-change fanout handle — see the `inventory-changed` listener
+// below. Paired with `bootstrap-state` for cleanup symmetry.
+let _inventoryUnlisten: (() => void) | null = null;
 
 /// Reentrancy guard for `initMqttListener`.
 ///
@@ -1108,6 +1133,15 @@ function applyConnectionTransition(
     effectiveConnection: nextEffective,
     staleSince: _connectingSince,
     transitionLog: nextLog,
+    // Inventory catch-up: the inventory-change signal is live-only
+    // (non-retained), so anything that happened while the Desktop was
+    // not subscribed is invisible to us. Every transition into
+    // `connected` means the Rust client just (re-)subscribed — refetch
+    // `GET /api/agents` so the AgentList sidebar converges. This also
+    // closes the mount-fetch-vs-first-subscribe window.
+    ...(nextEffective === "connected"
+      ? { inventoryVersion: state.inventoryVersion + 1 }
+      : {}),
   });
 }
 
@@ -1284,6 +1318,23 @@ async function doInitMqttListener(): Promise<void> {
     useChatStore.setState((s) => ({ bootstrapVersion: s.bootstrapVersion + 1 }));
   });
 
+  // Inventory-change fanout. The Gateway publishes a non-retained
+  // `acowork/desktop/inventory` message whenever its
+  // aggregated `installed_agents` table mutates (remote Node finishes
+  // install / uninstall, Node replays its retained inventory on
+  // reconnect, HTTP uninstall drops an entry). The Tauri
+  // `inventory-changed` event is emitted by the Rust eventloop on each
+  // delivery; bumping `inventoryVersion` here is the realtime trigger
+  // for the AgentList sidebar to refetch `GET /api/agents`.
+  //
+  // The signal is live-only, so it cannot cover a change that happened
+  // while the Desktop was disconnected. That catch-up lives in
+  // `applyConnectionTransition` below, which bumps the same counter on
+  // every transition into `connected`.
+  _inventoryUnlisten = await listen("inventory-changed", () => {
+    useChatStore.setState((s) => ({ inventoryVersion: s.inventoryVersion + 1 }));
+  });
+
   // Pull the *current* status from the Rust side so we don't miss the
   // initial state.  The source of truth is `DesktopMqttClient::session_state`
   // (a watch channel updated synchronously by the poll task).
@@ -1331,6 +1382,10 @@ export function disposeMqttListener(): void {
     _bootstrapUnlisten();
     _bootstrapUnlisten = null;
   }
+  if (_inventoryUnlisten) {
+    _inventoryUnlisten();
+    _inventoryUnlisten = null;
+  }
   useChatStore.setState({
     mqttConnected: false,
     lastMqttError: null,
@@ -1347,6 +1402,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   staleSince: null,
   transitionLog: [],
   bootstrapVersion: 0,
+  inventoryVersion: 0,
   availableModels: [],
   providerAccounts: {},
 

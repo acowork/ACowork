@@ -1536,6 +1536,12 @@ pub async fn uninstall_agent(
     // Drop the installed entry immediately (the node's retained clear is
     // the eventual-consistency backstop for a fresh Gateway).
     state.gateway_state.write().await.remove_installed(&instance_id);
+    // Wake the inventory-change notifier — subscribers (Desktop) refetch
+    // `GET /api/agents` on each signal so the sidebar reflects the
+    // uninstall without polling or a tab-switch remount.
+    if let Some(t) = state.inventory_trigger.as_ref() {
+        t.notify();
+    }
 
     Ok(Json(MessageResponse {
         message: format!("Agent uninstalled: {}", resolved_agent_id),

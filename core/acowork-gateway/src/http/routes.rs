@@ -47,6 +47,11 @@ pub struct AppState {
     /// ADR-033: MQTT global resources publisher trigger.
     /// HTTP handlers call `.trigger()` after resource changes to republish.
     pub mqtt_publisher_trigger: Option<crate::mqtt::MqttPublisherTrigger>,
+    /// Inventory-change signal trigger. HTTP handlers that mutate the
+    /// aggregated `installed_agents` table (e.g. `uninstall_agent`) call
+    /// `.notify()` so the Gateway republishes `acowork/desktop/inventory`.
+    /// Subscribers (Desktop App) refetch `GET /api/agents` on each signal.
+    pub inventory_trigger: Option<crate::mqtt::InventoryNotifierTrigger>,
     /// ADR-033: Runtime HTTP port registry for reverse proxy to Runtime localhost HTTP.
     pub runtime_http_registry: Option<crate::http::proxy::SharedRuntimeHttpRegistry>,
     /// ADR-033: Agent registry tracking online/offline status from MQTT.
@@ -85,6 +90,7 @@ impl AppState {
             log_reload_handle: None,
             mqtt_gateway_client: None,
             mqtt_publisher_trigger: None,
+            inventory_trigger: None,
             runtime_http_registry: None,
             agent_registry: None,
             node_control: None,

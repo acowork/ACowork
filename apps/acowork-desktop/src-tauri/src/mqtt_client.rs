@@ -100,6 +100,22 @@ pub const ALL_TOPIC_FILTERS: &[(&str, MqttQoS)] = &[
     // (re)connect so the Desktop always converges on the current
     // instance_id / version / phase even after a Gateway restart.
     ("acowork/global/bootstrap", MqttQoS::AtLeastOnce),
+    // ── Inventory-change signal ──
+    // Gateway emits a non-retained timestamp message here whenever its
+    // aggregated `installed_agents` table mutates (a Node finishes an
+    // install/uninstall, or a Node replays its retained inventory on
+    // reconnect). Subscribers (AgentList sidebar) treat it as "refresh
+    // now" and refetch `GET /api/agents`, which combines
+    // `installed_agents` with the MQTT AgentRegistry's liveness verdict —
+    // the signal carries the change hint, not the data.
+    //
+    // The topic lives outside `acowork/global/` on purpose: every Runtime
+    // decodes that prefix as a protobuf `DataEnvelope`, so a non-envelope
+    // payload there would log a decode failure in each Runtime. Not
+    // retained either: the signal only reaches a subscriber that is
+    // already connected, and changes missed while disconnected are caught
+    // by the sidebar's refetch on each MQTT connect edge.
+    ("acowork/desktop/inventory", MqttQoS::AtLeastOnce),
     // ADR-043: Retained per-session config + state. Runtime publishes
     // config (title/model/provider/workspace/reasoning_effort/temperature)
     // and state (status/message_count/tokens/ratio/context_usage) on

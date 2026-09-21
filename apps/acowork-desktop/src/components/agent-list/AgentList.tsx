@@ -141,13 +141,29 @@ export function AgentList({ width }: AgentListProps) {
   // fallback needed (the original loop polled both agents and nodes).
   const bootstrapVersion = useChatStore((s) => s.bootstrapVersion);
 
+  // Inventory-change counter — bumped by the `inventory-changed` Tauri
+  // event (see chatStore.ts listener) and by every MQTT transition into
+  // `connected`. The Gateway sends a live (non-retained)
+  // `acowork/desktop/inventory` signal whenever its aggregated
+  // `installed_agents` table mutates (remote Node finishes install /
+  // uninstall, Node replays its retained inventory on reconnect, HTTP
+  // DELETE /api/agents/{id}); the connection edge is the catch-up for
+  // signals missed while disconnected. On bump we refetch the list —
+  // replaces the previous mount-fetch + 30s `setInterval` polling
+  // fallback that left the sidebar stale until a tab-switch remount.
+  const inventoryVersion = useChatStore((s) => s.inventoryVersion);
+
   useEffect(() => {
+    // Initial mount fetch — populates the list before any realtime
+    // signal arrives, and the only fetch path when MQTT is unavailable.
     fetchAgents();
-    const interval = setInterval(() => {
-      fetchAgents();
-    }, 30_000);
-    return () => clearInterval(interval);
   }, [fetchAgents]);
+
+  // Realtime refetch on every inventory change (signal or reconnect).
+  useEffect(() => {
+    if (inventoryVersion === 0) return; // Skip the initial 0 (mount fetch already ran)
+    fetchAgents();
+  }, [inventoryVersion, fetchAgents]);
 
   // Refetch the node topology on mount and on every bootstrap snapshot
   // transition. `bootstrapVersion` increments drive the realtime path
@@ -453,6 +469,16 @@ export function AgentList({ width }: AgentListProps) {
     return partitionAgentsByNode(filteredAgents, nodes);
   }, [isRemoteMode, filteredAgents, nodes]);
 
+  // A search is an agent-first intent ("find agent X"), so agent-less node
+  // groups are dropped while one is active — otherwise the matches are
+  // buried under empty headers. Outside a search every node is listed, so
+  // an empty node stays reachable (e.g. to install its first agent).
+  const searching = searchQuery.trim().length > 0;
+  const visibleGroups = useMemo(() => {
+    if (!nodeGroups) return null;
+    return searching ? nodeGroups.filter((g) => g.agents.length > 0) : nodeGroups;
+  }, [nodeGroups, searching]);
+
   // Shared row renderer for both local (flat) and remote (grouped) modes.
   // `total` lets the row compute whether it is the last in its visual
   // scope (so the divider is drawn correctly inside remote groups too).
@@ -640,21 +666,35 @@ export function AgentList({ width }: AgentListProps) {
           </div>
         )}
 
-        {isRemoteMode && nodeGroups
-          ? nodeGroups.map((group) => {
+        {visibleGroups
+          ? visibleGroups.map((group) => {
               const collapsed = collapsedNodes.has(group.nodeId);
+              const nodeOnline = group.node?.online ?? false;
               return (
                 <Fragment key={group.nodeId}>
                   <NodeGroupHeader
                     nodeName={nodeDisplayName(group)}
-                    online={group.node?.online ?? false}
+                    online={nodeOnline}
                     statusLabel={t(
-                      group.node?.online ? "settings.nodesOnline" : "settings.nodesOffline",
+                      nodeOnline ? "settings.nodesOnline" : "settings.nodesOffline",
                     )}
                     collapsed={collapsed}
                     onToggle={() => toggleNode(group.nodeId)}
                     agentCount={group.agents.length}
                   />
+                  {!collapsed && group.agents.length === 0 && (
+                    <button
+                      type="button"
+                      onClick={() => void doInstall(group.nodeId)}
+                      disabled={!nodeOnline || installing}
+                      title={t("agentList.installAgent")}
+                      data-testid="node-group-install"
+                      className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs text-text-tertiary transition-colors hover:bg-nav-item-hover hover:text-text-secondary disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent"
+                    >
+                      <Plus className="h-3.5 w-3.5 shrink-0" />
+                      <span className="truncate">{t("agentList.installAgent")}</span>
+                    </button>
+                  )}
                   {!collapsed &&
                     group.agents.map((agent, index) => renderAgentItem(agent, index, group.agents.length))}
                 </Fragment>
@@ -662,11 +702,12 @@ export function AgentList({ width }: AgentListProps) {
             })
           : filteredAgents.map((agent, index) => renderAgentItem(agent, index, filteredAgents.length))}
 
-        {filteredAgents.length === 0 && !loading && (
-          <div className="px-3 py-8 text-center text-xs text-text-tertiary ">
-            {agentsList.length === 0 ? t("agentList.noAgentsInstalled") : t("agentList.noMatchingAgents")}
-          </div>
-        )}
+        {!loading &&
+          (visibleGroups ? visibleGroups.length === 0 : filteredAgents.length === 0) && (
+            <div className="px-3 py-8 text-center text-xs text-text-tertiary ">
+              {agentsList.length === 0 ? t("agentList.noAgentsInstalled") : t("agentList.noMatchingAgents")}
+            </div>
+          )}
       </div>
 
       <div ref={addMenuRef} className="relative p-1.5">

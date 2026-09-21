@@ -133,6 +133,8 @@ acowork/global/
                                # Gateway 重 publish 此主题，Runtime 立即收到。
 ```
 
+**Desktop 侧信号主题（不属于上图）**：`acowork/desktop/inventory` —— Gateway 的聚合表 `installed_agents` 每次变更（Node 安装/卸载、Node 重连重放清单、`DELETE /api/agents/{id}`）时发布一次，payload 为毫秒时间戳，**非 Retained**。Desktop 收到后重新拉取 `GET /api/agents`。它刻意不放在 `acowork/global/` 下：Runtime 对 `acowork/global/#` 的每个 payload 都按 protobuf `DataEnvelope` 解码，非 envelope 的 payload 会让每个 Runtime 打出解码失败的 warn；这个信号是给 Desktop 的，不是给 agent 的。
+
 **为什么密钥在 `acowork/global/*` 主题里一起发布？** 这是 Runtime **唯一**的密钥获取路径——Runtime 启动时只 SUB `acowork/global/#`，所有密钥随 retained payload 一次性下发：
 
 1. **Gateway 是 broker 的同进程宿主**（见 §11），broker 只绑定 localhost（`127.0.0.1`），不出主机。PUBLISH 的 payload（含解密的密钥）不会进入网络。

@@ -206,6 +206,12 @@ pub struct DispatchContext {
     /// Replay guard — suppresses stale retained replays of offline
     /// signals from demoting freshly-reconnected nodes (ADR-059 §7.2).
     pub node_replay_guard: Arc<NodeReplayGuard>,
+    /// Triggers an `acowork/desktop/inventory` publish whenever the
+    /// aggregated `installed_agents` table mutates. `None` in tests
+    /// that do not start the notifier; dispatcher code paths must
+    /// `if let Some(t) = ctx.inventory_trigger { t.notify(); }` so the
+    /// absence is harmless.
+    pub inventory_trigger: Option<crate::mqtt::InventoryNotifierTrigger>,
 }
 
 impl Default for DispatchContext {
@@ -223,6 +229,7 @@ impl Default for DispatchContext {
             node_tokens: None,
             auth_enabled: false,
             bootstrap_registry: None,
+            inventory_trigger: None,
             operation_store: None,
             node_replay_guard: Arc::new(NodeReplayGuard::default()),
         }
@@ -905,10 +912,17 @@ pub fn handle_plaintext_message(topic: &str, payload: &[u8], ctx: &DispatchConte
         let payload_owned = payload.to_vec();
         let node_id_owned = node_id.clone();
         let bootstrap_registry_for_installed = ctx.bootstrap_registry.clone();
+        // Inventory-change signal: every mutation to installed_agents
+        // (install complete / retained replay / empty-payload clear)
+        // must wake the publisher so subscribers (Desktop) refresh.
+        let inventory_trigger = ctx.inventory_trigger.clone();
         tokio::spawn(async move {
             let mut gw = state_for_installed.write().await;
             if payload_owned.is_empty() {
                 gw.remove_installed(&agent_id);
+                if let Some(t) = inventory_trigger.as_ref() {
+                    t.notify();
+                }
                 tracing::info!(node_id = %node_id_owned, agent_id, "Removed installed agent (node retained cleared)");
                 return;
             }
@@ -967,6 +981,16 @@ pub fn handle_plaintext_message(topic: &str, payload: &[u8], ctx: &DispatchConte
                             tracing::info!(
                                 "System Agent ready — bootstrap can reach READY (ADR-059)"
                             );
+                        }
+
+                        // Wake the inventory-change notifier — the
+                        // Desktop listens on `acowork/desktop/inventory`
+                        // and refetches `GET /api/agents` on each
+                        // signal. Idempotent if the same Node
+                        // re-publishes its retained inventory on
+                        // reconnect.
+                        if let Some(t) = inventory_trigger.as_ref() {
+                            t.notify();
                         }
                     }
                 }
@@ -1097,6 +1121,12 @@ pub async fn remove_node_records(ctx: &DispatchContext, node_id: &str) {
             gw.remove_running(id);
             gw.cron_scheduler.unregister_agent(id);
         }
+    }
+    // Bulk uninstalls from a permanently-offline node also need to wake
+    // the inventory notifier (Desktop subscribes to one signal per
+    // change; coalescing handles the burst on the publish side).
+    if let Some(t) = ctx.inventory_trigger.as_ref() {
+        t.notify();
     }
     {
         let mut agents = ctx.agent_registry.write().await;
@@ -3048,5 +3078,210 @@ mod tests {
             entry.started_at, started_at,
             "consistent entries must NOT be re-installed (started_at preserved)"
         );
+    }
+
+    /// Regression: a Node's `acowork/nodes/+/agents/+/installed`
+    /// retained message must wake the inventory-change notifier so
+    /// the Desktop sidebar refetches without a tab-switch remount
+    /// (the bug that motivated this signal — see PR description).
+    ///
+    /// We exercise the dispatcher path by feeding a synthetic
+    /// retained payload and then polling the trigger's Notify
+    /// registry directly: every `Notify::notify_one()` increments an
+    /// internal counter that the standard `Notify` does not expose,
+    /// so we use a thin wrapper here. The trigger struct itself
+    /// is an `Arc<Notify>`; `Notify::notified()` is what we drive.
+    #[tokio::test]
+    async fn installed_inventory_aggregation_wakes_inventory_trigger() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use tokio::sync::Notify;
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_for_cb = counter.clone();
+        let inventory_trigger = crate::mqtt::InventoryNotifierTrigger::for_test(Notify::new());
+        // Poll the test-side counter via a one-shot task: subscribe
+        // via `notified()` and bump a sibling atomic on wake. This is
+        // racey if the publish has already happened, so we register
+        // the listener BEFORE feeding the dispatcher.
+        let counter_for_task = counter_for_cb.clone();
+        let inventory_trigger_for_task = inventory_trigger.clone();
+        let listener = tokio::spawn(async move {
+            // Wait in a loop so a single burst still registers.
+            loop {
+                inventory_trigger_for_task.notify.notified().await;
+                counter_for_task.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+
+        let registry = crate::bootstrap::SubsystemReadinessRegistry::new_shared();
+        let mut ctx = ctx_with_registry(registry);
+        // Inject the trigger AFTER ctx_with_registry (which sets `..Default::default()`,
+        // so inventory_trigger is None).
+        ctx.inventory_trigger = Some(inventory_trigger.clone());
+
+        // Build a valid InstalledAgentInfo envelope.
+        let manifest_toml = "agent_id = \"com.acowork.test\"\n\
+            version = \"1.0.0\"\n\
+            name = \"Test\"\n\
+            description = \"\"\n\
+            author = \"\"\n\
+            runtime_version = \"0.1.0\"";
+        let info = acowork_core::mqtt_proto::InstalledAgentInfo {
+            agent_id: "com.acowork.test".to_string(),
+            version: "1.0.0".to_string(),
+            name: "Test".to_string(),
+            install_path: "/tmp/pkg/abc".to_string(),
+            manifest_toml: manifest_toml.to_string(),
+            instance_id: "1a1a1a1a-0000-4000-8000-000000000099".to_string(),
+            overrides_json: String::new(),
+        };
+        let envelope = acowork_core::mqtt_proto::DataEnvelope {
+            version: 1,
+            payload: Some(
+                acowork_core::mqtt_proto::data_envelope::Payload::InstalledAgentInfo(info),
+            ),
+        };
+        let payload = prost::Message::encode_to_vec(&envelope);
+
+        // Feed the dispatcher. The installed-topic matcher spawns an
+        // async task; wait for the installed_agents table to populate
+        // (then the notify() has already fired).
+        let topic = acowork_core::node::node_agent_installed_topic(
+            "node-test",
+            "1a1a1a1a-0000-4000-8000-000000000099",
+        );
+        handle_message(&topic, &payload, &ctx);
+
+        // Poll for either: (a) the trigger woke (counter > 0) or
+        // (b) the installed_agents table populated. Either proves
+        // the dispatcher path fired.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            if counter_for_cb.load(Ordering::SeqCst) >= 1 {
+                break;
+            }
+            let gw = ctx.state.read().await;
+            if gw.installed_agents.contains_key("1a1a1a1a-0000-4000-8000-000000000099") {
+                // Aggregation completed; the notify() that runs AFTER
+                // upsert_installed_from_node must have been called.
+                // Give the listener a brief moment to wake.
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                if counter_for_cb.load(Ordering::SeqCst) >= 1 {
+                    break;
+                }
+                panic!(
+                    "installed_agents was populated but inventory_trigger.notify() \
+                     was never called — the dispatcher forgot to wake the notifier"
+                );
+            }
+            drop(gw);
+            if std::time::Instant::now() >= deadline {
+                panic!(
+                    "neither the inventory trigger nor the installed_agents table \
+                     updated within 2s — dispatcher did not process the message"
+                );
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        listener.abort();
+    }
+
+    /// Regression: empty-payload `installed` retained message (the
+    /// node clearing its entry on uninstall) must also wake the
+    /// trigger — covers the "uninstall from remote node" case where
+    /// the Desktop sidebar must drop the entry in real time.
+    #[tokio::test]
+    async fn installed_inventory_empty_payload_wakes_inventory_trigger() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_for_cb = counter.clone();
+        let inventory_trigger = crate::mqtt::InventoryNotifierTrigger::for_test(
+            tokio::sync::Notify::new(),
+        );
+        let inventory_trigger_for_task = inventory_trigger.clone();
+        let counter_for_task = counter.clone();
+        let listener = tokio::spawn(async move {
+            loop {
+                inventory_trigger_for_task.notify.notified().await;
+                counter_for_task.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+
+        // Seed an installed entry so `remove_installed` has something to drop.
+        let registry = crate::bootstrap::SubsystemReadinessRegistry::new_shared();
+        let mut ctx = ctx_with_registry(registry);
+        ctx.inventory_trigger = Some(inventory_trigger.clone());
+        {
+            let mut gw = ctx.state.write().await;
+            gw.add_installed(crate::gateway::state::AgentInfo {
+                instance_id: "1a1a1a1a-0000-4000-8000-000000000077".to_string(),
+                agent_id: "com.acowork.to-remove".to_string(),
+                version: "1.0.0".to_string(),
+                name: "To Remove".to_string(),
+                install_path: "/tmp/pkg/rm".to_string(),
+                manifest: acowork_core::AgentManifest {
+                    agent_id: "com.acowork.to-remove".to_string(),
+                    version: "1.0.0".to_string(),
+                    name: "To Remove".to_string(),
+                    display_name: None,
+                    role: None,
+                    avatar: None,
+                    builtin_avatar: None,
+                    description: String::new(),
+                    author: String::new(),
+                    runtime_version: "0.1.0".to_string(),
+                    permissions: vec![],
+                    triggers: vec![],
+                    llm: Default::default(),
+                    memory: Default::default(),
+                    identity_deps: vec![],
+                    tools: vec![],
+                    capabilities: Default::default(),
+                    resources: Default::default(),
+                    sandbox: Default::default(),
+                    system: false,
+                    dev: false,
+                    skills: Default::default(),
+                },
+                node_id: "node-test".to_string(),
+            });
+        }
+
+        // Feed an empty retained payload (the node confirming uninstall).
+        let topic = acowork_core::node::node_agent_installed_topic(
+            "node-test",
+            "1a1a1a1a-0000-4000-8000-000000000077",
+        );
+        handle_message(&topic, &[], &ctx);
+
+        // Wait until either the table loses the entry or the trigger fires.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            if counter_for_cb.load(Ordering::SeqCst) >= 1 {
+                break;
+            }
+            let gw = ctx.state.read().await;
+            if !gw.installed_agents.contains_key("1a1a1a1a-0000-4000-8000-000000000077") {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                if counter_for_cb.load(Ordering::SeqCst) >= 1 {
+                    break;
+                }
+                panic!(
+                    "installed_agents lost the entry but inventory_trigger.notify() \
+                     was never called — dispatcher forgot to wake the notifier"
+                );
+            }
+            drop(gw);
+            if std::time::Instant::now() >= deadline {
+                panic!("dispatcher did not process the empty-payload clear within 2s");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        listener.abort();
     }
 }

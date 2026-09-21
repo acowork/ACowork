@@ -133,6 +133,8 @@ acowork/global/
                                # Gateway republishes this topic; Runtime receives it immediately.
 ```
 
+**Desktop-side signal topic (not part of the table above)**: `acowork/desktop/inventory` — the Gateway publishes it on every mutation of its aggregated `installed_agents` table (Node install/uninstall, a Node replaying its retained inventory on reconnect, `DELETE /api/agents/{id}`). Payload = millisecond timestamp, **not retained**. The Desktop refetches `GET /api/agents` on each signal. It deliberately does not live under `acowork/global/`: every Runtime decodes each `acowork/global/#` payload as a protobuf `DataEnvelope`, so a non-envelope payload there would make every Runtime log a decode failure. This signal is addressed to the Desktop, not to agents.
+
 **Why are secrets published together in `acowork/global/*` topics?** This is Runtime's **only** secret retrieval path—Runtime starts with only a `SUB acowork/global/#`, and all secrets are delivered in one retained payload:
 
 1. **Gateway is the broker's same-process host** (see §11), and the broker binds only to localhost (`127.0.0.1`), never leaving the host. PUBLISHed payloads (containing decrypted secrets) do not enter the network.

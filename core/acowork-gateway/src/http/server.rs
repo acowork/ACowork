@@ -109,6 +109,7 @@ pub(crate) async fn start_http_server(
     log_reload_handle: Option<crate::LogReloadHandle>,
     mqtt_client: Option<Arc<crate::mqtt::GatewayMqttClient>>,
     mqtt_publisher_trigger: Option<crate::mqtt::MqttPublisherTrigger>,
+    inventory_trigger: Option<crate::mqtt::InventoryNotifierTrigger>,
     runtime_http_registry: Option<crate::http::proxy::SharedRuntimeHttpRegistry>,
     agent_registry: Option<crate::mqtt::agent_registry::SharedAgentRegistry>,
     node_control: Option<crate::mqtt::node_control::NodeControlClient>,
@@ -142,6 +143,7 @@ pub(crate) async fn start_http_server(
     app_state.log_reload_handle = log_reload_handle;
     app_state.mqtt_gateway_client = mqtt_client;
     app_state.mqtt_publisher_trigger = mqtt_publisher_trigger;
+    app_state.inventory_trigger = inventory_trigger;
     app_state.runtime_http_registry = runtime_http_registry;
     app_state.agent_registry = agent_registry;
     app_state.node_control = node_control;
