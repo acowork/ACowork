@@ -20,7 +20,7 @@ import {
   AuthApiError,
   changePasswordRequest,
   deleteAccount,
-  fetchAuthMode,
+  fetchAuthPolicy,
   fetchMe,
   firstLoginRequest,
   loginRequest,
@@ -79,6 +79,12 @@ function reloadApp(): void {
 interface AuthStore {
   /** Resolved deployment mode; `"unknown"` until `/api/status` answers. */
   mode: AuthMode | "unknown";
+  /**
+   * ADR-076 §决策 6: `[multi_user].registration_open`. When set, a logged-in
+   * non-admin may create accounts (the Gateway still forces `role: user`), so
+   * the sidebar offers the invite affordance to everyone.
+   */
+  registrationOpen: boolean;
   /** App-level gate state. */
   status: AuthState;
   /** The caller's own account (redacted), once known. */
@@ -129,6 +135,7 @@ function app(account: UserAccount | null): void {
 
 export const useAuthStore = create<AuthStore>((set, get) => ({
   mode: "unknown",
+  registrationOpen: false,
   status: "unknown",
   account: null,
   accessToken: null,
@@ -141,7 +148,9 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
     const url = getGatewayUrl();
     let mode: AuthMode;
     try {
-      mode = await fetchAuthMode(url);
+      const policy = await fetchAuthPolicy(url);
+      mode = policy.authMode;
+      set({ registrationOpen: policy.registrationOpen });
     } catch (err) {
       log.warn("[authStore] failed to resolve auth mode:", err);
       // Gateway not answering the probe — leave `unknown` so the UI stays

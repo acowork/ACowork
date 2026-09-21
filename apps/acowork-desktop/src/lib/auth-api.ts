@@ -60,16 +60,25 @@ async function postJson(url: string, body: unknown, accessToken?: string): Promi
 }
 
 /**
- * Read the deployment auth mode from the public `/api/status` probe
- * (ADR-076 §决策 12). An older Gateway that predates ADR-076 omits the
- * field — treated as `local` so the Desktop never gates a backend that
- * has no account system.
+ * Read the deployment auth policy from the public `/api/status` probe
+ * (ADR-076 §决策 12 + §决策 6). An older Gateway that predates ADR-076 omits
+ * `auth_mode` — treated as `local` so the Desktop never gates a backend that
+ * has no account system. `registration_open` is `false` whenever the account
+ * system is off, so a stale flag can never offer a dead invite button.
  */
-export async function fetchAuthMode(gatewayUrl: string): Promise<AuthMode> {
+export async function fetchAuthPolicy(
+  gatewayUrl: string,
+): Promise<{ authMode: AuthMode; registrationOpen: boolean }> {
   const resp = await fetch(`${gatewayUrl}/api/status`);
   if (!resp.ok) throw new AuthApiError(resp.status, await readError(resp));
-  const data = (await resp.json()) as { auth_mode?: AuthMode };
-  return data.auth_mode === "multi_user" ? "multi_user" : "local";
+  const data = (await resp.json()) as {
+    auth_mode?: AuthMode;
+    registration_open?: boolean;
+  };
+  return {
+    authMode: data.auth_mode === "multi_user" ? "multi_user" : "local",
+    registrationOpen: data.registration_open === true,
+  };
 }
 
 export async function loginRequest(

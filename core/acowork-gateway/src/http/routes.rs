@@ -378,6 +378,11 @@ pub struct SystemStatusResponse {
     /// the auth middleware's public whitelist, so this is reachable
     /// before any login.
     pub auth_mode: &'static str,
+    /// ADR-076 §决策 6: whether a non-admin may create accounts
+    /// (`[multi_user].registration_open`). Always `false` unless the account
+    /// system is actually running — the Desktop offers the invite
+    /// affordance to non-admins only when this is set.
+    pub registration_open: bool,
 }
 
 /// `GET /api/status` — system status
@@ -424,6 +429,11 @@ pub async fn system_status(State(state): State<AppState>) -> Json<SystemStatusRe
         mqtt_username,
         mqtt_password,
         auth_mode: state.auth_mode.as_str(),
+        registration_open: state.auth_service.is_some()
+            && gw.config
+                .as_ref()
+                .map(|c| c.multi_user.registration_open)
+                .unwrap_or(false),
     })
 }
 
@@ -830,6 +840,8 @@ mod tests {
         // ADR-076 §决策 12: the resolved mode is exposed for the Desktop's
         // login gate; the default (loopback) deployment is `local`.
         assert_eq!(resp.auth_mode, "local");
+        // No account system → registration can never be open.
+        assert!(!resp.registration_open);
     }
 
     #[tokio::test]

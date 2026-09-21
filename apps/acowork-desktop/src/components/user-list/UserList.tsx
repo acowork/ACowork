@@ -49,6 +49,7 @@ export function UserList() {
   const self = useAuthStore((s) => s.account);
   const accessToken = useAuthStore((s) => s.accessToken);
   const viewAsUserId = useAuthStore((s) => s.viewAsUserId);
+  const registrationOpen = useAuthStore((s) => s.registrationOpen);
   const selectedAgentId = useAgentStore((s) => s.selectedAgentId);
 
   const [collapsed, setCollapsed] = useState(true);
@@ -63,6 +64,9 @@ export function UserList() {
 
   const loggedIn = mode === "multi_user" && status === "logged_in";
   const isAdmin = self?.role === "admin";
+  // §决策 6: a non-admin may create accounts only while self-registration is
+  // open (the Gateway hardcodes the created role to `user`). Admins always may.
+  const canInvite = isAdmin || registrationOpen;
 
   const reload = useCallback(async () => {
     const token = useAuthStore.getState().accessToken;
@@ -199,7 +203,7 @@ export function UserList() {
           <span className="truncate">{t("userList.title")}</span>
           <span className="ml-auto text-[10px] font-normal opacity-60">{rows.length}</span>
         </button>
-        {isAdmin && (
+        {canInvite && (
           <button
             type="button"
             onClick={() => setCreateOpen(true)}
@@ -294,7 +298,9 @@ export function UserList() {
         open={createOpen}
         onClose={() => setCreateOpen(false)}
         onCreated={(result: CreateAccountResult) => {
-          void reload();
+          // `reload` hits the admin-only account list; a non-admin only ever
+          // sees their own row, so there is nothing to refresh for them.
+          if (isAdmin) void reload();
           if (result.invite_token) {
             setInvite({ token: result.invite_token, username: result.account.display_name });
           }
