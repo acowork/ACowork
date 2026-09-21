@@ -1115,10 +1115,9 @@ impl SessionManager {
             .or(Some(DEFAULT_TEMPERATURE));
         session_state.set_temperature(temperature);
 
-        // Install the restored history *after* set_max_tokens has been applied,
-        // so the lossless trim (if needed) operates against the model-correct
-        // budget. Trim is the safety net for the "resumed under a smaller
-        // model" case — it never invokes an LLM.
+        // Install the restored history *after* set_max_tokens has been applied
+        // so any downstream budget comparison uses the model-correct budget.
+        // No trim happens here — see the restore note below.
         if let Some(outcome) = restored {
             session_state
                 .history_mut()
@@ -1127,10 +1126,9 @@ impl SessionManager {
             // Restore the token-counting scene from meta: the last
             // API-counted input (authoritative anchor for the resumed
             // history) and the last calibrated chars/token ratio. Without
-            // this the JSONL replay re-estimates with the default ratio,
-            // which for CJK-heavy sessions is ~2x off the provider count
-            // (and previously got patched with the now-removed overhead
-            // compensation).
+            // this the JSONL replay re-estimates with a messages-only count
+            // that is strictly smaller than the real prompt, so the first
+            // post-resume request would slip past the compaction threshold.
             if let Some(conv) = session_state.conversation() {
                 let last_input = conv.tokens().map(|t| t.last_input);
                 let model_ratio = conv.model_ratio();
@@ -1139,23 +1137,23 @@ impl SessionManager {
                     .restore_anchor(last_input, model_ratio);
             }
 
-            // NOTE: restore does not perform placeholder compression.
+            // NOTE: restore does not perform placeholder compression OR
+            // lossless trim. History is loaded from JSONL as-is so the
+            // post-resume state matches the user's last-active view — the
+            // 90-message lossless trim we used to run here silently
+            // discarded entire rounds and surfaced as `~109K` usage in
+            // the status panel even when the persisted `last_input`
+            // reported `167K`. Active-session protection is enough:
+            //   - `execute_single_iteration` calls `trim_history_to_budget`
+            //     (absolute budget floor → `compact_history_if_needed(force=true)`,
+            //     LLM-summary compaction) before every `build_chat_request`,
+            //     including the very first call after cold start.
+            //   - `check_context_overflow_and_trim` covers the 90% threshold.
+            // Both routes preserve semantics via LLM summary, so the
+            // "resumed under a smaller model" edge case is handled by the
+            // same fail-closed path (compaction failure → session Idle)
+            // instead of a silent lossless drop.
             //
-            // History is loaded from JSONL as-is. Tool-result compression
-            // was retired; the JSONL stores the original tool output, so
-            // `last_input` (restored from meta) already reflects the
-            // uncompressed state — no re-compression needed at restore time.
-            //
-            // `fit_to_budget_lossless` remains the safety net for the
-            // "resumed under a smaller model" case.
-            let dropped = session_state.history_mut().fit_to_budget_lossless();
-            if dropped > 0 {
-                tracing::warn!(
-                    dropped,
-                    "Session resume: history exceeded 80% budget under current model; \
-                     applied lossless tail-preserving trim"
-                );
-            }
             // If a compaction summary was restored, the session is logically
             // already in a "post-compaction" state — mark it so session-close
             // tail distillation respects the boundary.

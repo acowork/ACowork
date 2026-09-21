@@ -105,13 +105,17 @@ impl super::loop_::AgentLoop {
             let caps = self.core.get_model_capabilities(model_name)?;
             let max_output = self.core.max_output_tokens_limit_for_model(model_name);
             // Prefer the live in-memory history token count over the
-            // persisted snapshot. After a cold-start resume, `persisted
-            // .last_input` still holds the PRE-restart value while `history`
-            // has already been re-loaded (and lossless-trimmed) — pushing
-            // the stale number made the UI report a tiny context right up to
-            // the moment compaction fired (incident 2026-09-06). Empty/new
+            // persisted snapshot. `restore_anchor` has already seeded
+            // `history` from `persisted.last_input`, so at cold start the two
+            // agree; the live value wins afterwards because messages appended
+            // after resume are only counted in `history`. Empty/new
             // histories keep the persisted fallback so the pre-first-LLM
             // snapshot still shows something sensible.
+            //
+            // Both figures are whole-prompt API counts (history + system +
+            // tool schemas), never a messages-only estimate — mixing the two
+            // 口径 is what made a resumed session report a bogus `~109K`
+            // against a persisted `last_input` of `167098`.
             let live_tokens = self.session.history.token_count();
             let use_live = live_tokens > 0;
             let input_tokens = if use_live {
