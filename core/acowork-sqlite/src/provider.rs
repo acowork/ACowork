@@ -673,7 +673,7 @@ impl SqliteStore {
     }
 
     /// `page_count * page_size` — the honest DB size for file and memory alike.
-    fn storage_size_bytes(&self) -> crate::Result<u64> {
+    pub(crate) fn storage_size_bytes(&self) -> crate::Result<u64> {
         let conn = self.lock();
         let page_count: i64 = conn.query_row("PRAGMA page_count", [], |r| r.get(0))?;
         let page_size: i64 = conn.query_row("PRAGMA page_size", [], |r| r.get(0))?;
@@ -773,7 +773,7 @@ fn age_days(created_at: Option<&Value>, now: DateTime<Utc>) -> f64 {
 /// migration. Order matters: autobiographical is disambiguated by category,
 /// procedural reads as a guideline, and knowledge is flattened to
 /// `subject predicate object`.
-fn render_content(props: &Value) -> String {
+pub(crate) fn render_content(props: &Value) -> String {
     let text = |key: &str| props.get(key).and_then(Value::as_str).unwrap_or("");
     let non_empty = |key: &str| {
         let value = text(key);

@@ -1233,3 +1233,399 @@ fn provider_search_episodes_and_hybrid_search() {
     assert!(all.iter().any(|hit| hit.node_id == id));
     assert!(all.iter().all(|hit| !hit.content.is_empty()));
 }
+
+// ── MemoryAdminService (ADR-082 D1) ──────────────────────────────────────
+//
+// The admin surface is what the Desktop Memory panel and the HTTP admin
+// endpoints call, so these tests pin the wire contract: pagination, filters,
+// the eager `rejected_unfiltered` guard, and the record/detail field meaning.
+
+use acowork_memory::MemoryAdminService;
+use acowork_memory::admin::{AdminListNodesParams, RebuildStats};
+use serde_json::json;
+
+/// Every filter the panel can send must actually narrow the scan.
+#[test]
+fn admin_list_nodes_filters_and_paginates() {
+    let store = store();
+
+    let mut recent = episode("recent rain");
+    recent.timestamp = Utc::now();
+    recent.knowledge_subtype = Some(KnowledgeSubType::Preference);
+    let recent_id = store.store_episode(&recent).unwrap();
+
+    let mut old = episode("old rain");
+    old.timestamp = Utc::now() - TimeDelta::days(30);
+    let old_id = store.store_episode(&old).unwrap();
+
+    let mut node = knowledge("user", "likes");
+    node.object = "oolong tea".to_string();
+    node.sub_type = KnowledgeSubType::Fact;
+    // Recent, so the time-range assertion below only exercises the window.
+    node.created_at = Utc::now();
+    node.updated_at = Utc::now();
+    let knowledge_id = store.store_knowledge(&node).unwrap();
+
+    let page = |params: AdminListNodesParams| store.list_nodes(&params);
+
+    // Unfiltered: newest first (created_at DESC).
+    let all = page(AdminListNodesParams {
+        size: 50,
+        ..Default::default()
+    });
+    assert_eq!(all.total, 3);
+    assert_eq!(all.nodes.len(), 3);
+    assert!(all.rejected_unfiltered.is_none());
+    let timestamps: Vec<i64> = all.nodes.iter().map(|n| n.created_at).collect();
+    assert!(
+        timestamps.windows(2).all(|w| w[0] >= w[1]),
+        "list must be newest first: {timestamps:?}"
+    );
+    assert_eq!(all.nodes.last().unwrap().node_id, old_id);
+
+    // Pagination is contiguous: page 1 + page 2 cover every node exactly once.
+    let first = page(AdminListNodesParams {
+        page: 1,
+        size: 2,
+        ..Default::default()
+    });
+    let second = page(AdminListNodesParams {
+        page: 2,
+        size: 2,
+        ..Default::default()
+    });
+    assert_eq!(first.nodes.len(), 2);
+    assert_eq!(second.nodes.len(), 1);
+    let mut seen: Vec<u64> = first
+        .nodes
+        .iter()
+        .chain(second.nodes.iter())
+        .map(|n| n.node_id)
+        .collect();
+    seen.sort_unstable();
+    let mut expected = vec![old_id, knowledge_id, recent_id];
+    expected.sort_unstable();
+    assert_eq!(seen, expected, "pages must not repeat or drop rows");
+
+    // node_type filter.
+    let knowledge_only = page(AdminListNodesParams {
+        size: 50,
+        node_type: labels::KNOWLEDGE.to_string(),
+        ..Default::default()
+    });
+    assert_eq!(knowledge_only.total, 1);
+    assert_eq!(knowledge_only.nodes[0].node_id, knowledge_id);
+
+    // keyword filter (case-insensitive substring over rendered content).
+    let tea = page(AdminListNodesParams {
+        size: 50,
+        keyword: "OOLONG".to_string(),
+        ..Default::default()
+    });
+    assert_eq!(tea.total, 1);
+    assert_eq!(tea.nodes[0].content, "user likes oolong tea");
+
+    // sub_type filter, per label (Knowledge → `sub_type`).
+    let facts = page(AdminListNodesParams {
+        size: 50,
+        node_type: labels::KNOWLEDGE.to_string(),
+        sub_type: "Fact".to_string(),
+        ..Default::default()
+    });
+    assert_eq!(facts.total, 1);
+    let prefs = page(AdminListNodesParams {
+        size: 50,
+        node_type: labels::KNOWLEDGE.to_string(),
+        sub_type: "Preference".to_string(),
+        ..Default::default()
+    });
+    assert_eq!(prefs.total, 0);
+
+    // Episodic carries its sub-type in `knowledge_subtype`.
+    let episodic_pref = page(AdminListNodesParams {
+        size: 50,
+        node_type: labels::EPISODIC.to_string(),
+        sub_type: "Preference".to_string(),
+        ..Default::default()
+    });
+    assert_eq!(episodic_pref.total, 1);
+
+    // time_range window drops the 30-day-old episode.
+    let week = page(AdminListNodesParams {
+        size: 50,
+        time_range: "7d".to_string(),
+        ..Default::default()
+    });
+    assert_eq!(week.total, 2);
+    assert!(!week.nodes.iter().any(|n| n.node_id == old_id));
+
+    // A size of 0 clamps up rather than returning an empty page forever.
+    let clamped = page(AdminListNodesParams {
+        size: 0,
+        ..Default::default()
+    });
+    assert_eq!(clamped.size, 1);
+    assert_eq!(clamped.nodes.len(), 1);
+}
+
+/// An unfiltered scan of an oversized store is refused eagerly instead of
+/// materializing every node; a filtered scan is still allowed.
+#[test]
+fn admin_list_rejects_unfiltered_oversized_scan() {
+    let store = store();
+    {
+        let conn = store.lock();
+        // Bulk insert to keep the test fast: the guard only counts rows.
+        for i in 0..10_001 {
+            conn.execute(
+                "INSERT INTO nodes(label, status, props, created_at, updated_at) VALUES (?1, 'Active', ?2, ?3, ?3)",
+                params![
+                    labels::EPISODIC,
+                    format!("{{\"content\":\"filler {i}\"}}"),
+                    ts_text(Utc::now())
+                ],
+            )
+            .unwrap();
+        }
+    }
+
+    let rejected = store.list_nodes(&AdminListNodesParams {
+        size: 10,
+        ..Default::default()
+    });
+    assert_eq!(rejected.rejected_unfiltered, Some(10_001));
+    assert!(rejected.nodes.is_empty());
+    assert_eq!(rejected.total, 10_001);
+
+    let filtered = store.list_nodes(&AdminListNodesParams {
+        size: 10,
+        keyword: "filler 1".to_string(),
+        ..Default::default()
+    });
+    assert!(filtered.rejected_unfiltered.is_none());
+    assert!(!filtered.nodes.is_empty());
+}
+
+/// `semantic_search` mode selects the retrieval path, and a query with neither
+/// text nor embedding is a no-op.
+#[test]
+fn admin_semantic_search_modes() {
+    let store = store();
+    let mut ep = episode("北京今天下雨吗");
+    ep.embedding = Some(vec![1.0, 0.0, 0.0, 0.0]);
+    let id = store.store_episode(&ep).unwrap();
+
+    let mut other = episode("totally different words");
+    other.embedding = Some(vec![0.0, 1.0, 0.0, 0.0]);
+    store.store_episode(&other).unwrap();
+
+    let empty = store.semantic_search("", None, "keyword", 10);
+    assert!(empty.is_empty());
+
+    let keyword = store.semantic_search("北京今天下雨吗", None, "keyword", 10);
+    assert_eq!(keyword.len(), 1);
+    assert_eq!(keyword[0].node_id, id);
+
+    let vector = store.semantic_search("", Some(&[1.0, 0.0, 0.0, 0.0]), "vector", 10);
+    assert_eq!(vector[0].node_id, id, "exact match must rank first");
+
+    let hybrid = store.semantic_search("北京今天下雨吗", Some(&[1.0, 0.0, 0.0, 0.0]), "hybrid", 10);
+    assert!(!hybrid.is_empty());
+    assert!(hybrid.iter().all(|r| !r.content.is_empty()));
+
+    // No embedding + "vector" mode degrades to text search (embedding model
+    // not ready), never to an error.
+    let degraded = store.semantic_search("北京今天下雨吗", None, "vector", 10);
+    assert_eq!(degraded.len(), 1);
+}
+
+/// Detail exposes the raw property map so the panel can show fields the typed
+/// API does not model.
+#[test]
+fn admin_get_node_detail_and_missing() {
+    let store = store();
+    let mut node = knowledge("user", "likes");
+    node.confidence = 0.75;
+    node.importance = 0.4;
+    let id = store.store_knowledge(&node).unwrap();
+
+    let detail = store.get_node(id);
+    assert!(detail.found);
+    assert_eq!(detail.node_type, labels::KNOWLEDGE);
+    assert_eq!(detail.content, "user likes Beijing");
+    assert!((detail.confidence - 0.75).abs() < 1e-6);
+    assert!((detail.importance - 0.4).abs() < 1e-6);
+    assert_eq!(detail.status, "Active");
+    assert_eq!(
+        detail.properties.get("subject").and_then(|v| v.as_str()),
+        Some("user")
+    );
+    assert!(detail.created_at > 0);
+    assert!(detail.message.is_empty());
+
+    let missing = store.get_node(9_999);
+    assert!(!missing.found);
+    assert!(missing.properties.is_empty());
+    assert!(!missing.message.is_empty());
+}
+
+/// Raw CRUD: create from a property map, patch without dropping other fields,
+/// and refuse to patch a node that does not exist.
+#[test]
+fn admin_create_update_delete_node() {
+    let store = store();
+
+    let properties = HashMap::from([
+        ("subject".to_string(), json!("user")),
+        ("predicate".to_string(), json!("drinks")),
+        ("object".to_string(), json!("tea")),
+        ("status".to_string(), json!("Active")),
+        ("confidence".to_string(), json!(0.9)),
+        ("embedding".to_string(), json!([1.0, 0.0, 0.0, 0.0])),
+    ]);
+    let id = store
+        .create_node(labels::KNOWLEDGE, &properties)
+        .expect("create_node");
+
+    let detail = store.get_node(id);
+    assert_eq!(detail.content, "user drinks tea");
+    assert_eq!(detail.status, "Active");
+    // `embedding` lives in the `vectors` table, never duplicated into `props`.
+    assert!(!detail.properties.contains_key("embedding"));
+    assert!(detail.properties.contains_key("subject"));
+    assert_eq!(MemoryAdminService::count_nodes_with_embedding(&store), 1);
+
+    // Patching one property must preserve the rest (merge, not replace).
+    store
+        .update_node(
+            id,
+            &HashMap::from([("object".to_string(), json!("coffee"))]),
+        )
+        .expect("update_node");
+    let patched = store.get_node(id);
+    assert_eq!(patched.content, "user drinks coffee");
+    assert_eq!(
+        patched.properties.get("subject").and_then(|v| v.as_str()),
+        Some("user")
+    );
+
+    // Updating a missing node is an error, so the HTTP layer can 404.
+    assert!(
+        store
+            .update_node(9_999, &HashMap::from([("object".to_string(), json!("x"))]))
+            .is_err()
+    );
+
+    assert!(MemoryAdminService::delete_node(&store, id));
+    assert!(
+        !MemoryAdminService::delete_node(&store, id),
+        "second delete reports not-found"
+    );
+    assert!(!store.get_node(id).found);
+}
+
+/// Stats must agree with the underlying counts and surface the purge log.
+#[test]
+fn admin_stats_shape() {
+    let store = store();
+    store.store_episode(&episode("one")).unwrap();
+    let mut dormant = knowledge("user", "likes");
+    dormant.status = NodeStatus::Dormant;
+    store.store_knowledge(&dormant).unwrap();
+
+    let stats = store.get_stats();
+    assert_eq!(stats.total_nodes, 2);
+    assert_eq!(stats.by_type.get(labels::EPISODIC), Some(&1));
+    assert_eq!(stats.by_type.get(labels::KNOWLEDGE), Some(&1));
+    assert_eq!(stats.by_status.get("Dormant"), Some(&1));
+    assert_eq!(stats.by_status.get("purged"), Some(&0));
+    assert_eq!(stats.index_health, "healthy");
+    assert_eq!(stats.stored_dim, DIM as u64);
+    assert_eq!(stats.nodes_with_embedding, 0);
+    assert!(stats.storage_bytes > 0);
+}
+
+/// `migrate_embedding_dimension` must re-embed what it can, count what it
+/// cannot, and leave the store reporting the new dimension.
+#[test]
+fn admin_embedding_migration() {
+    let store = store();
+
+    let mut mine = episode("migrate me");
+    mine.embedding = Some(vec![1.0, 0.0, 0.0, 0.0]);
+    let mine_id = store.store_episode(&mine).unwrap();
+
+    let mut empty = episode("   ");
+    empty.content = String::new();
+    store.store_episode(&empty).unwrap();
+
+    let mut no_embedding = episode("no model available");
+    no_embedding.content = "model returns nothing".to_string();
+    store.store_episode(&no_embedding).unwrap();
+
+    // A model that reports the wrong width must be rejected, not written.
+    let stats: RebuildStats = store
+        .migrate_embedding_dimension(
+            &|content: &str| {
+                if content.contains("model returns nothing") {
+                    None
+                } else {
+                    Some(vec![0.5, 0.5])
+                }
+            },
+            2,
+        )
+        .expect("migrate");
+
+    assert_eq!(stats.total_scanned, 3);
+    assert_eq!(stats.rebuilt, 1);
+    assert_eq!(stats.skipped_no_embedding, 1);
+    assert_eq!(stats.skipped_no_content, 1);
+    assert_eq!(stats.errors, 0);
+    assert_eq!(store.embedding_dim(), 2);
+    assert_eq!(MemoryAdminService::count_nodes_with_embedding(&store), 1);
+
+    // The re-embedded node is searchable at the new width.
+    let hits = store.semantic_search("migrate me", Some(&[0.5, 0.5]), "hybrid", 10);
+    assert!(!hits.is_empty());
+    // The node itself is untouched; only its vector was rewritten.
+    let detail = store.get_node(mine_id);
+    assert!(detail.found);
+    assert_eq!(detail.content, "migrate me");
+}
+
+/// A wrong-width vector from the embedder is counted as an error rather than
+/// silently poisoning the vector index.
+#[test]
+fn admin_embedding_migration_rejects_wrong_width() {
+    let store = store();
+    store.store_episode(&episode("anything")).unwrap();
+
+    let stats = store
+        .migrate_embedding_dimension(&|_: &str| Some(vec![1.0, 2.0, 3.0]), 2)
+        .expect("migrate");
+
+    assert_eq!(stats.errors, 1);
+    assert_eq!(stats.rebuilt, 0);
+    assert_eq!(MemoryAdminService::count_nodes_with_embedding(&store), 0);
+}
+
+/// The stored dimension is part of the database, not of the caller: reopening
+/// with a different value must not reinterpret existing vectors.
+#[test]
+fn admin_embedding_dim_persists_across_reopen() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("memory.db");
+
+    {
+        let store = SqliteStore::open(&path, 4).expect("open");
+        let mut ep = episode("persisted");
+        ep.embedding = Some(vec![1.0, 0.0, 0.0, 0.0]);
+        store.store_episode(&ep).unwrap();
+        store.close().unwrap();
+    }
+
+    let reopened = SqliteStore::open(&path, 8).expect("reopen");
+    assert_eq!(reopened.embedding_dim(), 4, "stored dimension must win");
+    assert_eq!(MemoryAdminService::count_nodes_with_embedding(&reopened), 1);
+}

@@ -28,6 +28,14 @@ CREATE TABLE IF NOT EXISTS nodes (
 );
 CREATE INDEX IF NOT EXISTS idx_nodes_label ON nodes(label);
 
+-- Store-level metadata (currently just the embedding dimension). Keeping it in
+-- the database means a reopen reports the dimension actually stored rather
+-- than whatever the caller guessed.
+CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS vectors (
     node_id   INTEGER PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
     dim       INTEGER NOT NULL,

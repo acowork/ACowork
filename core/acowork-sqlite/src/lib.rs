@@ -22,6 +22,7 @@
 //! deserialize to `None` / empty (serde `Option` and `#[serde(default)]`), so
 //! the projection never breaks a read.
 
+mod admin;
 mod provider;
 mod retrieval;
 mod schema;
@@ -31,6 +32,7 @@ mod tests;
 pub use retrieval::RRF_K;
 
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, RwLock};
 
 use chrono::{DateTime, SecondsFormat, TimeDelta, Utc};
@@ -90,7 +92,10 @@ const KNOWLEDGE_DEDUP_SIMILARITY: f64 = 0.95;
 /// `SqliteStore` is `Send + Sync`.
 pub struct SqliteStore {
     conn: Mutex<Connection>,
-    embedding_dim: usize,
+    /// Current vector dimension. Atomic because embedding migration rewrites
+    /// it in place; persisted in `meta` so a reopen reports the real stored
+    /// dimension rather than the caller's guess.
+    embedding_dim: AtomicUsize,
     /// Agent memory-quality knobs (ADR-062 D2). Defaults reproduce the
     /// pre-configuration behaviour until `apply_quality_config` is called.
     quality: RwLock<MemoryQualityConfig>,
@@ -127,9 +132,28 @@ impl SqliteStore {
 
     fn from_connection(conn: Connection, embedding_dim: usize) -> Result<Self> {
         conn.execute_batch(SCHEMA_SQL)?;
+        // The database remembers its own dimension: a caller that opens an
+        // existing store with a stale dimension must not be believed.
+        let stored: Option<String> = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'embedding_dim'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let embedding_dim = match stored.as_deref().and_then(|v| v.parse().ok()) {
+            Some(stored) => stored,
+            None => {
+                conn.execute(
+                    "INSERT OR REPLACE INTO meta(key, value) VALUES ('embedding_dim', ?1)",
+                    params![embedding_dim.to_string()],
+                )?;
+                embedding_dim
+            }
+        };
         Ok(Self {
             conn: Mutex::new(conn),
-            embedding_dim,
+            embedding_dim: AtomicUsize::new(embedding_dim),
             quality: RwLock::new(MemoryQualityConfig::default()),
         })
     }
@@ -148,7 +172,19 @@ impl SqliteStore {
 
     /// The embedding dimension this store was opened with.
     pub fn embedding_dim(&self) -> usize {
-        self.embedding_dim
+        self.embedding_dim.load(Ordering::Relaxed)
+    }
+
+    /// Record a new vector dimension (embedding migration) and persist it.
+    pub fn set_embedding_dim(&self, dim: usize) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES ('embedding_dim', ?1)",
+            params![dim.to_string()],
+        )?;
+        drop(conn);
+        self.embedding_dim.store(dim, Ordering::Relaxed);
+        Ok(())
     }
 
     // ── Generic node operations ──────────────────────────────────────────
