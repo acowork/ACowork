@@ -6,6 +6,7 @@ import { initMqttListener } from "../../stores/chatStore";
 import { initWorkspaceFsListener } from "../../lib/workspaceFsEvents";
 import { initDocTreeChangeListener } from "../../lib/docFsEvents";
 import { getGatewayUrl } from "../../lib/config";
+import { probeGateways } from "../../lib/gateway-probe";
 import { useTranslation } from "../../i18n/useTranslation";
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import pkg from "../../../package.json";
@@ -16,6 +17,15 @@ import type { BootstrapStateView, GatewayBootResult } from "../../lib/types";
 const POLL_INTERVAL = 500;
 const MIN_SPLASH_MS = 1500;
 const MAX_WAIT_MS = 30_000;
+/**
+ * Fallback-window: how long SplashScreen waits before giving up on the
+ * persisted Gateway URL and surfacing alternative reachable URLs from
+ * the URL history (laptop moved to a new LAN). The happy path is
+ * unaffected — once the Gateway connects, the candidate UI is
+ * immediately dismissed. 30s still acts as the hard upper bound for
+ * the underlying boot pipeline.
+ */
+const CANDIDATE_FALLBACK_MS = 5_000;
 
 /**
  * Push the persisted settings into Rust and (for local mode) boot the
@@ -118,10 +128,74 @@ function LoadingDots({ className = "" }: { className?: string }) {
     );
 }
 
+/**
+ * Inline chooser rendered alongside the boot spinner when the 5s
+ * fallback probe finds reachable Gateways other than the persisted
+ * one. Stays non-modal — the original boot spinner keeps running so the
+ * persisted URL still has a chance to come up (Wi-Fi flapping).
+ *
+ * Sort order is set upstream in the probe caller (fastest first). The
+ * "Keep waiting" button just dismisses the chooser — the main boot
+ * pipeline continues unchanged.
+ */
+function CandidateChooser({
+    candidates,
+    onPick,
+    onDismiss,
+}: {
+    candidates: { url: string; latencyMs: number }[];
+    onPick: (url: string) => void;
+    onDismiss: () => void;
+}) {
+    const { t } = useTranslation();
+    return (
+        <div className="mb-2 w-[28rem] max-w-full rounded-md border border-border-outer bg-panel-base p-3 text-left shadow-sm">
+            <div className="mb-2 flex items-center justify-between">
+                <p className="text-xs font-medium text-text-secondary">
+                    {t("splashScreen.candidateTitle")}
+                </p>
+                <button
+                    onClick={onDismiss}
+                    className="text-[11px] text-text-tertiary hover:text-text-secondary"
+                >
+                    {t("splashScreen.candidateKeepWaiting")}
+                </button>
+            </div>
+            <ul className="flex flex-col gap-1">
+                {candidates.map((c) => (
+                    <li key={c.url}>
+                        <button
+                            onClick={() => onPick(c.url)}
+                            className="flex w-full items-center justify-between rounded border border-border-divider bg-page-bg px-2.5 py-1.5 text-left hover:border-[var(--color-accent)] hover:bg-panel-inset"
+                        >
+                            <span className="truncate font-mono text-xs text-text-secondary" title={c.url}>
+                                {c.url}
+                            </span>
+                            <span className="ml-2 shrink-0 text-[11px] text-text-tertiary">
+                                {Math.round(c.latencyMs)} ms
+                            </span>
+                        </button>
+                    </li>
+                ))}
+            </ul>
+        </div>
+    );
+}
+
 export function SplashScreen({ onReady }: SplashScreenProps) {
     const { t } = useTranslation();
     const checkHealth = useGatewayStore((s) => s.checkHealth);
+    const candidates = useGatewayStore((s) => s.candidates);
+    const setCandidates = useGatewayStore((s) => s.setCandidates);
+    const clearCandidates = useGatewayStore((s) => s.clearCandidates);
     const gatewayMode = useSettingsStore((s) => s.gatewayMode);
+    /**
+     * Whether the candidate chooser has been offered in this boot
+     * session. Gates the 5s fallback timer so we don't reprobe on every
+     * `handleRetry` — once we've offered the picker, we let the existing
+     * 30s timeout / user-driven retry path take over.
+     */
+    const [candidatesOffered, setCandidatesOffered] = useState(false);
     const [statusText, setStatusText] = useState("Starting Gateway...");
     const [timedOut, setTimedOut] = useState(false);
     // Hard boot failure (a rejected `invoke` inside `bootGateway`).
@@ -142,6 +216,23 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
     useEffect(() => {
         requestAnimationFrame(() => setFadeIn(true));
     }, []);
+
+    // Connection-lifecycle effects:
+//
+//   - On CONNECTED: dismiss the candidate chooser (the URL we just
+//     connected to IS the persisted URL now — no chooser needed).
+//
+// History recording is owned by App.tsx (top-level subscriber so it
+// covers both boot-time and runtime disconnects). Keeping it out of
+// here avoids the same status transition firing twice during boot.
+    useEffect(() => {
+        const unsub = useGatewayStore.subscribe((state, prev) => {
+            if (state.status === "connected" && prev.status !== "connected") {
+                clearCandidates();
+            }
+        });
+        return unsub;
+    }, [clearCandidates]);
 
     /**
      * Check bootstrap readiness via `GET /api/bootstrap` (ADR-059 §5.1)
@@ -193,6 +284,7 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
 
         let pollTimer: ReturnType<typeof setInterval>;
         let maxTimer: ReturnType<typeof setTimeout>;
+        let candidateTimer: ReturnType<typeof setTimeout> | undefined;
 
         const pollGateway = (onDone: () => void) => {
             pollTimer = setInterval(async () => {
@@ -239,6 +331,41 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
                 setStatusText("Starting local Gateway...");
             } else {
                 setStatusText("Connecting to Gateway...");
+            }
+
+            // 5s fallback: if the persisted URL hasn't connected by now,
+            // probe the rest of the URL history and surface reachable
+            // candidates (laptop moved LAN). Fires on a parallel track;
+            // doesn't cancel the main boot pipeline. Skipped in local
+            // mode (always 127.0.0.1) and when there's no history to
+            // probe.
+            if (gatewayMode === "remote" && !candidatesOffered) {
+                const history = useSettingsStore.getState().gatewayUrlHistory;
+                const currentUrl = useSettingsStore.getState().gatewayUrl;
+                const others = history.filter((u) => u !== currentUrl);
+                if (others.length > 0) {
+                    candidateTimer = setTimeout(async () => {
+                        if (!mountedRef.current) return;
+                        // Re-read at fire time — `handleRetry` may have
+                        // already changed the persisted URL by now.
+                        const liveUrl = useSettingsStore.getState().gatewayUrl;
+                        const liveHistory = useSettingsStore.getState().gatewayUrlHistory;
+                        if (useGatewayStore.getState().status === "connected") return;
+                        const toProbe = liveHistory.filter((u) => u !== liveUrl);
+                        if (toProbe.length === 0) return;
+                        const results = await probeGateways(toProbe);
+                        if (!mountedRef.current) return;
+                        if (useGatewayStore.getState().status === "connected") return;
+                        const reachable = results
+                            .filter((r) => r.ok)
+                            .sort((a, b) => a.latencyMs - b.latencyMs)
+                            .map((r) => ({ url: r.url, latencyMs: r.latencyMs }));
+                        if (reachable.length > 0) {
+                            setCandidates(reachable);
+                            setCandidatesOffered(true);
+                        }
+                    }, CANDIDATE_FALLBACK_MS);
+                }
             }
 
             // Push persisted settings into Rust and (for local mode)
@@ -288,6 +415,7 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
             mountedRef.current = false;
             clearInterval(pollTimer);
             clearTimeout(maxTimer);
+            if (candidateTimer) clearTimeout(candidateTimer);
         };
     }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -421,6 +549,27 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
                         </>
                     ) : (
                         <>
+                            {/* Candidate chooser — only appears if the
+                                5s fallback probe found other reachable
+                                Gateways in URL history. Original boot
+                                spinner stays untouched below. */}
+                            {candidates.length > 0 && (
+                                <CandidateChooser
+                                        candidates={candidates}
+                                        onPick={(url) => {
+                                            // Persist + push to Rust BEFORE
+                                            // retrying so the reconnect lands
+                                            // on the picked host. Also records
+                                            // the picked URL back into history
+                                            // so it stays at the top next boot.
+                                            useSettingsStore.getState().setGatewayUrl(url);
+                                            // Reuse the existing retry path so
+                                            // we don't fork the boot flow.
+                                            handleRetry();
+                                        }}
+                                        onDismiss={() => clearCandidates()}
+                                />
+                            )}
                             {/* Progress bar */}
                             <div className="h-0.5 w-48 overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-700">
                                 <div

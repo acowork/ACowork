@@ -83,9 +83,28 @@ pub enum MqttClientError {
     Subscribe(String),
 }
 
-/// Guard that keeps the event loop polling task alive.
+/// Guard that ties the event-loop polling task's lifetime to the
+/// `MqttClient`. When the last `Arc<EventLoopGuard>` is dropped (i.e.
+/// the `MqttClient` and every clone of it are dropped), the poll task
+/// is aborted so the underlying TCP socket is released and the broker
+/// can drop the previous `client_id` registration.
+///
+/// Without this `Drop` impl, `JoinHandle::drop()` only detaches the
+/// task from the Tokio registry -- it does NOT abort the task. A stale
+/// poll task would keep running with the old socket, racing against
+/// every freshly-created client for the same `client_id` and causing
+/// the broker to repeatedly log `Duplicate client_id, dropping
+/// previous connection`. This is what the desktop hits when the user
+/// switches the configured gateway URL while a previous client still
+/// exists in `AppState::mqtt_client`.
 struct EventLoopGuard {
-    _task: tokio::task::JoinHandle<()>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for EventLoopGuard {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
 }
 
 /// Unified MQTT client with a fully internalized poll loop (ADR-065).
@@ -261,6 +280,12 @@ impl<B: MqttClientHandler> MqttClient<B> {
                                     }
                                 }
                                 Ok(Event::Incoming(Incoming::Disconnect)) => {
+                                    tracing::warn!(
+                                        client_id = %task_options.client_id(),
+                                        "MQTT broker sent DISCONNECT; entering Reconnecting state without break — \
+                                         relying on next poll() to surface the socket error. \
+                                         SessionState set to Reconnecting, on_disconnect callback fired."
+                                    );
                                     set_state(SessionState::Reconnecting);
                                     let poll_client = task_shared_handle.lock().await.clone();
                                     task_handler_poll.on_disconnect(&poll_client).await;
@@ -387,7 +412,7 @@ impl<B: MqttClientHandler> MqttClient<B> {
             shared_handle,
             state: state_tx,
             force_restart,
-            _eventloop_guard: Arc::new(EventLoopGuard { _task: poll_task }),
+            _eventloop_guard: Arc::new(EventLoopGuard { task: poll_task }),
             _handler: task_handler,
         })
     }
@@ -512,5 +537,43 @@ mod tests {
         // Sanity: the error type is constructible and Display-able.
         let e = MqttClientError::Publish("boom".into());
         assert!(e.to_string().contains("boom"));
+    }
+
+    #[tokio::test]
+    async fn eventloop_guard_aborts_task_on_drop() {
+        // Regression test for the desktop disconnect/reconnect loop:
+        // prior to adding `impl Drop for EventLoopGuard`, dropping the
+        // guard only detached the `JoinHandle` from the runtime registry
+        // -- it did NOT abort the task. The stale poll task kept
+        // running with the old TCP socket and raced against every
+        // freshly-created client for the same `client_id`, producing
+        // the broker error `Duplicate client_id, dropping previous
+        // connection` in an infinite loop.
+        //
+        // This test asserts that dropping an `EventLoopGuard` causes
+        // the wrapped task to be aborted, by polling `abort_handle()
+        // .is_finished()` after the drop. If the `Drop` impl is
+        // missing or broken, the task keeps sleeping and `is_finished`
+        // stays false for the entire 2 s window.
+        let task = tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+        });
+        let abort_handle = task.abort_handle();
+
+        let guard = EventLoopGuard { task };
+        drop(guard);
+
+        let mut finished = false;
+        for _ in 0..100 {
+            if abort_handle.is_finished() {
+                finished = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(
+            finished,
+            "EventLoopGuard::drop did not abort the wrapped task within              2s; the Drop impl is missing or broken (this is the desktop              disconnect/reconnect-loop bug)."
+        );
     }
 }

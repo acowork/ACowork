@@ -5,7 +5,7 @@ import type { ChatMessage, ContextUsageInfo, TokenUsage, ToolApprovalNeededEvent
 import { toWireAttachedItems } from "../lib/types";
 import { isAtTail } from "../lib/paginationUtils";
 import { useAgentStore } from "./agentStore";
-import { useGatewayStore } from "./gatewayStore";
+import { useGatewayStore, stopGatewayDeathWatch } from "./gatewayStore";
 import { useUserProfileStore } from "./userProfileStore";
 import { useWorkspaceStore } from "./workspaceStore";
 import { releaseAdapterSession, clearOptimisticEntries, clearAllOptimisticEntries, ingestStreamDelta, ingestRecordComplete, getChatAdapterSession } from "../components/chat/chatAdapterStore";
@@ -1111,6 +1111,11 @@ function applyConnectionTransition(
   }
   if (prevEffective === nextEffective) return;
 
+  log.warn(
+    `[mqtt-status] applying transition ${prevEffective} → ${nextEffective}` +
+      (raw.reason ? ` (reason: ${raw.reason})` : "") +
+      (options.fromWatchdog ? " [via watchdog]" : ""),
+  );
   const nextError = dedupeError(
     state.lastMqttError,
     raw.connected ? null : raw.reason ?? null,
@@ -1170,33 +1175,42 @@ function applyWatchdogSnapshot(snapshot: MqttStatusSnapshot): { recovered: boole
 
 function startMqttPoll(): void {
   stopMqttPoll();
+  log.warn("[mqtt-watchdog] starting 5s polling watchdog");
   _mqttPollHandle = setInterval(async () => {
     // Stop the watchdog as soon as we're back to `connected` — it's a
     // safety net, not a permanent feature.
     const cur = useChatStore.getState();
     if (cur.effectiveConnection === "connected") {
-      log.debug("[mqtt-watchdog] connected; stopping watchdog");
+      log.warn("[mqtt-watchdog] effectiveConnection=connected; stopping watchdog");
       stopMqttPoll();
       return;
     }
+    log.warn(
+      `[mqtt-watchdog] tick: effectiveConnection=${cur.effectiveConnection}, \
+       mqttConnected=${cur.mqttConnected}, will query get_mqtt_status`,
+    );
 
     // 1. Poll the Rust snapshot and apply it. This self-heals a
     //    Rust-vs-frontend inconsistency (F-3) and may promote a stuck
     //    `connecting` / `reconnecting` to `stale` (plan §3.1.1).
     try {
       const snap = await invoke<MqttStatusSnapshot>("get_mqtt_status");
-      log.debug?.("[mqtt-watchdog] snapshot:", JSON.stringify(snap));
+      log.warn(
+        "[mqtt-watchdog] get_mqtt_status returned:",
+        JSON.stringify(snap),
+      );
       if (snap.known) {
         const { recovered } = applyWatchdogSnapshot(snap);
         if (recovered) {
-          log.debug?.(
+          log.warn(
             "[mqtt-watchdog] recovered Rust-vs-frontend inconsistency; stopping watchdog",
           );
           stopMqttPoll();
           return;
         }
       }
-    } catch {
+    } catch (err) {
+      log.warn("[mqtt-watchdog] get_mqtt_status threw:", err);
       // Transient IPC failure - keep polling.
     }
 
@@ -1289,6 +1303,10 @@ async function doInitMqttListener(): Promise<void> {
     reconnecting?: boolean;
   }>("mqtt-status", (event) => {
     const { connected, reason, connecting, reconnecting } = event.payload;
+    log.warn(
+      "[mqtt-status] received from Rust:",
+      JSON.stringify({ connected, connecting, reconnecting, reason }),
+    );
     applyConnectionTransition({
       known: true,
       connected,
@@ -1345,7 +1363,10 @@ async function doInitMqttListener(): Promise<void> {
   // transition may have been emitted before this listener registered.
     try {
       const snapshot = await invoke<MqttStatusSnapshot>("get_mqtt_status");
-      log.debug("[initMqttListener] snapshot:", snapshot);
+      log.warn(
+        "[initMqttListener] initial snapshot from Rust:",
+        JSON.stringify(snapshot),
+      );
       if (snapshot.known) {
         // Pass the snapshot through verbatim so the transient
         // `connecting` / `reconnecting` flags survive the init path
@@ -1357,6 +1378,9 @@ async function doInitMqttListener(): Promise<void> {
       // It is harmless when the event stream is working and is a
       // lifeline when the initial event was lost during webview reload.
       if (!snapshot.connected) {
+        log.warn(
+          "[initMqttListener] initial snapshot not connected — starting watchdog",
+        );
         startMqttPoll();
       }
     } catch (err) {
@@ -1368,6 +1392,9 @@ async function doInitMqttListener(): Promise<void> {
 
 export function disposeMqttListener(): void {
   stopMqttPoll();
+  // The death classifier watch polls /health every 3s while MQTT is
+  // down — tear it down with the rest of the liveness machinery.
+  stopGatewayDeathWatch();
   _connectingSince = null;
   _mqttInitPromise = null;
   if (_mqttAgentEventUnlisten) {

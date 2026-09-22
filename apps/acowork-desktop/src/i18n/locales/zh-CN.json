@@ -1222,6 +1222,8 @@
     "retrying": "重试中...",
     "retryConnection": "重试连接",
     "gatewayAddress": "网关地址",
+    "candidateTitle": "检测到其他可用的网关,是否切换?",
+    "candidateKeepWaiting": "继续等待",
     "altLogo": "ACowork"
   },
   "appLayout": {

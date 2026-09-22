@@ -206,18 +206,32 @@ impl MqttClientHandler for DesktopHandler {
     }
 
     async fn on_disconnect(&self, _client: &AsyncClient) {
+        tracing::warn!(
+            "DesktopHandler::on_disconnect fired — about to emit mqtt-status \
+             Reconnecting event with hardcoded reason \"broker sent DISCONNECT\". \
+             Frontend chatStore will set effectiveConnection = reconnecting."
+        );
         (self.on_status)(MqttStatus::Reconnecting {
             reason: "broker sent DISCONNECT".into(),
         });
     }
 
     async fn on_error(&self, _client: &AsyncClient, _class: ErrClass, error: &str) {
+        tracing::warn!(
+            error = %error,
+            err_class = ?_class,
+            "DesktopHandler::on_error fired — about to emit mqtt-status Reconnecting event."
+        );
         (self.on_status)(MqttStatus::Reconnecting {
             reason: format!("eventloop error: {error}"),
         });
     }
 
     async fn on_soft_restart(&self) -> Option<(String, String)> {
+        tracing::warn!(
+            "DesktopHandler::on_soft_restart fired — about to emit mqtt-status \
+             Connecting event. This is the soft-restart trigger."
+        );
         // Surfacing `Connecting` here mirrors the Desktop's pre-Step-4
         // behaviour, where the inline poll task fired
         // `on_status(MqttStatus::Connecting)` immediately before

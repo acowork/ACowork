@@ -75,7 +75,42 @@ export function getLevel(): LogLevel {
  *
  * `log.debug` is the replacement for `console.log` (most existing
  * `console.log` calls are debug-level diagnostics, not user-facing info).
+ *
+ * TEMP DEBUG (mqtt reconnect investigation): `warn` / `error` are
+ * additionally forwarded to the Rust `fe_log` command so they land in
+ * the desktop log FILE — the WebView console is invisible in the
+ * field. Remove the forward once the effectiveConnection-stuck bug is
+ * closed.
  */
+const FE_LOG_MAX = 2000;
+
+function forwardToRust(level: "warn" | "error", args: unknown[]): void {
+  try {
+    const parts: string[] = [];
+    for (const a of args) {
+      if (typeof a === "string") parts.push(a);
+      else if (a instanceof Error) parts.push(`${a.name}: ${a.message}`);
+      else {
+        try {
+          parts.push(JSON.stringify(a));
+        } catch {
+          parts.push(String(a));
+        }
+      }
+    }
+    let msg = parts.join(" ");
+    if (msg.length > FE_LOG_MAX) msg = msg.slice(0, FE_LOG_MAX) + "…(truncated)";
+    const inv = (
+      window as unknown as {
+        __TAURI__?: { core?: { invoke?: (n: string, args: unknown) => Promise<unknown> } };
+      }
+    ).__TAURI__?.core?.invoke;
+    if (inv) void inv("fe_log", { level, msg }).catch(() => {});
+  } catch {
+    // Never let the log bridge break application logging.
+  }
+}
+
 export const log = {
   trace: (...args: unknown[]): void => {
     if (LEVEL_VALUES.trace >= currentLevel) console.log(...args);
@@ -87,10 +122,16 @@ export const log = {
     if (LEVEL_VALUES.info >= currentLevel) console.info(...args);
   },
   warn: (...args: unknown[]): void => {
-    if (LEVEL_VALUES.warn >= currentLevel) console.warn(...args);
+    if (LEVEL_VALUES.warn >= currentLevel) {
+      console.warn(...args);
+      forwardToRust("warn", args);
+    }
   },
   error: (...args: unknown[]): void => {
     // error is always emitted unless level is "off"
-    if (LEVEL_VALUES.error >= currentLevel) console.error(...args);
+    if (LEVEL_VALUES.error >= currentLevel) {
+      console.error(...args);
+      forwardToRust("error", args);
+    }
   },
 } as const;

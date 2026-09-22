@@ -9,6 +9,8 @@ import { ErrorBoundary } from "./components/common/ErrorBoundary";
 import { initMqttListener } from "./stores/chatStore";
 import { initWorkspaceFsListener } from "./lib/workspaceFsEvents";
 import { initDocTreeChangeListener } from "./lib/docFsEvents";
+import { useGatewayStore } from "./stores/gatewayStore";
+import { useSettingsStore } from "./stores/settingsStore";
 import { log } from "./lib/logger";
 
 function App() {
@@ -76,6 +78,31 @@ function App() {
       }
     };
     showWindow();
+  }, []);
+
+  // Connection lifecycle → gateway URL history.
+  //
+  //   - On CONNECTED:        record the URL (known-good Gateway).
+  //   - On DISCONNECTED:     if we WERE connected, also record (the user
+  //                          just successfully disconnected from this URL,
+  //                          typically after typing a new one — it's a
+  //                          candidate we know worked recently).
+  //
+  // We do NOT record inside `setGatewayUrl`: an address change alone
+  // doesn't mean it connected. This way typos and unreachable hosts
+  // never pollute the candidate list shown by SplashScreen's 5s
+  // fallback chooser / the SettingsPage combo.
+  useEffect(() => {
+    const unsub = useGatewayStore.subscribe((state, prev) => {
+      const record = useSettingsStore.getState().recordGatewayUrl;
+      const url = useSettingsStore.getState().gatewayUrl;
+      if (state.status === "connected" && prev.status !== "connected") {
+        record(url);
+      } else if (prev.status === "connected" && state.status !== "connected") {
+        record(url);
+      }
+    });
+    return unsub;
   }, []);
 
   if (!gatewayReady && onboardingDone) {

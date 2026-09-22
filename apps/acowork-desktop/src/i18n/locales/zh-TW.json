@@ -1161,6 +1161,8 @@
     "retrying": "重試中...",
     "retryConnection": "重試連線",
     "gatewayAddress": "閘道位址",
+    "candidateTitle": "偵測到其他可用的閘道,是否切換?",
+    "candidateKeepWaiting": "繼續等待",
     "altLogo": "ACowork"
   },
   "appLayout": {

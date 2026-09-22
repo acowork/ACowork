@@ -1163,6 +1163,8 @@
     "retrying": "재시도 중...",
     "retryConnection": "연결 재시도",
     "gatewayAddress": "게이트웨이 주소",
+    "candidateTitle": "다른 사용 가능한 게이트웨이를 찾았습니다 — 연결하시겠습니까?",
+    "candidateKeepWaiting": "대기 계속",
     "altLogo": "ACowork"
   },
   "appLayout": {

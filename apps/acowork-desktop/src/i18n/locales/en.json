@@ -353,6 +353,8 @@
     "retrying": "Retrying...",
     "retryConnection": "Retry Connection",
     "gatewayAddress": "Gateway Address",
+    "candidateTitle": "Other reachable Gateways — connect to one?",
+    "candidateKeepWaiting": "Keep waiting",
     "altLogo": "ACowork"
   },
   "appLayout": {

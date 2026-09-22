@@ -701,6 +701,9 @@ pub fn run() {
             // TEMP DEBUG: <a> click probe — see src/main.tsx. Delete once
             // the link-click webview-crash root cause is confirmed.
             debug_log_link_click,
+            // TEMP DEBUG: frontend logger bridge (mqtt reconnect
+            // investigation). See `fe_log` above.
+            fe_log,
         ])
         .setup(|app| {
             tray::setup(app)?;
@@ -1092,4 +1095,17 @@ pub fn run() {
 #[tauri::command]
 fn debug_log_link_click(payload: String) {
     tracing::warn!(target: "webview_link_click", "{}", payload);
+}
+
+// TEMP DEBUG: frontend log bridge — the React-side `log.warn/error`
+// calls forward their message here so frontend diagnostics land in the
+// desktop log FILE instead of only the WebView devtools console. Added
+// for the "effectiveConnection stuck at reconnecting" investigation;
+// remove once that bug is closed.
+#[tauri::command]
+fn fe_log(level: String, msg: String) {
+    match level.as_str() {
+        "error" => tracing::error!(target: "fe", "{}", msg),
+        _ => tracing::warn!(target: "fe", "{}", msg),
+    }
 }

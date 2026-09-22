@@ -175,14 +175,15 @@ function formatBytes(n: number): string {
 }
 
 /**
- * Pick the input-box placeholder from (gatewayStatus, effectiveConnection,
- * activeSkill). P0 of unified-diagnostics plan §3.1.2.
+ * Pick the input-box placeholder from (effectiveConnection, activeSkill).
+ * P0 of unified-diagnostics plan §3.1.2.
  *
- * The previous implementation only distinguished `connected` vs
- * `!mqttConnected`. The watchdog's 6-state `effectiveConnection` lets us
- * show a more accurate hint per state:
+ * The MQTT verdict is the single authority for connection gating: the
+ * old `gatewayStatus` branch was removed because the HTTP probe is a
+ * display-side signal, and a superseded probe's late failure must never
+ * decide what the user sees about the real connection (2026-09-22
+ * incident: the input box stayed "正在重新连接..." after MQTT healed).
  *
- *   - gateway disconnected → "Gateway 未连接"
  *   - connecting          → "正在连接 Agent..."
  *   - reconnecting        → "正在重新连接..."
  *   - stale               → "连接状态异常，正在恢复..."
@@ -209,7 +210,6 @@ type InputPlaceholderKey =
   | "inputGatewayDisconnected";
 
 function getInputPlaceholderKey(
-  gatewayStatus: string,
   effective: ConnectionStatus,
   activeSkill: boolean,
   sending: boolean,
@@ -217,7 +217,6 @@ function getInputPlaceholderKey(
   // Agent is busy — Enter will queue the message. Hint the user up-front
   // so they don't think Enter is a no-op while waiting for the stream.
   if (sending) return activeSkill ? "inputParamsQueueing" : "inputMessageQueueing";
-  if (gatewayStatus !== "connected") return "inputGatewayDisconnected";
   switch (effective) {
     case "connecting":
       return activeSkill ? "inputParamsConnecting" : "inputMessageConnecting";
@@ -259,11 +258,9 @@ function getInputPlaceholderKey(
  * re-renders that would trigger Zustand churn.
  */
 function ConnectionStatusBanner({
-  gatewayStatus,
   effectiveConnection,
   staleSince,
 }: {
-  gatewayStatus: string;
   effectiveConnection: ConnectionStatus;
   staleSince: number | null;
 }): React.ReactElement | null {
@@ -281,15 +278,15 @@ function ConnectionStatusBanner({
       setReconnecting(false);
     }
   }, []);
-  // Show banner only when the gateway itself is reachable. If gateway is
-  // down, the placeholder already says "Gateway 未连接" — showing a
-  // second banner above would just be noise.
+  // The banner speaks for the MQTT/agent-side liveness — the single
+  // authority for connection UI. It no longer requires the HTTP `status`
+  // to read "connected": that display-side signal must not decide what
+  // the user is told about the real connection.
   const isBannerWorthy =
-    gatewayStatus === "connected" &&
-    (effectiveConnection === "connecting" ||
-      effectiveConnection === "reconnecting" ||
-      effectiveConnection === "stale" ||
-      effectiveConnection === "disconnected");
+    effectiveConnection === "connecting" ||
+    effectiveConnection === "reconnecting" ||
+    effectiveConnection === "stale" ||
+    effectiveConnection === "disconnected";
 
   // Tick once per second so the countdown animates. Cheap (single
   // setState/ChatPanel re-render, no global store updates).
@@ -1643,7 +1640,12 @@ export function ChatPanel() {
   // missed (wake-recovery webview reload, listener registration race).
   // The previous `!mqttConnected` check stayed false forever in that
   // case, locking the input box.
-  const inputDisabled = gatewayStatus !== "connected" || effectiveConnection !== "connected";
+  //
+  // Single-authority gating: the MQTT verdict ALONE decides. The old
+  // `gatewayStatus !== "connected"` clause was removed — the HTTP probe
+  // is display-side, and a superseded probe's late failure kept the box
+  // disabled after MQTT had already healed (2026-09-22 incident).
+  const inputDisabled = effectiveConnection !== "connected";
 
   // ── Cross-platform paste handling ──────────────────────────────────
   // Three entry points — keyboard (Ctrl+V / ⌘+V), context-menu "Paste",
@@ -2658,7 +2660,6 @@ export function ChatPanel() {
               rare case where the banner isn't mounted (e.g. while the
               watchdog is still in its initial idle state). */}
           <ConnectionStatusBanner
-            gatewayStatus={gatewayStatus}
             effectiveConnection={effectiveConnection}
             staleSince={mqttStaleSince}
           />
@@ -2668,7 +2669,7 @@ export function ChatPanel() {
             value={session.inputValue}
             onChange={(e) => session.setInputValue(e.target.value)}
             placeholder={t(
-              `chatPanel.${getInputPlaceholderKey(gatewayStatus, effectiveConnection, !!activeSkill, sending)}`,
+              `chatPanel.${getInputPlaceholderKey(effectiveConnection, !!activeSkill, sending)}`,
             )}
             disabled={inputDisabled}
             className="w-full resize-none border-0 bg-transparent p-3 pb-2 outline-none placeholder:text-text-disabled  disabled:cursor-not-allowed disabled:opacity-50 max-h-48 overflow-y-auto min-h-[5rem]"

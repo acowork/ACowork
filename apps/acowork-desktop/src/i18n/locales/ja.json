@@ -1162,6 +1162,8 @@
     "retrying": "再試行中...",
     "retryConnection": "接続を再試行",
     "gatewayAddress": "ゲートウェイアドレス",
+    "candidateTitle": "他の利用可能なゲートウェイが見つかりました — 接続しますか?",
+    "candidateKeepWaiting": "待機を続ける",
     "altLogo": "ACowork"
   },
   "appLayout": {
