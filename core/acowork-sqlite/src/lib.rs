@@ -23,7 +23,7 @@
 //! the projection never breaks a read.
 
 mod admin;
-mod conversation;
+pub mod conversation;
 mod provider;
 mod retrieval;
 mod schema;

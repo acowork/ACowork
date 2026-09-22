@@ -33,7 +33,7 @@ pub const STORE_FILE: &str = "conversation_index.sqlite";
 /// Content is truncated to this many chars before embedding, bounding embedding
 /// cost for very long messages (the stored snippet is the truncated form,
 /// matching what was embedded).
-const MAX_INDEX_CONTENT: usize = 4_000;
+pub const MAX_INDEX_CONTENT: usize = 4_000;
 
 /// Cosine floor applied to the vector source of a hybrid conversation search
 /// (ADR-082 D5). Same default as the memory retrieval path: below this an
@@ -79,7 +79,7 @@ impl ConversationStore {
     /// every vector write mismatch a 512-dim provider).
     pub fn open(path: impl AsRef<Path>, embedding_dim: usize) -> Result<Self> {
         let store = SqliteStore::open(path, embedding_dim)?;
-        Ok(Self::from_store(store)?)
+        Self::from_store(store)
     }
 
     /// In-memory variant, for tests.
@@ -169,6 +169,11 @@ impl ConversationStore {
     /// Number of sessions with at least one indexed message.
     pub fn session_count(&self) -> Result<usize> {
         Ok(self.watermark.lock().unwrap().len())
+    }
+
+    /// Every session with a known watermark (i.e. one present in the index).
+    pub fn sessions(&self) -> Vec<String> {
+        self.watermark.lock().unwrap().keys().cloned().collect()
     }
 
     /// Index one message and advance this session's watermark past it.
