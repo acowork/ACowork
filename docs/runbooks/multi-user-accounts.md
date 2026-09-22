@@ -41,6 +41,8 @@ acowork-gateway --daemon --home ~/.acowork/acowork-gateway
 
 **为什么 local 模式下路由是"不存在"而不是"403"**：未注册的路由不可能因为将来某次中间件改动被放开。少一条能踩的路，比多一条守住的墙划算（ADR-076 §决策 12）。
 
+> ⚠️ **暴露到非信任网络前必读**：`POST /api/auth/login` **没有速率限制，也没有账号 lockout**（连续失败不锁定账号）。当前唯一的在线防线是密码强度（`password_policy`），其余靠部署面兜底——默认部署 bind `127.0.0.1`，外部根本连不上。若要把 Gateway 放到局域网 / 公网，**先**在它前面加一层限流（反向代理的 `limit_req` / fail2ban 之类），或先补上 ADR-076 §10.2 第 14 项。这不是"可以留白的 ceiling"，是信任边界上的缺口。
+
 ### 1.1 模式怎么定的（优先级从上到下）
 
 1. `--auth-mode local|multi_user`（命令行，最大）
@@ -315,3 +317,5 @@ bash dev/ci.sh check
 `auth_mode_e2e` 的 4 个用例覆盖：`multi_user` 无管理员**拒启动**（退出码非 0 且 stderr 点名 `bootstrap_admin`）、`multi_user` 从 TOML 拿到管理员后**起得来**（端口可连 + `accounts.json` 落盘且明文不含密码）、`local` **不留痕**（无 `accounts.json`、无 `data/auth/`）、显式 `--auth-mode local` **压过 `0.0.0.0` 绑定**（这条是唯一会让服务裸奔的组合）。
 
 > 仍未做：session 过滤的**跨进程** e2e（需要真起 Runtime + Node）。过滤判定本身（`SessionScope` 三态 / `is_readable_by` / 分页前过滤）已有单测，见 ADR-076 §7.1。
+>
+> **全部"仍未做"的清单**（有意留白 / 未实现 / 测试缺口 / 已否决，每项带触发条件）在 [ADR-076 §10 遗留清单](../adr/zh/ADR-076-multi-user-account-system.md#10-遗留清单仍未做全集)——想知道这套东西还有什么洞，看那一节就够了。

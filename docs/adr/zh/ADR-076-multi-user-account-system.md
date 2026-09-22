@@ -190,6 +190,8 @@ pub enum Role { User, Admin }
 
 **关键点**：`password_hash` 落在**明文**的 `accounts.json`——它是一向的 Argon2id PHC 串，本身不含明文密码，可安全落盘；放明文正是为了让登录校验在 Vault locked 时也能完成（见下）。`vault/accounts/*.enc` **不含** password_hash，只装真·机密扩展字段。`user_profiles.json` 由 `accounts.json` 派生，供 Runtime `last_user_profile` 推送（脱敏副本）。
 
+**派生视图的残余 ceiling**（`account_api::sync_profiles`）：multi_user 下每个会话都自带 owner（`x-user-id`），"全局 active user" 这个概念本身已经没有意义了；但那条遗留的 `last_user_profile` 推送主题还在按**单一**账号推送，所以每次账号变更仍要从 `accounts.json` 重建这份派生视图，并用"最近登录的账号，没有就取第一个启用的 admin"来挑一个（`is_active`）。它现在**只喂**那条遗留主题，不影响任何鉴权判定（鉴权读 `accounts.json` / token claim）。升级路径 = Runtime 学会按请求携带的 owner 读 profile，这份派生视图和整个 `sync_profiles` 一起消失。触发条件：Runtime 侧要做"多账号各自的 profile 推送"（当前没有任何消费者需要它）。
+
 **为什么 Argon2id 不走 Vault**：Vault 是对称加密（加密/解密需要同一把 master key），用于"短期可解密的机密"。密码哈希是**单向**的（无法反推明文），且需要在 Vault locked 状态下也能校验（典型场景：开机后用户第一次登录解锁 Vault 之前）。两者密码学属性不同，强行塞进 Vault 反而要让登录路径依赖 Vault unlock 状态（违反 §1.3 不变量 3）。
 
 **为什么不直接用 bcrypt/scrypt**：项目 Vault 已选 Argon2id（ADR-059），保持单一 KDF 算法，减少密码学 surface。
@@ -887,12 +889,14 @@ require_mixed_case = false
 
 ### 5.5 已知技术债
 
+> 本节混放**变更记录**（标 已结清 / 已实现）与**未结清的 ceiling**。只看"还剩什么没做"请直接跳 [§10 遗留清单](#10-遗留清单仍未做全集)——那一节是本节加上 §7.2 / §9 的**索引**，按"触发条件"排序，并单列了**已否决**的方案。
+
 - **ponytail: access token 校验无状态**（只验签 + `exp`，不读 `accounts.json`），所以"账号被禁用后 token 仍可用"的窗口 = `ACCESS_TTL_SECS`（15 分钟）。这是**有意的上界**，不是遗漏：代价是每请求一次磁盘解析，收益只有 15 分钟。真正的强一致点在 `refresh`（每次重读 store）。要即时生效 → 加一个内存 `user_id → revoked_at` 集合在 `verify_access` 里查（无磁盘 I/O）。用户量 > 100 或需要即时踢人时再上 RS256 + 撤销名单。
 - **ponytail: refresh token 单次使用 + 复用检测会误伤重试**。若客户端发出 refresh、服务端处理成功、但响应在网络上丢失，客户端重试同一 token 会被判为"复用"→ 整个用户全线下线。RFC 9700 认可这种严格模式；主流实现多给一个几秒的宽限窗口（grace window）。本期不实现宽限窗口（YAGNI，Desktop 单客户端场景重试窗口极窄），升级路径 = 在 `revoked_families.txt` 的 `r:` 条目上加时间戳 + 宽限判定。
 - **ponytail: `revoked_families.txt` 是扁平文件、无 GC**，每次 refresh 追加一行。目标规模（< 100 用户）无问题；超过需要 SQLite 表 + 过期列。
 - **ponytail: 用户聊天列表是 fs 扫描**，O(n) on `data_dir/users/`。n < 1000 时可接受；超过需要 SQLite 索引。
 - **ponytail: `as_user` query 在反代链路上是字符串透传**，未来如果引入 proto 升级需要结构化字段。
-- **未实现**：多设备登录并发 session 限制、密码过期强制改密（本期仅记录 `password_expires_at` 不强制）、账号 lockout（5 次失败 → 15 分钟锁定）——放后续 ADR。
+- **未实现**：多设备登录并发 session 限制、密码过期强制改密（本期仅记录 `password_expires_at` 不强制）、账号 lockout（5 次失败 → 15 分钟锁定）、**登录端点速率限制**（`POST /api/auth/login` 既无限流也无 lockout，[§7.4](#74-安全测试手动-checklist) 与 §10.2 第 14 项已按"信任边界缺口"记录——唯一的缓解是默认 bind `127.0.0.1`）——前三项放后续 ADR，第四项在"暴露到非信任网络"之前必须补。
 - **已实现（Phase E）**：`/api/auth/first-login`（`invite_token` 以 SHA-256 落 `accounts.json`，24h 过期、用后即焚）、账号 CRUD（`account_api.rs`）、`registration_open` 接线（`[multi_user].registration_open = true` 时非 admin 亦可创建普通账号，永不创建 admin）。`allow_public_signup`（匿名注册，ADR 里的 demo-only 极端模式）**仍未接线**——它需要把 `/api/users` 加入中间件白名单，属安全面扩大，未做。
 - **已结清：multi_user 下展示字段（language / timezone / avatar …）的单一写入权威**。原先两条写路径各自为政：`PUT /api/users/{id}` 只接 `display_name` + `role`（Desktop 的其余偏好字段被 serde 静默忽略，no-op 不报错），而 `/api/user/avatar-*` 直接改 `user_profiles.json` 里共享的 "active user"——`account_api::sync_profiles` 每次账号变更都从 `accounts.json` **整体重建**该视图，头像变更会被下一次账号变更冲掉，且 multi_user 下 "active user" 本身无意义。现收敛到 `accounts.json` 单权威：`AuthService::update_account` 改收 `ProfilePatch`（全部展示字段；`None` = 不动，空串 avatar = 清除，`display_name` 沿用 trim + 空白忽略契约），`UpdateAccountRequest` 以 `#[serde(flatten)]` 透传；avatar 路由在 multi_user 分支按 `AuthContext.user_id` 写穿 `accounts.json` 后走同一个 `sync_profiles`（local 模式保留 active-user 路径不动）。回归测试：`update_account_applies_the_display_patch`（service 层：patch 语义 + 落盘）、`update_account_persists_display_fields`（HTTP：PUT 展示字段 → 权威读回一致）、`avatar_config_writes_through_accounts_under_multi_user`（先设头像 → 再改 display_name 触发重建 → 头像仍在，旧实现必失败）。**资产归属（已结清）**：头像文件按账号命名空间落 `assets/avatars/{user_id}/`——upload / list 只见自己的命名空间，delete 在 unlink **之前**做归属守卫（路径前缀非本人命名空间 → 403，admin 无 bypass：先经 `PUT /api/users/{id}` 解引用再删；守卫放在 unlink 前是因为"删完再拒"文件已经没了），GET 保持全池可读（头像本就要展示给他人，读隔离不是需求）；local 模式保留 `assets/` 根（单用户无跨用户向量）。user_id 进路径前在边界校验字符集（alnum / `-` / `_`），不信任 token claim 的形状。不做存量迁移——multi_user 无已发布数据（ADR 未评审、Desktop authStore 未接线），legacy `assets/avatar-XX` 路径 GET 仍可读，用户重新上传即迁移。回归测试：`avatar_file_deletes_are_confined_to_the_owner_namespace`（他人 / admin 删 → 403 且文件存活；owner 删 → 200 + 字段经权威清掉）、`avatar_target_dir_is_per_user_under_multi_user_and_shared_under_local`（目录解析 + 越界 user_id 拒绝）。**仍开放：上传配额**。Phase 6 已评估：附件上传落地时**没有**顺手补它，而本轮进一步**否决了 per-user 配额这个框架**——磁盘是共享资源，按账号限额只在"配额本身是公平契约"的多租户下才有意义（否则一个用户 100 MiB 上限 × 50 个用户 = 5 GiB，保护不了任何东西），而本期唯一的写者 `store_attachment` 已按 mime 分档限制单文件体积，"单文件大小"与"账号总量"也不是同一件事。**真要做就换全局水位**：在 `store_attachment` 前统计 `data_dir/users/**/files/` 总量，超过 `data_dir` 的水位阈值就拒绝（一个数字、一处检查、保护真正被争用的那个资源）。触发条件：出现真实的磁盘压力，或引入了互不信任的多租户。
 - **ponytail: 公开 session 的分页计数是"可见行数"而非"总行数"**：过滤发生在分页前，所以 `total_count` / `total_pages` 只数调用者能看见的 session。这是有意的——按总数分页会泄漏"别人还有 N 个 session"——但代价是不同用户看到的同一页边界不同，前端**不能**缓存跨用户的分页结果。
@@ -905,7 +909,7 @@ require_mixed_case = false
 - **ponytail: MQTT 事件面没有 per-user 订阅隔离**（读侧保密性缺口）。`session 隔离`只覆盖**写侧**与 **HTTP 读侧**：任何能连上 broker 的客户端理论上可以 SUBSCRIBE 任意 `agents/{id}/sessions/{sid}/messages/#` 看到他人会话的事件流。这是 ceiling——`rumqttd` 0.20 没有 per-topic ACL 能力，**无法在现有 broker 上修复**（用户决策：MQTT 用户身份验证先暂缓）。缓解：broker 默认只 bind `127.0.0.1`（攻击者须先能访问本机回路）。升级路径 = 换 mosquitto（Phase 5b 评估）或给事件面加 token 化订阅代理。已在 [mqtt.md §10](../../protocols/zh/mqtt.md) 标注为"暂缓 / 已知缺口"。
 - **已结清 + 已实现：普通用户"发起"会话**（用户聊天，§决策 8）。原缺口：解析收件人需要一份用户名录，而 `GET /api/users` 是 admin-only，"发消息"入口只挂在 admin-only 的侧栏 `UserList` 右键菜单上（普通用户只看得见自己那一行）——普通用户只能**回复**，无法发起。**决策（用户授权"你来定"）**：新增 `GET /api/users/directory`，**任何已认证账号可读**，返回三字段 `user_id` / `username` / `display_name`，**排除已禁用账号**，**排除调用者自己**。取舍依据：① 这些展示字段本就是部署的公开视图——`user_profiles.json` 从 `accounts.json` 重建后被 Runtime 当 `last_user_profile` 消费（§决策 1），名字在此语境里不是秘密；② 一个无法指认收件人的聊天功能，对**除 admin 外的所有人**（也就是它服务的所有人）不可用，"隐私死锁"比"可枚举用户名"更糟。Desktop 侧 `MessagesView` 左栏头部加"新会话"选择器（联系人来自该端点），admin 的 `UserList` 右键"发消息"降级为快捷方式而非唯一入口。回归测试：`user_directory_is_readable_by_any_account_but_bounded`（普通用户可读 + 禁用账号不出现 + admin 可读）。
   - **ponytail: 名录对任何认证账号是全量可枚举**（残余 ceiling）。端点不暴露邮箱 / 时区 / 自定义字段，也不暴露 admin 才需要的字段，但 `username` 全集对每个账号可见。个人 / 小团队部署（本 ADR 的目标规模）这是可接受的；要收敛就得上"先按精确 username 查询 / 只回已有会话对手方 / 通讯录邀请制"——都需要一个新的产品决策，不是加个 filter 能解决的。
-- **ponytail: 附件有三处已知 ceiling**（§决策 9，均在代码中就地点标注）。① **blob 无回收**：先写 blob 后写元数据，两次写之间崩溃会留一个没人能引用的孤儿文件；上传本身需要认证，且失败窗口极窄，所以不为此加一个后台清扫线程——真要回收时按"无 sidecar 且早于 N 天"扫 `files/` 即可。② **下载整文件读进内存**：`load_attachment` 返回 `Vec<u8>`，单次上限 100 MiB（本机回路的桌面场景可接受）；要改成流式就换 `tokio::fs::File` + `ReaderStream`，代价是多一个依赖。③ **上传时限按客户端声明的 mime 分档**：把 100 MiB 的文档声明成 `image/png` 只会**更严格**（25 MiB），反向没有漏洞——真正决定处理方式的是存储方自己规整过的 mime，限额只影响接受的体积。
+- **ponytail: 附件有四处已知 ceiling**（§决策 9，均在代码中就地点标注）。① **blob 无回收**：先写 blob 后写元数据，两次写之间崩溃会留一个没人能引用的孤儿文件；上传本身需要认证，且失败窗口极窄，所以不为此加一个后台清扫线程——真要回收时按"无 sidecar 且早于 N 天"扫 `files/` 即可。② **下载整文件读进内存**：`load_attachment` 返回 `Vec<u8>`，单次上限 100 MiB（本机回路的桌面场景可接受）；要改成流式就换 `tokio::fs::File` + `ReaderStream`，代价是多一个依赖。③ **上传时限按客户端声明的 mime 分档**：把 100 MiB 的文档声明成 `image/png` 只会**更严格**（25 MiB），反向没有漏洞——真正决定处理方式的是存储方自己规整过的 mime，限额只影响接受的体积。④ **上传路由的 body 上限是"文档上限 + 1 MiB 信封余量"的估算**（`chat_api::UPLOAD_BODY_LIMIT`）：multipart 信封里还有 boundary + 文件名 + 头部，所以**贴着 100 MB 边界的文件仍可能被外层上限拒掉**（表现为 413 而非业务错误）。不用精确计算是因为它只能靠"解析 multipart 才能知道真实开销"——那时请求体已经读进来了，限制就失去意义。真要精确，就在路由前读 `Content-Length` 并按"文件大小 + 固定信封估算"两段判定。
 
 ---
 
@@ -1106,6 +1110,7 @@ run_gateway_auth_mode_redline() { ... }    # awk：auth_routes()/account_api 注
 - [x] 注销账号后旧 refresh_token → `disable_account` / `reset_password` 调 `revoke_user` → 拒绝（`account_api` 单测断言注销后 login 失败；`AuthService` 单测覆盖 `revoke_user` 命中）
 - [x] admin 用 `as_user` 调 POST（写操作）→ 403（`auth_middleware` 强制点，已单测）
 - [x] 跨用户聊天路径：`POST /api/users/{A}/chats/{B}/messages` 以 A 身份发送，从 token 拿 from 字段 → from=B 拒绝（**已实现**：`chat_api::tests::third_party_and_admin_cannot_write_as_someone_else`——第三方与 admin 都不能代写；`upload_attachment` / `download_attachment` 的 self-only 写 + self-or-admin 读由 `attachment_writes_are_self_only_and_reads_are_scoped` 覆盖）
+- [ ] **未覆盖（已知缺口，见 §10.2 第 14 项）：登录端点的暴力破解防护**——`POST /api/auth/login` 没有速率限制，也没有账号 lockout（连续失败不锁定）。当前唯一的缓解是**部署面**：`multi_user` 由 bind 地址推断，默认部署是 `127.0.0.1` 回路；密码强度（`password_policy`）是仅剩的在线防线。**把 Gateway 暴露到非信任网络之前必须先补这一项**——它属于"信任边界上的防护"，不是可以留白的 ceiling。
 
 ### 7.5 部署模式测试（决策 12）
 
@@ -1162,9 +1167,9 @@ grep -nE '"/sessions' core/acowork-runtime/src/http/server.rs
 
 ## 8. 实施里程碑（建议）
 
-> **进度（本次实施）**：Phase 1-4 的**后端全部完成并测试通过**——`UserAccount` 模型 + Argon2id + `accounts.json` + `/api/auth/*`（含 `/first-login`）+ token 中间件 + bootstrap_admin fail-fast（Phase 1-2）；`SessionMeta.user_id` + `visibility` 开关 + Runtime scope 过滤 + owner 校验 + **会话写路径全量 MQTT→HTTP 迁移**（Phase 3，见 §决策 4 Phase D 实施记录），MQTT 侧**全部用户操作命令**（两批共 16 条：生命周期 8 + 会话动作 8）的 proto 字段 / Runtime 变体 / 命令名映射表已**删除**并重排为连续，`can_write` 下发到前端用于禁用写控件；**Phase 4 账号 CRUD**（`account_api.rs` + `registration_open` 接线 + invite/first-login 生命周期）已完成。Phase 5-7 未动（Desktop UI / 用户聊天 / 进程级 e2e + 手册）。剩余项在各处标了 ⬜ / `**未实现（Phase X）**`。
+> **进度（本次实施）**：Phase 1-4 的**后端全部完成并测试通过**——`UserAccount` 模型 + Argon2id + `accounts.json` + `/api/auth/*`（含 `/first-login`）+ token 中间件 + bootstrap_admin fail-fast（Phase 1-2）；`SessionMeta.user_id` + `visibility` 开关 + Runtime scope 过滤 + owner 校验 + **会话写路径全量 MQTT→HTTP 迁移**（Phase 3，见 §决策 4 Phase D 实施记录），MQTT 侧**全部用户操作命令**（两批共 16 条：生命周期 8 + 会话动作 8）的 proto 字段 / Runtime 变体 / 命令名映射表已**删除**并重排为连续，`can_write` 下发到前端用于禁用写控件；**Phase 4 账号 CRUD**（`account_api.rs` + `registration_open` 接线 + invite/first-login 生命周期）已完成。Phase 5-7 当时未动（Desktop UI / 用户聊天 / 进程级 e2e + 手册）——**这一段是历史记录，随后已全部落地，见下一段「补充」；本 ADR 当前的剩余项以 [§10 遗留清单](#10-遗留清单仍未做全集) 为唯一权威**（正文里不再散标 ⬜，避免出现两处互相矛盾的状态）。
 >
-> **补充（本次）**：Phase 2 残留（Desktop `authStore` + 全局 fetch 拦截器 + `LoginView` 门禁 + 顶栏账号菜单）与 Phase 5（Sidebar User 折叠分组 + admin 账号管理 UI + `?as_user=` 过滤）已落地，见 §6.5「已实现（Phase 2 残留 + Phase 5，本次）」与「已实现（Phase 5 admin 账号管理 UI + Phase 6 后端，本次）」。Phase 6 的**后端**（`src/chat.rs` 持久化 + `src/http/chat_api.rs`，见 §6.4）与 **Desktop 聊天 UI**（`MessagesView` + `userChatStore` + nav 未读红点 + `requestNavView`，见 §6.5「已实现（Phase 6 Desktop 聊天 UI，本次）」）均已落地并测试；**普通用户发起会话**所需的 `GET /api/users/directory`（§5.5，本次决策）与 `MessagesView` "新会话"选择器一并完成——§决策 8 除附件外已闭环。**附件上传/下载**（§决策 9）也已落地；§决策 8 + 9 至此全部闭环。**Phase 7 本次收尾**：进程级 e2e（`tests/auth_mode_e2e.rs`，4 用例，见 §7.5）、第三条 ceiling lint（`run_gateway_chat_path_redline`，见 §7.5 回归防护）、用户手册（[`docs/runbooks/multi-user-accounts.md`](../../runbooks/multi-user-accounts.md)）、协议文档（`http.md` §4.14 / §4.15）。**唯一残余**：session 过滤的跨进程 e2e（需 Gateway + Node + Runtime 三进程 harness；判据逻辑已在 §7.1 穷举单测）。**再补充（本轮）**：最后一处"后端已接线、前端无入口"的洞已补——`registration_open` 的 Desktop 入口（非 admin 在开关打开时可见 "+"，见 §决策 6 / §9 问题 9），同时把两项产品决策写成决议（名录枚举维持现状 §5.5；上传配额否决 per-user 框架、改记全局水位 §5.5 / §9 问题 10）。
+> **补充（本次）**：Phase 2 残留（Desktop `authStore` + 全局 fetch 拦截器 + `LoginView` 门禁 + 顶栏账号菜单）与 Phase 5（Sidebar User 折叠分组 + admin 账号管理 UI + `?as_user=` 过滤）已落地，见 §6.5「已实现（Phase 2 残留 + Phase 5，本次）」与「已实现（Phase 5 admin 账号管理 UI + Phase 6 后端，本次）」。Phase 6 的**后端**（`src/chat.rs` 持久化 + `src/http/chat_api.rs`，见 §6.4）与 **Desktop 聊天 UI**（`MessagesView` + `userChatStore` + nav 未读红点 + `requestNavView`，见 §6.5「已实现（Phase 6 Desktop 聊天 UI，本次）」）均已落地并测试；**普通用户发起会话**所需的 `GET /api/users/directory`（§5.5，本次决策）与 `MessagesView` "新会话"选择器一并完成——§决策 8 除附件外已闭环。**附件上传/下载**（§决策 9）也已落地；§决策 8 + 9 至此全部闭环。**Phase 7 本次收尾**：进程级 e2e（`tests/auth_mode_e2e.rs`，4 用例，见 §7.5）、第三条 ceiling lint（`run_gateway_chat_path_redline`，见 §7.5 回归防护）、用户手册（[`docs/runbooks/multi-user-accounts.md`](../../runbooks/multi-user-accounts.md)）、协议文档（`http.md` §4.14 / §4.15）。**唯一残余**：session 过滤的跨进程 e2e（需 Gateway + Node + Runtime 三进程 harness；判据逻辑已在 §7.1 穷举单测）。**再补充（本轮）**：最后一处"后端已接线、前端无入口"的洞已补——`registration_open` 的 Desktop 入口（非 admin 在开关打开时可见 "+"，见 §决策 6 / §9 问题 9），同时把两项产品决策写成决议（名录枚举维持现状 §5.5；上传配额否决 per-user 框架、改记全局水位 §5.5 / §9 问题 10）。**收口**：所有仍未做完的事已汇总为 [§10 遗留清单](#10-遗留清单仍未做全集)（13 项有意留白 + 8 项未实现 + 2 项测试缺口 + 7 项已否决），每项带触发条件与升级路径——后续不必重读全文就知道还剩什么。
 
 | Phase | 内容 | 估时 | 状态 |
 |---|---|---|---|
@@ -1199,3 +1204,63 @@ grep -nE '"/sessions' core/acowork-runtime/src/http/server.rs
 
 ---
 
+
+---
+
+## 10. 遗留清单（仍未做全集）
+
+> **这一节是索引，不是第二份描述**：每项只写「类型 + 触发条件 + 详见」，细节留在被指向的那一节——两处各写一份，迟早会漂移成两种说法。
+>
+> 边界（本节覆盖截至本 ADR "本次收尾"时的状态）：§5.5 中标了 **已结清** / **已实现** 的条目**不在**此列（那些是变更记录，不是债务）。本节的目的是让下一个人（或下一个我）不必重读 1000 行就能知道"还有哪些洞、什么时候才需要去堵"。
+>
+> **判据**：某一行只有在"触发条件成立"时才值得动手。在此之前动它，就是给一个没有消费者的场景写代码。
+
+### 10.1 有意留白（有明确升级路径，不是遗漏）
+
+| # | 项 | 触发条件（什么时候才真要做） | 详见 |
+|---|---|---|---|
+| 1 | **MQTT 事件面无 per-user 订阅 ACL**——能连上 broker 的客户端理论上可 SUBSCRIBE 任意 `agents/{id}/sessions/{sid}/messages/#` | 部署从"本机回路"变成"跨机 / 多租户"；或在 `rumqttd` 上找到 ACL 能力 | §5.5 + [`mqtt.md §10`](../../protocols/zh/mqtt.md)（已标注"暂缓 / 已知缺口"） |
+| 2 | **access token 校验无状态**——账号被禁用后旧 token 仍可用，窗口 = `ACCESS_TTL_SECS`（15 分钟） | 用户量 > 100，或需要"立刻踢下线" | §5.5（升级路径：内存 `user_id → revoked_at` 集合） |
+| 3 | **refresh 无 grace window**——响应丢包后的重试会被判成"复用"，连坐撤销该用户全部 family | 出现真实的多客户端 / 弱网重试场景 | §5.5（升级路径：`r:` 条目加时间戳 + 宽限判定） |
+| 4 | **`revoked_families.txt` 是扁平文件、无 GC** | 历史上万次 refresh | §5.5（升级路径：SQLite 表 + 过期列） |
+| 5 | **聊天列表是 fs 全扫（O(pairs)）** | 会话对数接近 1000 | §6.4（`chat.rs` 已知 ceiling）+ 代码内 `ponytail:` |
+| 6 | **翻页要读整个 `messages.jsonl`** | 单会话消息上万 | §6.4（同上） |
+| 7 | **附件 blob 无回收**——崩溃会留无人引用的孤儿文件 | 出现真实磁盘压力 | §5.5（升级路径：扫"无 sidecar 且早于 N 天"） |
+| 8 | **下载整文件读进内存**（`Vec<u8>`） | 需要 > 100 MiB 附件 | §5.5（升级路径：`ReaderStream`，代价是多一个依赖） |
+| 9 | **上传路由的 body 上限是"100 MB + 1 MiB 信封"的估算**——贴着上限的文件可能被外层拒掉（413 而非业务错误） | 用户开始上传 99–100 MB 的文件 | §5.5（④） |
+| 10 | **上传配额未做**（框架已从 per-user 改为**全局 `data_dir` 水位**） | 出现真实磁盘压力，或引入互不信任的多租户 | §5.5 + §9 问题 10 |
+| 11 | **`user_profiles.json` 仍是全局派生视图**（`is_active` 取"最近登录 / 第一个 admin"），只喂遗留的 `last_user_profile` 主题 | Runtime 要做 per-owner 的 profile 推送 | §决策 2「派生视图的残余 ceiling」 |
+| 12 | **用户名录对任何认证账号全量可枚举**（`username` 全集） | 出现"同一实例上有陌生人"的场景 | §5.5（升级路径：精确 username 查询 / 只回已有对手方 / 邀请制通讯录） |
+| 13 | **per-agent 默认可见性**（admin 能否强制某 agent 的会话对所有账号可见） | 真出现"这个 agent 的对话是团队共享日志"的需求 | §决策 4 + §5.5 |
+
+### 10.2 未实现（明确留给后续工作 / 独立 ADR）
+
+| # | 项 | 触发条件 | 详见 |
+|---|---|---|---|
+| 14 | **登录端点没有速率限制 / 没有账号 lockout**——在线暴力破解只能靠密码强度挡（部署侧缓解：只 bind `127.0.0.1`） | 暴露到非信任网络之前**必须**补 | §7.4（已列为已知缺口）+ §5.5 |
+| 15 | **多设备并发上限 / `device_id`**——本期按"每设备独立 family"允许多端并发 | 需要"新登录踢旧登录" | §9 问题 7 |
+| 16 | **密码过期强制改密**（只记录 `password_expires_at`，不强制） | 有合规要求 | §5.5 |
+| 17 | **Vault 加密扩展字段**（`vault/accounts/{user_id}.enc`：`api_secrets` / `recovery_codes`） | 出现"每个账号自己的 API key"需求 | §决策 2 + §8 Phase 1 行 |
+| 18 | **`acowork-gateway admin create` CLI 子命令**（交互式首位 admin；无人值守场景已有 `bootstrap_admin`） | 有人要在终端里交互建号 | §9 问题 1 + [apps/cli/](apps/cli/) |
+| 19 | **admin 代用户写**（OAuth 2.0 Token Exchange / RFC 8693 的 `X-On-Behalf-Of`） | 出现"运营替用户发消息"的真实流程 | §9 问题 5 |
+| 20 | **群聊**（`participants` 已预留 `Vec<String>`，运行时断言 `len() == 2`） | 需要 3 人以上会话（schema 零迁移） | §9 问题 3 + §决策 8 |
+| 21 | **病毒扫描**（附件不做 ClamAV） | 附件来源不可信 + 规模上去了 | §9 问题 4 |
+
+### 10.3 测试缺口
+
+| # | 项 | 现状 | 详见 |
+|---|---|---|---|
+| 22 | **session 过滤的跨进程 e2e**（Gateway + Node + Runtime 三进程） | 判据逻辑已在单测里按 `(归属 × visibility × scope)` 矩阵穷举；端到端只有 Gateway 单进程的部署面 e2e | §7.2 + §7.5 |
+| 23 | **账号 CRUD / 改密的进程级 e2e** | 单测已覆盖（invite 生命周期 / 非 admin 自我封闭 / 冲突拒绝 / `registration_open` 门控 / 展示字段持久化） | §7.2 |
+
+### 10.4 已否决（评审时不要再重新讨论，除非触发条件变了）
+
+| 方案 | 否决理由 | 详见 |
+|---|---|---|
+| **匿名注册**（`allow_public_signup`） | 需要把 `/api/users` 移出认证中间件 = 无认证攻击面的净扩张；目标部署没有对应场景 | §决策 6 |
+| **per-user 上传配额** | 磁盘是共享资源，按账号限额保护不了它（100 MiB × 50 人也只是 5 GiB） | §5.5 + §9 问题 10 |
+| **硬删除账号** | 破坏 session / 聊天的引用完整性；主流实现都是软删除 | §9 问题 2 |
+| **把 `user_profiles.json` 升级成账号 schema** | 会把凭据混进"非敏感展示元数据"语义（ADR-059 §7.3） | §决策 1/2 |
+| **第二条真相源索引文件**（会话索引落盘） | 缓存索引只放进程内存，权威永远是 meta 文件 | §决策 2 + §5.5 |
+| **`as_user` 写操作** | 身份冒用 = 横向越权入口 | §9 问题 5 |
+| **给公开会话开 `open` 读授权**（观众激活） | `Active` 是 per-session 全局状态，会造出"无责任人"的常驻会话；改成"观众不激活" | §5.5 |
