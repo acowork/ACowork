@@ -147,6 +147,8 @@ Compaction 不再生成 `entities` / `triples` 块——LLM 在压缩场景下�
 
 所有检索统一使用默认 RRF 权重（vector: 0.7, text: 0.3），不再基于 memory_hint 类型动态调整。HintType 枚举保留但仅在 `memory_store` 工具调用时由 LLM 显式指定（用于即时提取管道的 sub_type 分类）。
 
+> **v3.13 更正（[ADR-082](../adr/zh/ADR-082-hybrid-retrieval-score-domain-and-gating.md) C4 / P4）**：实现为**等权 RRF（`k = 60`）**——`hint_weights` 传入 `hybrid_search_full` 后即被忽略，加权 RRF 曾被显式否决（*"weight scaling after RRF is meaningless"*）。上文所述 vector 0.7 / text 0.3 的默认权重**尚未接入**，排序不体现查询意图。
+
 **瞬态层的管理策略（v3.8 简化）**：
 
 上下文压缩是一个语义理解任务，只有 LLM 能可靠判断哪些信息可以丢弃。程序化策略（字符截断、FIFO、角色折叠）本质是用 proxy 指标替代语义理解，必然失效。因此所有日常程序化折叠策略已被放弃，压缩简化为三阶段：
@@ -847,14 +849,14 @@ embedding 聚簇（cluster_threshold，默认 0.85，per-agent 可调 0.80~0.92�
 
 **设计动机**：当检索结果的置信度不足时，Agent 应选择拒答而非生成可能不准确的回答。这是检索系统的最终质量门控——比检索降级策略（Level 0-3）更后置，是在检索结果已返回后的语义级别保障。
 
-**min_score 阈值机制**：
+**门控阈值机制（v3.13 修正，见 [ADR-082](../adr/zh/ADR-082-hybrid-retrieval-score-domain-and-gating.md)）**：
 
-`hybrid_search` 返回的结果中，所有分数低于 `min_score` 的结果被过滤。若过滤后结果为空，触发 Abstention（拒答）：
+过滤**不作用于融合分**，而是各源在各自分数域内独立过滤后**取并集**：向量源按绝对余弦相似度 `min_cosine`（默认 0.3）过滤；文本源（BM25）命中即保留（BM25 含 IDF，无可靠绝对阈值）。融合分（RRF，仅含名次）不参与任何阈值判定。若过滤后结果为空，触发 Abstention（拒答）：
 
 ```
 检索结果处理流程：
   ① hybrid_search 返回原始结果集
-  ② 过滤：移除 score < min_score 的结果
+  ② 各源分别过滤：向量源移除 cos < min_cosine 的；文本源命中保留
   ③ 若过滤后结果为空：
      → 触发 Abstention
      → System Prompt 注入拒答指引：
@@ -866,15 +868,15 @@ embedding 聚簇（cluster_threshold，默认 0.85，per-agent 可调 0.80~0.92�
 
 **默认阈值**：
 
-| 阶段    | min_score 默认值 | 说明                                               |
+| 阶段    | 阈值 | 说明                                               |
 | ------- | ---------------- | -------------------------------------------------- |
-| Phase 2 | 0.6              | 保守值，精度优先。预期会过滤掉较多低质量结果       |
-| Phase 3 | 基于实际数据校准 | 根据在线评估的 NRR 指标和 LongMemEval 成绩动态调整 |
+| Phase 2 | `min_cosine = 0.3` | 余弦域噪声底；注意真实 embedding 各向异性强，实际过滤力度远小于字面（ADR-082 C1） |
+| Phase 3 | 基于实际数据校准 | 根据在线评估的 NRR 指标和 LongMemEval 成绩动态调整；升级路径为对语料均值中心化 / 每查询 z-score（ADR-082 P5） |
 
-> **实现澄清（v3.12，P2 G9）**：代码中存在**两个同名但语义不同的 `min_score`**，勿混淆：
-> - `AbstentionConfig.default_min_score = 0.6`（`abstention.rs`）：作用于 `check_abstention` 的 **raw scores**（向量/BM25 原始相似度），用于拒答判定。
-> - `MemoryManagerConfig.default_min_score = 0.0`（`manager.rs`）：作用于 **hybrid RRF 融合分数**。RRF 分数典型范围仅 0.01-0.05（`1/(k + rank)` 量级），设非零默认值会过滤掉几乎全部结果，故有意为 0.0（不过滤）。
-> - 两者所在分数域不同，默认值不可互相移植。manager 侧仅做注释区分，不改默认值（改 0.6 会误过滤全部，属于 §6.5 Phase 2 目标而非当前缺陷）。
+> **实现澄清（v3.13，取代 v3.12 的 G9 说明）**：代码中现为**两个不同名的量**，勿混淆：
+> - `AbstentionConfig.default_min_score = 0.6`（`abstention.rs`）：作用于 `check_abstention` 的 **raw scores**（向量/BM25 原始相似度），用于拒答判定。**当前尚未接入检索链路，属死代码**（ADR-082 P6）。
+> - `MemoryQualityConfig.min_cosine = 0.3`（`quality.rs`）：作用于**向量源的绝对余弦**（`cos = 1 − distance`，对外归一化为 `(1 + cos)/2 ∈ [0,1]`），在 `hybrid_search_full` 内完成过滤。
+> - 旧的 `MemoryManagerConfig.min_score`（融合 RRF 域，默认 0.0）**已删除**：它对**单源向量路径**（`score = cos − 1`，恒非正）等价于要求 `cos >= 1`，会静默滤光全部结果——即 2026-09 中文查询 `memory_recall` 返回 0 条的根因。详见 [ADR-082](../adr/zh/ADR-082-hybrid-retrieval-score-domain-and-gating.md)。
 
 **与检索降级策略的关系**：
 
@@ -883,7 +885,7 @@ Abstention 在 Level 0-3 降级策略之后生效，是最终的质量门控：
 ```
 检索降级策略（§6.1）→ 返回原始结果集
   ↓
-min_score 过滤 → 移除低质量结果
+各源门控过滤（向量源 cos < min_cosine 移除；文本源命中保留）→ 移除低质量结果
   ↓
 Abstention 判断 → 结果为空则触发拒答
   ↓
@@ -900,12 +902,12 @@ LongMemEval 的 Abs（Abstention）维度评估 Agent 在信息不足时是否�
 
 | 阶段    | Abs 目标 | 当前预期 | 说明                                         |
 | ------- | -------- | -------- | -------------------------------------------- |
-| Phase 2 | 60%+     | 40-50%   | 通过 min_score 阈值 + System Prompt 注入实现 |
+| Phase 2 | 60%+     | 40-50%   | 通过 min_cosine 门控 + System Prompt 注入实现 |
 | Phase 3 | 75%+     | —        | 结合在线评估反馈和轻量 LLM Judge 优化        |
 
 **可配置性**：
 
-`min_score` 通过 `MemoryQuery` 参数传入（§10.3 `MemoryQuery.min_score` 字段已预留），支持不同 Agent 不同阈值：
+`min_cosine` 通过 `MemoryQuery` 参数传入（§10.3 `MemoryQuery.min_cosine` 字段），支持不同 Agent 不同阈值：
 
 ```rust
 pub struct MemoryQuery {
@@ -913,15 +915,15 @@ pub struct MemoryQuery {
     pub filters: MemoryFilters,
     pub limit: usize,
     pub expand_hops: u8,
-    // 检索过滤阈值（RRF 融合分数域）。None = MemoryManagerConfig.default_min_score = 0.0（不过滤）。
+    // 向量源门控阈值（余弦绝对域 [0,1]，归一化 cos）。None = MemoryQualityConfig.min_cosine = 0.3。
     // ⚠️ 与 AbstentionConfig.default_min_score = 0.6（raw scores，拒答判定）语义不同，勿混淆。
-    pub min_score: Option<f32>,
+    pub min_cosine: Option<f32>,
 }
 ```
 
-- 工具型 Agent（如天气助手）：min_score = 0.5（容忍较低匹配，宁可多答）
-- 学习型 Agent（如知识库助手）：min_score = 0.7（严格匹配，宁缺毋滥）
-- 默认值从 manifest.toml `[memory.retrieval]` 节读取
+- 工具型 Agent（如天气助手）：min_cosine = 0.2（容忍较低匹配，宁可多答）
+- 学习型 Agent（如知识库助手）：min_cosine = 0.5（严格匹配，宁缺毋滥）
+- 默认值从 manifest.toml `[memory.quality]` 节读取（真实 embedding 各向异性强，绝对阈值实际力度有限，见 ADR-082 C1）
 
 ### 6.6 检索权重（v3.10 简化）
 
@@ -1283,7 +1285,7 @@ pub struct MemoryQuery {
     pub filters: MemoryFilters,
     pub limit: usize,
     pub expand_hops: u8,          // 关联扩散跳数（0 = 不扩散）
-    pub min_score: Option<f32>,   // 最低分数阈值
+    pub min_cosine: Option<f32>,  // 向量源门控阈值（归一化余弦 [0,1]）
 }
 
 pub struct MemoryFilters {
@@ -1601,8 +1603,8 @@ pub struct RetrievalMetrics {
 }
 ```
 
-- **result_count + avg_score + max_score**：基础检索质量指标，连续低 avg_score 暗示 min_score 阈值需调整
-- **abstention_triggered**：拒答率过高（>30%）可能说明 min_score 过严；拒答率过低（<5%）可能说明 min_score 过松
+- **result_count + avg_score + max_score**：基础检索质量指标，连续低 avg_score 暗示 min_cosine 阈值需调整
+- **abstention_triggered**：拒答率过高（>30%）可能说明 min_cosine 过严；拒答率过低（<5%）可能说明 min_cosine 过松
 - **retrieval_level**：降级频率反映 Grafeo 健康状况
 
 **轻量 LLM Judge（Phase 3+，可选）**：
@@ -1689,7 +1691,7 @@ lambda 值 vs 用户反馈的"记忆过期率"：
 | 指标               | 采集频率     | 告警阈值            | 告警动作                       |
 | ------------------ | ------------ | ------------------- | ------------------------------ |
 | NRR                | 每次检索     | < 0.5 持续 10 次    | 检查 embedding 模型 + 索引状态 |
-| Abstention 率      | 每次检索     | > 30% 或 < 5%       | 调整 min_score 阈值            |
+| Abstention 率      | 每次检索     | > 30% 或 < 5%       | 调整 min_cosine 阈值           |
 | 冲突自动判定准确率 | 每次离线巩固 | < 80%               | 回退为 LLM 仲裁                |
 | 降级频率           | 每次检索     | Level 2+ 占比 > 20% | 检查 Grafeo 健康状态           |
 
@@ -1710,7 +1712,7 @@ Phase 2 交付前必须通过以下验证：
 | ----------------- | -------------------- | ------------------------- |
 | Abstention 机制   | 人工构造低相关性查询 | 触发拒答且不产生幻觉      |
 | 两层冲突检测      | 人工构造冲突场景     | 两层信号均能正确标记      |
-| min_score 过滤    | 调整阈值观察检索结果 | 阈值与过滤效果符合预期    |
+| min_cosine 门控   | 调整阈值观察检索结果 | 阈值与过滤效果符合预期    |
 | 检索权重动态调整  | 不同 hint.type 查询  | 权重和扩散参数正确切换    |
 | 即时/离线巩固边界 | 对比即时和离线产出   | PendingNode 正确升级/降级 |
 

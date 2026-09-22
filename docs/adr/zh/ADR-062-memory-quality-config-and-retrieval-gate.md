@@ -89,8 +89,8 @@ _vector_weight: f32, // Reserved for future weighted RRF implementation
 |---|---|---|---|---|
 | RRF k | 60 | grafeo-engine 硬编码 | ✅ | ❌ |
 | hint_weights（4 套） | 0.8/0.2 等 | `manager.rs:1024` | ❌ 空转 | ❌ |
-| min_score（RRF 域，默认） | 0.0 | `MemoryManagerConfig` | ✅ | ✅ 已有 |
-| min_score（auto_inject） | 0.3 | `memory/types.rs:132` | ✅ | ❌ 写死 |
+| min_cosine（余弦域，默认） | 0.3 | `MemoryQualityConfig` | ✅ | ✅ 已有 |
+| ~~min_score（RRF 域 / auto_inject）~~ | ~~0.0 / 0.3~~ | 已删除 → 见 ADR-082 | — | — |
 | graph expand 阈值 | `[0.1,0.15,0.2]` | `spreading.rs:42` | ✅ | ✅（builder） |
 | min_edge_weight | 0.1 | `spreading.rs` | ✅ | ✅（builder） |
 | DECAY_PER_HOP | 0.7 | `spreading.rs:105` | ✅ | ❌ 写死 |
@@ -275,9 +275,11 @@ pub struct MemoryQualityConfig {
 - 测试 `test_memory_store_default_confidence`（`memory_store.rs:586`）与 autobio 0.85 断言（:915-918）**不受影响**——它们验证的是代码兜底路径，而非 schema 文本。
 - **阈值合理性由数据决定**：去锚定后分数绝对尺度会漂移，代码中 `≥0.85→Active`/`<0.3→Dormant`/`≥0.7→Active` 等阈值与 LLM 分数的映射关系随之变化。这不靠猜，靠 §6.6 的 M3.6 阈值校准用分布数据重标定。
 
-### 6.4 顺带修复：auto_inject 的 min_score
+### 6.4 顺带修复：auto_inject 的 min_score（⚠️ 已被 [ADR-082](./ADR-082-hybrid-retrieval-score-domain-and-gating.md) 取代）
 
 `memory/types.rs:132` `auto_inject` 设 `min_score: Some(0.3)`，落在 RRF 分数域（`1/(k+rank)`，k=60 → 最高约 0.016）会过滤掉几乎全部结果。D2 落地后改为走 `MemoryQualityConfig.min_score`（默认 0.0）。
+
+> **ADR-082 修正**：上述论断只在 **双源 RRF** 下成立，且真正的隐患被漏掉——`min_score = 0.0` 在**单源向量路径**下（`score = cos − 1`，恒非正）等价于要求 `cos >= 1`，会静默滤光**全部**向量结果（即中文查询 `memory_recall` 返回 0 条的根因）。该"融合分阈值"机制与 `min_score` 字段已整体删除，改为**各源在各自分数域内把门 + 名次融合**，阈值更名为 `min_cosine`（余弦绝对域，默认 0.3）。完整论证见 ADR-082。
 
 ### 6.5 验收
 
@@ -335,4 +337,5 @@ pub struct MemoryQualityConfig {
 
 - [05-memory.md](../design/zh/05-memory.md)（§5.2 Dormant 语义、§6.5 Abstention、§6.6 检索权重）
 - [ADR-051](./ADR-051-runtime-memory-provider-decoupling.md)
+- [ADR-082](./ADR-082-hybrid-retrieval-score-domain-and-gating.md)（**取代本文 §6.4 与 §2.4 的 `min_score` 决策**：各源把门 + 名次融合）
 - [review 报告](../_internal/archive/review/zh/)（Gap 分析来源）
