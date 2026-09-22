@@ -8,6 +8,7 @@ members = [
     "acowork-gateway",
     "acowork-node",
     "acowork-grafeo",
+    "acowork-sqlite",
     "acowork-vault",
     "acowork-sign",
     "acowork-tool-sdk",
@@ -214,6 +215,7 @@ acowork-core = { path = "acowork-core" }
 acowork-mcp = { path = "acowork-mcp" }
 acowork-memory = { path = "acowork-memory" }
 acowork-grafeo = { path = "acowork-grafeo" }
+acowork-sqlite = { path = "acowork-sqlite" }
 acowork-runtime = { path = "acowork-runtime" }
 acowork-gateway = { path = "acowork-gateway" }
 # NOTE (ADR-055 §6.20 dependency red line): `acowork-node` must NEVER
