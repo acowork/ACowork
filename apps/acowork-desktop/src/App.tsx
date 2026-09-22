@@ -105,6 +105,25 @@ function App() {
     return unsub;
   }, []);
 
+  // Steady-state drop (laptop woke from sleep / switched Wi-Fi) →
+  // probe the rest of URL history so the GatewayBanner can offer
+  // reachable candidates.
+  //
+  // We probe on EVERY `connected → *` transition into a non-connected
+  // state (the "we were fine, now we're not" family). The banner owns
+  // its own re-probe on retry so we don't double-fire. We skip
+  // `connecting` because that's the user mid-edit. To stay robust
+  // against the case where /health stays "ok" while the network is
+  // actually dead (caching, intermediate proxy) we also probe on the
+  // banner's own trigger — see GatewayBanner.
+  //
+  // The banner component drives its own probe lifecycle (on mount +
+  // on retry click), which is the simpler and more reliable hook than
+  // trying to enumerate every transition. The subscriber here exists
+  // for one specific case: the banner mounts AFTER a transition has
+  // already happened, so we need the candidate set up before the
+  // banner's first paint.
+
   if (!gatewayReady && onboardingDone) {
     return (
       <div className="h-screen w-screen overflow-hidden">

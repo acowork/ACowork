@@ -354,7 +354,13 @@
     "retryConnection": "Retry Connection",
     "gatewayAddress": "Gateway Address",
     "candidateTitle": "Other reachable Gateways — connect to one?",
+    "candidateDetected": "Detected:",
     "candidateKeepWaiting": "Keep waiting",
+    "bannerLocalStarting": "Starting local Gateway",
+    "bannerLocalDown": "Local Gateway is not running",
+    "bannerRemoteDown": "Gateway unreachable",
+    "bannerStart": "Start",
+    "bannerRetry": "Retry",
     "altLogo": "ACowork"
   },
   "appLayout": {

@@ -1162,7 +1162,13 @@
     "retryConnection": "重試連線",
     "gatewayAddress": "閘道位址",
     "candidateTitle": "偵測到其他可用的閘道,是否切換?",
+    "candidateDetected": "可用閘道:",
     "candidateKeepWaiting": "繼續等待",
+    "bannerLocalStarting": "正在啟動本機閘道",
+    "bannerLocalDown": "本機閘道未執行",
+    "bannerRemoteDown": "閘道無法連線",
+    "bannerStart": "啟動",
+    "bannerRetry": "重試",
     "altLogo": "ACowork"
   },
   "appLayout": {

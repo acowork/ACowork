@@ -1163,7 +1163,13 @@
     "retryConnection": "接続を再試行",
     "gatewayAddress": "ゲートウェイアドレス",
     "candidateTitle": "他の利用可能なゲートウェイが見つかりました — 接続しますか?",
+    "candidateDetected": "検出:",
     "candidateKeepWaiting": "待機を続ける",
+    "bannerLocalStarting": "ローカルゲートウェイを起動中",
+    "bannerLocalDown": "ローカルゲートウェイが実行されていません",
+    "bannerRemoteDown": "ゲートウェイに到達できません",
+    "bannerStart": "起動",
+    "bannerRetry": "再試行",
     "altLogo": "ACowork"
   },
   "appLayout": {

@@ -1223,7 +1223,13 @@
     "retryConnection": "重试连接",
     "gatewayAddress": "网关地址",
     "candidateTitle": "检测到其他可用的网关,是否切换?",
+    "candidateDetected": "可用网关:",
     "candidateKeepWaiting": "继续等待",
+    "bannerLocalStarting": "正在启动本地网关",
+    "bannerLocalDown": "本地网关未运行",
+    "bannerRemoteDown": "网关不可达",
+    "bannerStart": "启动",
+    "bannerRetry": "重试",
     "altLogo": "ACowork"
   },
   "appLayout": {
