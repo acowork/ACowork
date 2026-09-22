@@ -110,6 +110,10 @@ impl GrafeoStore {
             embedding_dim: AtomicUsize::new(0),
             quality: Arc::new(RwLock::new(MemoryQualityConfig::default())),
         };
+        // Consume the HNSW topologies the engine persisted but never reads back
+        // on its own (see `index_persist`), so `init_schema` does not rebuild
+        // them from scratch on every open.
+        store.restore_vector_indexes();
         store.init_schema()?;
         // Sync embedding_dim with the configured dimension after schema init.
         store.embedding_dim.store(store.hnsw_config.dim, Ordering::Relaxed);
@@ -159,10 +163,11 @@ impl GrafeoStore {
     /// Initialize schema: create HNSW vector indexes and BM25 text indexes.
     ///
     /// Vector indexes are created for all four memory labels **only if they
-    /// do not already exist**. When the database is restored from persistence,
-    /// indexes are restored with their original dimensions and should not be
-    /// recreated. This prevents dimension-mismatch errors when the embedding
-    /// provider dimension has changed since the last session.
+    /// do not already exist**: [`Self::restore_vector_indexes`] registers the
+    /// indexes carried by the persisted container, and recreating them here
+    /// would throw that topology away and rebuild it from the data
+    /// (`create_vector_index` replaces unconditionally — it has no
+    /// already-exists check).
     ///
     /// Text indexes are created on the "content" property for all labels,
     /// plus any label-specific text fields defined in
@@ -170,18 +175,15 @@ impl GrafeoStore {
     fn init_schema(&self) -> Result<()> {
         let cfg = &self.hnsw_config;
 
-        // HNSW vector indexes on the "embedding" property.
-        // Try to create each index. If creation fails (e.g., the index was
-        // already restored from persistence with a different dimension, or
-        // existing vectors have a mismatched dimension), log a warning and
-        // continue. The store remains usable for text search and graph
-        // operations; vector search will fail until migration is performed.
-        for label in [
-            labels::EPISODIC,
-            labels::KNOWLEDGE,
-            labels::PROCEDURAL,
-            labels::AUTOBIOGRAPHICAL,
-        ] {
+        // HNSW vector indexes on the "embedding" property. Skip the ones a
+        // restore already registered; create the rest, tolerating failures
+        // (e.g. existing vectors with a mismatched dimension — the store stays
+        // usable for text search and graph operations).
+        for label in labels::MEMORY {
+            if crate::index_persist::has_vector_index(&self.db, label, "embedding") {
+                tracing::debug!(label, "vector index present; not rebuilding");
+                continue;
+            }
             if let Err(e) = self.db.create_vector_index(
                 label,
                 "embedding",
@@ -221,6 +223,53 @@ impl GrafeoStore {
         let _ = self.db.create_text_index(labels::KNOWLEDGE, "content");
 
         Ok(())
+    }
+
+    /// Restore the persisted HNSW topologies for the memory labels.
+    ///
+    /// Best-effort and silent on failure: a label whose topology cannot be
+    /// restored is simply left for [`Self::init_schema`] to build from data.
+    fn restore_vector_indexes(&self) {
+        for label in labels::MEMORY {
+            crate::index_persist::restore_vector_index(
+                &self.db,
+                label,
+                crate::index_persist::EMBEDDING_PROPERTY,
+                &self.hnsw_config,
+            );
+        }
+    }
+
+    /// Ensure `label`'s vector index exists at `dim`, restoring the persisted
+    /// topology when possible and building it from the data otherwise.
+    ///
+    /// [`Self::init_schema`] only knows the four memory labels; stores owned by
+    /// another subsystem (the conversation index) declare their own label here.
+    ///
+    /// Returns `true` if the topology came from disk (no rebuild), `false` if it
+    /// was built from the data.
+    pub fn ensure_vector_index(&self, label: &str, property: &str, dim: usize) -> Result<bool> {
+        let cfg = HnswConfig {
+            dim,
+            ..self.hnsw_config.clone()
+        };
+        if crate::index_persist::restore_vector_index(&self.db, label, property, &cfg) {
+            return Ok(true);
+        }
+        if crate::index_persist::has_vector_index(&self.db, label, property) {
+            return Ok(true);
+        }
+        self.db.create_vector_index(
+            label,
+            property,
+            Some(dim),
+            Some(VECTOR_METRIC),
+            Some(cfg.m),
+            Some(cfg.ef_construction),
+            None,
+        )?;
+        tracing::info!(label, property, dim, "vector index built from data");
+        Ok(false)
     }
 
     /// Return the HNSW config used by this store.
@@ -519,7 +568,7 @@ impl GrafeoStore {
                         }
                         let emb_value =
                             Value::Vector(std::sync::Arc::from(new_embedding.as_slice()));
-                        self.db.set_node_property(node_id, "embedding", emb_value);
+                        self.set_node_property(node_id, "embedding", emb_value);
                         stats.rebuilt += 1;
                     }
                     None => {
@@ -798,11 +847,6 @@ impl MemoryStore for GrafeoStore {
 
         // Sort by score descending
         all_results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
-
-        // Apply min_score filter if present
-        if let Some(min_score) = query.min_score {
-            all_results.retain(|r| r.score >= min_score as f64);
-        }
 
         // Limit results
         all_results.truncate(query.limit);

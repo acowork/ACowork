@@ -1,11 +1,11 @@
 //! Conversation vector index (ADR-081 §4.2, P1-2).
 //!
 //! Reuses `grafeo-engine` via [`GrafeoStore`] in a dedicated store file
-//! `{work_dir}/conversation_index/` — one node per indexed message with
+//! `{work_dir}/conversation_index.grafeo` — one node per indexed message with
 //! `session_id`, `message_index` (the JSONL line number), `role`,
 //! `content`, `embedding`. Physically isolated from the memory store:
-//! the directory can be deleted and rebuilt from the JSONL history at
-//! any time (ADR-081 "索引目录独立，可删重建；降级关键词").
+//! the file can be deleted and rebuilt from the JSONL history at any
+//! time (ADR-081 "索引目录独立，可删重建；降级关键词").
 //!
 //! The JSONL conversation log is append-only (compaction appends a
 //! `kind="compaction"` marker — never truncates), so the JSONL line
@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use std::time::Instant;
 
 use grafeo_common::types::Value;
 
@@ -30,6 +31,14 @@ use crate::error::Result;
 
 /// Label for every indexed conversation-message node.
 const LABEL: &str = "ConversationMessage";
+/// The store file. The `.grafeo` suffix selects the container's single-file
+/// layout — a paged snapshot plus a WAL that is checkpointed every
+/// `DEFAULT_CHECKPOINT_INTERVAL`. A suffix-less path selects the engine's
+/// legacy `WalDirectory` layout, whose checkpoint timer never runs and whose
+/// WAL therefore grew unbounded (182 MB here) and was replayed on every boot.
+pub const STORE_FILE: &str = "conversation_index.grafeo";
+/// Pre-`STORE_FILE` location — the legacy `WalDirectory` layout.
+const LEGACY_STORE_DIR: &str = "conversation_index";
 /// Content is truncated to this many chars before embedding, bounding
 /// embedding cost for very long messages (the stored snippet is the
 /// truncated form, matching what was embedded).
@@ -74,26 +83,34 @@ impl ConversationIndex {
     /// an in-place dimension migration is not implemented since no store
     /// pre-dates this change.
     pub fn open(work_dir: &Path, embedding_dim: usize) -> Result<Self> {
+        let started = Instant::now();
+        let path = work_dir.join(STORE_FILE);
         let store = GrafeoStore::open(&GrafeoConfig {
-            db_path: work_dir.join("conversation_index"),
+            db_path: path,
             embedding_dim,
         })
         .map_err(|e| crate::error::RuntimeError::Memory(e.to_string()))?;
         // The engine's `init_schema` only creates indexes for the four
         // memory labels — `ConversationMessage` needs its own BM25 +
-        // HNSW indexes or every search comes back empty. Idempotent:
-        // re-opening an existing store restores its indexes as-is.
-        let hnsw = store.hnsw_config().clone();
+        // HNSW indexes or every search comes back empty.
+        //
+        // The vector index is restore-aware: `open` already consumed the
+        // persisted HNSW topology, so this only builds from data when the
+        // container had none (fresh store, changed dimension, corrupt
+        // topology) — dropping a restored index here cost a full O(N log N)
+        // rebuild on every boot (release: 1.44 s for 3.7k messages).
+        //
+        // The BM25 index is NOT restored: the engine writes its postings to
+        // the container but never reads them back either, and unlike the
+        // vector index it is only maintained for writes that happen while it
+        // is registered — so it must be (re)built from the data, on top of
+        // the replayed WAL. Linear in the corpus (~125 ms for 3.7k messages,
+        // ~2 s at 55k).
         let _ = store.db().create_text_index(LABEL, "content");
-        let _ = store.db().create_vector_index(
-            LABEL,
-            "embedding",
-            Some(hnsw.dim),
-            Some(acowork_grafeo::index_config::VECTOR_METRIC),
-            Some(hnsw.m),
-            Some(hnsw.ef_construction),
-            None,
-        );
+        let _ = store.ensure_vector_index(LABEL, "embedding", embedding_dim);
+        // Both indexes now exist (and are maintained per write), so a legacy
+        // store can be migrated straight into them.
+        migrate_legacy_store(work_dir, &store, embedding_dim);
         let index = Self {
             store,
             conversations_dir: work_dir.join("conversations"),
@@ -109,6 +126,15 @@ impl ConversationIndex {
         // indexed line per session and drop the duplicates an earlier
         // restart already wrote.
         index.recover_watermarks();
+        // The boot-time number users watch: with a restored topology this is
+        // ~60 ms regardless of message count; a rebuild shows up as seconds.
+        tracing::info!(
+            path = %work_dir.join(STORE_FILE).display(),
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            dim = embedding_dim,
+            messages = index.store.db().graph_store().nodes_by_label(LABEL).len(),
+            "conversation index store opened"
+        );
         Ok(index)
     }
 
@@ -235,8 +261,8 @@ impl ConversationIndex {
 
     /// Reset the whole index: purge every message node and clear the
     /// per-session watermarks, then latch `indexing` so the next indexer
-    /// sweep rebuilds from the JSONL history. The directory is
-    /// append-only and re-derivable, so this is the self-heal path after
+    /// sweep rebuilds from the JSONL history. The store file is
+    /// re-derivable, so this is the self-heal path after
     /// corruption or an embedding-dimension change (ADR-081 "可删重建").
     pub fn rebuild(&self) {
         let ids = self.store.db().graph_store().nodes_by_label(LABEL);
@@ -284,6 +310,93 @@ impl ConversationIndex {
                 })
             })
             .collect()
+    }
+}
+
+/// Migrate a legacy `conversation_index/` store into the current single-file
+/// store, then drop it.
+///
+/// The legacy layout (suffix-less path → `WalDirectory`) never checkpoints, so
+/// its WAL grows without bound and is fully replayed on every open: 183 MB and
+/// 1.3 s of a bare `open` on this machine. Migrating keeps the embeddings that
+/// are already in that WAL — rebuilding from the JSONL history instead would
+/// re-embed every message, which needs a reachable embedding provider (the
+/// remote one is not always up) and re-encodes thousands of messages.
+///
+/// Runs only when the new store is empty, so a migrated store is never
+/// re-migrated. A legacy store that cannot be opened is left in place.
+fn migrate_legacy_store(work_dir: &Path, target: &GrafeoStore, embedding_dim: usize) {
+    let legacy_dir = work_dir.join(LEGACY_STORE_DIR);
+    if !legacy_dir.is_dir() || !target.db().graph_store().nodes_by_label(LABEL).is_empty() {
+        return;
+    }
+    let legacy = match GrafeoStore::open(&GrafeoConfig {
+        db_path: legacy_dir.clone(),
+        embedding_dim,
+    }) {
+        Ok(store) => store,
+        Err(e) => {
+            tracing::warn!(
+                dir = %legacy_dir.display(),
+                error = %e,
+                "conversation index: legacy store could not be opened; leaving it in place"
+            );
+            return;
+        }
+    };
+
+    let mut migrated = 0usize;
+    let mut skipped = 0usize;
+    for id in legacy.db().graph_store().nodes_by_label(LABEL) {
+        let Some(node) = legacy.get_node(id) else {
+            continue;
+        };
+        let Some(Value::Vector(vector)) = node.get_property("embedding") else {
+            skipped += 1;
+            continue;
+        };
+        let str_of = |key: &str| {
+            node.get_property(key)
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string()
+        };
+        let line = node
+            .get_property("message_index")
+            .and_then(|v| v.as_int64())
+            .unwrap_or(0);
+        if target
+            .store_node(
+                LABEL,
+                [
+                    ("session_id", Value::from(str_of("session_id").as_str())),
+                    ("message_index", Value::from(line)),
+                    ("role", Value::from(str_of("role").as_str())),
+                    ("content", Value::from(str_of("content").as_str())),
+                    ("embedding", Value::Vector(std::sync::Arc::clone(vector))),
+                ],
+            )
+            .is_ok()
+        {
+            migrated += 1;
+        }
+    }
+    let _ = legacy.close();
+    tracing::info!(
+        migrated,
+        skipped,
+        "conversation index: migrated legacy store into the single-file store"
+    );
+
+    // Only drop the old store once its data is safely in the new one.
+    if migrated > 0
+        && let Err(e) = std::fs::remove_dir_all(&legacy_dir)
+    {
+        tracing::warn!(
+            dir = %legacy_dir.display(),
+            error = %e,
+            "conversation index: migrated legacy store could not be removed"
+        );
     }
 }
 
@@ -648,6 +761,9 @@ mod tests {
         // purges the strays on the NEXT open — verify the dedup path directly.
         idx2.index_message("s1", 0, "user", "unique alpha marker", &emb).expect("dup write");
         assert_eq!(idx2.search("alpha", None, 10).len(), 2, "duplicate present before recovery");
+        // A restart drops the old handle before reopening — the single-file
+        // container holds one live handle at a time.
+        drop(idx2);
         let idx3 = ConversationIndex::open(dir.path(), DEFAULT_EMBEDDING_DIM).expect("open3");
         assert_eq!(idx3.search("alpha", None, 10).len(), 1, "recovery purges duplicates");
         assert_eq!(idx3.next_line("s1"), 2, "watermark stays correct after purge");

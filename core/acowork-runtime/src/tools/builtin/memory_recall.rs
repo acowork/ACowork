@@ -478,7 +478,7 @@ mod tests {
                 filters: Default::default(),
                 limit: 5,
                 expand_hops: 0,
-                min_score: None,
+                min_cosine: None,
                 abstention_enabled: false,
                 hint_type: Default::default(),
                 embedding: None,

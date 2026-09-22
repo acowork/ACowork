@@ -1,5 +1,7 @@
 //! Associative diffusion retrieval.
 
+use std::collections::HashMap;
+
 use grafeo_common::types::NodeId;
 
 use crate::error::Result;
@@ -15,26 +17,6 @@ use crate::index_config::validate_embedding_dim;
 #[inline]
 pub fn cosine_distance_to_similarity(dist: f32) -> f64 {
     (2.0 - f64::from(dist)) / 2.0
-}
-
-/// Apply min_score filtering to search results.
-/// Returns filtered results and the count of removed items.
-fn apply_min_score(
-    results: Vec<(NodeId, f64)>,
-    min_score: Option<f32>,
-) -> (Vec<(NodeId, f64)>, usize) {
-    match min_score {
-        Some(threshold) => {
-            let original_len = results.len();
-            let filtered: Vec<(NodeId, f64)> = results
-                .into_iter()
-                .filter(|(_, score)| *score >= threshold as f64)
-                .collect();
-            let removed = original_len - filtered.len();
-            (filtered, removed)
-        }
-        None => (results, 0),
-    }
 }
 
 impl GrafeoStore {
@@ -81,6 +63,31 @@ impl GrafeoStore {
         let results =
             self.db
                 .hybrid_search(label, text_prop, vec_prop, query, Some(embedding), k, None)?;
+        // Diagnostic: an empty fusion result on a non-empty index means at least
+        // one source came back empty, and RRF cannot tell us which. Probe both
+        // sources so the log names the culprit (usize::MAX = the probe failed).
+        if results.is_empty() {
+            let text_hits = self
+                .db
+                .text_search(label, text_prop, query, k)
+                .map(|v| v.len())
+                .unwrap_or(usize::MAX);
+            let vector_hits = self
+                .vector_search(label, embedding, k, None)
+                .map(|v| v.len())
+                .unwrap_or(usize::MAX);
+            tracing::info!(
+                label,
+                text_prop,
+                vec_prop,
+                query_len = query.len(),
+                embedding_dim = embedding.len(),
+                k,
+                text_hits,
+                vector_hits,
+                "hybrid_search returned empty; per-source probe"
+            );
+        }
         Ok(results)
     }
 
@@ -145,26 +152,17 @@ impl GrafeoStore {
         Ok(nodes)
     }
 
-    /// Full-text search with optional min_score filtering.
-    ///
-    /// Results with a score below `min_score` are removed. Returns the
-    /// filtered results along with the number of removed entries.
-    #[allow(clippy::too_many_arguments)]
+    /// Full-text search over the `content` property.
     pub fn text_search_filtered(
         &self,
         label: &str,
         query: &str,
         k: usize,
-        min_score: Option<f32>,
     ) -> Result<Vec<(NodeId, f64)>> {
-        let results = self.db.text_search(label, "content", query, k)?;
-        let (filtered, _) = apply_min_score(results, min_score);
-        Ok(filtered)
+        Ok(self.db.text_search(label, "content", query, k)?)
     }
 
-    /// Hybrid search with optional min_score filtering.
-    ///
-    /// Results with a fused score below `min_score` are removed.
+    /// Hybrid search across the given text/vector properties, ranked by RRF.
     #[allow(clippy::too_many_arguments)]
     pub fn hybrid_search_filtered(
         &self,
@@ -174,61 +172,54 @@ impl GrafeoStore {
         query: &str,
         embedding: &[f32],
         k: usize,
-        min_score: Option<f32>,
     ) -> Result<Vec<(NodeId, f64)>> {
-        let results =
-            self.db
-                .hybrid_search(label, text_prop, vec_prop, query, Some(embedding), k, None)?;
-        let (filtered, _) = apply_min_score(results, min_score);
-        Ok(filtered)
+        Ok(self
+            .db
+            .hybrid_search(label, text_prop, vec_prop, query, Some(embedding), k, None)?)
     }
 
-    /// Vector search with configurable ef and min_score filtering.
+    /// Vector search with configurable `ef`.
     ///
     /// Validates the embedding dimension before searching.
-    /// Returns `(NodeId, score)` pairs sorted by descending similarity.
+    /// Returns `(NodeId, similarity)` pairs in [0, 1], sorted by descending
+    /// similarity.
     pub fn vector_search_with_params(
         &self,
         label: &str,
         embedding: &[f32],
         k: usize,
         ef_search: usize,
-        min_score: Option<f32>,
     ) -> Result<Vec<(NodeId, f64)>> {
         validate_embedding_dim(embedding, self.hnsw_config.dim)?;
         let raw = self
             .db
             .vector_search(label, "embedding", embedding, k, Some(ef_search), None)?;
-        // Convert distance to similarity score using shared function.
-        let results: Vec<(NodeId, f64)> = raw
+        Ok(raw
             .into_iter()
             .map(|(id, dist)| (id, cosine_distance_to_similarity(dist)))
-            .collect();
-        let (filtered, _) = apply_min_score(results, min_score);
-        Ok(filtered)
+            .collect())
     }
 
-    /// Text search on a specific field with min_score filtering.
+    /// Text search on a specific field.
     ///
-    /// Searches the BM25 index for `field` on the given `label`.
+    /// Searches the BM25 index for `field` on the given `label`. No score
+    /// threshold: BM25 scores drift with corpus statistics.
     pub fn text_search_with_filter(
         &self,
         label: &str,
         field: &str,
         query: &str,
         k: usize,
-        min_score: Option<f32>,
     ) -> Result<Vec<(NodeId, f64)>> {
-        let results = self.db.text_search(label, field, query, k)?;
-        let (filtered, _) = apply_min_score(results, min_score);
-        Ok(filtered)
+        Ok(self.db.text_search(label, field, query, k)?)
     }
 
-    /// Full hybrid search: vector + text with custom weights and min_score.
+    /// Full hybrid search: BM25 + HNSW, ranked by RRF, thresholded by cosine.
     ///
-    /// Combines BM25 text search and HNSW vector search, applying
-    /// `text_weight` and `vector_weight` to scale the fused scores.
-    /// Results below `min_score` are filtered out.
+    /// Fusion decides the *order* but yields no relevance magnitude (RRF
+    /// scores are rank-only). The absolute cosine similarity is recovered from
+    /// the vector index and used both for the `min_cosine` threshold and as
+    /// the returned score, normalized to [0, 1] (higher = more relevant).
     #[allow(clippy::too_many_arguments)]
     pub fn hybrid_search_full(
         &self,
@@ -236,12 +227,12 @@ impl GrafeoStore {
         query: &str,
         embedding: &[f32],
         k: usize,
-        _text_weight: f32,   // Reserved for future weighted RRF implementation
-        _vector_weight: f32, // Reserved for future weighted RRF implementation
-        min_score: Option<f32>,
+        _text_weight: f32,
+        _vector_weight: f32,
+        min_cosine: Option<f32>,
     ) -> Result<Vec<(NodeId, f64)>> {
         validate_embedding_dim(embedding, self.hnsw_config.dim)?;
-        let results = self.db.hybrid_search(
+        let fused = self.db.hybrid_search(
             label,
             "content",
             "embedding",
@@ -251,56 +242,36 @@ impl GrafeoStore {
             None,
         )?;
 
-        // Note: RRF fusion already handles ranking combination internally.
-        // Weight scaling after RRF is meaningless as it doesn't change relative rankings.
-        // The weight_factor approach has been removed to avoid confusion.
+        let distances: HashMap<NodeId, f32> = self
+            .db
+            .vector_search(label, "embedding", embedding, k.saturating_mul(2), None, None)?
+            .into_iter()
+            .collect();
 
-        let (filtered, _) = apply_min_score(results, min_score);
-        Ok(filtered)
+        // `min_cosine` lives in cosine space ([-1, 1]); -1.0 keeps everything.
+        let floor = f64::from(min_cosine.unwrap_or(-1.0));
+        Ok(fused
+            .into_iter()
+            .filter_map(|(id, _fused)| match distances.get(&id) {
+                Some(&dist) => {
+                    let cosine = 1.0 - f64::from(dist);
+                    (cosine >= floor).then(|| (id, cosine_distance_to_similarity(dist)))
+                }
+                None => Some((id, 0.5)),
+            })
+            .collect())
     }
 
-    /// Perform a weighted hybrid search combining text and vector search with custom weights.
+    /// Perform a hybrid search and collect retrieval metrics.
     ///
-    /// The fusion method can be adjusted based on the query hint type.
-    /// After RRF fusion, scores are adjusted by `text_weight` and `vector_weight`,
-    /// then results below `min_score` are filtered out.
-    #[allow(clippy::too_many_arguments)]
-    pub fn hybrid_search_weighted(
-        &self,
-        label: &str,
-        text_prop: &str,
-        vec_prop: &str,
-        query: &str,
-        embedding: &[f32],
-        k: usize,
-        _text_weight: f32,   // Reserved for future weighted RRF implementation
-        _vector_weight: f32, // Reserved for future weighted RRF implementation
-        min_score: Option<f32>,
-    ) -> Result<Vec<(NodeId, f64)>> {
-        let results =
-            self.db
-                .hybrid_search(label, text_prop, vec_prop, query, Some(embedding), k, None)?;
-
-        // Note: RRF fusion already handles ranking combination internally.
-        // Weight scaling after RRF is meaningless as it doesn't change relative rankings.
-        // The weight_factor approach has been removed to avoid confusion.
-
-        let (filtered, _) = apply_min_score(results, min_score);
-        Ok(filtered)
-    }
-
-    /// Perform a search and collect retrieval metrics.
-    ///
-    /// Uses hybrid search internally, then applies min_score filtering and
-    /// computes statistics about the result set including whether abstention
-    /// was triggered (all results filtered out).
+    /// Computes statistics about the result set, including whether abstention
+    /// was triggered (empty result set).
     pub fn search_with_metrics(
         &self,
         label: &str,
         query: &str,
         embedding: &[f32],
         k: usize,
-        min_score: Option<f32>,
     ) -> Result<(Vec<(NodeId, f64)>, acowork_memory::RetrievalMetrics)> {
         let results = self.db.hybrid_search(
             label,
@@ -312,7 +283,8 @@ impl GrafeoStore {
             None,
         )?;
 
-        let (filtered, filtered_count) = apply_min_score(results, min_score);
+        let filtered = results;
+        let filtered_count = 0;
 
         let result_count = filtered.len();
         let max_score = filtered
@@ -324,7 +296,7 @@ impl GrafeoStore {
         } else {
             0.0
         };
-        let abstention_triggered = result_count == 0 && min_score.is_some();
+        let abstention_triggered = result_count == 0;
 
         let metrics = acowork_memory::RetrievalMetrics {
             result_count,
@@ -360,13 +332,13 @@ mod tests {
 
     /// Helper: store an Episodic node with both content and embedding.
     ///
-    /// Creates the node with content first, then sets the embedding via
-    /// `set_node_property` so the vector index auto-updates.
+    /// Creates the node with content first, then sets the embedding through
+    /// [`GrafeoStore::set_node_property`], which keeps the vector index current.
     fn store_episode(store: &GrafeoStore, content: &str, embedding: &[f32]) -> NodeId {
         let id = store
             .store_node(labels::EPISODIC, [("content", Value::from(content))])
             .unwrap();
-        store.db().set_node_property(
+        store.set_node_property(
             id,
             "embedding",
             Value::Vector(std::sync::Arc::from(embedding.to_vec().into_boxed_slice())),
@@ -414,7 +386,7 @@ mod tests {
         store_episode(&store, "test content", &emb);
 
         let results = store
-            .vector_search_with_params(labels::EPISODIC, &emb, 5, 64, None)
+            .vector_search_with_params(labels::EPISODIC, &emb, 5, 64)
             .unwrap();
         assert_eq!(results.len(), 1);
         // Cosine similarity of identical vectors should be ~1.0
@@ -431,7 +403,7 @@ mod tests {
         let store = test_store();
         let bad_emb = vec![0.1f32; 128];
 
-        let result = store.vector_search_with_params(labels::EPISODIC, &bad_emb, 5, 64, None);
+        let result = store.vector_search_with_params(labels::EPISODIC, &bad_emb, 5, 64);
         assert!(result.is_err(), "expected error for wrong dimension");
     }
 
@@ -447,36 +419,9 @@ mod tests {
         store_episode(&store, "the lazy dog", &emb);
 
         let results = store
-            .text_search_with_filter(labels::EPISODIC, "content", "quick fox", 5, None)
+            .text_search_with_filter(labels::EPISODIC, "content", "quick fox", 5)
             .unwrap();
         assert!(!results.is_empty(), "expected at least one result");
-    }
-
-    // =====================================================================
-    // Test 6: text_search_with_filter with min_score filtering
-    // =====================================================================
-
-    #[test]
-    fn test_text_search_with_filter_min_score() {
-        let store = test_store();
-        let emb = test_embedding();
-        store_episode(&store, "the quick brown fox jumps over", &emb);
-        store_episode(&store, "unrelated data about rust programming", &emb);
-
-        // Without min_score — should return results
-        let all = store
-            .text_search_with_filter(labels::EPISODIC, "content", "quick fox", 5, None)
-            .unwrap();
-        assert!(!all.is_empty());
-
-        // With very high min_score — should filter everything out
-        let filtered = store
-            .text_search_with_filter(labels::EPISODIC, "content", "quick fox", 5, Some(999.0))
-            .unwrap();
-        assert!(
-            filtered.is_empty(),
-            "expected all results filtered out by high min_score"
-        );
     }
 
     // =====================================================================
@@ -501,6 +446,38 @@ mod tests {
             )
             .unwrap();
         assert!(!results.is_empty(), "expected at least one result");
+    }
+
+    // =====================================================================
+    // Test 7b: hybrid_search_full applies the floor in cosine space
+    // =====================================================================
+
+    #[test]
+    fn test_hybrid_search_full_cosine_floor() {
+        // Regression: the floor used to be applied to the *fused* score, which
+        // goes negative on the single-source (vector-only) path — so a query
+        // that only the vector index matched was filtered down to nothing. The
+        // floor now lives in cosine space and the returned score is the
+        // normalized similarity in [0, 1].
+        let store = test_store();
+        let emb = test_embedding();
+        store_episode(&store, "engineering meeting notes", &emb);
+
+        // Query text matches no BM25 term -> only the vector source returns
+        // rows (sources.len() == 1). This is the case the old code dropped.
+        let all = store
+            .hybrid_search_full(labels::EPISODIC, "zzz-no-text-match", &emb, 5, 0.0, 0.0, None)
+            .unwrap();
+        assert!(!all.is_empty(), "vector-only hits must not be dropped");
+        for (_, s) in &all {
+            assert!((0.0..=1.0).contains(s), "score {s} outside [0, 1]");
+        }
+
+        // A floor above the cosine maximum drops everything.
+        let none = store
+            .hybrid_search_full(labels::EPISODIC, "zzz-no-text-match", &emb, 5, 0.0, 0.0, Some(2.0))
+            .unwrap();
+        assert!(none.is_empty(), "floor above 1.0 must drop everything");
     }
 
     // =====================================================================
@@ -572,7 +549,7 @@ mod tests {
 
             // Verify vector search works before close
             let results = store
-                .vector_search_with_params(labels::EPISODIC, &emb, 5, 64, None)
+                .vector_search_with_params(labels::EPISODIC, &emb, 5, 64)
                 .unwrap();
             assert_eq!(results.len(), 1);
 
@@ -594,13 +571,13 @@ mod tests {
                 .unwrap();
 
             let results = store
-                .vector_search_with_params(labels::EPISODIC, &emb, 5, 64, None)
+                .vector_search_with_params(labels::EPISODIC, &emb, 5, 64)
                 .unwrap();
             assert_eq!(results.len(), 1, "index should recover after reopen");
 
             // Text search should also work
             let text_results = store
-                .text_search_with_filter(labels::EPISODIC, "content", "persistent memory", 5, None)
+                .text_search_with_filter(labels::EPISODIC, "content", "persistent memory", 5)
                 .unwrap();
             assert!(
                 !text_results.is_empty(),

@@ -21,6 +21,7 @@ pub mod grafeo;
 pub mod provider_impl;
 pub mod graph;
 pub mod index_config;
+pub mod index_persist;
 pub mod judge;
 pub mod retrieval;
 pub mod retrieval_metrics;

@@ -29,6 +29,14 @@ mod tests {
         vec![0.1f32; DEFAULT_EMBEDDING_DIM]
     }
 
+    /// Helper: an embedding orthogonal to [`test_embedding`] (cosine ≈ 0.0),
+    /// i.e. genuinely unrelated under the cosine floor.
+    fn orthogonal_embedding() -> Vec<f32> {
+        (0..DEFAULT_EMBEDDING_DIM)
+            .map(|i| if i % 2 == 0 { 0.1 } else { -0.1 })
+            .collect()
+    }
+
     /// Helper: store an Episodic node with content and embedding.
     fn store_episode(store: &TestStore, content: &str, embedding: &[f32]) -> u64 {
         let id = store
@@ -135,7 +143,7 @@ mod tests {
             filters: Default::default(),
             limit: 5,
             expand_hops: 0,
-            min_score: None,
+            min_cosine: None,
             abstention_enabled: true,
             hint_type: HintType::Semantic,
         };
@@ -162,7 +170,7 @@ mod tests {
             filters: Default::default(),
             limit: 5,
             expand_hops: 0,
-            min_score: Some(0.99), // Very high threshold — should filter everything.
+            min_cosine: Some(0.99), // Very high threshold — should filter everything.
             abstention_enabled: true,
             hint_type: HintType::Semantic,
         };
@@ -197,7 +205,7 @@ mod tests {
             filters: Default::default(),
             limit: 5,
             expand_hops: 0,
-            min_score: None,
+            min_cosine: None,
             abstention_enabled: false,
             hint_type: HintType::Semantic,
         };
@@ -222,7 +230,7 @@ mod tests {
             filters: Default::default(),
             limit: 5,
             expand_hops: 0,
-            min_score: None,
+            min_cosine: None,
             abstention_enabled: false,
             hint_type: HintType::Semantic,
         };
@@ -269,13 +277,16 @@ mod tests {
         store_episode(&store, "test content", &emb);
 
         let manager = MemoryManager::new(MemoryManagerConfig::default());
+        // Cosine-orthogonal to the stored vector (≈ 0.0), so the cosine floor
+        // rejects it. Reusing `emb` would score cosine 1.0 — a perfect match —
+        // and legitimately survive the floor.
         let mut query = MemoryQuery {
             query_text: "unrelated query".to_string(),
-            embedding: Some(emb),
+            embedding: Some(orthogonal_embedding()),
             filters: Default::default(),
             limit: 5,
             expand_hops: 0,
-            min_score: Some(0.99),
+            min_cosine: Some(0.99),
             abstention_enabled: true,
             hint_type: HintType::Semantic,
         };
@@ -303,7 +314,7 @@ mod tests {
             filters: Default::default(),
             limit: 5,
             expand_hops: 0,
-            min_score: None,
+            min_cosine: None,
             abstention_enabled: false,
             hint_type: HintType::Semantic,
         };
@@ -329,7 +340,7 @@ mod tests {
             filters: Default::default(),
             limit: 5,
             expand_hops: 0,
-            min_score: None,
+            min_cosine: None,
             abstention_enabled: true,
             hint_type: HintType::Semantic,
         };
@@ -353,11 +364,11 @@ mod tests {
         let manager = MemoryManager::new(MemoryManagerConfig::default());
         let mut query = MemoryQuery {
             query_text: "completely unrelated".to_string(),
-            embedding: Some(emb),
+            embedding: Some(orthogonal_embedding()),
             filters: Default::default(),
             limit: 5,
             expand_hops: 0,
-            min_score: Some(0.99),
+            min_cosine: Some(0.99),
             abstention_enabled: true,
             hint_type: HintType::Semantic,
         };
@@ -404,7 +415,7 @@ mod tests {
             filters: Default::default(),
             limit: 5,
             expand_hops: 0,
-            min_score: None,
+            min_cosine: None,
             abstention_enabled: false,
             hint_type: HintType::Semantic,
         };
@@ -442,7 +453,7 @@ mod tests {
             filters: Default::default(),
             limit: 5,
             expand_hops: 0,
-            min_score: None,
+            min_cosine: None,
             abstention_enabled: false,
             hint_type: HintType::Semantic,
         };
@@ -469,7 +480,7 @@ mod tests {
             filters: Default::default(),
             limit: 5,
             expand_hops: 0,
-            min_score: None,
+            min_cosine: None,
             abstention_enabled: false,
             hint_type: HintType::Identity,
         };

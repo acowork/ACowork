@@ -28,12 +28,7 @@ use crate::stats;
 const MAX_UNFILTERED_MEMORY_SCAN: usize = 10_000;
 
 /// All memory labels scanned by list/stats/delete operations.
-const MEMORY_LABELS: [&str; 4] = [
-    labels::EPISODIC,
-    labels::KNOWLEDGE,
-    labels::PROCEDURAL,
-    labels::AUTOBIOGRAPHICAL,
-];
+const MEMORY_LABELS: [&str; 4] = labels::MEMORY;
 
 /// Snapshot of node-level embedding health across `MEMORY_LABELS`.
 ///
@@ -999,9 +994,7 @@ mod tests {
             .expect("store_node should succeed in test store");
         if let Some(dim) = embedding_dim {
             let vec: Vec<f32> = (0..dim).map(|i| (i as f32) * 0.001).collect();
-            store
-                .db()
-                .set_node_property(id, "embedding", Value::Vector(Arc::from(vec.as_slice())));
+            store.set_node_property(id, "embedding", Value::Vector(Arc::from(vec.as_slice())));
         }
         id.0
     }
@@ -1195,22 +1188,18 @@ mod tests {
             )
             .expect("store_node should succeed")
             .0;
-        store
-            .db()
-            .set_node_property(
-                grafeo_common::NodeId(a),
-                "embedding",
-                Value::Vector(Arc::from(query_vec(EMB_DIM).as_slice())),
-            );
+        store.set_node_property(
+            grafeo_common::NodeId(a),
+            "embedding",
+            Value::Vector(Arc::from(query_vec(EMB_DIM).as_slice())),
+        );
         // Node B embedding is orthogonal to the query ramp.
         let b = make_node(&store, labels::EPISODIC, "user prefers dark mode", Some(EMB_DIM));
-        store
-            .db()
-            .set_node_property(
-                grafeo_common::NodeId(b),
-                "embedding",
-                Value::Vector(Arc::from(vec![1.0f32; EMB_DIM].as_slice())),
-            );
+        store.set_node_property(
+            grafeo_common::NodeId(b),
+            "embedding",
+            Value::Vector(Arc::from(vec![1.0f32; EMB_DIM].as_slice())),
+        );
 
         let query = query_vec(EMB_DIM);
         let records = store.semantic_search("", Some(&query), "vector", 10);

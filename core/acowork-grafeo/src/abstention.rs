@@ -13,10 +13,9 @@ pub struct AbstentionConfig {
     /// scores. Default: 0.6.
     ///
     /// ⚠️ Scope: this applies to RAW relevance scores passed to
-    /// `check_abstention` (abstention decision), NOT to the manager's hybrid
-    /// RRF filter. `MemoryManagerConfig.default_min_score` (default 0.0)
-    /// operates on RRF scores (typically 0.01–0.05) — do not conflate the
-    /// two (G9).
+    /// `check_abstention` (abstention decision), NOT to the retrieval gate.
+    /// `MemoryQualityConfig.min_cosine` (default 0.3) filters candidates in
+    /// the cosine domain *before* this check — do not conflate the two (G9).
     pub default_min_score: f32,
     /// Minimum score for tool-oriented agents. Default: 0.5.
     pub tool_agent_min_score: f32,

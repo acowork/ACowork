@@ -249,7 +249,7 @@ async fn run_state(
         let ids: Vec<u64> = result.memories.iter().map(|m| m.node_id).collect();
 
         let mut ai = MemoryQuery::auto_inject(query_text.to_string(), None);
-        ai.min_score = auto_inject_min_score;
+        ai.min_cosine = auto_inject_min_score;
         let ai_result = manager
             .retrieve(&*e2e.store, &mut ai, Some(&DeterministicEmbedding))
             .await

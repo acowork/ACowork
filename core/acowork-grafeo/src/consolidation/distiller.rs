@@ -1651,7 +1651,6 @@ mod tests {
             _f: &str,
             _q: &str,
             _k: usize,
-            _ms: Option<f32>,
         ) -> acowork_core::error::Result<Vec<(u64, f64)>> {
             Ok(vec![])
         }

@@ -5,6 +5,8 @@
 //! type conversion between `acowork_memory` types (no `id` field) and
 //! grafeo's internal types (with `id: Option<NodeId>`).
 
+use std::collections::{HashMap, HashSet};
+
 use acowork_core::error::{AcoworkError, Result as AcoworkResult};
 use acowork_memory::provider::MemoryProvider;
 use acowork_memory::{
@@ -380,9 +382,6 @@ impl MemoryProvider for GrafeoStore {
         }
 
         all_results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
-        if let Some(min_score) = query.min_score {
-            all_results.retain(|r| r.score >= min_score as f64);
-        }
         all_results.truncate(query.limit);
         Ok(all_results)
     }
@@ -465,27 +464,53 @@ impl MemoryProvider for GrafeoStore {
         query_text: &str,
         embedding: &[f32],
         k: usize,
-        text_weight: f64,
-        vector_weight: f64,
-        min_score: Option<f32>,
+        _text_weight: f64,
+        _vector_weight: f64,
+        min_cosine: Option<f32>,
     ) -> AcoworkResult<Vec<(u64, f64)>> {
-        let results = self
-            .hybrid_search(
-                label,
-                "content",
-                "embedding",
-                query_text,
-                embedding,
-                k,
-            )
+        // `min_cosine` lives in cosine space ([-1, 1]); -1.0 keeps everything.
+        let floor = f64::from(min_cosine.unwrap_or(-1.0));
+
+        // Each source gates in its own domain: the vector source by absolute
+        // cosine similarity, the text source by BM25 relevance. This is what
+        // makes the fusion legitimate — RRF ranks the survivors by position
+        // only, so it never has to compare a BM25 score with a cosine.
+        //
+        // The survivors are the union of the two gates. A candidate the text
+        // source matched is kept even when its embedding sits far from the
+        // query: the lexical hit is its own justification, and a weak or
+        // degenerate embedding must not silence BM25.
+        let fused = self
+            .hybrid_search(label, "content", "embedding", query_text, embedding, k)
             .map_err(err_to_acowork)?;
-        // Apply weights and min_score filter
-        Ok(results
+
+        let text_hits: HashSet<u64> = self
+            .text_search_with_filter(label, "content", query_text, k.saturating_mul(2))
+            .map_err(err_to_acowork)?
             .into_iter()
-            .filter(|(_, score)| min_score.is_none_or(|ms| *score as f32 >= ms))
-            .map(|(id, score)| {
-                let weighted = score * text_weight.max(vector_weight);
-                (id.0, weighted)
+            .map(|(id, _)| id.0)
+            .collect();
+
+        // Vector source: `distances` is the vector search's own result set, so
+        // "in here" means "matched the vector source".
+        let vector_kept: HashMap<u64, f64> = self
+            .vector_search(label, embedding, k.saturating_mul(2), None)
+            .map_err(err_to_acowork)?
+            .into_iter()
+            .filter(|(_, dist)| 1.0 - f64::from(*dist) >= floor)
+            .map(|(id, dist)| (id.0, crate::retrieval::cosine_distance_to_similarity(dist)))
+            .collect();
+
+        Ok(fused
+            .into_iter()
+            .filter_map(|(id, _fused_score)| match vector_kept.get(&id.0) {
+                // Vector-backed and similar enough: report the similarity so the
+                // caller sees a number in the [0, 1] cosine domain.
+                Some(&similarity) => Some((id.0, similarity)),
+                // Not kept by the vector gate. Keep it if the text source
+                // matched it, at a neutral score so it cannot outrank a
+                // vector-backed hit.
+                None => text_hits.contains(&id.0).then_some((id.0, 0.5)),
             })
             .collect())
     }
@@ -496,10 +521,9 @@ impl MemoryProvider for GrafeoStore {
         field: &str,
         query_text: &str,
         k: usize,
-        min_score: Option<f32>,
     ) -> AcoworkResult<Vec<(u64, f64)>> {
         let results = self
-            .text_search_with_filter(label, field, query_text, k, min_score)
+            .text_search_with_filter(label, field, query_text, k)
             .map_err(err_to_acowork)?;
         Ok(results.into_iter().map(|(id, score)| (id.0, score)).collect())
     }
