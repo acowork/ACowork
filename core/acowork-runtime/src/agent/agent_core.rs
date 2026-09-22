@@ -1121,6 +1121,13 @@ impl AgentCore {
             tracing::warn!(error = %e, dir = %memory_dir.display(), "Failed to create memory directory, memory features disabled");
             return;
         }
+        // ADR-082 D1: the SQLite backend always compiles in, so it is also the
+        // fallback when the grafeo feature is disabled.
+        if Self::memory_backend_is_sqlite() {
+            self.init_sqlite_backend(&memory_dir);
+            return;
+        }
+
         #[cfg(feature = "grafeo-backend")]
         {
             self.init_grafeo_backend(&memory_dir);
@@ -1135,6 +1142,90 @@ impl AgentCore {
         }
     }
 
+    /// Which memory backend this process uses.
+    ///
+    /// `ACOWORK_MEMORY_BACKEND=sqlite` opts into the ADR-082 backend; anything
+    /// else (including unset) keeps grafeo, so the rollout is opt-in and a
+    /// regression can be reverted by unsetting one variable.
+    fn memory_backend_is_sqlite() -> bool {
+        matches!(
+            std::env::var("ACOWORK_MEMORY_BACKEND").as_deref(),
+            Ok("sqlite")
+        )
+    }
+
+    /// Create and initialise a SQLite store as the memory provider (ADR-082 D1).
+    ///
+    /// The file name is backend-specific (`private.sqlite` vs
+    /// `private.grafeo`) so switching backends never opens one engine's file
+    /// with the other.
+    fn init_sqlite_backend(&mut self, memory_dir: &std::path::Path) {
+        let db_path = memory_dir.join("private.sqlite");
+        let embedding_dim = self.memory_embedding_dim();
+        match acowork_sqlite::SqliteStore::open(&db_path, embedding_dim) {
+            Ok(store) => self.install_memory_backend(std::sync::Arc::new(store), &db_path),
+            Err(e) => tracing::warn!(
+                error = %e,
+                path = %db_path.display(),
+                "Failed to open SQLite memory store, memory features disabled"
+            ),
+        }
+    }
+
+    /// Expected embedding width, warning when the provider is unavailable.
+    fn memory_embedding_dim(&self) -> usize {
+        self.embedding_provider
+            .as_ref()
+            .map(|p| p.dimension())
+            .unwrap_or_else(|| {
+                let default_dim = acowork_memory::types::DEFAULT_EMBEDDING_DIM;
+                tracing::warn!(
+                    default_dim,
+                    "⚠️ Embedding provider unavailable - opening the memory store with the default                      dim {}. If the on-disk store was created with a different dim, vector search                      will fail and memory will fall back to text-only search. Restart runtime after                      the embedding service is back online to use vector search.",
+                    default_dim
+                );
+                default_dim
+            })
+    }
+
+    /// Wire an opened store into the session, admin handle and consolidation
+    /// pipeline.
+    ///
+    /// Generic over the concrete store so the backend choice never leaks past
+    /// this function — every memory consumer downstream already holds a trait
+    /// object (ADR-051).
+    fn install_memory_backend<T>(&mut self, store: std::sync::Arc<T>, db_path: &std::path::Path)
+    where
+        T: acowork_memory::MemoryProvider + acowork_memory::MemoryAdminService + 'static,
+    {
+        // Backend-agnostic node count: the trait reports it, so this does not
+        // reach into engine internals any more.
+        let existing = store
+            .stats()
+            .map(|stats| stats.episode_count + stats.node_count)
+            .unwrap_or(0);
+        tracing::info!(path = %db_path.display(), existing_nodes = existing, "Memory store opened");
+
+        let quality = self.memory_quality_config();
+        if let Err(e) = store.apply_quality_config(&quality) {
+            tracing::warn!(error = %e, "Failed to apply memory quality config, using defaults");
+        }
+
+        // Autobiographical bootstrap is still grafeo-side (world-model traits).
+        #[cfg(feature = "grafeo-backend")]
+        self.bootstrap_autobiographical_from_manifest(&*store);
+        if let Some(ref session) = self.memory_session {
+            session.set_provider(store.clone());
+            // Config consistency: the memory_recall tool reads the
+            // SAME MemoryManagerConfig as auto-inject (ADR-062 M5),
+            // so per-agent quality settings apply to both paths.
+            session.set_memory_config(self.memory_manager_config());
+        }
+        self.memory_admin = Some(store.clone());
+        self.memory_provider = Some(store);
+        self.start_consolidation_pipeline();
+    }
+
     /// Create and initialise a GrafeoStore as the memory provider.
     ///
     /// ADR-051 P4: Feature-gated behind `grafeo-backend`. When the feature
@@ -1142,56 +1233,20 @@ impl AgentCore {
     #[cfg(feature = "grafeo-backend")]
     fn init_grafeo_backend(&mut self, memory_dir: &std::path::Path) {
         use acowork_grafeo::grafeo::GrafeoStore;
-        use acowork_grafeo::types::{DEFAULT_EMBEDDING_DIM, GrafeoConfig};
+        use acowork_grafeo::types::GrafeoConfig;
 
         let db_path = memory_dir.join("private.grafeo");
-        let embedding_dim = self
-            .embedding_provider
-            .as_ref()
-            .map(|p| p.dimension())
-            .unwrap_or_else(|| {
-                tracing::warn!(
-                    default_dim = DEFAULT_EMBEDDING_DIM,
-                    "⚠️ Embedding provider unavailable - opening GrafeoStore with default dim {}. \
-                 If the on-disk store was created with a different dim, vector search will fail \
-                 (HNSW index creation will warn) and memory will fall back to text-only search. \
-                 Restart runtime after the embedding service is back online to use vector search.",
-                    DEFAULT_EMBEDDING_DIM
-                );
-                DEFAULT_EMBEDDING_DIM
-            });
         let config = GrafeoConfig {
             db_path: db_path.clone(),
-            embedding_dim,
+            embedding_dim: self.memory_embedding_dim(),
         };
         match GrafeoStore::open(&config) {
-            Ok(store) => {
-                let graph = store.db().graph_store();
-                let existing: usize = ["Episodic", "Knowledge", "Procedural", "Autobiographical"]
-                    .iter()
-                    .map(|l| graph.nodes_by_label(l).len())
-                    .sum();
-                tracing::info!(path = %db_path.display(), existing_nodes = existing, "Grafeo memory store opened");
-                let quality = self.memory_quality_config();
-                if let Err(e) = store.apply_quality_config(&quality) {
-                    tracing::warn!(error = %e, "Failed to apply memory quality config to GrafeoStore, using defaults");
-                }
-                let store_arc = Arc::new(store);
-                self.bootstrap_autobiographical_from_manifest(&*store_arc);
-                if let Some(ref session) = self.memory_session {
-                    session.set_provider(store_arc.clone());
-                    // Config consistency: the memory_recall tool reads the
-                    // SAME MemoryManagerConfig as auto-inject (ADR-062 M5),
-                    // so per-agent quality settings apply to both paths.
-                    session.set_memory_config(self.memory_manager_config());
-                }
-                self.memory_admin = Some(store_arc.clone());
-                self.memory_provider = Some(store_arc);
-                self.start_consolidation_pipeline();
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, path = %db_path.display(), "Failed to open Grafeo memory store, memory features disabled");
-            }
+            Ok(store) => self.install_memory_backend(std::sync::Arc::new(store), &db_path),
+            Err(e) => tracing::warn!(
+                error = %e,
+                path = %db_path.display(),
+                "Failed to open Grafeo memory store, memory features disabled"
+            ),
         }
     }
 

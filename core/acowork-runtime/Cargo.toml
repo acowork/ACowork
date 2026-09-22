@@ -30,6 +30,9 @@ acowork-memory.workspace = true
 acowork-mqtt-session = { workspace = true, features = ["rumqttc-0-25"] }
 # ADR-051 P4: grafeo is an optional dependency behind `grafeo-backend` feature.
 acowork-grafeo = { workspace = true, optional = true }
+# ADR-082 D1: SQLite memory backend. Always compiled in — it is also the
+# fallback when the `grafeo-backend` feature is disabled.
+acowork-sqlite = { workspace = true }
 acowork-mcp.workspace = true
 indexmap.workspace = true
 grafeo-common = { workspace = true, optional = true }
