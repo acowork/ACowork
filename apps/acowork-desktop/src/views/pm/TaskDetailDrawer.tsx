@@ -205,7 +205,7 @@ export function TaskDetailDrawer({ taskId, onClose, onEdit, onAddSubtask }: Task
         className="absolute inset-y-0 right-0 flex w-[480px] flex-col bg-page-bg shadow-xl outline-none dark:bg-zinc-900"
       >
         {/* 头部：标题 + 徽章 + 关闭 */}
-        <header className="shrink-0 border-b border-border-divider px-4 py-3">
+        <header className="flex shrink-0 items-start justify-between border-b border-border-divider px-4 py-3 min-h-[var(--ui-dialog-zone-h)]">
           <div className="flex items-start justify-between gap-2">
             <div className="min-w-0 flex-1">
               <h2 className="break-words text-sm font-semibold text-text ">
@@ -231,7 +231,7 @@ export function TaskDetailDrawer({ taskId, onClose, onEdit, onAddSubtask }: Task
           <div
             role="tablist"
             aria-label={t("pm.task.tabs")}
-            className="mt-3 flex gap-1 border-b border-border-divider"
+            className="mt-3 flex items-center gap-1 border-b border-border-divider min-h-[var(--ui-dialog-zone-h)]"
           >
             {tabs.map((tab, i) => (
               <button

@@ -125,7 +125,7 @@ export function MemberManagerDialog({ project, onClose }: MemberManagerDialogPro
         aria-modal="true"
         aria-label={t("pm.memberManagerTitle")}
       >
-        <header className="flex items-center justify-between border-b border-border-divider px-5 py-3">
+        <header className="flex items-center justify-between border-b border-border-divider px-5 py-3 min-h-[var(--ui-dialog-zone-h)]">
           <h3 className="text-sm font-semibold text-text ">
             {t("pm.memberManagerTitle")}
           </h3>

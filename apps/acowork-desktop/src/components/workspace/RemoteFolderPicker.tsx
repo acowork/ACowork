@@ -268,7 +268,7 @@ export function RemoteFolderPicker({ onSelect, onCancel, target }: RemoteFolderP
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-modal-overlay">
             <div className="w-full max-w-lg rounded-md bg-modal-surface shadow-xl flex flex-col max-h-[80vh]">
                 {/* Header */}
-                <div className="flex items-center justify-between border-b border-border-divider px-4 py-3">
+                <div className="flex items-center justify-between border-b border-border-divider px-4 py-3 min-h-[var(--ui-dialog-zone-h)]">
                     <h3 className="text-sm font-semibold text-text ">
                         {t("workspace.remoteBrowseTitle")}
                     </h3>

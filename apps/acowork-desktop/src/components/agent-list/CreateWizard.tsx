@@ -22,12 +22,12 @@ interface CreateWizardProps {
 
 type WizardStep = "basic" | "llm" | "template" | "preview";
 
-type StepIcon = { key: WizardStep; icon: React.ElementType };
+type StepIcon = { key: WizardStep; icon: React.ElementType; i18nKey: string };
 const STEP_ICONS: StepIcon[] = [
-  { key: "basic", icon: Bot },
-  { key: "llm", icon: Sparkles },
-  { key: "template", icon: Layout },
-  { key: "preview", icon: Check },
+  { key: "basic", icon: Bot, i18nKey: "Basic" },
+  { key: "llm", icon: Sparkles, i18nKey: "LLM" },
+  { key: "template", icon: Layout, i18nKey: "Template" },
+  { key: "preview", icon: Check, i18nKey: "Preview" },
 ];
 
 interface AgentFormData {
@@ -55,7 +55,7 @@ const TEMPLATE_ICONS: TemplateIcon[] = [
 
 export function CreateWizard({ open, onCreated, onClose }: CreateWizardProps) {
   const { t } = useTranslation();
-  const STEPS = STEP_ICONS.map((s) => ({ ...s, label: t(`createWizard.step${s.key.charAt(0).toUpperCase()}${s.key.slice(1)}`) }));
+  const STEPS = STEP_ICONS.map((s) => ({ ...s, label: t(`createWizard.step${s.i18nKey}`) }));
   const TEMPLATES = TEMPLATE_ICONS.map((tmpl) => ({
     ...tmpl,
     name: t(`createWizard.template${tmpl.i18nKey}`),
@@ -146,7 +146,7 @@ export function CreateWizard({ open, onCreated, onClose }: CreateWizardProps) {
       {/* Dialog */}
       <div className="relative z-10 flex w-full max-w-2xl flex-col rounded-md border border-border-outer bg-modal-surface shadow-xl">
         {/* Header */}
-        <div className="flex items-center gap-2 border-b border-border-divider px-5 py-3.5">
+        <div className="flex items-center gap-2 border-b border-border-divider px-5 py-3 min-h-[var(--ui-dialog-zone-h)]">
           <Sparkles className="h-5 w-5 text-text-tertiary " />
           <h2 className="text-sm font-semibold text-text ">
             Create New Agent
@@ -154,7 +154,7 @@ export function CreateWizard({ open, onCreated, onClose }: CreateWizardProps) {
         </div>
 
         {/* Step indicators */}
-        <div className="flex items-center gap-0 border-b border-border-divider px-5 py-3">
+        <div className="flex items-center gap-0 border-b border-border-divider px-5 min-h-[var(--ui-dialog-zone-h)]">
           {STEPS.map((s, i) => {
             const Icon = s.icon;
             const active = s.key === step;
@@ -340,7 +340,7 @@ dev = true
         </div>
 
         {/* Footer */}
-        <div className="flex justify-between border-t border-border-divider px-5 py-3">
+        <div className="flex items-center justify-between border-t border-border-divider px-5 min-h-[var(--ui-dialog-zone-h)]">
           <button
             onClick={stepIndex === 0 ? onClose : handleBack}
             disabled={busy}
@@ -352,7 +352,7 @@ dev = true
           <button
             onClick={handleNext}
             disabled={!canProceed}
-            className="flex items-center gap-2 rounded btn-solid px-3 py-1.5 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-50"
+            className="flex items-center gap-2 rounded btn-accent px-3 py-1.5 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-50"
           >
             {busy ? (
               <>

@@ -279,7 +279,7 @@ export function PublishWizard({
       {/* Dialog */}
       <div className="relative z-10 flex w-full max-w-2xl flex-col rounded-md border border-border-outer bg-modal-surface shadow-xl">
         {/* Header */}
-        <div className="flex items-center gap-2 border-b border-border-divider px-5 py-3.5">
+        <div className="flex items-center gap-2 border-b border-border-divider px-5 py-3 min-h-[var(--ui-dialog-zone-h)]">
           <Package className="h-5 w-5 text-text-tertiary " />
           <h2 className="text-sm font-semibold text-text ">
             Publish: {agentName}
@@ -287,7 +287,7 @@ export function PublishWizard({
         </div>
 
         {/* Step indicators */}
-        <div className="flex items-center gap-0 border-b border-border-divider px-5 py-3">
+        <div className="flex items-center gap-0 border-b border-border-divider px-5 min-h-[var(--ui-dialog-zone-h)]">
           {STEPS.map((s, i) => {
             const Icon = s.icon;
             const active = s.key === step;
@@ -497,7 +497,7 @@ export function PublishWizard({
         </div>
 
         {/* Footer */}
-        <div className="flex justify-between border-t border-border-divider px-5 py-3">
+        <div className="flex items-center justify-between border-t border-border-divider px-5 min-h-[var(--ui-dialog-zone-h)]">
           <button
             onClick={onClose}
             disabled={busy}
@@ -510,7 +510,7 @@ export function PublishWizard({
             <button
               onClick={currentAction.action}
               disabled={busy}
-              className="flex items-center gap-2 rounded btn-solid px-3 py-1.5 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-50"
+              className="flex items-center gap-2 rounded btn-accent px-3 py-1.5 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-50"
             >
               {busy ? (
                 <>

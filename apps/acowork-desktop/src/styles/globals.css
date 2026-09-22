@@ -9,7 +9,7 @@
   /* default UI labels & icons (light) */
   --color-text-tertiary: hsl(0 0% 40%);
   /* hints / metadata / placeholder (light) */
-  --color-text-disabled: hsl(0 0% 60%);
+  --color-text-disabled: hsl(0 0% 70%);
   /* disabled state (light) */
 
   /* Semantic status colors — foreground values for Badge tones
@@ -250,6 +250,11 @@
   /* 6px — standard button vertical padding */
   --ui-btn-compact-py: 0.25rem;
   /* 4px — compact toolbar button vertical padding */
+  --ui-dialog-zone-h: 2.75rem;
+  /* 44px — single-line dialog zone min-height (header / search row /
+     tab strip / footer). Applied as `min-h-[var(--ui-dialog-zone-h)]`
+     on every divider-separated row so dialog chrome lines up
+     vertically across all dialogs. Grow with content as needed. */
 
   /* Radio group tokens */
   --ui-radio-size: 1rem;

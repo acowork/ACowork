@@ -16,7 +16,7 @@ export function ConfirmDialog({
   title,
   message,
   confirmLabel = "Confirm",
-  destructive = false,
+  destructive: _destructive = false, // accepted for API back-compat; currently both branches use btn-accent
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
@@ -52,7 +52,7 @@ export function ConfirmDialog({
         {/* Header */}
         <h3
           id="confirm-title"
-          className="border-b border-border-divider px-5 py-3 text-sm font-semibold text-text"
+          className="flex items-center border-b border-border-divider px-5 py-3 min-h-[var(--ui-dialog-zone-h)] text-sm font-semibold text-text"
         >
           {title}
         </h3>
@@ -66,7 +66,7 @@ export function ConfirmDialog({
         </p>
 
         {/* Footer */}
-        <div className="flex justify-end gap-2 border-t border-border-divider px-5 py-3">
+        <div className="flex items-center justify-end gap-2 border-t border-border-divider px-5 min-h-[var(--ui-dialog-zone-h)]">
           <button
             ref={cancelRef}
             onClick={onCancel}
@@ -78,7 +78,7 @@ export function ConfirmDialog({
             onClick={onConfirm}
             className={cn(
               "rounded-md px-3 py-1.5 text-xs font-medium",
-              destructive ? "btn-accent" : "btn-solid",
+              "btn-accent",
             )}
           >
             {confirmLabel}
