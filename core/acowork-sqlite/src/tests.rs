@@ -6,7 +6,9 @@
 //! migration cannot silently drop data.
 
 use super::*;
-use acowork_memory::{KnowledgeSubType, PrivacyLevel, PromotionMetadata};
+use acowork_memory::quality::MemoryQualityConfig;
+use acowork_memory::types::{EpisodicDecayConfig, MemoryQuery};
+use acowork_memory::{KnowledgeSubType, MemoryProvider, PrivacyLevel, PromotionMetadata};
 use chrono::TimeZone;
 use std::collections::HashMap;
 
@@ -852,4 +854,382 @@ fn hybrid_order_is_deterministic_across_calls() {
             .unwrap();
         assert_eq!(expected, again);
     }
+}
+
+// ── MemoryProvider integration (ADR-082 D1) ──────────────────────────────
+//
+// These exercise the trait surface the Runtime actually holds, so they are the
+// tests that prove the four feature chains (memory_store / memory_recall /
+// distillation / forgetting) survive the backend swap.
+
+/// Content rendering must match the grafeo provider byte-for-byte, because
+/// prompts and the `memory_recall` tool consume it directly.
+#[test]
+fn provider_renders_content_per_node_type() {
+    let store = store();
+
+    let episode_id = store.store_episode(&episode("用户问了天气")).unwrap();
+    let knowledge_id = store
+        .store_knowledge(&knowledge("user", "lives in"))
+        .unwrap();
+
+    let mut proc = procedural();
+    proc.trigger_condition = "用户要求详细解释".to_string();
+    proc.action_pattern = "先给结论".to_string();
+    let proc_id = store.store_procedural(&proc).unwrap();
+
+    let mut auto = autobiographical();
+    auto.category = AutobioCategory::Identity;
+    auto.key = "name".to_string();
+    auto.value = "大鱼".to_string();
+    let auto_id = store.store_autobiographical(&auto).unwrap();
+
+    assert_eq!(
+        store.get_node_content(episode_id).unwrap().as_deref(),
+        Some("用户问了天气")
+    );
+    assert_eq!(
+        store.get_node_content(knowledge_id).unwrap().as_deref(),
+        Some("user lives in Beijing")
+    );
+    assert_eq!(
+        store.get_node_content(proc_id).unwrap().as_deref(),
+        Some("当 用户要求详细解释 时，优先 先给结论")
+    );
+    assert_eq!(
+        store.get_node_content(auto_id).unwrap().as_deref(),
+        Some("Identity: name: 大鱼")
+    );
+    assert_eq!(store.get_node_content(9_999).unwrap(), None);
+}
+
+/// `MemoryManager` filters the current session out of retrieval results through
+/// this accessor; it must answer for episodic nodes and stay `None` elsewhere.
+#[test]
+fn provider_exposes_session_id_and_status() {
+    let store = store();
+    let mut ep = episode("session scoped");
+    ep.session_id = "sess-7".to_string();
+    let ep_id = store.store_episode(&ep).unwrap();
+    let kn_id = store.store_knowledge(&knowledge("user", "likes")).unwrap();
+
+    assert_eq!(
+        store.get_node_session_id(ep_id).unwrap().as_deref(),
+        Some("sess-7")
+    );
+    assert_eq!(store.get_node_session_id(kn_id).unwrap(), None);
+    assert_eq!(
+        store.get_node_status(ep_id).unwrap(),
+        Some(NodeStatus::Active)
+    );
+    assert_eq!(store.get_node_status(9_999).unwrap(), None);
+}
+
+/// `memory_recall --since/--until` filters on `created_at`. Episodes carry
+/// their timestamp in that column instead of a `created_at` property, so the
+/// accessor must answer for them too (the grafeo path returned `None`, which
+/// silently disabled the filter).
+#[test]
+fn provider_created_at_covers_episodes() {
+    let store = store();
+    let mut old = episode("old news");
+    old.timestamp = t(1_600_000_000);
+    let old_id = store.store_episode(&old).unwrap();
+
+    assert_eq!(
+        store.get_node_created_at(old_id).unwrap(),
+        Some(t(1_600_000_000))
+    );
+
+    let query = MemoryQuery {
+        filters: acowork_memory::types::MemoryFilters {
+            time_range: Some((t(1_700_000_000), t(1_800_000_000))),
+            ..Default::default()
+        },
+        ..MemoryQuery::new("news")
+    };
+    // The provider itself does not filter; the accessor is what makes the
+    // manager-side filter possible.
+    let created = store.get_node_created_at(old_id).unwrap().unwrap();
+    let (since, until) = query.filters.time_range.unwrap();
+    assert!(created < since && created <= until);
+}
+
+/// The `status` column is authoritative: forgetting flips it without touching
+/// `props`, so reading `props.status` would resurrect decayed episodes.
+#[test]
+fn provider_status_reads_column_not_props() {
+    let store = store();
+    let mut ep = episode("will decay");
+    ep.timestamp = t(1_700_000_000);
+    let id = store.store_episode(&ep).unwrap();
+
+    store.transition_to_dormant(id).unwrap();
+    assert_eq!(
+        store.get_node_status(id).unwrap(),
+        Some(NodeStatus::Dormant)
+    );
+}
+
+/// A skipped episode is a sticky judge verdict: it must leave the distiller
+/// backlog (both count and enumeration) while staying retrievable.
+#[test]
+fn provider_skip_tombstone_removes_from_distiller_backlog() {
+    let store = store();
+    let keep = store.store_episode(&episode("keep me")).unwrap();
+    let skip = store.store_episode(&episode("skip me")).unwrap();
+    assert_eq!(store.count_unconsolidated_episodes().unwrap(), 2);
+
+    store
+        .mark_episodes_skipped(&[skip], "cluster-1", "declined")
+        .unwrap();
+
+    assert_eq!(store.count_unconsolidated_episodes().unwrap(), 1);
+    let backlog = store.get_episodes_by_subtype(None, 10).unwrap();
+    assert_eq!(backlog.len(), 1);
+    assert_eq!(backlog[0].0, keep);
+    // Still retrievable — the content stays in the episodic layer.
+    assert_eq!(
+        store.get_node_content(skip).unwrap().as_deref(),
+        Some("skip me")
+    );
+}
+
+/// `get_episodes_by_subtype` honours the subtype filter and orders oldest
+/// first so evidence accumulates deterministically across distiller runs.
+#[test]
+fn provider_episodes_by_subtype_filters_and_orders() {
+    let store = store();
+    let mut older = episode("older fact");
+    older.timestamp = t(1_600_000_000);
+    older.knowledge_subtype = Some(KnowledgeSubType::Fact);
+    let older_id = store.store_episode(&older).unwrap();
+
+    let mut newer = episode("newer preference");
+    newer.timestamp = t(1_700_000_000);
+    newer.knowledge_subtype = Some(KnowledgeSubType::Preference);
+    let newer_id = store.store_episode(&newer).unwrap();
+
+    let facts = store
+        .get_episodes_by_subtype(Some(KnowledgeSubType::Fact), 10)
+        .unwrap();
+    assert_eq!(facts.len(), 1);
+    assert_eq!(facts[0].0, older_id);
+
+    let all = store.get_episodes_by_subtype(None, 10).unwrap();
+    assert_eq!(
+        all.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+        vec![older_id, newer_id]
+    );
+}
+
+/// Forgetting: Active → Dormant once retention drops below the threshold, but
+/// only when the config is enabled.
+#[test]
+fn provider_decay_scan_dormants_old_episodes() {
+    let store = store();
+    let mut ancient = episode("ancient");
+    // ~3.3 half-lives of age with the default 180-day half-life → retention
+    // well under the 0.1 dormant threshold.
+    ancient.timestamp = Utc::now() - TimeDelta::days(1200);
+    let ancient_id = store.store_episode(&ancient).unwrap();
+
+    // Note: the shared `episode()` fixture is pinned at 2023-11-14, which is
+    // already decades past the threshold — "fresh" must be explicit.
+    let mut fresh = episode("fresh");
+    fresh.timestamp = Utc::now();
+    let fresh_id = store.store_episode(&fresh).unwrap();
+
+    let disabled = EpisodicDecayConfig::default();
+    assert!(!disabled.enabled);
+    let noop = store.run_episodic_decay_scan(&disabled).unwrap();
+    assert_eq!(noop.to_dormant, 0);
+    assert_eq!(
+        store.get_node_status(ancient_id).unwrap(),
+        Some(NodeStatus::Active)
+    );
+
+    let enabled = EpisodicDecayConfig {
+        enabled: true,
+        ..Default::default()
+    };
+    let result = store.run_episodic_decay_scan(&enabled).unwrap();
+    assert_eq!(result.to_dormant, 1);
+    assert_eq!(result.purged, 0);
+    assert_eq!(
+        store.get_node_status(ancient_id).unwrap(),
+        Some(NodeStatus::Dormant)
+    );
+    assert_eq!(
+        store.get_node_status(fresh_id).unwrap(),
+        Some(NodeStatus::Active)
+    );
+}
+
+/// The archive step must copy the node into `purge_log` before deleting it —
+/// forgetting is recoverable, never destructive.
+#[test]
+fn provider_decay_archives_before_deleting() {
+    let store = store();
+    let mut ancient = episode("archived memory");
+    ancient.timestamp = Utc::now() - TimeDelta::days(1200);
+    let id = store.store_episode(&ancient).unwrap();
+
+    let enabled = EpisodicDecayConfig {
+        enabled: true,
+        ..Default::default()
+    };
+    store.run_episodic_decay_scan(&enabled).unwrap();
+
+    // Age the dormancy past the 90-day archive deadline.
+    {
+        let conn = store.lock();
+        conn.execute(
+            "UPDATE nodes SET props = json_set(props, '$.dormant_since', json_quote(?2)) WHERE id = ?1",
+            params![id as i64, ts_text(Utc::now() - TimeDelta::days(120))],
+        )
+        .unwrap();
+    }
+
+    let result = store.run_episodic_decay_scan(&enabled).unwrap();
+    assert_eq!(result.purged, 1);
+    assert!(store.get_episode(id).unwrap().is_none());
+
+    let conn = store.lock();
+    let (content, reason): (String, String) = conn
+        .query_row(
+            "SELECT content, reason FROM purge_log WHERE node_id = ?1",
+            params![id as i64],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(content, "archived memory");
+    assert!(reason.contains("dormant_days=120"), "{reason}");
+}
+
+/// `apply_quality_config` must actually reach the write path, not just be
+/// recorded: raising the dedup threshold stops the (subject, predicate) merge.
+///
+/// The two stores are deliberate — a merge rewrites the stored embedding, so
+/// probing both thresholds on one store would compare against a moved target.
+#[test]
+fn provider_quality_config_drives_dedup() {
+    let similar = |store: &SqliteStore| {
+        let mut first = knowledge("user", "lives in");
+        first.embedding = Some(vec![1.0, 0.0, 0.0, 0.0]);
+        let first_id = store.store_knowledge(&first).unwrap();
+
+        // cos 0.96 against the first embedding.
+        let mut second = knowledge("user", "lives in");
+        second.embedding = Some(vec![0.96, 0.28, 0.0, 0.0]);
+        let second_id = store.store_knowledge(&second).unwrap();
+        (first_id, second_id)
+    };
+
+    let lenient = store();
+    let (a, b) = similar(&lenient);
+    assert_eq!(a, b, "the 0.95 default must merge cos 0.96");
+
+    let strict = store();
+    strict
+        .apply_quality_config(&MemoryQualityConfig {
+            dedup: acowork_memory::quality::DedupQuality {
+                knowledge_threshold: 0.99,
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .unwrap();
+    let (a, b) = similar(&strict);
+    assert_ne!(a, b, "a raised threshold must not merge cos 0.96");
+    assert_eq!(strict.node_count_by_label(labels::KNOWLEDGE).unwrap(), 2);
+}
+
+/// Graph operations are documented no-ops (ADR-082 D4): no expansion, no
+/// topology boost, no edge writes.
+#[test]
+fn provider_graph_ops_are_noops() {
+    let store = store();
+    let id = store.store_episode(&episode("seed")).unwrap();
+
+    assert!(
+        store
+            .graph_expand_seeded(&[(id, 0.9)], "s")
+            .unwrap()
+            .is_empty()
+    );
+    store
+        .create_memory_edge(id, id, "REFERENCES", vec![])
+        .unwrap();
+
+    let mut scores = vec![(id, 0.5)];
+    store.apply_pagerank_boost(&mut scores, 0.1).unwrap();
+    assert_eq!(scores, vec![(id, 0.5)]);
+
+    assert!(!store.should_trigger_confirmation().unwrap());
+    assert_eq!(store.generate_confirmation_hint().unwrap(), None);
+}
+
+/// Health and stats must reflect the real store, and stats must not count
+/// episodic nodes twice (they are reported separately from semantic nodes).
+#[test]
+fn provider_stats_and_health() {
+    let store = store();
+    assert!(store.health_check().unwrap().is_healthy);
+    assert!(store.health_check().unwrap().latency_ms < 5_000);
+
+    store.store_episode(&episode("one")).unwrap();
+    let mut kn = knowledge("user", "likes");
+    kn.status = NodeStatus::Dormant;
+    store.store_knowledge(&kn).unwrap();
+
+    let stats = store.stats().unwrap();
+    assert_eq!(stats.episode_count, 1);
+    assert_eq!(stats.node_count, 1);
+    assert_eq!(stats.active_node_count, 0);
+    assert_eq!(stats.dormant_node_count, 1);
+    assert_eq!(stats.edge_count, 0);
+    assert_eq!(stats.index_count, 5);
+    assert!(stats.storage_size_bytes > 0);
+}
+
+/// `collaboration_span` feeds the 30-day Relationship generation; it must be
+/// `None` on an empty store and report the earliest episode timestamp once
+/// there is history.
+#[test]
+fn provider_collaboration_span() {
+    let store = store();
+    assert!(store.collaboration_span().unwrap().is_none());
+
+    let mut older = episode("first contact");
+    older.timestamp = t(1_600_000_000);
+    store.store_episode(&older).unwrap();
+    store.store_episode(&episode("later")).unwrap();
+
+    let span = store.collaboration_span().unwrap().unwrap();
+    assert_eq!(span.earliest_episode_at, t(1_600_000_000));
+    assert_eq!(span.episode_count, 2);
+}
+
+/// `search_episodes` / `hybrid_search` are the `MemoryQuery` entry points; they
+/// must return hits with real content and node ids.
+#[test]
+fn provider_search_episodes_and_hybrid_search() {
+    let store = store();
+    let mut ep = episode("北京今天下雨吗");
+    ep.embedding = Some(vec![1.0, 0.0, 0.0, 0.0]);
+    let id = store.store_episode(&ep).unwrap();
+    store.store_knowledge(&knowledge("user", "likes")).unwrap();
+
+    let mut query = MemoryQuery::deep_recall("北京今天下雨吗".to_string(), None);
+    query.embedding = Some(vec![1.0, 0.0, 0.0, 0.0]);
+
+    let episodes = store.search_episodes(&query).unwrap();
+    assert_eq!(episodes.len(), 1);
+    assert_eq!(episodes[0].node_id, id);
+    assert_eq!(episodes[0].content, "北京今天下雨吗");
+
+    let all = store.hybrid_search(&query).unwrap();
+    assert!(all.iter().any(|hit| hit.node_id == id));
+    assert!(all.iter().all(|hit| !hit.content.is_empty()));
 }

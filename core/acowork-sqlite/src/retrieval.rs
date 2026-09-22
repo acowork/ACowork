@@ -47,8 +47,8 @@ impl SqliteStore {
         query: &str,
         embedding: &[f32],
         k: usize,
-        text_weight: f32,
-        vector_weight: f32,
+        text_weight: f64,
+        vector_weight: f64,
         min_cosine: Option<f32>,
     ) -> Result<Vec<(u64, f64)>> {
         if k == 0 {
@@ -90,11 +90,10 @@ impl SqliteStore {
 
         let mut fused: HashMap<u64, f64> = HashMap::new();
         for (rank, id) in text_ranked.iter().enumerate() {
-            *fused.entry(*id).or_default() += f64::from(text_weight) / (RRF_K + rank as f64 + 1.0);
+            *fused.entry(*id).or_default() += text_weight / (RRF_K + rank as f64 + 1.0);
         }
         for (rank, id) in vector_ranked.iter().enumerate() {
-            *fused.entry(*id).or_default() +=
-                f64::from(vector_weight) / (RRF_K + rank as f64 + 1.0);
+            *fused.entry(*id).or_default() += vector_weight / (RRF_K + rank as f64 + 1.0);
         }
 
         let mut ranked: Vec<(u64, f64)> = fused.into_iter().collect();

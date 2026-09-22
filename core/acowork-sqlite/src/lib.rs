@@ -22,6 +22,7 @@
 //! deserialize to `None` / empty (serde `Option` and `#[serde(default)]`), so
 //! the projection never breaks a read.
 
+mod provider;
 mod retrieval;
 mod schema;
 #[cfg(test)]
@@ -30,12 +31,13 @@ mod tests;
 pub use retrieval::RRF_K;
 
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Mutex, RwLock};
 
 use chrono::{DateTime, SecondsFormat, TimeDelta, Utc};
 use rusqlite::{Connection, OptionalExtension, ToSql, params};
 
 use acowork_memory::labels;
+use acowork_memory::quality::MemoryQualityConfig;
 use acowork_memory::{
     AutobioCategory, AutobiographicalNode, Episode, KnowledgeNode, NodeStatus, ProceduralNode,
 };
@@ -62,9 +64,20 @@ pub enum Error {
 /// Convenience alias.
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Backend errors surface to the Runtime as memory errors, so `?` works inside
+/// the [`acowork_memory::MemoryProvider`] implementation.
+impl From<Error> for acowork_core::error::AcoworkError {
+    fn from(e: Error) -> Self {
+        Self::Memory(e.to_string())
+    }
+}
+
 /// Cosine-similarity threshold above which two knowledge nodes with the same
 /// `(subject, predicate)` are treated as the same fact (mirrors the grafeo
 /// store's semantic dedup).
+///
+/// Never-configurable default; [`MemoryProvider::apply_quality_config`] may
+/// override it with `DedupQuality::knowledge_threshold` (ADR-062 D2).
 const KNOWLEDGE_DEDUP_SIMILARITY: f64 = 0.95;
 
 /// SQLite-backed memory store.
@@ -78,6 +91,9 @@ const KNOWLEDGE_DEDUP_SIMILARITY: f64 = 0.95;
 pub struct SqliteStore {
     conn: Mutex<Connection>,
     embedding_dim: usize,
+    /// Agent memory-quality knobs (ADR-062 D2). Defaults reproduce the
+    /// pre-configuration behaviour until `apply_quality_config` is called.
+    quality: RwLock<MemoryQualityConfig>,
 }
 
 // Static assertion: the store must be shareable across runtime tasks.
@@ -114,6 +130,7 @@ impl SqliteStore {
         Ok(Self {
             conn: Mutex::new(conn),
             embedding_dim,
+            quality: RwLock::new(MemoryQualityConfig::default()),
         })
     }
 
@@ -255,9 +272,7 @@ impl SqliteStore {
     /// Episodes not yet promoted to the semantic layer, oldest first.
     pub fn get_unconsolidated_episodes(&self, limit: usize) -> Result<Vec<Episode>> {
         self.episodes_where(
-            "SELECT id FROM nodes \
-             WHERE label = ?1 AND json_extract(props, '$.consolidated') = 0 \
-             ORDER BY created_at ASC LIMIT ?2",
+            "SELECT id FROM nodes WHERE label = ?1 AND json_extract(props, '$.consolidated') = 0 AND json_extract(props, '$.metadata.distiller_skip') IS NULL ORDER BY created_at ASC LIMIT ?2",
             &[&(limit as i64)],
         )
     }
@@ -266,8 +281,7 @@ impl SqliteStore {
     pub fn count_unconsolidated_episodes(&self) -> Result<usize> {
         let conn = self.lock();
         let n: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM nodes \
-             WHERE label = ?1 AND json_extract(props, '$.consolidated') = 0",
+            "SELECT COUNT(*) FROM nodes WHERE label = ?1 AND json_extract(props, '$.consolidated') = 0 AND json_extract(props, '$.metadata.distiller_skip') IS NULL",
             params![labels::EPISODIC],
             |r| r.get(0),
         )?;
@@ -348,7 +362,7 @@ impl SqliteStore {
             self.find_knowledge_by_subject(&node.subject, &node.predicate)?
         {
             let merge = match (&node.embedding, &existing.embedding) {
-                (Some(new), Some(old)) => cosine_similarity(new, old) > KNOWLEDGE_DEDUP_SIMILARITY,
+                (Some(new), Some(old)) => cosine_similarity(new, old) > self.dedup_threshold(),
                 // Missing embeddings on either side: fall back to the exact
                 // (subject, predicate) match (conservative dedup).
                 _ => true,
@@ -376,6 +390,14 @@ impl SqliteStore {
             &ts_text(node.updated_at),
             node.embedding.as_deref(),
         )
+    }
+
+    /// Effective knowledge-dedup cosine threshold.
+    fn dedup_threshold(&self) -> f64 {
+        self.quality
+            .read()
+            .map(|q| f64::from(q.dedup.knowledge_threshold))
+            .unwrap_or(KNOWLEDGE_DEDUP_SIMILARITY)
     }
 
     /// Overwrite an existing knowledge node.

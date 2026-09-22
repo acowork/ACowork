@@ -38,6 +38,22 @@ CREATE VIRTUAL TABLE IF NOT EXISTS fts_episodic USING fts5(content, node_id UNIN
 CREATE VIRTUAL TABLE IF NOT EXISTS fts_knowledge USING fts5(content, node_id UNINDEXED, tokenize = 'trigram');
 CREATE VIRTUAL TABLE IF NOT EXISTS fts_procedural USING fts5(content, node_id UNINDEXED, tokenize = 'trigram');
 CREATE VIRTUAL TABLE IF NOT EXISTS fts_autobiographical USING fts5(content, node_id UNINDEXED, tokenize = 'trigram');
+
+-- Forgetting archive (ADR-082 D1, replacing the grafeo PurgeLog).
+-- Decay is the one path that can destroy memory data, so an expired node is
+-- copied here *before* deletion instead of being dropped outright. Keeping the
+-- whole row (props + text + embedding) makes recovery a re-insert.
+CREATE TABLE IF NOT EXISTS purge_log (
+    id        INTEGER PRIMARY KEY,
+    node_id   INTEGER NOT NULL,
+    label     TEXT NOT NULL,
+    props     JSON NOT NULL,
+    content   TEXT NOT NULL DEFAULT '',
+    embedding BLOB,
+    reason    TEXT NOT NULL DEFAULT '',
+    purged_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_purge_log_purged_at ON purge_log(purged_at);
 "#;
 
 /// Map a node label to its FTS5 table name.

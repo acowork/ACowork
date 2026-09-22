@@ -8,7 +8,9 @@ rust-version.workspace = true
 description = "SQLite storage backend for the ACowork memory system (ADR-082)"
 
 [dependencies]
+acowork-core.workspace = true
 acowork-memory.workspace = true
+async-trait.workspace = true
 # bundled → FTS5 + the `trigram` tokenizer are always available (ADR-082 D3).
 rusqlite.workspace = true
 serde.workspace = true
