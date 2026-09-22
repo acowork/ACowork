@@ -587,3 +587,269 @@ fn store_autobiographical_forces_active() {
     let restored = store.get_autobiographical(id).unwrap().unwrap();
     assert_eq!(restored.status, NodeStatus::Active);
 }
+
+// ── Hybrid retrieval fusion (ADR-082 D5) ─────────────────────────────────
+
+/// ADR-082 §1.4 regression: a BM25-only hit must survive the cosine floor.
+///
+/// The engine-era fusion applied `min_score` in the *fused* score domain, which
+/// on the vector-only path meant `cos >= 1` — every Chinese `memory_recall`
+/// query returned nothing. Here the floor gates the vector source only, so the
+/// lexical hit is kept even though its embedding is orthogonal to the query.
+#[test]
+fn hybrid_keeps_lexical_hit_whose_embedding_is_far() {
+    let store = store();
+
+    let mut lexical_only = episode("北京今天下雨吗");
+    lexical_only.embedding = Some(vec![0.0, 1.0, 0.0, 0.0]);
+    let lexical_id = store.store_episode(&lexical_only).unwrap();
+
+    let mut vector_only = episode("completely unrelated wording");
+    vector_only.embedding = Some(vec![1.0, 0.0, 0.0, 0.0]);
+    let vector_id = store.store_episode(&vector_only).unwrap();
+
+    let hits = store
+        .hybrid_search_full(
+            labels::EPISODIC,
+            "北京今天下雨吗",
+            &[1.0, 0.0, 0.0, 0.0],
+            10,
+            1.0,
+            1.0,
+            Some(0.3),
+        )
+        .unwrap();
+
+    let ids: Vec<u64> = hits.iter().map(|(id, _)| *id).collect();
+    assert!(
+        ids.contains(&lexical_id),
+        "lexical hit dropped by the cosine floor: {ids:?}"
+    );
+    assert!(ids.contains(&vector_id));
+
+    // Both are single-source rank-1 hits, so the id tie-break decides; what
+    // matters is that neither was filtered out.
+    assert_eq!(hits.len(), 2);
+    // Scores live in the normalized-cosine domain, not the RRF domain
+    // (`~0.016`), so downstream `min_score` / abstention thresholds still mean
+    // what they used to.
+    for (id, score) in &hits {
+        assert!((0.0..=1.0).contains(score), "score out of range: {score}");
+        if *id == vector_id {
+            assert!((score - 1.0).abs() < 1e-9);
+        } else {
+            // Cosine was not recovered (gated out of the vector source), so the
+            // hit is scored as orthogonal: (1 + 0) / 2.
+            assert!((score - 0.5).abs() < 1e-9);
+        }
+    }
+}
+
+/// A hit found by *both* sources must outrank a hit found by only one.
+#[test]
+fn hybrid_ranks_dual_source_hit_first() {
+    let store = store();
+
+    let mut both = episode("project codename is blue whale");
+    both.embedding = Some(vec![1.0, 0.0, 0.0, 0.0]);
+    let both_id = store.store_episode(&both).unwrap();
+
+    let mut vector_only = episode("nothing lexically shared here");
+    vector_only.embedding = Some(vec![0.9, 0.1, 0.0, 0.0]);
+    let vector_id = store.store_episode(&vector_only).unwrap();
+
+    let hits = store
+        .hybrid_search_full(
+            labels::EPISODIC,
+            "project codename is blue whale",
+            &[1.0, 0.0, 0.0, 0.0],
+            10,
+            1.0,
+            1.0,
+            Some(0.3),
+        )
+        .unwrap();
+
+    assert_eq!(
+        hits[0].0, both_id,
+        "dual-source hit lost to a vector-only hit"
+    );
+    assert!(hits.iter().any(|(id, _)| *id == vector_id));
+}
+
+/// The vector source still honours the absolute cosine floor; the floor is not
+/// applied to the text source.
+#[test]
+fn hybrid_gates_vector_source_by_min_cosine() {
+    let store = store();
+
+    let mut far = episode("qxz wording that the query cannot lexically match");
+    far.embedding = Some(vec![0.0, 1.0, 0.0, 0.0]);
+    let far_id = store.store_episode(&far).unwrap();
+
+    let query = &[1.0, 0.0, 0.0, 0.0];
+
+    let gated = store
+        .hybrid_search_full(labels::EPISODIC, "zzz", query, 10, 1.0, 1.0, Some(0.3))
+        .unwrap();
+    assert!(gated.is_empty(), "cos 0 survived a 0.3 floor: {gated:?}");
+
+    let ungated = store
+        .hybrid_search_full(labels::EPISODIC, "zzz", query, 10, 1.0, 1.0, Some(-1.0))
+        .unwrap();
+    assert_eq!(ungated.len(), 1);
+    assert_eq!(ungated[0].0, far_id);
+    assert!((ungated[0].1 - 0.5).abs() < 1e-9, "cos 0 -> (1+0)/2");
+}
+
+/// Even with an impossibly high floor, a lexical hit is retained: a BM25 match
+/// is independent evidence, and a weak/absent embedding must not kill it.
+#[test]
+fn hybrid_text_source_ignores_min_cosine() {
+    let store = store();
+
+    let mut node = episode("独一无二的中文词组");
+    node.embedding = Some(vec![0.0, 1.0, 0.0, 0.0]);
+    let id = store.store_episode(&node).unwrap();
+
+    let hits = store
+        .hybrid_search_full(
+            labels::EPISODIC,
+            "独一无二的中文词组",
+            &[1.0, 0.0, 0.0, 0.0],
+            10,
+            1.0,
+            1.0,
+            Some(0.99),
+        )
+        .unwrap();
+
+    assert_eq!(hits.len(), 1, "lexical hit gated away: {hits:?}");
+    assert_eq!(hits[0].0, id);
+}
+
+/// Fusion must not leak across labels.
+#[test]
+fn hybrid_search_is_label_isolated() {
+    let store = store();
+    let mut lexical = episode("shared keyword alpha");
+    lexical.embedding = Some(vec![1.0, 0.0, 0.0, 0.0]);
+    store.store_episode(&lexical).unwrap();
+
+    let hits = store
+        .hybrid_search_full(
+            labels::KNOWLEDGE,
+            "shared keyword alpha",
+            &[1.0, 0.0, 0.0, 0.0],
+            10,
+            1.0,
+            1.0,
+            Some(0.3),
+        )
+        .unwrap();
+    assert!(hits.is_empty(), "{hits:?}");
+}
+
+/// `k` caps the fused output, and an empty query still allows vector-only hits.
+#[test]
+fn hybrid_respects_limit_and_handles_empty_query() {
+    let store = store();
+    for i in 0..5 {
+        let mut node = episode(&format!("filler number {i}"));
+        node.embedding = Some(vec![1.0, 0.0, 0.0, 0.0]);
+        store.store_episode(&node).unwrap();
+    }
+
+    let hits = store
+        .hybrid_search_full(
+            labels::EPISODIC,
+            "filler",
+            &[1.0, 0.0, 0.0, 0.0],
+            2,
+            1.0,
+            1.0,
+            None,
+        )
+        .unwrap();
+    assert_eq!(hits.len(), 2);
+
+    let vector_only = store
+        .hybrid_search_full(
+            labels::EPISODIC,
+            "   ",
+            &[1.0, 0.0, 0.0, 0.0],
+            10,
+            1.0,
+            1.0,
+            None,
+        )
+        .unwrap();
+    assert_eq!(vector_only.len(), 5);
+}
+
+/// `hybrid_search_filtered` is the equal-weight, ungated entry point.
+#[test]
+fn hybrid_search_filtered_delegates() {
+    let store = store();
+    let mut node = episode("delegation works");
+    node.embedding = Some(vec![1.0, 0.0, 0.0, 0.0]);
+    let id = store.store_episode(&node).unwrap();
+
+    let hits = store
+        .hybrid_search_filtered(
+            labels::EPISODIC,
+            "content",
+            "embedding",
+            "delegation works",
+            &[1.0, 0.0, 0.0, 0.0],
+            10,
+        )
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].0, id);
+}
+
+/// Equal-weight RRF makes single-source rank-1 hits tie exactly, so the result
+/// order must not depend on `HashMap` iteration order (randomized per process).
+#[test]
+fn hybrid_order_is_deterministic_across_calls() {
+    let store = store();
+    for i in 0..5 {
+        let mut node = episode(&format!("filler number {i}"));
+        node.embedding = Some(vec![1.0, 0.0, 0.0, 0.0]);
+        store.store_episode(&node).unwrap();
+    }
+
+    let expected = store
+        .hybrid_search_full(
+            labels::EPISODIC,
+            "filler",
+            &[1.0, 0.0, 0.0, 0.0],
+            5,
+            1.0,
+            1.0,
+            None,
+        )
+        .unwrap();
+    assert_eq!(expected.len(), 5);
+    assert_eq!(
+        expected.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+        vec![1, 2, 3, 4, 5],
+        "ties must fall back to node id"
+    );
+
+    for _ in 0..20 {
+        let again = store
+            .hybrid_search_full(
+                labels::EPISODIC,
+                "filler",
+                &[1.0, 0.0, 0.0, 0.0],
+                5,
+                1.0,
+                1.0,
+                None,
+            )
+            .unwrap();
+        assert_eq!(expected, again);
+    }
+}

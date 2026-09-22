@@ -22,9 +22,12 @@
 //! deserialize to `None` / empty (serde `Option` and `#[serde(default)]`), so
 //! the projection never breaks a read.
 
+mod retrieval;
 mod schema;
 #[cfg(test)]
 mod tests;
+
+pub use retrieval::RRF_K;
 
 use std::path::Path;
 use std::sync::Mutex;
