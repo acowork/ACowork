@@ -1976,6 +1976,35 @@ pub async fn stop_agent(
             },
         ))?;
 
+    // Close the liveness race (2026-09-22 stop-UI delay): the node ACK
+    // returns before the Runtime's MQTT teardown delivers the LWT, so a
+    // `GET /api/agents` issued by the stop caller (Desktop `stopAgent`
+    // refetches immediately) can still read `online=true` and clobber the
+    // realtime offline event that reaches it milliseconds later — leaving
+    // the UI in the chat view until an unrelated refetch converges it.
+    // Mark the registry offline synchronously (deterministic for any
+    // subsequent list read) and publish the retained plain-text status so
+    // the normal dispatch path (registry loopback + protobuf republish to
+    // Desktop subscribers) runs exactly as it would for an LWT. The LWT
+    // itself remains the fallback for crash paths and is idempotent here.
+    let status_topic = format!("acowork/agents/{instance_id}/status");
+    if let Some(reg) = &state.agent_registry {
+        reg.write().await.update_from_mqtt(&status_topic, b"offline");
+    }
+    if let Some(client) = state.mqtt_gateway_client.as_ref()
+        && let Err(e) = client
+            .publish_text(&status_topic, "offline", crate::mqtt::MqttQoS::AtLeastOnce, true)
+            .await
+    {
+        // Non-fatal: the registry is already updated and the LWT will
+        // still fire; only the Desktop's realtime push is degraded.
+        tracing::warn!(
+            instance_id = %instance_id,
+            error = %e,
+            "stop: failed to publish offline status"
+        );
+    }
+
     // Pre-emptively drop the running entry (mirrors the old stop path).
     state.gateway_state.write().await.remove_running(&agent_id);
 
