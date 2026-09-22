@@ -275,7 +275,7 @@ pub struct MemoryQualityConfig {
 - 测试 `test_memory_store_default_confidence`（`memory_store.rs:586`）与 autobio 0.85 断言（:915-918）**不受影响**——它们验证的是代码兜底路径，而非 schema 文本。
 - **阈值合理性由数据决定**：去锚定后分数绝对尺度会漂移，代码中 `≥0.85→Active`/`<0.3→Dormant`/`≥0.7→Active` 等阈值与 LLM 分数的映射关系随之变化。这不靠猜，靠 §6.6 的 M3.6 阈值校准用分布数据重标定。
 
-### 6.4 顺带修复：auto_inject 的 min_score（⚠️ 已被 [ADR-082](./ADR-082-hybrid-retrieval-score-domain-and-gating.md) 取代）
+### 6.4 顺带修复：auto_inject 的 min_score（⚠️ 已被 [ADR-082](./ADR-082-memory-storage-sqlite-vector-fts.md) 取代）
 
 `memory/types.rs:132` `auto_inject` 设 `min_score: Some(0.3)`，落在 RRF 分数域（`1/(k+rank)`，k=60 → 最高约 0.016）会过滤掉几乎全部结果。D2 落地后改为走 `MemoryQualityConfig.min_score`（默认 0.0）。
 
@@ -337,5 +337,5 @@ pub struct MemoryQualityConfig {
 
 - [05-memory.md](../design/zh/05-memory.md)（§5.2 Dormant 语义、§6.5 Abstention、§6.6 检索权重）
 - [ADR-051](./ADR-051-runtime-memory-provider-decoupling.md)
-- [ADR-082](./ADR-082-hybrid-retrieval-score-domain-and-gating.md)（**取代本文 §6.4 与 §2.4 的 `min_score` 决策**：各源把门 + 名次融合）
+- [ADR-082](./ADR-082-memory-storage-sqlite-vector-fts.md)（**取代本文 §6.4 与 §2.4 的 `min_score` 决策**：各源把门 + 名次融合）
 - [review 报告](../_internal/archive/review/zh/)（Gap 分析来源）

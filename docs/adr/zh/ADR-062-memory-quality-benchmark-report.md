@@ -112,7 +112,7 @@ auto_inject min_score=None    → 1 result, score 0.6437
 - ADR-062 §6.4 原文："`min_score: Some(0.3)` 落在 RRF 分数域（`1/(k+rank)`，k=60 → 最高约 0.016）会过滤掉几乎全部结果。"
 - **修正**：该论断仅在 vector 索引参与融合（双 source RRF）时成立。在 vector 索引未填充（text-only BM25 域）的环境下，`min_score=0.3` 不过滤任何结果。
 - **D2 修复仍应保留**：它消除的是"生产环境 vector 索引被填充后 min_score=0.3 静默过滤全部"的隐患（防御性修复），只是本次 benchmark 环境无法量化其命中率收益。
-- **后续航向**：该"融合分阈值"机制已于 [ADR-082](./ADR-082-hybrid-retrieval-score-domain-and-gating.md) 整体废除，改为各源在各自分数域把门 + 名次融合（`min_cosine`，余弦绝对域）。本文 §4.1 的分数域事实链是该决策的直接输入。
+- **后续航向**：该"融合分阈值"机制已于 [ADR-082](./ADR-082-memory-storage-sqlite-vector-fts.md) 整体废除，改为各源在各自分数域把门 + 名次融合（`min_cosine`，余弦绝对域）。本文 §4.1 的分数域事实链是该决策的直接输入。
 
 ---
 

@@ -147,7 +147,7 @@ Compaction 不再生成 `entities` / `triples` 块——LLM 在压缩场景下�
 
 所有检索统一使用默认 RRF 权重（vector: 0.7, text: 0.3），不再基于 memory_hint 类型动态调整。HintType 枚举保留但仅在 `memory_store` 工具调用时由 LLM 显式指定（用于即时提取管道的 sub_type 分类）。
 
-> **v3.13 更正（[ADR-082](../adr/zh/ADR-082-hybrid-retrieval-score-domain-and-gating.md) C4 / P4）**：实现为**等权 RRF（`k = 60`）**——`hint_weights` 传入 `hybrid_search_full` 后即被忽略，加权 RRF 曾被显式否决（*"weight scaling after RRF is meaningless"*）。上文所述 vector 0.7 / text 0.3 的默认权重**尚未接入**，排序不体现查询意图。
+> **v3.13 更正（[ADR-082](../adr/zh/ADR-082-memory-storage-sqlite-vector-fts.md) C4 / P4）**：实现为**等权 RRF（`k = 60`）**——`hint_weights` 传入 `hybrid_search_full` 后即被忽略，加权 RRF 曾被显式否决（*"weight scaling after RRF is meaningless"*）。上文所述 vector 0.7 / text 0.3 的默认权重**尚未接入**，排序不体现查询意图。
 
 **瞬态层的管理策略（v3.8 简化）**：
 
@@ -849,7 +849,7 @@ embedding 聚簇（cluster_threshold，默认 0.85，per-agent 可调 0.80~0.92�
 
 **设计动机**：当检索结果的置信度不足时，Agent 应选择拒答而非生成可能不准确的回答。这是检索系统的最终质量门控——比检索降级策略（Level 0-3）更后置，是在检索结果已返回后的语义级别保障。
 
-**门控阈值机制（v3.13 修正，见 [ADR-082](../adr/zh/ADR-082-hybrid-retrieval-score-domain-and-gating.md)）**：
+**门控阈值机制（v3.13 修正，见 [ADR-082](../adr/zh/ADR-082-memory-storage-sqlite-vector-fts.md)）**：
 
 过滤**不作用于融合分**，而是各源在各自分数域内独立过滤后**取并集**：向量源按绝对余弦相似度 `min_cosine`（默认 0.3）过滤；文本源（BM25）命中即保留（BM25 含 IDF，无可靠绝对阈值）。融合分（RRF，仅含名次）不参与任何阈值判定。若过滤后结果为空，触发 Abstention（拒答）：
 
@@ -876,7 +876,7 @@ embedding 聚簇（cluster_threshold，默认 0.85，per-agent 可调 0.80~0.92�
 > **实现澄清（v3.13，取代 v3.12 的 G9 说明）**：代码中现为**两个不同名的量**，勿混淆：
 > - `AbstentionConfig.default_min_score = 0.6`（`abstention.rs`）：作用于 `check_abstention` 的 **raw scores**（向量/BM25 原始相似度），用于拒答判定。**当前尚未接入检索链路，属死代码**（ADR-082 P6）。
 > - `MemoryQualityConfig.min_cosine = 0.3`（`quality.rs`）：作用于**向量源的绝对余弦**（`cos = 1 − distance`，对外归一化为 `(1 + cos)/2 ∈ [0,1]`），在 `hybrid_search_full` 内完成过滤。
-> - 旧的 `MemoryManagerConfig.min_score`（融合 RRF 域，默认 0.0）**已删除**：它对**单源向量路径**（`score = cos − 1`，恒非正）等价于要求 `cos >= 1`，会静默滤光全部结果——即 2026-09 中文查询 `memory_recall` 返回 0 条的根因。详见 [ADR-082](../adr/zh/ADR-082-hybrid-retrieval-score-domain-and-gating.md)。
+> - 旧的 `MemoryManagerConfig.min_score`（融合 RRF 域，默认 0.0）**已删除**：它对**单源向量路径**（`score = cos − 1`，恒非正）等价于要求 `cos >= 1`，会静默滤光全部结果——即 2026-09 中文查询 `memory_recall` 返回 0 条的根因。详见 [ADR-082](../adr/zh/ADR-082-memory-storage-sqlite-vector-fts.md)。
 
 **与检索降级策略的关系**：
 
