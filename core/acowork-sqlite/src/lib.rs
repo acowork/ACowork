@@ -23,12 +23,14 @@
 //! the projection never breaks a read.
 
 mod admin;
+mod conversation;
 mod provider;
 mod retrieval;
 mod schema;
 #[cfg(test)]
 mod tests;
 
+pub use conversation::{ConversationHit, ConversationStore};
 pub use retrieval::RRF_K;
 
 use std::path::Path;

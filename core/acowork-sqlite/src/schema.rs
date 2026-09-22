@@ -47,6 +47,12 @@ CREATE VIRTUAL TABLE IF NOT EXISTS fts_knowledge USING fts5(content, node_id UNI
 CREATE VIRTUAL TABLE IF NOT EXISTS fts_procedural USING fts5(content, node_id UNINDEXED, tokenize = 'trigram');
 CREATE VIRTUAL TABLE IF NOT EXISTS fts_autobiographical USING fts5(content, node_id UNINDEXED, tokenize = 'trigram');
 
+-- Conversation index (ADR-082 §4 step 2). Separate from the memory labels: it
+-- is a different store file driven by a different subsystem (ADR-081), but it
+-- reuses the same `nodes` / `vectors` / FTS machinery so `/search` gets the
+-- same trigram CJK matching and exact vector scan as memory recall.
+CREATE VIRTUAL TABLE IF NOT EXISTS fts_conversation USING fts5(content, node_id UNINDEXED, tokenize = 'trigram');
+
 -- Forgetting archive (ADR-082 D1, replacing the grafeo PurgeLog).
 -- Decay is the one path that can destroy memory data, so an expired node is
 -- copied here *before* deletion instead of being dropped outright. Keeping the
@@ -77,6 +83,8 @@ pub(crate) fn fts_table(label: &str) -> Option<&'static str> {
         Some("fts_procedural")
     } else if label == labels::AUTOBIOGRAPHICAL {
         Some("fts_autobiographical")
+    } else if label == crate::conversation::LABEL {
+        Some("fts_conversation")
     } else {
         None
     }
