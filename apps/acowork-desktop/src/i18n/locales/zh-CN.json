@@ -105,6 +105,7 @@
     "chat": "聊天",
     "projects": "项目",
     "docs": "文档",
+    "extensions": "扩展",
     "harness": "Harness",
     "settings": "设置",
     "ariaLabelMainNavigation": "主导航"
@@ -1405,6 +1406,8 @@
     "clickToEdit": "点击编辑",
     "noDescription": "暂无描述",
     "statTotal": "全部",
+    "searchPlaceholder": "搜索项目...",
+    "noMatchingProjects": "无匹配的项目",
     "projectListAria": "项目列表",
     "projectMenu": "项目菜单",
     "deleteProjectTitle": "删除项目",

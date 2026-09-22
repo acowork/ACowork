@@ -20,10 +20,11 @@ const topNavItems: { view: NavView; icon: ComponentType<{ className?: string }>;
   { view: "chat", icon: OutlineChatIcon, i18nKey: "navBar.chat" },
   { view: "projects", icon: OutlineProjectsIcon, i18nKey: "navBar.projects" },
   { view: "docs", icon: OutlineDocsIcon, i18nKey: "navBar.docs" },
-  { view: "harness", icon: OutlineHarnessIcon, i18nKey: "navBar.harness" },
+  { view: "extensions", icon: OutlineExtensionsIcon, i18nKey: "navBar.extensions" },
 ];
 
 const bottomNavItems: { view: NavView; icon: ComponentType<{ className?: string }>; i18nKey: string }[] = [
+  { view: "harness", icon: OutlineHarnessIcon, i18nKey: "navBar.harness" },
   { view: "settings", icon: OutlineSettingsIcon, i18nKey: "navBar.settings" },
 ];
 
@@ -45,6 +46,34 @@ function FilledHarnessIcon({ className }: { className?: string }) {
       <g transform="translate(1.2, 1.2) scale(0.9, 0.9)">
         <path d="M19.439 7.85c-.049.322.059.648.289.878l1.568 1.568c.47.47.706 1.087.706 1.704s-.235 1.233-.706 1.704l-1.611 1.611a.98.98 0 0 1-.837.276c-.47-.07-.802-.48-.968-.925a2.501 2.501 0 1 0-3.214 3.214c.446.166.855.497.925.968a.979.979 0 0 1-.276.837l-1.61 1.611a2.404 2.404 0 0 1-1.705.706 2.404 2.404 0 0 1-1.704-.706l-1.568-1.568a1.026 1.026 0 0 0-.877-.29c-.493.074-.84.504-1.02.968a2.5 2.5 0 1 1-3.237-3.237c.464-.18.894-.527.967-1.02a1.026 1.026 0 0 0-.289-.877l-1.568-1.568A2.404 2.404 0 0 1 1.998 12c0-.617.236-1.234.706-1.704L4.315 8.685a.98.98 0 0 1 .837-.276c.47.07.802.48.968.925a2.501 2.501 0 1 0 3.214-3.214c-.446-.166-.855-.497-.925-.968a.979.979 0 0 1 .276-.837l1.611-1.611a2.404 2.404 0 0 1 1.704-.706c.617 0 1.234.236 1.704.706l1.568 1.568c.23.23.556.338.877.29.493-.074.84-.504 1.02-.969a2.5 2.5 0 1 1 3.237 3.237c-.464.18-.894.527-.967 1.02Z" />
       </g>
+    </svg>
+  );
+}
+
+/** Outline Extensions icon — VSCode-style 2×2 grid of tiles (extensions panel glyph) */
+function OutlineExtensionsIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round">
+      {/* Top-left small tile */}
+      <rect x="3" y="3" width="8" height="8" rx="1.5" />
+      {/* Top-right wide tile */}
+      <rect x="13" y="3" width="8" height="6" rx="1.5" />
+      {/* Bottom-left tall tile */}
+      <rect x="3" y="13" width="6" height="8" rx="1.5" />
+      {/* Bottom-right square tile */}
+      <rect x="11" y="11" width="10" height="10" rx="1.5" />
+    </svg>
+  );
+}
+
+/** Filled Extensions icon — solid version for active state */
+function FilledExtensionsIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round">
+      <rect x="3" y="3" width="8" height="8" rx="1.5" />
+      <rect x="13" y="3" width="8" height="6" rx="1.5" />
+      <rect x="3" y="13" width="6" height="8" rx="1.5" />
+      <rect x="11" y="11" width="10" height="10" rx="1.5" />
     </svg>
   );
 }
@@ -179,6 +208,8 @@ export function NavBar({ currentView, onViewChange, onAvatarClick }: NavBarProps
           {currentView === view ? (
             view === "chat" ? (
               <FilledChatIcon className="h-6 w-6" />
+            ) : view === "extensions" ? (
+              <FilledExtensionsIcon className="h-6 w-6" />
             ) : view === "harness" ? (
               <FilledHarnessIcon className="h-6 w-6" />
             ) : view === "docs" ? (
@@ -211,7 +242,11 @@ export function NavBar({ currentView, onViewChange, onAvatarClick }: NavBarProps
           tooltipPosition="right"
         >
           {currentView === view ? (
-            <FilledSettingsIcon className="h-6 w-6" />
+            view === "harness" ? (
+              <FilledHarnessIcon className="h-6 w-6" />
+            ) : (
+              <FilledSettingsIcon className="h-6 w-6" />
+            )
           ) : (
             <Icon className="h-6 w-6" />
           )}

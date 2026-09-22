@@ -105,6 +105,7 @@
     "chat": "Chat",
     "projects": "Projects",
     "docs": "Docs",
+    "extensions": "확장",
     "harness": "Harness",
     "settings": "Settings",
     "ariaLabelMainNavigation": "기본 탐색"
@@ -1346,6 +1347,8 @@
     "clickToEdit": "클릭하여 편집",
     "noDescription": "설명 없음",
     "statTotal": "전체",
+    "searchPlaceholder": "프로젝트 검색...",
+    "noMatchingProjects": "일치하는 프로젝트가 없습니다",
     "projectListAria": "프로젝트 목록",
     "projectMenu": "프로젝트 메뉴",
     "deleteProjectTitle": "프로젝트 삭제",

@@ -8,6 +8,7 @@
     "chat": "Chat",
     "projects": "Projects",
     "docs": "Docs",
+    "extensions": "Extensions",
     "harness": "Harness",
     "settings": "Settings",
     "ariaLabelMainNavigation": "Main navigation"
@@ -1388,6 +1389,8 @@
     "clickToEdit": "Click to edit",
     "noDescription": "No description",
     "statTotal": "Total",
+    "searchPlaceholder": "Search projects...",
+    "noMatchingProjects": "No matching projects",
     "projectListAria": "Project list",
     "projectMenu": "Project menu",
     "deleteProjectTitle": "Delete project",

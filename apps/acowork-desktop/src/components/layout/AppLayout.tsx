@@ -45,6 +45,7 @@ import { SettingsPage } from "../settings/SettingsPage";
 import { HarnessPage } from "../harness/HarnessPage";
 import { ProjectsView } from "../../views/ProjectsView";
 import { DocsView } from "../../views/DocsView";
+import { ExtensionsView } from "../../views/ExtensionsView";
 import { MqttDebugControls } from "../debug/MqttDebugControls";
 import { Tooltip } from "../common/Tooltip";
 import { useChatStore } from "../../stores/chatStore";
@@ -1086,6 +1087,12 @@ export function AppLayout() {
         {currentView === "docs" && (
           <div className="flex flex-1 overflow-hidden rounded-xl bg-page-bg">
             <DocsView />
+          </div>
+        )}
+
+        {currentView === "extensions" && (
+          <div className="flex flex-1 overflow-hidden rounded-xl bg-page-bg">
+            <ExtensionsView />
           </div>
         )}
 

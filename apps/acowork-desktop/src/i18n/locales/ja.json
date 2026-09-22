@@ -105,6 +105,7 @@
     "chat": "Chat",
     "projects": "Projects",
     "docs": "Docs",
+    "extensions": "拡張機能",
     "harness": "Harness",
     "settings": "Settings",
     "ariaLabelMainNavigation": "メインナビゲーション"
@@ -1345,6 +1346,8 @@
     "clickToEdit": "クリックして編集",
     "noDescription": "説明なし",
     "statTotal": "すべて",
+    "searchPlaceholder": "プロジェクトを検索...",
+    "noMatchingProjects": "一致するプロジェクトがありません",
     "projectListAria": "プロジェクト一覧",
     "projectMenu": "プロジェクトメニュー",
     "deleteProjectTitle": "プロジェクトを削除",

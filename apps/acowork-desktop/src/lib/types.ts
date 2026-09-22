@@ -869,7 +869,7 @@ export interface ContextUsageInfo {
 }
 
 /** Navigation view type */
-export type NavView = "chat" | "harness" | "docs" | "projects" | "settings";
+export type NavView = "chat" | "extensions" | "harness" | "docs" | "projects" | "settings";
 
 /** Theme type */
 export type Theme = "light" | "dark" | "system";

@@ -105,6 +105,7 @@
     "chat": "Chat",
     "projects": "Projects",
     "docs": "Docs",
+    "extensions": "擴充功能",
     "harness": "Harness",
     "settings": "Settings",
     "ariaLabelMainNavigation": "主導航"
@@ -1344,6 +1345,8 @@
     "clickToEdit": "點擊編輯",
     "noDescription": "暫無描述",
     "statTotal": "全部",
+    "searchPlaceholder": "搜尋專案...",
+    "noMatchingProjects": "無符合的專案",
     "projectListAria": "專案列表",
     "projectMenu": "專案選單",
     "deleteProjectTitle": "刪除專案",
