@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { Sparkles, FolderPlus, Check, Loader2, X } from "lucide-react";
+import { Sparkles, FolderPlus, Check, Loader2 } from "lucide-react";
 import { cn } from "../../lib/utils";
 import { ToolbarDropdownTrigger } from "../common/ToolbarDropdown";
 import { useSkillStore } from "../../stores/skillStore";
@@ -208,21 +208,21 @@ export function SkillsPanel({ textHidden }: { textHidden?: boolean } = {}) {
 
       {/* Import Dialog */}
       {importDialogOpen && (
-        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-modal-overlay">
-          <div className="w-96 rounded-md border border-border-outer bg-modal-surface p-6 shadow-xl">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-modal-overlay" onClick={handleCloseDialog}>
+          <div
+            className="flex w-96 flex-col rounded-md border border-border-outer bg-modal-surface shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
             {/* Header */}
-            <div className="mb-4 flex items-center justify-between">
-              <h3 className="text-sm font-semibold text-text ">
-                Import Skill
-              </h3>
-              <button
-                onClick={handleCloseDialog}
-                className="rounded p-1 text-text-tertiary hover:bg-zinc-100 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300"
-              >
-                <X className="h-4 w-4" />
-              </button>
+            <div className="flex items-center gap-2 border-b border-border-divider px-5 py-3 min-h-[var(--ui-dialog-zone-h)]">
+              <FolderPlus className="h-5 w-5 text-text-tertiary " />
+              <h2 className="text-sm font-semibold text-text ">
+                {t("skillsPanel.buttonImportSkills")}
+              </h2>
             </div>
 
+            {/* Body */}
+            <div className="space-y-4 px-5 py-4">
             {/* Description */}
             <p className="mb-4 text-xs text-text-tertiary ">
               Select a skill ZIP package to import. The ZIP must contain a{" "}
@@ -281,30 +281,26 @@ export function SkillsPanel({ textHidden }: { textHidden?: boolean } = {}) {
             )}
 
             {/* Actions */}
-            <div className="flex justify-end gap-2">
-              <button
-                onClick={handleCloseDialog}
-                className="rounded-md px-3 py-1.5 text-xs font-medium text-text-secondary transition-colors hover:bg-zinc-100  dark:hover:bg-zinc-700"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleImport}
-                disabled={!selectedFile || importing}
-                className={cn(
-                  "inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors",
-                  !selectedFile || importing
-                    ? "cursor-not-allowed bg-zinc-200 text-text-tertiary dark:bg-zinc-700 "
-                    : "text-white",
-                )}
-                style={selectedFile && !importing ? { backgroundColor: "var(--color-accent)" } : undefined}
-                onMouseEnter={(e) => { if (selectedFile && !importing) e.currentTarget.style.filter = "brightness(0.85)"; }}
-                onMouseLeave={(e) => { e.currentTarget.style.filter = ""; }}
-              >
-                {importing && <Loader2 className="h-3 w-3 animate-spin" />}
-                {importing ? t("skillsPanel.importing") : t("skillsPanel.buttonImport")}
-              </button>
             </div>
+          </div>
+
+          {/* Footer */}
+          <div className="flex items-center justify-end gap-2 border-t border-border-divider px-5 min-h-[var(--ui-dialog-zone-h)]">
+            <button
+              onClick={handleCloseDialog}
+              disabled={importing}
+              className="rounded-md px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-zinc-100 disabled:opacity-50  dark:hover:bg-zinc-700"
+            >
+              {t("common.cancel")}
+            </button>
+            <button
+              onClick={handleImport}
+              disabled={!selectedFile || importing}
+              className="flex items-center gap-2 rounded btn-accent px-3 py-1.5 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {importing && <Loader2 className="h-3 w-3 animate-spin" />}
+              {importing ? t("skillsPanel.importing") : t("skillsPanel.buttonImport")}
+            </button>
           </div>
         </div>
       )}

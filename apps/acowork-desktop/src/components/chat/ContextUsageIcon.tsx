@@ -395,7 +395,7 @@ const handleCompressSummary = () => {
                   <button
                     type="button"
                     onClick={saveWindow}
-                    className="rounded bg-indigo-600 px-2 py-1 text-[11px] font-medium text-white transition-colors hover:bg-indigo-500"
+                    className="rounded bg-[var(--color-accent)] px-2 py-1 text-[11px] font-medium text-white transition-[filter] hover:brightness-90"
                   >
                     {t("contextUsage.save")}
                   </button>

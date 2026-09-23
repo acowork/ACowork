@@ -3349,7 +3349,7 @@ function ModelMenu({
                           <span
                             title={t("chatPanel.modelMenuLastUsed")}
                             aria-label={t("chatPanel.modelMenuLastUsed")}
-                            className="inline-flex shrink-0 items-center text-text-tertiary"
+                            className="inline-flex shrink-0 items-center text-[var(--color-accent)]"
                           >
                             <Clock size={10} />
                           </span>

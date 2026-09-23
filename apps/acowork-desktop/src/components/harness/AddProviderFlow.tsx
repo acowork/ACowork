@@ -8,7 +8,7 @@ import { ModelMultiSelect } from "./ModelMultiSelect";
 import { ProviderPicker } from "./ProviderPicker";
 import { parseOfflineJson, OFFLINE_JSON_EXAMPLE } from "./offlineJson";
 import { useTranslation } from "../../i18n/useTranslation";
-import { ChevronLeft, Minus, Plus } from "lucide-react";
+import { ChevronLeft, Minus, Plus, Plug } from "lucide-react";
 import { ErrorBox } from "../common/ErrorBox";
 
 interface AddProviderFlowProps {
@@ -401,28 +401,30 @@ export function AddProviderFlow({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-modal-overlay" onClick={onClose}>
       <div
-        className="w-[440px] max-h-[85vh] overflow-hidden rounded-md bg-modal-surface shadow-xl flex flex-col"
+        className="w-full max-w-lg max-h-[85vh] overflow-hidden rounded-md border border-border-outer bg-modal-surface shadow-xl flex flex-col"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header with optional back button */}
-        <div className="shrink-0 flex items-center gap-2 px-6 pt-6 pb-3">
+        <div className="shrink-0 flex items-center gap-2 border-b border-border-divider px-5 py-3 min-h-[var(--ui-dialog-zone-h)]">
+          <Plug className="h-5 w-5 text-text-tertiary " />
           {step !== "picker" && (
             <button
               onClick={() => setStep("picker")}
               className="text-text-tertiary hover:text-zinc-600 dark:hover:text-zinc-200"
+              aria-label={t("common.back")}
             >
               <ChevronLeft className="h-4 w-4" />
             </button>
           )}
-          <h3 className="text-sm font-semibold">
+          <h2 className="text-sm font-semibold text-text ">
             {step === "picker" && t("harness.availableProviders")}
             {step === "add" && (selectedProviderIsLocal ? t("harness.connectLocalProvider") : t("harness.addApiKey")) + " " + selectedProviderName}
             {step === "custom" && t("harness.addCustomProvider")}
-          </h3>
+          </h2>
         </div>
 
         {/* Scrollable content */}
-        <div className="flex-1 overflow-y-auto px-6 pb-2">
+        <div className="flex-1 overflow-y-auto px-5 py-4">
 
           {/* ── Step: Picker ── */}
           {step === "picker" && (
@@ -747,7 +749,7 @@ export function AddProviderFlow({
         </div>
 
         {/* Footer */}
-        <div className="shrink-0 flex items-center justify-between gap-2 border-t border-border-divider px-6 py-4">
+        <div className="shrink-0 flex items-center justify-between gap-2 border-t border-border-divider px-5 min-h-[var(--ui-dialog-zone-h)]">
           {/* Status on the left */}
           <div className="flex-1 min-w-0">
             {step === "add" && testResult && testResult.success && (
@@ -782,7 +784,7 @@ export function AddProviderFlow({
                 // the key and surfaces `pleaseEnterApiKey` inline — keep
                 // the button enabled so that hint can fire.
                 disabled={testing}
-                className="rounded-md bg-zinc-200 px-3 py-1.5 text-xs font-medium text-text hover:bg-zinc-300 disabled:opacity-50 dark:bg-zinc-700 dark:hover:bg-zinc-600"
+                className="flex items-center gap-2 rounded btn-accent px-3 py-1.5 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {testing ? t("harness.saving") : t("harness.save")}
               </button>
@@ -791,7 +793,7 @@ export function AddProviderFlow({
               <button
                 onClick={handleAddCustom}
                 disabled={!customProviderName.trim() || !customProviderId.trim() || !customBaseUrl.trim() || customTesting}
-                className="rounded-md bg-zinc-200 px-3 py-1.5 text-xs font-medium text-text hover:bg-zinc-300 disabled:opacity-50 dark:bg-zinc-700 dark:hover:bg-zinc-600"
+                className="flex items-center gap-2 rounded btn-accent px-3 py-1.5 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {customTesting ? t("harness.saving") : t("harness.save")}
               </button>
