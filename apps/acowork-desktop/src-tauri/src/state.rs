@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 
 use acowork_core::mqtt_proto::{BootstrapPhase, BootstrapState};
 
-use crate::gateway_client::GatewayClient;
+use crate::gateway_client::{GatewayAuth, GatewayClient};
 use crate::mqtt_client::SharedDesktopMqttClient;
 
 /// Gateway deployment mode, mirrors frontend `GatewayMode`.
@@ -112,6 +112,12 @@ pub struct AppState {
     ///   - Local mode  → `acowork_core::defaults::GATEWAY_HTTP_URL`
     ///   - Remote mode → user-configured URL
     pub gateway: Arc<tokio::sync::RwLock<GatewayClient>>,
+    /// Desktop-side mirror of the webview's account session (ADR-076
+    /// §决策 3). Shared with the [`GatewayClient`] held above: every request
+    /// carries its token and replays once after a transparent renewal.
+    /// Exposed here so the Tauri command layer can mirror the webview's
+    /// token without reaching into the HTTP client.
+    pub gateway_auth: Arc<GatewayAuth>,
     /// Active deployment mode. Set by `set_gateway_config` (called from frontend).
     pub gateway_mode: Arc<tokio::sync::RwLock<GatewayMode>>,
     /// Handle to the locally spawned Gateway process (None in remote mode,
@@ -163,8 +169,13 @@ impl AppState {
     ///   - base_url = acowork_core::defaults::GATEWAY_HTTP_URL
     ///   - exit policy = stop the owned Gateway on exit (historical)
     pub fn new() -> Self {
+        // One `GatewayAuth` shared by `AppState` (Tauri command layer) and
+        // the `GatewayClient` inside `gateway`.
+        let client = GatewayClient::new();
+        let gateway_auth = client.auth_handle();
         Self {
-            gateway: Arc::new(tokio::sync::RwLock::new(GatewayClient::new())),
+            gateway: Arc::new(tokio::sync::RwLock::new(client)),
+            gateway_auth,
             gateway_mode: Arc::new(tokio::sync::RwLock::new(GatewayMode::Local)),
             gateway_process: Arc::new(Mutex::new(None)),
             gateway_keep_running_on_exit: Arc::new(AtomicBool::new(false)),

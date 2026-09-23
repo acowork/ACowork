@@ -13,6 +13,9 @@ use reqwest::Response;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::Arc;
+use tauri::Emitter;
+use tokio::sync::watch;
 
 /// Default Gateway base URL (from shared core constants)
 const DEFAULT_BASE_URL: &str = defaults::GATEWAY_HTTP_URL;
@@ -93,6 +96,158 @@ impl std::fmt::Display for GatewayApiError {
 
 impl std::error::Error for GatewayApiError {}
 
+// ── Desktop ↔ Gateway account session (ADR-076 §决策 3) ────────────────
+
+/// Tauri event asking the webview to rotate the token pair.
+///
+/// Emitted when the Gateway answers 401 to a request that carried the
+/// mirrored access token. The webview owns the refresh token — it is the
+/// only party allowed to call `/api/auth/refresh`.
+pub const AUTH_REQUIRED_EVENT: &str = "gateway-auth-required";
+
+/// How long a 401 waits for the webview's renewed token before the
+/// original response is surfaced to the caller. Bounds the worst case
+/// (webview gone, session already dropped) to one visible failure
+/// instead of a hang.
+const AUTH_RENEW_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Desktop-side mirror of the webview's account session.
+///
+/// Under `AUTH_MODE=multi_user` every Gateway route except the public
+/// probes requires `Authorization: Bearer <access_token>`. The webview
+/// owns the token pair and is the only party that may rotate it: refresh
+/// rotation has no grace window, so two concurrent rotations would revoke
+/// the whole family (ADR-076 §10.1 #3). Rust therefore *mirrors* the token
+/// instead of managing it:
+///
+/// 1. [`GatewayClient`] attaches the mirrored token to every request,
+/// 2. a 401 emits [`AUTH_REQUIRED_EVENT`] and waits for the webview to push
+///    a newer token (or to clear it, meaning the session is over),
+/// 3. the request is replayed once with the fresh token.
+///
+/// The wait is keyed on [`AuthSnapshot::epoch`]: a 401 carries the epoch of
+/// the token it used, and only a *newer* epoch ends the wait — so a rotation
+/// that landed before the 401 was observed resolves immediately, and N
+/// parallel 401s ask the webview at most once.
+pub struct GatewayAuth {
+    tx: watch::Sender<AuthSnapshot>,
+    /// Webview handle used for the refresh event. Installed by the Tauri
+    /// setup hook; absent only before setup completes (and in tests).
+    app: std::sync::OnceLock<tauri::AppHandle>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct AuthSnapshot {
+    /// Set by the first non-empty [`GatewayAuth::set_access_token`] push: the
+    /// webview speaks the account protocol. `local` deployments never push a
+    /// token (ADR-076 §决策 12 — no token exists there), so a stray 401 there
+    /// fails fast instead of waiting for a rotation that cannot come. An
+    /// initial `None` (the bridge's boot-time mirror, before the mode is even
+    /// resolved) therefore must not arm this path either.
+    armed: bool,
+    access_token: Option<String>,
+    /// Bumped on every push — the ordering key for the 401 wait.
+    epoch: u64,
+    /// Highest epoch the webview has already been asked to renew. Dedupes
+    /// the event across concurrent 401s from the same token.
+    renew_requested_epoch: u64,
+}
+
+impl GatewayAuth {
+    fn new() -> Self {
+        Self {
+            tx: watch::channel(AuthSnapshot::default()).0,
+            app: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// Hand the client the webview handle used for [`AUTH_REQUIRED_EVENT`].
+    /// Called once from the Tauri setup hook.
+    pub fn install_app_handle(&self, app: tauri::AppHandle) {
+        let _ = self.app.set(app);
+    }
+
+    /// Mirror the webview's access token (ADR-076 §决策 3).
+    ///
+    /// `None` clears it — logout, or a refresh that ended the session. The
+    /// epoch advances either way so a waiting 401 is released with "no
+    /// session" instead of blocking until the timeout.
+    pub fn set_access_token(&self, token: Option<String>) {
+        let token = token.filter(|t| !t.trim().is_empty());
+        self.tx.send_modify(|s| {
+            // Only a *present* token arms the replay path: the webview mirrors
+            // `None` at boot (before the auth mode is resolved) and on logout.
+            s.armed |= token.is_some();
+            s.access_token = token;
+            s.epoch += 1;
+        });
+    }
+
+    /// Current token, its epoch, and whether the webview ever pushed a state.
+    fn snapshot(&self) -> (Option<String>, u64, bool) {
+        let s = self.tx.borrow();
+        (s.access_token.clone(), s.epoch, s.armed)
+    }
+
+    /// Wait for a token newer than `stale_epoch`, asking the webview to
+    /// rotate once. Returns the renewed token, or `None` when the session is
+    /// gone / the webview did not answer within [`AUTH_RENEW_TIMEOUT`].
+    async fn renew(&self, stale_epoch: u64) -> Option<String> {
+        // Fast path: something already rotated past the token we used —
+        // either another request's renewal or the webview's own 401 path.
+        let (token, epoch, _) = self.snapshot();
+        if epoch > stale_epoch {
+            return token;
+        }
+
+        // Ask the webview, at most once per observed epoch.
+        let ask = {
+            let mut ask = false;
+            self.tx.send_modify(|s| {
+                if s.renew_requested_epoch < stale_epoch {
+                    s.renew_requested_epoch = stale_epoch;
+                    ask = true;
+                }
+            });
+            ask
+        };
+        if ask {
+            match self.app.get() {
+                Some(app) => {
+                    if let Err(e) = app.emit(AUTH_REQUIRED_EVENT, ()) {
+                        tracing::warn!(error = %e, "failed to emit {AUTH_REQUIRED_EVENT}");
+                    }
+                }
+                None => tracing::warn!(
+                    "account 401 but no webview handle installed — cannot renew the token"
+                ),
+            }
+        }
+
+        let mut rx = self.tx.subscribe();
+        let wait = async {
+            loop {
+                if self.snapshot().1 > stale_epoch {
+                    return;
+                }
+                if rx.changed().await.is_err() {
+                    return;
+                }
+            }
+        };
+        if tokio::time::timeout(AUTH_RENEW_TIMEOUT, wait).await.is_err() {
+            tracing::warn!(
+                "account token renewal timed out after {}s — surfacing the 401",
+                AUTH_RENEW_TIMEOUT.as_secs()
+            );
+            return None;
+        }
+
+        let (token, epoch, _) = self.snapshot();
+        if epoch > stale_epoch { token } else { None }
+    }
+}
+
 /// Unified response parser for all Gateway API calls.
 ///
 /// - Success (2xx): deserializes the response body into `T`.
@@ -118,10 +273,39 @@ async fn parse_gateway_response<T: DeserializeOwned>(resp: Response) -> Result<T
     }
 }
 
+/// Build the multipart body of `POST /api/agents/install`.
+///
+/// A free function instead of inline code inside
+/// [`GatewayClient::install_agent`] because that request is rebuilt for the
+/// transparent 401 replay ([`GatewayClient::send`]) and a multipart body
+/// cannot be cloned.
+fn install_form(
+    package_bytes: &[u8],
+    dev_mode: bool,
+    node_id: Option<&str>,
+) -> Result<reqwest::multipart::Form> {
+    let mut form = reqwest::multipart::Form::new()
+        .part(
+            "package",
+            reqwest::multipart::Part::bytes(package_bytes.to_vec())
+                .file_name("package.agent")
+                .mime_str("application/octet-stream")?,
+        )
+        .text("dev_mode", dev_mode.to_string());
+    if let Some(node) = node_id {
+        form = form.text("node_id", node.to_string());
+    }
+    Ok(form)
+}
+
 /// Gateway HTTP client
 pub struct GatewayClient {
     client: reqwest::Client,
     base_url: String,
+    /// Account-session mirror handed to the Tauri command layer — see
+    /// [`GatewayAuth`]. Every request built through [`GatewayClient::send`]
+    /// carries its token and replays once after a renewal.
+    auth: Arc<GatewayAuth>,
 }
 
 /// Minimal mirror of Gateway's `SystemStatusResponse` — only the fields
@@ -154,7 +338,19 @@ impl GatewayClient {
             .timeout(std::time::Duration::from_secs(10))
             .build()
             .expect("failed to build reqwest client");
-        Self { client, base_url }
+        Self {
+            client,
+            base_url,
+            auth: Arc::new(GatewayAuth::new()),
+        }
+    }
+
+    /// The account-session mirror this client attaches to its requests.
+    ///
+    /// `AppState` holds the same handle, so the Tauri command layer can
+    /// mirror the webview's token without reaching into the HTTP client.
+    pub fn auth_handle(&self) -> Arc<GatewayAuth> {
+        self.auth.clone()
     }
 
     /// Get the current base URL
@@ -169,6 +365,52 @@ impl GatewayClient {
         self.base_url = url;
     }
 
+    /// Raw request builder against the Gateway, for the call sites that hit
+    /// an endpoint this client has no method for (`/api/agents/ensure`,
+    /// `/api/debug/mqtt/*`). Pair it with [`GatewayClient::send`] so the
+    /// request still carries the account credentials and the transparent
+    /// 401 replay.
+    pub fn request(&self, method: reqwest::Method, url: &str) -> reqwest::RequestBuilder {
+        self.client.request(method, url)
+    }
+
+    /// Issue a Gateway request with the caller's account credentials
+    /// attached, replaying it once after a transparent token renewal
+    /// (ADR-076 §决策 3).
+    ///
+    /// `build` is called at most twice rather than taking a ready
+    /// `RequestBuilder`: install / upload bodies are multipart streams,
+    /// which reqwest cannot clone, so a replay has to reconstruct the
+    /// request. Callers therefore pass a closure over owned data.
+    pub async fn send<F>(&self, build: F) -> Result<Response>
+    where
+        F: Fn() -> Result<reqwest::RequestBuilder>,
+    {
+        let (token, epoch, armed) = self.auth.snapshot();
+
+        let resp = match &token {
+            Some(t) => build()?.bearer_auth(t).send().await?,
+            None => build()?.send().await?,
+        };
+
+        // `local` deployments never push a token, so a 401 there is not an
+        // expired session — fail fast instead of waiting for a rotation.
+        if !armed || resp.status() != reqwest::StatusCode::UNAUTHORIZED {
+            return Ok(resp);
+        }
+
+        // 401 on a request that carried the session: the access token
+        // expired or was revoked. Ask the webview for a newer one and replay
+        // exactly once — a second 401 is a real authorization failure
+        // (disabled account, out-of-scope resource) and belongs to the
+        // caller.
+        let Some(fresh) = self.auth.renew(epoch).await else {
+            return Ok(resp);
+        };
+        tracing::info!("Gateway 401 — replaying the request with the renewed access token");
+        build()?.bearer_auth(fresh).send().await.map_err(Into::into)
+    }
+
     // ── Agent Management ───────────────────────────────────────────────
 
     /// `GET /api/status` — system status (ADR-055 D3 §6.3).
@@ -178,9 +420,7 @@ impl GatewayClient {
     /// ADR-058 W4 fixed the host derivation; this closes the port half).
     pub async fn system_status(&self) -> Result<SystemStatusInfo> {
         let resp = self
-            .client
-            .get(format!("{}/api/status", self.base_url))
-            .send()
+            .send(|| Ok(self.client.get(format!("{}/api/status", self.base_url))))
             .await?;
         parse_gateway_response(resp).await
     }
@@ -188,9 +428,7 @@ impl GatewayClient {
     /// `GET /api/agents`
     pub async fn list_agents(&self) -> Result<Vec<AgentListEntry>> {
         let resp = self
-            .client
-            .get(format!("{}/api/agents", self.base_url))
-            .send()
+            .send(|| Ok(self.client.get(format!("{}/api/agents", self.base_url))))
             .await?;
         parse_gateway_response(resp).await
     }
@@ -198,9 +436,7 @@ impl GatewayClient {
     /// `GET /api/agents/:id`
     pub async fn get_agent_detail(&self, agent_id: &str) -> Result<AgentDetailResponse> {
         let resp = self
-            .client
-            .get(format!("{}/api/agents/{}", self.base_url, agent_id))
-            .send()
+            .send(|| Ok(self.client.get(format!("{}/api/agents/{}", self.base_url, agent_id))))
             .await?;
         parse_gateway_response(resp).await
     }
@@ -222,24 +458,14 @@ impl GatewayClient {
         dev_mode: bool,
         node_id: Option<&str>,
     ) -> Result<OperationAck> {
-        let mut form = reqwest::multipart::Form::new()
-            .part(
-                "package",
-                reqwest::multipart::Part::bytes(package_bytes.to_vec())
-                    .file_name("package.agent")
-                    .mime_str("application/octet-stream")
-                    .map_err(|e| anyhow::anyhow!("Invalid mime: {}", e))?,
-            )
-            .text("dev_mode", dev_mode.to_string());
-        if let Some(node) = node_id {
-            form = form.text("node_id", node.to_string());
-        }
-
+        let url = format!("{}/api/agents/install", self.base_url);
         let resp = self
-            .client
-            .post(format!("{}/api/agents/install", self.base_url))
-            .multipart(form)
-            .send()
+            .send(|| {
+                Ok(self
+                    .client
+                    .post(&url)
+                    .multipart(install_form(package_bytes, dev_mode, node_id)?))
+            })
             .await?;
         parse_gateway_response(resp).await
     }
@@ -260,9 +486,7 @@ impl GatewayClient {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
             let resp = self
-                .client
-                .get(format!("{}/api/agents/{}", self.base_url, agent_id))
-                .send()
+                .send(|| Ok(self.client.get(format!("{}/api/agents/{}", self.base_url, agent_id))))
                 .await?;
             if resp.status().is_success() {
                 return parse_gateway_response(resp).await;
@@ -301,13 +525,15 @@ impl GatewayClient {
             );
         }
         let resp = self
-            .client
-            .post(format!(
-                "{}/api/agents/{}/manifest/avatar",
-                self.base_url, agent_id
-            ))
-            .json(&body)
-            .send()
+            .send(|| {
+                Ok(self
+                    .client
+                    .post(format!(
+                        "{}/api/agents/{}/manifest/avatar",
+                        self.base_url, agent_id
+                    ))
+                    .json(&body))
+            })
             .await?;
         parse_gateway_response(resp).await
     }
@@ -322,23 +548,22 @@ impl GatewayClient {
         relative_path: &str,
         bytes: &[u8],
     ) -> Result<serde_json::Value> {
-        let form = reqwest::multipart::Form::new().part(
-            "file",
-            reqwest::multipart::Part::bytes(bytes.to_vec())
-                .file_name("upload")
-                .mime_str("application/octet-stream")
-                .map_err(|e| anyhow::anyhow!("Invalid mime: {}", e))?,
+        let url = format!(
+            "{}/api/agents/{}/manifest/file?path={}",
+            self.base_url,
+            agent_id,
+            urlencoded(relative_path)
         );
         let resp = self
-            .client
-            .post(format!(
-                "{}/api/agents/{}/manifest/file?path={}",
-                self.base_url,
-                agent_id,
-                urlencoded(relative_path)
-            ))
-            .multipart(form)
-            .send()
+            .send(|| {
+                let form = reqwest::multipart::Form::new().part(
+                    "file",
+                    reqwest::multipart::Part::bytes(bytes.to_vec())
+                        .file_name("upload")
+                        .mime_str("application/octet-stream")?,
+                );
+                Ok(self.client.post(&url).multipart(form))
+            })
             .await?;
         parse_gateway_response(resp).await
     }
@@ -350,18 +575,17 @@ impl GatewayClient {
         bytes: &[u8],
         file_name: &str,
     ) -> Result<serde_json::Value> {
-        let form = reqwest::multipart::Form::new().part(
-            "file",
-            reqwest::multipart::Part::bytes(bytes.to_vec())
-                .file_name(file_name.to_string())
-                .mime_str("application/octet-stream")
-                .map_err(|e| anyhow::anyhow!("Invalid mime: {}", e))?,
-        );
+        let url = format!("{}/api/user/avatar-file", self.base_url);
         let resp = self
-            .client
-            .post(format!("{}/api/user/avatar-file", self.base_url))
-            .multipart(form)
-            .send()
+            .send(|| {
+                let form = reqwest::multipart::Form::new().part(
+                    "file",
+                    reqwest::multipart::Part::bytes(bytes.to_vec())
+                        .file_name(file_name.to_string())
+                        .mime_str("application/octet-stream")?,
+                );
+                Ok(self.client.post(&url).multipart(form))
+            })
             .await?;
         parse_gateway_response(resp).await
     }
@@ -369,9 +593,7 @@ impl GatewayClient {
     /// `DELETE /api/agents/:id`
     pub async fn uninstall_agent(&self, agent_id: &str) -> Result<GenericMessageResponse> {
         let resp = self
-            .client
-            .delete(format!("{}/api/agents/{}", self.base_url, agent_id))
-            .send()
+            .send(|| Ok(self.client.delete(format!("{}/api/agents/{}", self.base_url, agent_id))))
             .await?;
         parse_gateway_response(resp).await
     }
@@ -384,10 +606,12 @@ impl GatewayClient {
     ) -> Result<GenericMessageResponse> {
         let body = serde_json::json!({ "dev_mode": dev_mode });
         let resp = self
-            .client
-            .post(format!("{}/api/agents/{}/start", self.base_url, agent_id))
-            .json(&body)
-            .send()
+            .send(|| {
+                Ok(self
+                    .client
+                    .post(format!("{}/api/agents/{}/start", self.base_url, agent_id))
+                    .json(&body))
+            })
             .await?;
         parse_gateway_response(resp).await
     }
@@ -395,9 +619,11 @@ impl GatewayClient {
     /// `POST /api/agents/:id/stop`
     pub async fn stop_agent(&self, agent_id: &str) -> Result<GenericMessageResponse> {
         let resp = self
-            .client
-            .post(format!("{}/api/agents/{}/stop", self.base_url, agent_id))
-            .send()
+            .send(|| {
+                Ok(self
+                    .client
+                    .post(format!("{}/api/agents/{}/stop", self.base_url, agent_id)))
+            })
             .await?;
         parse_gateway_response(resp).await
     }
@@ -405,12 +631,12 @@ impl GatewayClient {
     /// `POST /api/agents/:id/restart-debug`
     pub async fn restart_agent_in_debug(&self, agent_id: &str) -> Result<GenericMessageResponse> {
         let resp = self
-            .client
-            .post(format!(
-                "{}/api/agents/{}/restart-debug",
-                self.base_url, agent_id
-            ))
-            .send()
+            .send(|| {
+                Ok(self.client.post(format!(
+                    "{}/api/agents/{}/restart-debug",
+                    self.base_url, agent_id
+                )))
+            })
             .await?;
         parse_gateway_response(resp).await
     }
@@ -454,11 +680,15 @@ impl GatewayClient {
 
         let method = reqwest::Method::from_bytes(method.as_bytes())
             .map_err(|e| anyhow::anyhow!("invalid HTTP method '{}': {}", method, e))?;
-        let mut req = self.client.request(method, &url);
-        if let Some(json) = body {
-            req = req.json(json);
-        }
-        let resp = req.send().await?;
+        let resp = self
+            .send(|| {
+                let mut req = self.client.request(method.clone(), &url);
+                if let Some(json) = body {
+                    req = req.json(json);
+                }
+                Ok(req)
+            })
+            .await?;
         let status = resp.status();
         let text = resp.text().await?;
 
@@ -504,10 +734,12 @@ impl GatewayClient {
             "mode": mode,
         });
         let resp = self
-            .client
-            .post(format!("{}/api/agents/{}/clone", self.base_url, agent_id))
-            .json(&body)
-            .send()
+            .send(|| {
+                Ok(self
+                    .client
+                    .post(format!("{}/api/agents/{}/clone", self.base_url, agent_id))
+                    .json(&body))
+            })
             .await?;
         parse_gateway_response(resp).await
     }
@@ -522,13 +754,15 @@ impl GatewayClient {
     ) -> Result<PreparePublishResponse> {
         let body = serde_json::json!({ "clean": clean });
         let resp = self
-            .client
-            .post(format!(
-                "{}/api/agents/{}/publish/prepare",
-                self.base_url, agent_id
-            ))
-            .json(&body)
-            .send()
+            .send(|| {
+                Ok(self
+                    .client
+                    .post(format!(
+                        "{}/api/agents/{}/publish/prepare",
+                        self.base_url, agent_id
+                    ))
+                    .json(&body))
+            })
             .await?;
         parse_gateway_response(resp).await
     }
@@ -545,13 +779,15 @@ impl GatewayClient {
             body["key_dir"] = serde_json::Value::String(dir.to_string());
         }
         let resp = self
-            .client
-            .post(format!(
-                "{}/api/agents/{}/publish/build",
-                self.base_url, agent_id
-            ))
-            .json(&body)
-            .send()
+            .send(|| {
+                Ok(self
+                    .client
+                    .post(format!(
+                        "{}/api/agents/{}/publish/build",
+                        self.base_url, agent_id
+                    ))
+                    .json(&body))
+            })
             .await?;
         parse_gateway_response(resp).await
     }
@@ -559,12 +795,12 @@ impl GatewayClient {
     /// `POST /api/agents/:id/publish/export`
     pub async fn export_package(&self, agent_id: &str) -> Result<ExportPackageResponse> {
         let resp = self
-            .client
-            .post(format!(
-                "{}/api/agents/{}/publish/export",
-                self.base_url, agent_id
-            ))
-            .send()
+            .send(|| {
+                Ok(self.client.post(format!(
+                    "{}/api/agents/{}/publish/export",
+                    self.base_url, agent_id
+                )))
+            })
             .await?;
         parse_gateway_response(resp).await
     }
@@ -611,32 +847,34 @@ impl GatewayClient {
         }
 
         let file_bytes = tokio::fs::read(file_path).await?;
-        let part = reqwest::multipart::Part::bytes(file_bytes)
-            .file_name(file_name.to_string())
-            .mime_str("application/octet-stream")?;
 
+        let url = format!(
+            "{}/api/agents/{}/sessions/{}/files",
+            self.base_url,
+            urlencoded(agent_id),
+            urlencoded(session_id),
+        );
         // Backend handler accepts `file` + optional `format` / `width` /
         // `height` as flat multipart fields. Unknown fields are ignored.
-        let mut form = reqwest::multipart::Form::new()
-            .part("file", part)
-            .text("format", format.to_string());
-        if let Some(w) = width {
-            form = form.text("width", w.to_string());
-        }
-        if let Some(h) = height {
-            form = form.text("height", h.to_string());
-        }
-
+        //
+        // The form is rebuilt on each attempt: `send` replays the request
+        // once after a token renewal, and multipart bodies cannot be cloned.
         let resp = self
-            .client
-            .post(format!(
-                "{}/api/agents/{}/sessions/{}/files",
-                self.base_url,
-                urlencoded(agent_id),
-                urlencoded(session_id),
-            ))
-            .multipart(form)
-            .send()
+            .send(|| {
+                let part = reqwest::multipart::Part::bytes(file_bytes.clone())
+                    .file_name(file_name.to_string())
+                    .mime_str("application/octet-stream")?;
+                let mut form = reqwest::multipart::Form::new()
+                    .part("file", part)
+                    .text("format", format.to_string());
+                if let Some(w) = width {
+                    form = form.text("width", w.to_string());
+                }
+                if let Some(h) = height {
+                    form = form.text("height", h.to_string());
+                }
+                Ok(self.client.post(&url).multipart(form))
+            })
             .await?;
         parse_gateway_response(resp).await
     }
@@ -646,9 +884,7 @@ impl GatewayClient {
     /// `GET /api/providers`
     pub async fn list_keys(&self) -> Result<Vec<VaultKeyEntry>> {
         let resp = self
-            .client
-            .get(format!("{}/api/providers", self.base_url))
-            .send()
+            .send(|| Ok(self.client.get(format!("{}/api/providers", self.base_url))))
             .await?;
         parse_gateway_response(resp).await
     }
@@ -727,10 +963,12 @@ impl GatewayClient {
             body["compact_model"] = serde_json::Value::String(cm.to_string());
         }
         let resp = self
-            .client
-            .post(format!("{}/api/providers", self.base_url))
-            .json(&body)
-            .send()
+            .send(|| {
+                Ok(self
+                    .client
+                    .post(format!("{}/api/providers", self.base_url))
+                    .json(&body))
+            })
             .await?;
         parse_gateway_response(resp).await
     }
@@ -747,7 +985,7 @@ impl GatewayClient {
             Some(aid) => format!("{}/api/providers/{}/keys/{}", self.base_url, provider, aid),
             None => format!("{}/api/providers/{}", self.base_url, provider),
         };
-        let resp = self.client.delete(url).send().await?;
+        let resp = self.send(|| Ok(self.client.delete(&url))).await?;
         parse_gateway_response(resp).await
     }
 
@@ -774,11 +1012,9 @@ impl GatewayClient {
             "{}/api/providers/{}/keys/{}",
             self.base_url, provider, account_id
         );
+        let body = serde_json::Value::Object(body);
         let resp = self
-            .client
-            .patch(url)
-            .json(&serde_json::Value::Object(body))
-            .send()
+            .send(|| Ok(self.client.patch(&url).json(&body)))
             .await?;
         parse_gateway_response(resp).await
     }
@@ -858,10 +1094,12 @@ impl GatewayClient {
             );
         }
         let resp = self
-            .client
-            .put(format!("{}/api/providers/{}", self.base_url, provider))
-            .json(&body)
-            .send()
+            .send(|| {
+                Ok(self
+                    .client
+                    .put(format!("{}/api/providers/{}", self.base_url, provider))
+                    .json(&body))
+            })
             .await?;
         parse_gateway_response(resp).await
     }
@@ -871,9 +1109,7 @@ impl GatewayClient {
     /// `GET /api/search/keys` — list search provider keys (masked)
     pub async fn list_search_keys(&self) -> Result<Vec<SearchVaultKeyEntry>> {
         let resp = self
-            .client
-            .get(format!("{}/api/search/keys", self.base_url))
-            .send()
+            .send(|| Ok(self.client.get(format!("{}/api/search/keys", self.base_url))))
             .await?;
         parse_gateway_response(resp).await
     }
@@ -892,10 +1128,12 @@ impl GatewayClient {
             body["base_url"] = serde_json::Value::String(url.to_string());
         }
         let resp = self
-            .client
-            .post(format!("{}/api/search/keys", self.base_url))
-            .json(&body)
-            .send()
+            .send(|| {
+                Ok(self
+                    .client
+                    .post(format!("{}/api/search/keys", self.base_url))
+                    .json(&body))
+            })
             .await?;
         parse_gateway_response(resp).await
     }
@@ -903,9 +1141,7 @@ impl GatewayClient {
     /// `DELETE /api/search/keys/:provider` — remove a search provider key
     pub async fn remove_search_key(&self, provider: &str) -> Result<GenericMessageResponse> {
         let resp = self
-            .client
-            .delete(format!("{}/api/search/keys/{}", self.base_url, provider))
-            .send()
+            .send(|| Ok(self.client.delete(format!("{}/api/search/keys/{}", self.base_url, provider))))
             .await?;
         parse_gateway_response(resp).await
     }
@@ -930,10 +1166,12 @@ impl GatewayClient {
             );
         }
         let resp = self
-            .client
-            .put(format!("{}/api/search/keys/{}", self.base_url, provider))
-            .json(&body)
-            .send()
+            .send(|| {
+                Ok(self
+                    .client
+                    .put(format!("{}/api/search/keys/{}", self.base_url, provider))
+                    .json(&body))
+            })
             .await?;
         parse_gateway_response(resp).await
     }

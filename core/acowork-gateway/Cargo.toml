@@ -72,6 +72,14 @@ regex.workspace = true
 # required so `IfWatcher` is re-exported from the platform module.
 if-watch = { version = "3", features = ["tokio"] }
 
+# Hidden-echo password prompt for first-boot admin setup (TTY path).
+# Cross-platform (macOS / Linux / Windows + msys2 / Git bash). Single-purpose
+# crate, no transitive surprise. ADR-076 §决策 12 v2.
+rpassword = "7"
+# Best-effort stack-buffer wipe for the plaintext password we read from stdin
+# or `--password-file`. ADR-076 §决策 12 v2.
+zeroize = "1"
+
 # Interactive CLI (feature-gated)
 dialoguer = { workspace = true, optional = true }
 

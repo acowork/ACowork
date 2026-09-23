@@ -6,6 +6,7 @@ import "./styles/globals.css";
 import { initMonaco } from "./lib/monacoBootstrap";
 import { installMainThreadProbe, installLongTaskObserver } from "./lib/mainThreadProbe";
 import { installAuthFetchInterceptor } from "./lib/authFetch";
+import { installGatewayAuthBridge } from "./lib/gatewayAuthBridge";
 // ponytail: diagnostic — remove once the slow-start report is root-caused.
 installMainThreadProbe();
 installLongTaskObserver();
@@ -13,6 +14,11 @@ installLongTaskObserver();
 // ADR-076 §决策 3: attach the login token to every Gateway request and
 // rotate it on 401. Installed before App renders so no child fetch escapes.
 installAuthFetchInterceptor();
+
+// ADR-076 §决策 3: the Rust command layer is a second HTTP client on the same
+// session. Mirror the access token into it and answer its 401 renew requests
+// from the store's single-flight rotation (see lib/gatewayAuthBridge.ts).
+installGatewayAuthBridge();
 
 // ═══ Bundled fonts (macOS uses -apple-system → SF Pro natively;
 // Win/Linux fall through to Inter / Noto Sans SC below) ═══

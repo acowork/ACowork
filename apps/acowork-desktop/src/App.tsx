@@ -5,6 +5,7 @@ import { AppLayout } from "./components/layout/AppLayout";
 import { SplashScreen } from "./components/layout/SplashScreen";
 import { OnboardingFlow } from "./components/onboarding/OnboardingFlow";
 import { LoginView } from "./components/account/LoginView";
+import { SetupRequiredView } from "./components/account/SetupRequiredView";
 import { ToastProvider } from "./components/common/ToastProvider";
 import { ErrorBoundary } from "./components/common/ErrorBoundary";
 import { useAuthStore } from "./stores/authStore";
@@ -31,10 +32,15 @@ function App() {
   // ADR-076 §决策 12: resolve the deployment auth mode once the Gateway is
   // reachable, and restore a stored session under multi_user. Runs for the
   // recovery-reload path too (gatewayReady starts true).
+  const [authProbed, setAuthProbed] = useState(false);
   useEffect(() => {
-    if (!gatewayReady || !onboardingDone) return;
-    void useAuthStore.getState().init();
-  }, [gatewayReady, onboardingDone]);
+    if (!gatewayReady) return;
+    setAuthProbed(false);
+    void useAuthStore
+      .getState()
+      .init()
+      .finally(() => setAuthProbed(true));
+  }, [gatewayReady]);
 
   const authStatus = useAuthStore((s) => s.status);
 
@@ -136,7 +142,18 @@ function App() {
   // already happened, so we need the candidate set up before the
   // banner's first paint.
 
-  if (!gatewayReady && onboardingDone) {
+  // Gateway boot is the first stage of EVERY topology — a fresh install
+  // included. It used to be gated on `onboardingDone`, which broke the
+  // "Settings → reset onboarding" path: that action only drops the
+  // localStorage flag, so with the gate in place SplashScreen never mounted,
+  // `gatewayReady` stayed false and `authStore.init()` never ran — the profile
+  // tab kept reporting "no profile" no matter what the wizard wrote.
+  //
+  // `bootGateway` is the only path that pushes the Gateway config into Rust,
+  // spawns/adopts a local Gateway, ensures the System Agent and connects MQTT.
+  // OnboardingFlow's GatewayStep reuses the result: it finds the Gateway
+  // already connected and only offers the mode/URL switch.
+  if (!gatewayReady) {
     return (
       <div className="h-screen w-screen overflow-hidden">
         <SplashScreen onReady={() => setGatewayReady(true)} />
@@ -147,15 +164,23 @@ function App() {
   return (
     <ErrorBoundary>
       <ToastProvider>
-        {!onboardingDone ? (
-          <OnboardingFlow onComplete={() => setOnboardingDone(true)} />
-        ) : authStatus === "logged_out" ? (
+        {authStatus === "logged_out" ? (
           <LoginView />
-        ) : authStatus === "unknown" ? (
-          // Gateway is reachable but the auth mode has not resolved yet —
-          // a brief window (one `/api/status` round-trip). Show a bare
-          // surface rather than flashing the main UI before LoginView.
+        ) : authStatus === "setup_required" ? (
+          <SetupRequiredView />
+        ) : authStatus === "unknown" && !authProbed ? (
+          // Auth probe in flight: the deployment mode has not resolved, or a
+          // stored session's `/api/auth/me` has not answered yet. Show a bare
+          // surface rather than flashing the main UI before LoginView. Once
+          // the probe settles, an `unknown` status can only mean the Gateway
+          // never answered `/api/status` — that falls through below instead of
+          // hanging on a blank screen.
           <div className="flex h-screen w-screen items-center justify-center bg-app" />
+        ) : !onboardingDone ? (
+          // ADR-076 §决策 7: the account comes first — under `multi_user` the
+          // wizard PATCHES the signed-in account, so it must not run before
+          // the login gate.
+          <OnboardingFlow onComplete={() => setOnboardingDone(true)} />
         ) : (
           <AppLayout />
         )}

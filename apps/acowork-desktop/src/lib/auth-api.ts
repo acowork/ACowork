@@ -65,19 +65,30 @@ async function postJson(url: string, body: unknown, accessToken?: string): Promi
  * `auth_mode` — treated as `local` so the Desktop never gates a backend that
  * has no account system. `registration_open` is `false` whenever the account
  * system is off, so a stale flag can never offer a dead invite button.
+ *
+ * `requiresSetup` (ADR-076 §决策 12 v2) signals first-boot restricted mode.
+ * `false` whenever the account system is off (`local`) or after the
+ * operator completed setup, so the field is safe to ignore on legacy
+ * gateways that predate the flag.
  */
 export async function fetchAuthPolicy(
   gatewayUrl: string,
-): Promise<{ authMode: AuthMode; registrationOpen: boolean }> {
+): Promise<{
+  authMode: AuthMode;
+  registrationOpen: boolean;
+  requiresSetup: boolean;
+}> {
   const resp = await fetch(`${gatewayUrl}/api/status`);
   if (!resp.ok) throw new AuthApiError(resp.status, await readError(resp));
   const data = (await resp.json()) as {
     auth_mode?: AuthMode;
     registration_open?: boolean;
+    requires_setup?: boolean;
   };
   return {
     authMode: data.auth_mode === "multi_user" ? "multi_user" : "local",
     registrationOpen: data.registration_open === true,
+    requiresSetup: data.requires_setup === true,
   };
 }
 

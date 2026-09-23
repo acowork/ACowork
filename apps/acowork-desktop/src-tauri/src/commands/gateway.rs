@@ -151,6 +151,27 @@ pub async fn get_gateway_config(
     })
 }
 
+/// Mirror the webview's account session into Rust (ADR-076 §决策 3).
+///
+/// The webview owns the token pair — it is the only party allowed to call
+/// `/api/auth/refresh`, because refresh rotation has no grace window and
+/// two concurrent rotations would revoke the whole family (ADR-076
+/// §10.1 #3). Rust therefore only mirrors the current access token, so that
+/// every command-issued Gateway request carries `Authorization: Bearer`,
+/// and asks the webview for a newer one when the Gateway answers 401
+/// (`gateway-auth-required` event → webview rotates → this command again).
+///
+/// `None` clears the mirror (logout, or a refresh that ended the session)
+/// and releases any request still waiting on a renewal.
+#[tauri::command]
+pub async fn set_gateway_access_token(
+    state: tauri::State<'_, AppState>,
+    access_token: Option<String>,
+) -> Result<(), String> {
+    state.gateway_auth.set_access_token(access_token);
+    Ok(())
+}
+
 /// Ensure a Gateway is running at the configured URL (local mode) and
 /// wait for bootstrap READY.
 ///
@@ -366,20 +387,26 @@ pub async fn ensure_system_agent(
     let mut attempt: usize = 0;
     loop {
         attempt += 1;
-        let form = reqwest::multipart::Form::new().part(
-            "package",
-            reqwest::multipart::Part::bytes(package_bytes.clone())
-                .file_name("com.acowork.system.agent")
-                .mime_str("application/octet-stream")
-                .map_err(|e| DependencyNotReady::install_failed(format!("Invalid package mime: {}", e)))?,
-        );
+        // Routed through `GatewayClient` instead of the 3s probe client
+        // above: `/api/agents/ensure` is not a public Gateway path, so under
+        // `AUTH_MODE=multi_user` a bare request answers 401 (ADR-076). Going
+        // through `send` also gets the transparent token-renewal replay.
+        let gw = state.gateway.read().await;
+        let ensure_url = format!("{}/api/agents/ensure", gw.base_url());
+        let result = gw
+            .send(|| {
+                let form = reqwest::multipart::Form::new().part(
+                    "package",
+                    reqwest::multipart::Part::bytes(package_bytes.clone())
+                        .file_name("com.acowork.system.agent")
+                        .mime_str("application/octet-stream")?,
+                );
+                Ok(gw.request(reqwest::Method::POST, &ensure_url).multipart(form))
+            })
+            .await;
+        drop(gw);
 
-        match client
-            .post(format!("{}/api/agents/ensure", gateway_url))
-            .multipart(form)
-            .send()
-            .await
-        {
+        match result {
             Ok(resp) => {
                 if resp.status().is_success() {
                     // 200 = already present, 202 = install dispatched.
@@ -1061,19 +1088,16 @@ async fn call_mqtt_debug_endpoint(
     state: tauri::State<'_, AppState>,
     action: &str,
 ) -> Result<MqttDebugResponse, String> {
-    let gateway_url = state.gateway.read().await.base_url().to_string();
-    let url = format!("{}/api/debug/mqtt/{}", gateway_url, action);
-
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-        .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
-
-    let resp = client
-        .post(&url)
-        .send()
+    // Routed through `GatewayClient` so the request carries the account
+    // credentials and the transparent 401 replay (ADR-076 §决策 3) — this
+    // debug endpoint is not a public Gateway path.
+    let gw = state.gateway.read().await;
+    let url = format!("{}/api/debug/mqtt/{}", gw.base_url(), action);
+    let resp = gw
+        .send(|| Ok(gw.request(reqwest::Method::POST, &url)))
         .await
         .map_err(|e| format!("Gateway unreachable at {}: {}", url, e))?;
+    drop(gw);
 
     let status = resp.status();
     let content_type = resp

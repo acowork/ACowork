@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { useUserProfileStore } from "../../stores/userProfileStore";
 import { UserAvatar, BUILTIN_ICONS, BUILTIN_ICON_IDS } from "../common/UserAvatar";
-import { fetchActiveUser, updateUser } from "../../lib/gateway-api";
+import { fetchSelfProfile, updateSelfProfile } from "../../lib/selfProfile";
 import type { BackendUserProfile, AvatarAssetEntry } from "../../lib/types";
 import {
   fetchUserAvatarConfig,
@@ -126,10 +126,12 @@ export function ProfileTab() {
   const [city, setCity] = useState("");
   const [occupation, setOccupation] = useState("");
 
-  // Load active user from backend on mount
+  // Load the caller's own profile from backend on mount. Mode-aware
+  // (`lib/selfProfile.ts`): `GET /api/auth/me` under multi_user, the
+  // active-user record under local.
   useEffect(() => {
     let cancelled = false;
-    fetchActiveUser()
+    fetchSelfProfile()
       .then((user) => {
         if (cancelled) return;
         setBackendUser(user);
@@ -162,11 +164,11 @@ export function ProfileTab() {
   // ── Save helpers ──────────────────────────────────────────────────
 
   /** Save a single field to backend (debounced via onBlur) */
-  const saveField = useCallback(async (userId: string, field: string, value: string) => {
+  const saveField = useCallback(async (field: string, value: string) => {
     setSaving(true);
     setSavedMsg(null);
     try {
-      const updated = await updateUser(userId, { [field]: value });
+      const updated = await updateSelfProfile({ [field]: value });
       setBackendUser(updated);
       setSavedMsg("saved");
       setTimeout(() => setSavedMsg(null), 2000);
@@ -186,7 +188,7 @@ export function ProfileTab() {
     setProfile({ displayName: trimmed });
     // Also update backend if we have a user
     if (backendUser) {
-      saveField(backendUser.user_id, "display_name", trimmed);
+      saveField("display_name", trimmed);
     }
   }, [backendUser, setProfile, saveField]);
 
@@ -483,7 +485,7 @@ export function ProfileTab() {
                     log.debug("[ProfileTab] changeLanguage resolved, i18n.language =", i18n.language);
                   });
                   if (backendUser?.user_id) {
-                    saveField(backendUser.user_id, "language", lng);
+                    saveField("language", lng);
                   }
                 }}
                 options={languages.map((l) => ({ value: l.value, label: l.label }))}
@@ -497,7 +499,7 @@ export function ProfileTab() {
                 value={timezone}
                 onChange={(tz) => {
                   setTimezone(tz);
-                  saveField(backendUser.user_id, "timezone", tz);
+                  saveField("timezone", tz);
                 }}
                 options={TIMEZONES.map((tz) => ({ value: tz, label: tz }))}
               />
@@ -510,10 +512,10 @@ export function ProfileTab() {
                 type="text"
                 value={city}
                 onChange={(e) => setCity(e.target.value)}
-                onBlur={() => saveField(backendUser.user_id, "city", city.trim())}
+                onBlur={() => saveField("city", city.trim())}
                 onKeyDown={(e) => {
                   if (e.key === "Enter") {
-                    saveField(backendUser.user_id, "city", city.trim());
+                    saveField("city", city.trim());
                     (e.target as HTMLInputElement).blur();
                   }
                 }}
@@ -529,10 +531,10 @@ export function ProfileTab() {
                 type="text"
                 value={occupation}
                 onChange={(e) => setOccupation(e.target.value)}
-                onBlur={() => saveField(backendUser.user_id, "occupation", occupation.trim())}
+                onBlur={() => saveField("occupation", occupation.trim())}
                 onKeyDown={(e) => {
                   if (e.key === "Enter") {
-                    saveField(backendUser.user_id, "occupation", occupation.trim());
+                    saveField("occupation", occupation.trim());
                     (e.target as HTMLInputElement).blur();
                   }
                 }}

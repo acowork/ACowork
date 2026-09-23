@@ -7,6 +7,7 @@ use clap::{Parser, Subcommand};
 use crate::config::GatewayConfig;
 use crate::error::GatewayError;
 use crate::gateway::Gateway;
+use std::io::IsTerminal;
 use std::sync::Arc;
 
 /// Global reference to the SizeRollingFileAppender for Gateway log file count
@@ -225,6 +226,23 @@ pub enum Commands {
         #[command(subcommand)]
         cmd: NodesCommands,
     },
+
+    /// First-boot admin password setup (ADR-076 §决策 12 v2).
+    ///
+    /// Sets the password of the passwordless `admin` account that the
+    /// Gateway seeds on a fresh install. Does NOT start the Gateway.
+    /// For interactive TTY startup use the daemon's prompt instead.
+    AdminSetup {
+        /// Read password from this file (first line, trimmed).
+        /// Useful for systemd `EnvironmentFile=` / k8s `Secret` mounts.
+        #[arg(long, value_name = "PATH", conflicts_with = "password_stdin")]
+        password_file: Option<String>,
+
+        /// Read password from stdin (first line, trimmed).
+        /// Use this when piping from another process: `vault kv get ... | acowork-gateway admin-setup --password-stdin`.
+        #[arg(long, conflicts_with = "password_file")]
+        password_stdin: bool,
+    },
 }
 
 /// Node Agent subcommands (ADR-055 §6.13.3).
@@ -309,6 +327,12 @@ impl Cli {
         // (the enrollment token store lives under it) — captured before
         // config moves into Gateway::new.
         let data_dir = config.data_dir.clone();
+        // ADR-076 §决策 12 v2: the `admin-setup` subcommand needs the
+        // configured password policy + resolved auth mode to validate the
+        // new password. Captured here so we can still build the gateway
+        // (which consumes `config`).
+        let admin_setup_policy = config.multi_user.password_policy.clone();
+        let admin_setup_auth_mode = config.effective_auth_mode();
         let gateway = Gateway::new(config)?;
         match self.command {
             Some(Commands::Install { package, node }) => {
@@ -463,7 +487,109 @@ impl Cli {
                 println!("\nPass it to a node on first boot:");
                 println!("  acowork-node start --token <token>");
             }
+            Some(Commands::AdminSetup { password_file, password_stdin }) => {
+                // ADR-076 §决策 12 v2: first-boot admin password setup.
+                // Runs synchronously, no Gateway start. The AccountStore
+                // resolution matches `Gateway::new` — load policy from the
+                // same TOML, build the same `AuthService`, call
+                // `set_admin_password`.
+                if !admin_setup_auth_mode.is_multi_user() {
+                    eprintln!(
+                        "admin-setup requires AUTH_MODE=multi_user (resolved mode: {admin_setup_auth_mode})."
+                    );
+                    eprintln!(
+                        "Either set `auth_mode = \"multi_user\"` in gateway.toml or remove \
+                         this invocation — local-mode deployments do not have an admin account."
+                    );
+                    return Err(GatewayError::Config(format!(
+                        "admin-setup requires multi_user mode (got {admin_setup_auth_mode})"
+                    )));
+                }
+                let svc = crate::auth::AuthService::new(
+                    std::path::Path::new(&data_dir),
+                    admin_setup_policy.clone(),
+                    None, // never seed via CLI subcommand path
+                )
+                .map_err(|e| GatewayError::Config(format!("failed to init AuthService: {e}")))?;
+                let mut password = read_admin_password(password_file.as_deref(), password_stdin)
+                    .map_err(GatewayError::Config)?;
+                svc.set_admin_password(&password)
+                    .map_err(GatewayError::Config)?;
+                // Zeroize the local buffer immediately — the Argon2id hash
+                // is the only durable artifact.
+                zeroize::Zeroize::zeroize(&mut password);
+                println!("Admin password set. Restart gateway to serve requests.");
+                return Ok(());
+            }
             None => {
+                // ADR-076 §决策 12 v3: first-boot admin setup is an
+                // *independent* operation, decoupled from whether the
+                // caller also asked the daemon to start. Two reasons:
+                //
+                //  1. UX — `acowork-gateway admin-setup` is the documented
+                //     entry point, but if the operator forgets that and
+                //     just runs the bare binary on a fresh install we
+                //     shouldn't dead-end them at a help banner.
+                //  2. Safety — the prompt path must NEVER silently start a
+                //     daemon afterwards. The operator should see the
+                //     prompt, set the password, then explicitly choose to
+                //     run with `--daemon` (or skip daemon entirely).
+                //
+                // We therefore handle first-boot setup *before* the
+                // daemon/help dispatch, regardless of `self.daemon`. If
+                // the operator didn't ask for the daemon, we exit after
+                // the prompt so they can confirm before launching the
+                // service.
+                if gateway.is_first_boot_restricted() {
+                    // ADR-076 §决策 12 v3: the prompt is *best effort* and
+                    // must never abort the boot — a Gateway that refuses to
+                    // start cannot serve the restricted-mode surface
+                    // (`/api/status` + `requires_setup`), so the Desktop
+                    // would see "connection refused" instead of the gate.
+                    // `build_macos.sh --start` is exactly that case: it
+                    // backgrounds us with stdio redirected.
+                    if can_prompt_interactively() {
+                        eprintln!(
+                            "First-boot setup required: a passwordless 'admin' account has \
+                             been seeded.\n\
+                             This prompt will only appear once on a fresh install."
+                        );
+                        match read_admin_password(None, false) {
+                            Ok(mut pw) => {
+                                gateway
+                                    .set_admin_password(&pw)
+                                    .map_err(GatewayError::Config)?;
+                                zeroize::Zeroize::zeroize(&mut pw);
+                                eprintln!("Admin password set.\n");
+                                if !self.daemon {
+                                    // Operator did NOT ask for the daemon.
+                                    // Exit cleanly — they can re-run with
+                                    // `--daemon` (or pick a subcommand) on
+                                    // the next invocation. We deliberately
+                                    // don't auto-promote them into daemon
+                                    // mode: that would couple first-boot UX
+                                    // to a launch decision they haven't
+                                    // made yet.
+                                    eprintln!(
+                                        "Run again with --daemon to start the gateway, \
+                                         or use a subcommand (run --help to list them)."
+                                    );
+                                    return Ok(());
+                                }
+                            }
+                            Err(e) => {
+                                // Mismatch / policy / no TTY after all. Keep
+                                // booting (restricted) rather than dying, so
+                                // the operator can retry with `admin-setup`
+                                // against the running Gateway.
+                                eprintln!("First-boot setup incomplete: {e}");
+                                warn_first_boot_restricted();
+                            }
+                        }
+                    } else {
+                        warn_first_boot_restricted();
+                    }
+                }
                 if self.daemon {
                     tracing::info!("Starting gateway in daemon mode");
                     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -473,7 +599,8 @@ impl Cli {
                         .map_err(GatewayError::Io)?;
                     rt.block_on(async_main(gateway, log_reload_handle))?;
                 } else {
-                    // No subcommand and no daemon flag — show help
+                    // No subcommand and no daemon flag, and no
+                    // first-boot setup pending — show help.
                     println!("ACowork Gateway — use subcommands or --daemon to start service");
                     println!("Run with --help for usage information");
                 }
@@ -481,6 +608,91 @@ impl Cli {
         }
         Ok(())
     }
+}
+
+/// Whether a hidden-echo prompt can reach a human at all.
+///
+/// `rpassword` opens `/dev/tty` directly instead of fd 0/1, so the prompt is
+/// *not* covered by redirecting stdio — a backgrounded start (build script,
+/// systemd, Tauri child) would block on a prompt the operator cannot see.
+/// Requiring both stdio ends to be terminals is the conservative proxy for
+/// "a human is attached"; anything else falls back to the file / stdin /
+/// `admin-setup` paths.
+fn can_prompt_interactively() -> bool {
+    std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
+}
+
+/// Tell the operator how to complete first-boot setup — on stderr *and* in
+/// the rolling log file, because the motivating path (`build_macos.sh
+/// --start`) sends stderr to `/dev/null`. ADR-076 §决策 12 v3.
+fn warn_first_boot_restricted() {
+    const HOW: &str = "Complete first-boot setup with ONE of:\n  \
+                       - run 'acowork-gateway' from an interactive shell (you will be prompted)\n  \
+                       - run 'acowork-gateway admin-setup --password-file <path>' \
+                       once with a file containing the new password\n  \
+                       - run 'acowork-gateway admin-setup --password-stdin < secret.txt'\n  \
+                       - edit gateway.toml: set [multi_user].bootstrap_admin = \
+                       { username = \"admin\", password = \"...\" } and restart";
+    eprintln!(
+        "Gateway is in first-boot restricted mode (admin has no password).\n\n{HOW}\n\n\
+         Only /health and /api/status are reachable until setup is complete."
+    );
+    tracing::warn!(
+        "first-boot restricted mode (passwordless admin) — only /health and /api/status are \
+         served. {HOW}"
+    );
+}
+
+/// Read the admin password from one of: `--password-file`, `--password-stdin`,
+/// or an interactive hidden-echo read (TTY only).
+///
+/// ADR-076 §决策 12 v2: the first password never crosses the network. This
+/// helper exists to make that an enforced invariant — there is no `--password`
+/// CLI flag, only file / stdin / interactive.
+fn read_admin_password(
+    password_file: Option<&str>,
+    password_stdin: bool,
+) -> Result<String, String> {
+    use std::io::{BufRead, Read};
+
+    if let Some(path) = password_file {
+        let file = std::fs::File::open(path)
+            .map_err(|e| format!("failed to open password file '{}': {}", path, e))?;
+        // Cap at 1 KiB. A password past 1 KiB is operator error.
+        let mut buf = String::new();
+        file.take(1024)
+            .read_to_string(&mut buf)
+            .map_err(|e| format!("failed to read password file '{}': {}", path, e))?;
+        return Ok(buf.trim_end_matches(['\n', '\r']).to_string());
+    }
+
+    if password_stdin {
+        let stdin = std::io::stdin();
+        let mut line = String::new();
+        stdin
+            .lock()
+            .read_line(&mut line)
+            .map_err(|e| format!("failed to read password from stdin: {e}"))?;
+        return Ok(line.trim_end_matches(['\n', '\r']).to_string());
+    }
+
+    if !can_prompt_interactively() {
+        return Err(
+            "no --password-file / --password-stdin given and there is no interactive \
+             terminal (stdin and stdout must both be a TTY).\n\
+             Hint: pass --password-file <path>, --password-stdin, or run from an interactive shell."
+                .to_string(),
+        );
+    }
+
+    let pw = rpassword::prompt_password("New admin password: ")
+        .map_err(|e| format!("password prompt failed: {e}"))?;
+    let confirm = rpassword::prompt_password("Confirm admin password: ")
+        .map_err(|e| format!("password confirm prompt failed: {e}"))?;
+    if pw != confirm {
+        return Err("passwords do not match".into());
+    }
+    Ok(pw)
 }
 
 /// Parse a TTL spec ("30m", "1h", "90s", "2d") into a Duration.

@@ -62,6 +62,9 @@ beforeEach(() => {
     error: null,
     viewAsUserId: null,
     _refreshPromise: null,
+    setupRequired: false,
+    registrationOpen: false,
+    _setupPollHandle: null,
   });
 });
 
@@ -106,6 +109,34 @@ describe("authStore.init", () => {
     await useAuthStore.getState().init();
 
     expect(useAuthStore.getState().status).toBe("disabled");
+  });
+
+  it("enters setup_required when requires_setup is true", async () => {
+    stubFetch({
+      "/api/status": () =>
+        json({ auth_mode: "multi_user", requires_setup: true }),
+    });
+
+    await useAuthStore.getState().init();
+
+    const state = useAuthStore.getState();
+    expect(state.status).toBe("setup_required");
+    expect(state.setupRequired).toBe(true);
+    expect(state._setupPollHandle).not.toBeNull();
+    // Cleanup so the interval doesn't leak across tests.
+    useAuthStore.getState().stopSetupPoll();
+  });
+
+  it("ignores requires_setup=false on a multi_user gateway", async () => {
+    stubFetch({
+      "/api/status": () =>
+        json({ auth_mode: "multi_user", requires_setup: false }),
+    });
+
+    await useAuthStore.getState().init();
+
+    expect(useAuthStore.getState().status).toBe("logged_out");
+    expect(useAuthStore.getState().setupRequired).toBe(false);
   });
 });
 

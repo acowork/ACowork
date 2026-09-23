@@ -5,9 +5,11 @@ import { useGatewayStore } from "../../stores/gatewayStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useUserProfileStore } from "../../stores/userProfileStore";
 import { useAgentStore } from "../../stores/agentStore";
+import { useAuthStore } from "../../stores/authStore";
 import { cn } from "../../lib/utils";
 import { needsApiKey, keyPlaceholder } from "../../lib/providers";
-import { fetchProviderModels, fetchProviders, createUser } from "../../lib/gateway-api";
+import { fetchProviderModels, fetchProviders } from "../../lib/gateway-api";
+import { saveOnboardedIdentity } from "../../lib/selfProfile";
 import { DEFAULT_GATEWAY_URL, getGatewayUrl } from "../../lib/config";
 import type { GatewayMode, ModelInfo, BootstrapStateView, OperationAck } from "../../lib/types";
 import { RadioGroup } from "../common/RadioGroup";
@@ -91,28 +93,52 @@ export function OnboardingFlow({ onComplete }: { onComplete?: () => void }) {
     }
   }, []);
 
+  // Prefill the identity step from the signed-in account.
+  //
+  // Under `multi_user` the wizard *patches* the logged-in account
+  // (`saveOnboardedIdentity`), so starting from its current values keeps a
+  // re-run of the wizard (Settings → reset onboarding) from overwriting the
+  // stored identity with blanks. In `local` mode there is no account yet and
+  // this is a no-op.
+  useEffect(() => {
+    const account = useAuthStore.getState().account;
+    if (!account) return;
+    setState((prev) => ({
+      ...prev,
+      name: prev.name || account.display_name || "",
+      language: account.language || prev.language,
+      timezone: account.timezone || prev.timezone,
+      city: account.city ?? prev.city,
+      occupation: account.occupation ?? prev.occupation,
+    }));
+  }, []);
+
   const completeOnboarding = useCallback(() => {
-    // Persist user identity to Gateway if name was provided in Step 4.
-    // Fire-and-forget — don't block onboarding completion on API result.
+    // Persist the identity collected in Step 4.
     //
-    // ADR-059 §7.3: `createUser` now returns an `OperationAck`
-    // (operation_id / state / resource_version / terminal_error) instead
-    // of the legacy `{ user, version }` envelope. We intentionally
-    // ignore the ack — the onboarding flow only needs the user profile
-    // to be persisted server-side; ProfileTab will re-fetch the active
-    // user list when it mounts, which picks up the just-created
-    // profile. Any non-2xx HTTP status throws and is logged here; a
-    // `terminal_error` inside the ack is silently swallowed because the
-    // fire-and-forget shape predates ADR-059.
+    // Fire-and-forget — don't block onboarding completion on the API result.
+    //
+    // Mode-aware (`lib/selfProfile.ts`): under `multi_user` the user is
+    // already signed in (login-then-onboarding boot order), so this PUTs the
+    // logged-in account; the legacy `POST /api/users` created a *second*
+    // account nobody was signed in as, which is why the identity entered here
+    // never showed up in the profile tab afterwards. `local` keeps the
+    // create path.
+    //
+    // ADR-059 §7.3: `createUser` answers an `OperationAck` (operation_id /
+    // state / resource_version / terminal_error) instead of the legacy
+    // `{ user, version }` envelope. We intentionally ignore the ack —
+    // ProfileTab re-fetches the profile when it mounts, which picks up the
+    // just-written identity.
     if (state.name.trim()) {
-      createUser({
+      saveOnboardedIdentity({
         display_name: state.name.trim(),
         language: state.language,
         timezone: state.timezone,
         city: state.city.trim() || undefined,
         occupation: state.occupation.trim() || undefined,
       }).catch((err) => {
-        log.warn("Failed to create user profile during onboarding:", err);
+        log.warn("Failed to persist the user profile during onboarding:", err);
       });
       // Sync the display name to the local profile store so the avatar
       // picker in ProfileTab immediately shows the name just entered.

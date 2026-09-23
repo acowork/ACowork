@@ -8,13 +8,15 @@
 //! server ever answers.
 //!
 //! That gap is the whole point of `AUTH_MODE` (ADR-076 §决策 12): the failure
-//! mode is not a wrong response, it is a Gateway that *starts* in the mode
-//! nobody asked for. A unit test cannot observe "refused to start".
+//! mode is not a wrong response, it is a Gateway that *boots into the mode
+//! nobody asked for* — or (v2/v3) boots into **restricted mode** because
+//! nobody has set the first password yet. Both are process-level states.
 //!
-//! Assertions are deliberately limited to what a test can see without an HTTP
-//! client: exit status, stderr, a listening socket, and the `--home` tree.
-//! Adding a client dependency to re-prove the router's own tests would not
-//! make the process-level story any stronger.
+//! Assertions stay dependency-free: exit status, stderr, a listening socket,
+//! the `--home` tree, and one hand-rolled raw-socket GET. The v2/v3 contract
+//! ("403 `setup_required`, not 401") is a *response*, so an exit code alone
+//! can no longer state it — but pulling in an HTTP client to re-prove the
+//! router's own tests would not make the process-level story any stronger.
 //!
 //! Each test gets its own temp home and its own ephemeral ports; the child is
 //! killed by the [`Gateway`] guard even when an assertion panics, so a failing
@@ -33,9 +35,6 @@ use std::time::{Duration, Instant};
 /// How long a *successful* boot may take before we call it a hang. Generous:
 /// the point is to catch "never binds", not to benchmark startup.
 const BOOT_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// Fail-fast and clean-shutdown paths are quick; this bounds the wait.
-const EXIT_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Pick a free TCP port. The listener is dropped immediately, so the port is
 /// only *probably* free — hence a fresh pair per test and a retry-free design
@@ -113,21 +112,6 @@ impl Gateway {
             self.stderr()
         );
     }
-
-    /// Wait for the process to exit on its own. `None` on timeout.
-    fn wait_for_exit(&mut self) -> Option<Exit> {
-        let deadline = Instant::now() + EXIT_TIMEOUT;
-        while Instant::now() < deadline {
-            if let Some(status) = self.child.try_wait().expect("try_wait") {
-                return Some(Exit {
-                    code: status.code(),
-                    stderr: self.stderr(),
-                });
-            }
-            sleep(Duration::from_millis(100));
-        }
-        None
-    }
 }
 
 impl Drop for Gateway {
@@ -136,11 +120,6 @@ impl Drop for Gateway {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
-}
-
-struct Exit {
-    code: Option<i32>,
-    stderr: String,
 }
 
 fn temp_home(tag: &str) -> PathBuf {
@@ -219,36 +198,86 @@ fn write_config(home: &Path, body: &str) -> PathBuf {
     path
 }
 
-// ── Refusing to start ──────────────────────────────────────────────────
+// ── First-boot restricted mode (ADR-076 §决策 12 v2 / v3) ───────────────
 
-/// ADR-076 §决策 12 / §7.5: `multi_user` with an empty account store and no
-/// bootstrap administrator has no way to log in — the binary must fail fast
-/// rather than come up as a Gateway nobody can enter.
+/// Minimal raw-socket HTTP/1.1 GET → `(status, body)`. Dependency-free on
+/// purpose (see the module doc).
+fn http_get(port: u16, path: &str) -> (u16, String) {
+    use std::io::{Read, Write};
+    let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .expect("set read timeout");
+    write!(
+        stream,
+        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+    )
+    .expect("send request");
+    let mut raw = String::new();
+    let _ = stream.read_to_string(&mut raw); // the peer closes; the timeout is a backstop
+    let code = raw
+        .split_whitespace()
+        .nth(1)
+        .and_then(|c| c.parse().ok())
+        .unwrap_or(0);
+    let body = raw
+        .split_once("\r\n\r\n")
+        .map(|(_, b)| b.to_string())
+        .unwrap_or_default();
+    (code, body)
+}
+
+/// ADR-076 §决策 12 v2/v3: `multi_user` with an empty account store and no
+/// bootstrap administrator must **not** refuse to start any more (v1 did, and
+/// the failure was invisible behind `build_macos.sh`'s `> /dev/null`). It
+/// seeds a passwordless `admin`, boots, and serves **restricted mode**:
+/// `/health` and `/api/status` answer, everything else is 403
+/// `setup_required` — *including* a request with no token at all, which is
+/// exactly why the gate has to sit outside `auth_middleware` (a 401 here
+/// would be indistinguishable from a bad token).
 #[test]
-fn multi_user_without_bootstrap_admin_refuses_to_start() {
+fn multi_user_without_bootstrap_admin_serves_restricted_mode() {
     let home = temp_home("nobootstrap");
     let (http, mqtt) = (free_port(), free_port());
     let mut gw = spawn(&home, http, mqtt, &["--auth-mode", "multi_user"]);
+    gw.wait_until_serving();
 
-    let exit = gw.wait_for_exit().expect(
-        "gateway must exit on its own — a running process here means the \
-         bootstrap_admin check was skipped",
-    );
-    assert_ne!(exit.code, Some(0), "expected a non-zero exit status");
+    let (code, body) = http_get(http, "/api/status");
+    assert_eq!(code, 200, "restricted mode must answer /api/status; body:\n{body}");
     assert!(
-        exit.stderr.contains("bootstrap_admin"),
-        "stderr must name the missing setting, got:\n{}",
-        exit.stderr
+        body.contains("\"requires_setup\":true"),
+        "restricted mode must advertise the gate on /api/status; body:\n{body}"
     );
-    // It must say *why* it gave up, not merely that it did.
-    assert!(
-        exit.stderr.contains("multi_user"),
-        "stderr must name the mode, got:\n{}",
-        exit.stderr
+
+    let (code, body) = http_get(http, "/api/users");
+    assert_eq!(
+        code, 403,
+        "a token-less /api/users must be 403 setup_required, never 401; body:\n{body}"
     );
     assert!(
-        !gw.data_file("accounts.json").exists(),
-        "a failed boot must not leave an account store behind"
+        body.contains("setup_required"),
+        "the 403 must name the reason; body:\n{body}"
+    );
+
+    // The seed *is* written this time — that is the whole point of v2/v3.
+    let accounts = gw.data_file("accounts.json");
+    assert!(
+        accounts.exists(),
+        "the passwordless admin must be seeded at {}",
+        accounts.display()
+    );
+    let raw = fs::read_to_string(&accounts).expect("read accounts.json");
+    assert!(
+        raw.contains("\"admin\""),
+        "the seed must be the built-in admin; got:\n{raw}"
+    );
+
+    // The operator is pointed at the setup paths on stderr, and the same text
+    // goes to the log file (the motivating path swallows stderr).
+    assert!(
+        gw.stderr().contains("admin-setup"),
+        "stderr must point at the setup paths; got:\n{}",
+        gw.stderr()
     );
 }
 

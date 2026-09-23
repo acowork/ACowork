@@ -463,9 +463,19 @@ impl AuthService {
     /// Create the first administrator when the account store is empty
     /// (ADR-076 §决策 5 / §决策 12).
     ///
-    /// *Empty store, no `bootstrap_admin`* → `Err`: a `multi_user` Gateway
-    /// with no accounts has no way in, so the boot must fail loudly
-    /// (ADR-076 §决策 12 "缺则拒启动").
+    /// Resolution:
+    /// *Empty store + `bootstrap_admin` configured* → use the toml password
+    /// (already-validated by the caller). The operator owns this credential;
+    /// keep the strict mode for non-interactive / scripted deployments.
+    ///
+    /// *Empty store + no `bootstrap_admin`* → seed a passwordless
+    /// `admin` account (`password_hash = DISABLED_PASSWORD_HASH`).
+    /// `is_restricted()` will then return `true` and the daemon will
+    /// refuse to serve any `/api/*` route other than `/health` and
+    /// `/api/status` until the operator completes first-boot setup
+    /// (TTY prompt, `admin-setup` subcommand, or manual toml edit). The
+    /// seed is intentionally a no-network path: there is no HTTP
+    /// endpoint that accepts the first password (ADR-076 §决策 12 v2).
     ///
     /// *Non-empty store* → `bootstrap_admin` is ignored. Keeping the
     /// bootstrap password alive as a second permanent admin credential
@@ -485,26 +495,65 @@ impl AuthService {
             return Ok(());
         }
 
-        let cfg = self.bootstrap_admin.as_ref().ok_or_else(|| {
-            "AUTH_MODE=multi_user requires [multi_user].bootstrap_admin in gateway.toml when the \
-             account store is empty — refusing to start with no way to log in"
-                .to_string()
-        })?;
-        self.policy.validate(&cfg.password).map_err(|e| {
-            format!("[multi_user].bootstrap_admin.password violates the password policy: {e}")
-        })?;
-
         let now = crate::auth::token::now_unix();
         let stamp = iso(now);
+
+        // Path A: operator pre-configured a password in gateway.toml.
+        // Same as the previous (fail-fast) behavior — only the messaging
+        // changes.
+        if let Some(cfg) = self.bootstrap_admin.as_ref() {
+            self.policy.validate(&cfg.password).map_err(|e| {
+                format!("[multi_user].bootstrap_admin.password violates the password policy: {e}")
+            })?;
+            let account = UserAccount {
+                user_id: uuid::Uuid::new_v4().to_string(),
+                username: cfg.username.to_ascii_lowercase(),
+                display_name: cfg
+                    .display_name
+                    .clone()
+                    .unwrap_or_else(|| cfg.username.clone()),
+                role: Role::Admin,
+                password_hash: password::hash_password(&cfg.password)?,
+                password_changed_at: stamp.clone(),
+                password_expires_at: None,
+                language: "zh-CN".into(),
+                timezone: "Asia/Shanghai".into(),
+                city: None,
+                country: None,
+                occupation: None,
+                avatar: None,
+                builtin_avatar: None,
+                communication_style: None,
+                custom: Default::default(),
+                created_at: stamp.clone(),
+                updated_at: stamp,
+                last_login_at: None,
+                disabled_at: None,
+                invite_token_hash: None,
+                invite_expires_at: None,
+            };
+            tracing::info!(
+                username = %account.username,
+                "created bootstrap administrator from [multi_user].bootstrap_admin"
+            );
+            list.accounts.push(account);
+            list.version += 1;
+            return self.save_accounts(&list);
+        }
+
+        // Path B: passwordless seed. The operator MUST complete first-boot
+        // setup via stdin / `admin-setup` subcommand / manual toml edit
+        // before the Gateway starts serving requests beyond `/health` and
+        // `/api/status`. There is no HTTP path for the first password.
         let account = UserAccount {
             user_id: uuid::Uuid::new_v4().to_string(),
-            username: cfg.username.to_ascii_lowercase(),
-            display_name: cfg
-                .display_name
-                .clone()
-                .unwrap_or_else(|| cfg.username.clone()),
+            username: "admin".into(),
+            display_name: "Administrator".into(),
             role: Role::Admin,
-            password_hash: password::hash_password(&cfg.password)?,
+            // sentinel — `is_login_capable()` returns false, so
+            // /api/auth/login cannot succeed and login attempts always
+            // look like an unknown account to a timing-attack observer.
+            password_hash: DISABLED_PASSWORD_HASH.to_string(),
             password_changed_at: stamp.clone(),
             password_expires_at: None,
             language: "zh-CN".into(),
@@ -523,10 +572,76 @@ impl AuthService {
             invite_token_hash: None,
             invite_expires_at: None,
         };
-        tracing::info!(username = %account.username, "created bootstrap administrator");
+        tracing::warn!(
+            username = %account.username,
+            "seeded passwordless admin (first-boot required); complete setup via \
+             the gateway's TTY prompt / 'admin-setup' subcommand / [multi_user].bootstrap_admin \
+             in gateway.toml before the Gateway will accept any request"
+        );
         list.accounts.push(account);
         list.version += 1;
         self.save_accounts(&list)
+    }
+
+    /// Set the password of the built-in passwordless `admin` account.
+    /// Used by the first-boot TTY prompt and the `admin-setup` CLI
+    /// subcommand (ADR-076 §决策 12 v2).
+    ///
+    /// * `Err(NotConfigured)` if no admin account exists.
+    /// * `Err(AlreadyConfigured)` if the admin account already has a
+    ///   real Argon2id hash. Refuses to overwrite — the CLI subcommand
+    ///   surfaces this as exit 1.
+    /// * `Err(Policy)` if the password violates the configured policy.
+    /// * `Ok(())` on success — `accounts.json` is rewritten atomically.
+    pub fn set_admin_password(&self, new_password: &str) -> Result<(), String> {
+        self.policy
+            .validate(new_password)
+            .map_err(|e| format!("password violates the password policy: {e}"))?;
+        let mut list = self.load_accounts()?;
+        let admin = list.accounts.iter_mut().find(|a| a.role == Role::Admin).ok_or_else(|| {
+            "no admin account exists; run 'ensure_bootstrap_admin' first".to_string()
+        })?;
+        if admin.password_hash != DISABLED_PASSWORD_HASH {
+            return Err(
+                "admin already has a password set; refusing to overwrite — use the normal \
+                 change-password flow instead"
+                    .to_string(),
+            );
+        }
+        let now = crate::auth::token::now_unix();
+        let stamp = iso(now);
+        admin.password_hash = password::hash_password(new_password)?;
+        admin.password_changed_at = stamp.clone();
+        admin.updated_at = stamp;
+        list.version += 1;
+        self.save_accounts(&list)
+    }
+
+    /// Whether the Gateway is in first-boot restricted mode: a passwordless
+    /// admin account exists and no other admin has a real password.
+    /// Drives the HTTP middleware and `/api/status.requires_setup`.
+    pub fn is_restricted(&self) -> bool {
+        let Ok(list) = self.load_accounts() else {
+            // If we can't read the store, the HTTP layer should not advertise
+            // the system as ready either.
+            return true;
+        };
+        // "Nobody can get in": there is an administrator and *every*
+        // administrator is still passwordless. The `all` half is load-bearing
+        // — `reset_password` also writes `DISABLED_PASSWORD_HASH`, so a bare
+        // `any` would flip a working Gateway into restricted mode (403 on
+        // every `/api/*`, login included) the moment an admin resets any
+        // password, including its own — which §1.3 invariant 6 defines as the
+        // normal administrator change-password flow.
+        let admins: Vec<&UserAccount> = list
+            .accounts
+            .iter()
+            .filter(|a| a.role == Role::Admin)
+            .collect();
+        !admins.is_empty()
+            && admins
+                .iter()
+                .all(|a| a.password_hash == DISABLED_PASSWORD_HASH)
     }
 
     // ── Account CRUD (ADR-076 §决策 5 / §决策 6, `account_api.rs`) ──
@@ -1067,11 +1182,21 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_requires_config_when_store_is_empty() {
-        let dir = tmp_dir("boot-missing");
+    fn bootstrap_with_empty_store_seeds_passwordless_admin() {
+        // ADR-076 §决策 12 v2: the empty-store path used to fail-fast
+        // when `bootstrap_admin` was unset. The current contract is to
+        // seed a passwordless admin and put the Gateway into restricted
+        // mode — see `empty_store_seeds_passwordless_admin_and_is_restricted`
+        // above for the full new behavior. This test asserts the same
+        // seed path from the "no bootstrap_admin" entry point.
+        let dir = tmp_dir("boot-empty-seed");
         let svc = AuthService::new(&dir, PasswordPolicy::default(), None).unwrap();
-        let err = svc.ensure_bootstrap_admin().unwrap_err();
-        assert!(err.contains("bootstrap_admin"), "unexpected: {err}");
+        svc.ensure_bootstrap_admin().expect("ok");
+        assert!(svc.is_restricted());
+        let list = svc.load_accounts().unwrap();
+        assert_eq!(list.accounts.len(), 1);
+        assert_eq!(list.accounts[0].username, "admin");
+        assert_eq!(list.accounts[0].password_hash, DISABLED_PASSWORD_HASH);
     }
 
     #[test]
@@ -1274,5 +1399,148 @@ mod tests {
             .unwrap();
         assert_eq!(account.display_name, "Alice A");
         assert_eq!(account.avatar, None);
+    }
+
+    // ── ADR-076 §决策 12 v2: passwordless-seed + first-boot setup ──
+
+    fn service_with_no_accounts(tag: &str) -> AuthService {
+        let dir = tmp_dir(tag);
+        AuthService::new(&dir, PasswordPolicy::default(), None).unwrap()
+    }
+
+    fn service_with_bootstrap_admin(tag: &str, username: &str, password: &str) -> AuthService {
+        let dir = tmp_dir(tag);
+        AuthService::new(
+            &dir,
+            PasswordPolicy::default(),
+            Some(BootstrapAdmin {
+                username: username.into(),
+                password: password.into(),
+                display_name: None,
+            }),
+        )
+        .unwrap()
+    }
+
+    /// Empty store + no `bootstrap_admin` → seed a passwordless `admin`,
+    /// `is_restricted()` is `true`, account cannot log in.
+    #[test]
+    fn empty_store_seeds_passwordless_admin_and_is_restricted() {
+        let svc = service_with_no_accounts("seed-empty");
+        svc.ensure_bootstrap_admin().unwrap();
+        let list = svc.load_accounts().unwrap();
+        assert_eq!(list.accounts.len(), 1);
+        let admin = &list.accounts[0];
+        assert_eq!(admin.username, "admin");
+        assert_eq!(admin.role, Role::Admin);
+        assert_eq!(admin.password_hash, DISABLED_PASSWORD_HASH);
+        assert!(!admin.is_login_capable());
+        assert!(svc.is_restricted());
+    }
+
+    /// Second `ensure_bootstrap_admin` is a no-op (account store is no
+    /// longer empty) — does not overwrite the seeded admin.
+    #[test]
+    fn re_running_ensure_bootstrap_admin_does_not_reset_the_seeded_admin() {
+        let svc = service_with_no_accounts("seed-idempotent");
+        svc.ensure_bootstrap_admin().unwrap();
+        let first_id = svc.load_accounts().unwrap().accounts[0].user_id.clone();
+        svc.ensure_bootstrap_admin().unwrap();
+        let second_id = svc.load_accounts().unwrap().accounts[0].user_id.clone();
+        assert_eq!(first_id, second_id);
+    }
+
+    /// `bootstrap_admin` from toml is honored (password set, not
+    /// `DISABLED_PASSWORD_HASH`), and `is_restricted()` is false.
+    #[test]
+    fn toml_bootstrap_admin_yields_a_login_capable_account_and_unrestricted() {
+        let svc = service_with_bootstrap_admin("seed-toml", "admin", "s3cret123");
+        svc.ensure_bootstrap_admin().unwrap();
+        let list = svc.load_accounts().unwrap();
+        assert_eq!(list.accounts.len(), 1);
+        let admin = &list.accounts[0];
+        // Real Argon2id hash — not the sentinel. We can't compare to a
+        // literal PHC string (salt is random) but we can assert it's not
+        // the sentinel and the account is login-capable.
+        assert_ne!(admin.password_hash, DISABLED_PASSWORD_HASH);
+        assert!(admin.is_login_capable());
+        assert!(!svc.is_restricted());
+    }
+
+    /// `set_admin_password` flips the passwordless seed into a real
+    /// Argon2id hash and clears the restricted flag.
+    #[test]
+    fn set_admin_password_activates_the_seeded_admin_and_unrestricts() {
+        let svc = service_with_no_accounts("set-pw");
+        svc.ensure_bootstrap_admin().unwrap();
+        assert!(svc.is_restricted());
+        svc.set_admin_password("new-pass-1").unwrap();
+        let list = svc.load_accounts().unwrap();
+        let admin = &list.accounts[0];
+        assert_ne!(admin.password_hash, DISABLED_PASSWORD_HASH);
+        assert!(admin.is_login_capable());
+        assert!(!svc.is_restricted());
+    }
+
+    /// `set_admin_password` refuses to overwrite an already-set password.
+    /// This is the CLI subcommand safety net — running `admin-setup`
+    /// against a configured Gateway must not silently rotate the
+    /// operator's password.
+    #[test]
+    fn set_admin_password_refuses_to_overwrite_an_existing_password() {
+        let svc = service_with_bootstrap_admin("set-nooverwrite", "admin", "old-pass-1");
+        svc.ensure_bootstrap_admin().unwrap();
+        // The admin already has a real password. Trying to set again
+        // must fail.
+        let err = svc.set_admin_password("new-pass-1").unwrap_err();
+        assert!(
+            err.contains("refusing to overwrite"),
+            "unexpected error message: {err}"
+        );
+    }
+
+    /// `set_admin_password` rejects passwords that violate the policy.
+    /// Default policy: ≥8 chars + at least one digit.
+    #[test]
+    fn set_admin_password_enforces_the_password_policy() {
+        let svc = service_with_no_accounts("set-policy");
+        svc.ensure_bootstrap_admin().unwrap();
+        let too_short = svc.set_admin_password("short").unwrap_err();
+        assert!(too_short.contains("at least"), "got: {too_short}");
+        let no_digit = svc.set_admin_password("nodigitpassword").unwrap_err();
+        assert!(no_digit.contains("digit"), "got: {no_digit}");
+        // Seed is still passwordless after both failures.
+        assert!(svc.is_restricted());
+    }
+
+    /// `reset_password` also writes `DISABLED_PASSWORD_HASH`, but that alone
+    /// must not restrict a Gateway that still has a usable administrator —
+    /// §1.3 invariant 6 makes reset the normal administrator
+    /// change-password flow, and a bare `any(passwordless admin)` would
+    /// answer 403 (login included) to everyone the moment one is reset.
+    #[test]
+    fn resetting_one_admin_does_not_restrict_a_gateway_with_another_admin() {
+        let svc = service_with_bootstrap_admin("reset-not-restricted", "admin", "s3cret123");
+        svc.ensure_bootstrap_admin().unwrap();
+        let (bob, _) = svc
+            .create_account("bob", "Bob", Some("bobpass123"), Role::Admin, 1_000)
+            .unwrap();
+        assert!(!svc.is_restricted());
+
+        svc.reset_password(&bob.user_id, 1_001).unwrap();
+        // Bob is passwordless now, but `admin` still has a real password.
+        assert!(!svc.is_restricted());
+        assert!(svc.login("admin", "s3cret123", 1_002).is_ok());
+    }
+
+    /// The other half of the rule: resetting the *last* administrator really
+    /// does leave nobody able to log in, so restricted mode is correct.
+    #[test]
+    fn resetting_the_last_admin_is_restricted() {
+        let svc = service_with_bootstrap_admin("reset-last-restricted", "admin", "s3cret123");
+        svc.ensure_bootstrap_admin().unwrap();
+        let id = svc.load_accounts().unwrap().accounts[0].user_id.clone();
+        svc.reset_password(&id, 1_000).unwrap();
+        assert!(svc.is_restricted());
     }
 }

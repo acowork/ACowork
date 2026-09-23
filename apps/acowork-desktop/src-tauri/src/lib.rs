@@ -654,6 +654,7 @@ pub fn run() {
             commands::create::create_agent,
             commands::gateway::set_gateway_config,
             commands::gateway::get_gateway_config,
+            commands::gateway::set_gateway_access_token,
             commands::gateway::init_local_gateway,
             commands::gateway::start_local_gateway,
             commands::gateway::stop_local_gateway,
@@ -707,6 +708,12 @@ pub fn run() {
         ])
         .setup(|app| {
             tray::setup(app)?;
+
+            // ADR-076 §决策 3: give the Gateway client's account-session
+            // mirror the webview handle it emits `gateway-auth-required` on.
+            app.state::<AppState>()
+                .gateway_auth
+                .install_app_handle(app.handle().clone());
 
             // ── macOS vibrancy ────────────────────────────────────────────
             // The initial NSVisualEffectView material is now applied by

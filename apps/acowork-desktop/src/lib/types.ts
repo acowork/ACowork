@@ -1799,7 +1799,13 @@ export type AuthState =
   /** `multi_user` and no valid token — must log in. */
   | "logged_out"
   /** `multi_user` with a token pair held in memory / storage. */
-  | "logged_in";
+  | "logged_in"
+  /** ADR-076 §决策 12 v2: Gateway is in first-boot restricted mode (a
+   * passwordless admin account exists). The Desktop must NOT show the
+   * normal login form — `/api/auth/login` will be refused and so will
+   * every other `/api/*` route. Render the "Gateway is not ready" gate
+   * and poll `/api/status` until setup completes. */
+  | "setup_required";
 
 // ── MCP types ────────────────────────────────────────────────────────
 /** MCP transport type — matches McpTransportDef in acowork_core::protocol */

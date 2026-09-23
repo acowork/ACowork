@@ -199,10 +199,11 @@ impl Gateway {
         // via the MQTT dispatch path.
 
         // ADR-076 §决策 12: resolve the deployment auth mode. Under
-        // `multi_user` the account system is built here (fail-fast): a
-        // missing `bootstrap_admin` on an empty account store means no
-        // one could ever log in, so boot must fail rather than serve a
-        // Gateway nobody can authenticate against.
+        // `multi_user` the account system is built here. A missing
+        // `bootstrap_admin` on an empty account store is *not* fatal any
+        // more (v2): a passwordless `admin` is seeded and the Gateway boots
+        // into restricted mode, so the Desktop can see `requires_setup`
+        // instead of a dead port.
         let auth_mode = config.effective_auth_mode();
         // ADR-076 §决策 12: an explicit mode that disagrees with the bind
         // inference is allowed (explicit always wins) but suspicious — warn
@@ -240,6 +241,26 @@ impl Gateway {
         };
 
         Ok(gateway)
+    }
+
+    /// Whether the account system is in first-boot restricted mode: a
+    /// passwordless admin account exists. ADR-076 §决策 12 v2.
+    /// Returns `false` in `local` mode (no account system at all).
+    pub fn is_first_boot_restricted(&self) -> bool {
+        self.auth_service
+            .as_ref()
+            .map(|svc| svc.is_restricted())
+            .unwrap_or(false)
+    }
+
+    /// Apply the first-boot admin password — used by the daemon's TTY
+    /// prompt path (ADR-076 §决策 12 v2). Errors if the account system is
+    /// not running (`local` mode) or the admin already has a password.
+    pub fn set_admin_password(&self, password: &str) -> Result<(), String> {
+        match self.auth_service.as_ref() {
+            Some(svc) => svc.set_admin_password(password),
+            None => Err("admin-setup is unavailable in local mode".to_string()),
+        }
     }
 
     /// Find the bundled agents directory.

@@ -27,6 +27,7 @@ pub mod pm_proxy;
 pub mod provider_api;
 pub mod proxy;
 pub mod publish_api;
+pub mod restricted_mode;
 pub mod routes;
 pub mod server;
 pub mod services_api;

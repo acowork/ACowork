@@ -6,8 +6,10 @@
  *   - Falsy / invalid input collapses to "" so the bubble component can
  *     skip rendering the timestamp span entirely on legacy entries.
  *   - Valid timestamps render a non-empty string.
- *   - The structural skeleton `YYYY/MM/DD HH:MM:SS` is preserved across
- *     locales (timezone-independent assertion).
+ *   - All six fields survive, zero-padded, with a 4-digit year. Field
+ *     ORDER is deliberately not asserted: `formatBubbleTime` formats with
+ *     the runtime locale, so "2026/08/30 12:34:56" (zh-CN) and
+ *     "08/30/2026, 12:34:56" (en-US) are both correct.
  */
 import { describe, it, expect } from "vitest";
 import { formatBubbleTime } from "./formatTime";
@@ -32,18 +34,16 @@ describe("formatBubbleTime", () => {
     expect(out.length).toBeGreaterThan(8);
   });
 
-  it("preserves the structural skeleton YYYY/MM/DD HH:MM:SS across locales", () => {
-    // Use a local-time constructor so the assertion is independent of the
-    // runner's timezone (jsdom picks up Asia/Shanghai here, CI may use UTC).
+  it("keeps all six fields, zero-padded and locale-order-independent", () => {
+    // Local-time constructor so the assertion is independent of the runner's
+    // timezone (jsdom picks up Asia/Shanghai here, CI may use UTC).
     const ms = new Date(2026, 7, 30, 12, 34, 56).getTime();
     const out = formatBubbleTime(ms);
-    const digits = out.replace(/[^0-9]/g, "");
-    expect(digits).toHaveLength(14); // YYYY + MM + DD + HH + MM + SS
-    expect(digits.slice(0, 4)).toBe("2026");
-    expect(digits.slice(4, 6)).toBe("08");
-    expect(digits.slice(6, 8)).toBe("30");
-    expect(digits.slice(8, 10)).toMatch(/^\d{2}$/);
-    expect(digits.slice(10, 12)).toMatch(/^\d{2}$/);
-    expect(digits.slice(12, 14)).toMatch(/^\d{2}$/);
+    const groups = out.match(/\d+/g) ?? [];
+    expect(groups).toHaveLength(6); // YYYY + MM + DD + HH + MM + SS
+    expect(groups).toContain("2026"); // 4-digit year, not "26"
+    expect(groups).toContain("08"); // month zero-padded, not "8"
+    expect(groups).toContain("30"); // day zero-padded
+    expect(groups.filter((g) => g.length === 2)).toHaveLength(5);
   });
 });

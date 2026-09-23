@@ -308,6 +308,17 @@ pub fn build_router(state: AppState) -> Router {
             auth_layer_state.clone(),
             crate::http::auth_middleware::auth_middleware,
         ))
+        // ADR-076 §决策 12 v2: first-boot restricted-mode gate. axum runs
+        // layers bottom-to-top, so adding it *after* `auth_middleware`
+        // makes it the outer one — a restricted-mode request is answered
+        // 403 `setup_required` before the token check can turn it into a
+        // 401 `missing bearer token`. The two errors must not be
+        // confusable, and 403 is the more informative answer here.
+        // No-op when `auth_service` is `None` (local mode).
+        .layer(middleware::from_fn_with_state(
+            auth_layer_state.clone(),
+            crate::http::restricted_mode::restricted_mode_middleware,
+        ))
         .layer(middleware::from_fn(log_request_origin))
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .layer(cors)
@@ -389,6 +400,13 @@ pub struct SystemStatusResponse {
     /// system is actually running — the Desktop offers the invite
     /// affordance to non-admins only when this is set.
     pub registration_open: bool,
+    /// ADR-076 §决策 12 v2: true iff the Gateway is in first-boot
+    /// restricted mode (a passwordless `admin` account exists). The
+    /// Desktop reads this to decide whether to render the
+    /// "Gateway is not ready" gate instead of the login screen. Always
+    /// `false` in `local` mode or after setup is finished.
+    #[serde(default)]
+    pub requires_setup: bool,
 }
 
 /// `GET /api/status` — system status
@@ -440,6 +458,11 @@ pub async fn system_status(State(state): State<AppState>) -> Json<SystemStatusRe
                 .as_ref()
                 .map(|c| c.multi_user.registration_open)
                 .unwrap_or(false),
+        requires_setup: state
+            .auth_service
+            .as_ref()
+            .map(|svc| svc.is_restricted())
+            .unwrap_or(false),
     })
 }
 

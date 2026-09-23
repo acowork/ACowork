@@ -34,7 +34,7 @@
 | 9 | 存储归属 | 用户聊天数据完全归属 Gateway 所在机器（`data_dir/users/...`），**不**走 Runtime HTTP 反代；明确写入 ADR-009 §5.4 例外条款 |
 | 10 | 反代身份注入（PM/Doc） | REST 反代 `X-Actor` 从硬编码 `"human"` 改为 `AuthContext.effective_user_id`（决策 3 的 token 身份）；MCP 路径 `X-MCP-Actor` 校验不变（agent 身份与 user 正交，见 §决策 10） |
 | 11 | PM 成员模型多用户化 | `ProjectMember` 新增 `kind`（`Agent`/`User`），人类操作者与 agent 成员对称；移除 `assignee = "human"` 特例，不变式收紧为 `assignee ∈ ∅ ∪ members`（见 §决策 11） |
-| 12 | 部署模式分流 | 新增 `AUTH_MODE ∈ {local, multi_user}`，由 bind 地址自动推断（`127.0.0.1` → `local`；`0.0.0.0` → `multi_user`），可显式覆盖；local 模式下 §1-§11 退化为 no-op（不引入登录页 / Argon2id / admin / session 过滤 / 用户聊天），multi_user 模式下完整启用且强制 `bootstrap_admin`（缺则拒启动） |
+| 12 | 部署模式分流 | 新增 `AUTH_MODE ∈ {local, multi_user}`，由 bind 地址自动推断（`127.0.0.1` → `local`；`0.0.0.0` → `multi_user`），可显式覆盖；local 模式下 §1-§11 退化为 no-op（不引入登录页 / Argon2id / admin / session 过滤 / 用户聊天）。**multi_user 模式下空账号库的处理（v2 修订）**：不再"缺则拒启动"，而是 seed 一个 `username=admin` 的无密码账号（`password_hash=DISABLED_PASSWORD_HASH`），Gateway 进入**受限模式**——只有 `/health` 和 `/api/status` 可达，其他 `/api/*` 一律返回 403 `{error: setup_required}`。操作员在 Gateway 主机上完成首次设置（TTY prompt / `admin-setup` 子命令 / `[multi_user].bootstrap_admin` toml 段）后，受���模式关闭。**没有任何 HTTP 端点接受首次密码**——密码只走 stdin / 文件 / TTY / toml，**永远不上网络**。**（v3 修订：daemon 永远先起 HTTP，受限模式真的对外服务；prompt 只是 best-effort，非 TTY 不阻断启动——见 §决策 12 v3）** 详见 §决策 12 v2 / v3。 |
 
 ### 1.3 不变量（必须满足）
 
@@ -53,7 +53,7 @@
 | 登录流程 | 无（Desktop 直接用 token） | `/api/auth/login` + LoginView |
 | `UserAccount` schema | `user_profiles.json` 沿用现有 `UserProfile` 字段 | `UserAccount`（含 `password_hash` / `role` / `disabled_at`） |
 | `accounts.json`（账号权威表） | 不创建 | 创建（明文）；`vault/accounts/*.enc` 扩展可选 |
-| 首位账号 | 沿用现状（无账号概念，`user_profiles.json` 不变） | 强制 `bootstrap_admin`，**缺配拒启动** |
+| 首位账号 | 沿用现状（无账号概念，`user_profiles.json` 不变） | seed 无密码 `admin` + 受限模式（**v2 修订**，见 §决策 12 v2 / v3；原为"缺配拒启动"） |
 | admin 角色 | 无（OS 用户即 admin） | `role = Admin`，`GET /api/users` 全量 |
 | session 隔离 | `SessionMeta.user_id` 写入但 **read 不过滤**（无 `x-user-id` 头 → `Unfiltered`） | read 路径强制过滤（admin 除外）；`visibility = Private` 时非 owner 视为不存在（404） |
 | session 控制面 | 同一条 HTTP 路由（Runtime 视为 `Unfiltered`） | HTTP + token 鉴权；create 记录 owner |
@@ -513,7 +513,7 @@ GET /api/agents/{id}/sessions?as_user=<user_id>
 3. 后续 admin 通过 admin token 创建其他 admin（需 `username` + `display_name`，密码由被创建者首次登录时设置——首次登录流程：`POST /api/auth/login?invite_token=<xxx>`）
 
 > **评审修订（实施期）**：`bootstrap_admin` 是**仅首次启动有效**（first-boot-only）的引导凭据，不是"永远必须配置"的常驻项。实施时明确为：
-> - `accounts.json` **为空** + `AUTH_MODE=multi_user` → 必须配 `bootstrap_admin`，**否则拒绝启动**（fail-fast）；
+> - `accounts.json` **为空** + `AUTH_MODE=multi_user` → ~~必须配 `bootstrap_admin`，否则拒绝启动（fail-fast）~~（**v2 修订**：空库改为 seed 无密码 admin + 受限模式，见 §决策 12 v2 / v3；原为"拒启动"）；
 > - `accounts.json` **非空** → `bootstrap_admin` **被忽略**（仍配置则打 warn 日志）。
 >
 > 理由：若每次启动都强制要求配置，等于把引导密码变成**常驻的第二组 admin 凭据**——它躺在明文 `gateway.toml` 里、绕过改密流程、且无法吊销，是一个长期敞口。Gitea / Jenkins / GitLab 的引导凭据同样是首启专用。创建之后该账号完全由正常的改密 / 禁用流程管辖。
@@ -824,7 +824,7 @@ require_mixed_case = false
 
 **multi_user 模式行为**（`AUTH_MODE=multi_user`）：
 - 完整启用 §1-§11 所有决策
-- 启动检查：`bootstrap_admin` 必须配置，**否则拒绝启动**（fail-fast；与决策 5 的"漏配告警"对冲——告警可被忽略，拒启动不可绕过）
+- 启动检查：~~`bootstrap_admin` 必须配置，否则拒绝启动（fail-fast；与决策 5 的"漏配告警"对冲——告警可被忽略，拒启动不可绕过）~~（**v2 修订**：空库改为 seed 无密码 admin + 受限模式，见 §决策 12 v2 / v3；原为"拒启动"）
 - bind 自动调整为 `0.0.0.0`（若仍 loopback → 仅 warn，**不强制改**——便于本地演示 multi_user）
 
 **UserAccount 在 local 模式下的存在性**（YAGNI：local 模式零改动）：
@@ -840,11 +840,95 @@ require_mixed_case = false
 
 **与之前决策的联动**：
 - **决策 1**：`UserAccount` 字段全保留，local 模式下 `password_hash` 填 sentinel（schema 不分裂）
-- **决策 5**：local 模式下 `bootstrap_admin` 不强制（首位 admin = 物理 OS 用户）；multi_user 模式下从"漏配告警"升级为"漏配拒启动"
+- **决策 5**：local 模式下 `bootstrap_admin` 不强制（首位 admin = 物理 OS 用户）；multi_user 模式下从"漏配告警"升级为"漏配拒启动"，再修订为"seed 无密码 admin + 受限模式"（见 §决策 12 v2 / v3）
 - **§5.4 回滚段**：`AUTH_MODE` 不再只是回滚段的环境变量，而是第一类配置——回滚段降级为"mode 内降级"
 - **§9 开放问题 1**：local 模式下"首位 admin"概念不存在（物理 OS 用户就是 admin），multi_user 模式下保留 bootstrap_admin；问题按模式分流消解
 
 **ponytail 标记**：bind 推断逻辑只覆盖 `127.0.0.1` vs `0.0.0.0` 二分；IPv6 link-local（`fe80::/10`）视为 multi_user（默认安全侧）。超规模场景（reverse proxy 后 + 仅内网访问）需手动 `--auth-mode local` 覆盖；bind + reverse proxy 的混合可信域判断留后续 ADR。
+
+#### §决策 12 v2：空账号库不再拒启动——seed 无密码 admin + 受限模式
+
+**修订动机**（实施期记录）：原 §决策 12 的 "multi_user + 空账号库 → fail-fast" 把"创建首位 admin"的责任推给 toml 的 `[multi_user].bootstrap_admin` 段。新用户跑 `build_macos.sh --start --remote`（bind 0.0.0.0 → 自动推断 multi_user）→ 无 toml → gateway 拒启动 → **用户看不到 stderr**（脚本 `> /dev/null`）→ desktop 连不上 → 黑洞。��是糟糕的首次使用体验，跟"产品还没人能用"等价。
+
+**新合约**（v2，**已实现**，见 §6.4 `Gateway::new` 的 passwordless seed 路径 + `http/restricted_mode.rs` middleware）：
+
+1. **空账号库 + 无 toml `bootstrap_admin`**：seed `username=admin` / `role=Admin` / `password_hash=DISABLED_PASSWORD_HASH` 的无密码账号，进入**受限模式**（`is_restricted()` 返回 `true`）。
+2. **受限模式下的 HTTP 行为**：
+   - `/health` → 200
+   - `/api/status` → 200 且新增字段 `requires_setup: true`
+   - 其他全部 `/api/*` → **403 `{error: "setup_required"}`**（不是 401）
+3. **受限模式解除**：操作员在 Gateway 主机上完成首次设置，受限模式关闭，恢复正常服务。**没有 HTTP 端点接受首次密码**——密码只走 stdin / 文件 / TTY / toml，**永远不上网络**。
+4. **空账号库 + toml `bootstrap_admin` 已配**：行为不变（直接用 toml 密码建 admin，跳过受限模式），保留为非交互/容器部署的"零交互启动"路径。
+5. **非空账号库**：行为不变（`bootstrap_admin` toml 被忽略 + warn）。
+
+**三种首次设置入口**（按使用频率排序）：
+
+| 入口 | 适用场景 | 实现 |
+|---|---|---|
+| **TTY prompt**（无子命令调用时自动） | 本地开发者、ssh 远程 | `cli.rs`：`Gateway::new` 后检测 restricted + `stdin`/`stdout` **双** TTY → `rpassword::prompt_password` 两次确认 → 写 accounts.json。非 TTY 不阻断启动（v3，见 §决策 12 v3） |
+| **`admin-setup` CLI 子命令** | systemd / Docker / 非 TTY | `acowork-gateway admin-setup [--password-file PATH] [--password-stdin]`：从文件/stdin/rprompt 读密码 → `AuthService::set_admin_password` → **不启动 Gateway**，退出 0 |
+| **`[multi_user].bootstrap_admin` toml 段** | 纯配置文件驱动（k8s ConfigMap / 镜像打包） | 重新启动 daemon → `ensure_bootstrap_admin` 走 path A → 受限模式从一开始就不进入 |
+
+**安全不变量**（v2 不破坏任何原有安全保证）：
+
+- **首次密码永远不上网络**。HTTP 上没有任何端点接受它。即使 LAN 攻击者抢先连到 Gateway，端口开放的 `/health` 和 `/api/status` 不接受密码。SSH/物理访问 = 已经是 admin。
+- **受限模式 + LAN 攻击者 + 远程 desktop**：desktop 拿到 `requires_setup=true` → 显示"去 Gateway 主机设密码"提示页，**不会**尝试登录。攻击者不能代替操作员设密。
+- **race window**：从"daemon 完成 `set_admin_password` 写盘"到"HTTP 中间件下一次看到 `is_restricted()==false`"是 micro-秒级（同一进程内的 accounts.json 原子写 + middleware 直接调 `is_restricted()` 读盘）���
+- **policy 一致性**：`set_admin_password` 走 `PasswordPolicy::validate`，跟普通 `change-password` 同一条代码路径。
+
+**与原 §决策 12 的关系**：
+
+- 原"fail-fast"是 v1 的"安全优先"极端选择，假设操作员一定会读 toml。**经验证**这假设不成立（build_macos.sh 把 stderr 吞了）。v2 保持"操作员必须设置密码"这个安全不变量的同时，**把"如何设置"从"必须读文档改 toml"降到"gateway 启动时一个 TTY 提示"或"一行 CLI"**。
+- `bootstrap_admin` toml 段**保留**——它是"纯配置文件驱动"场景的合规出口，CI/k8s/CI 镜像打包用它。
+- v2 是 v1 的**降级**，不是替代：bind 推断规则、local 模式所有 no-op、UserAccount 在 local 模式下的存在性、回滚/降级路径、主流参照、ponytail ceiling 全部继承。
+
+**实施映射**：
+
+| 文件 | 变更 |
+|---|---|
+| `auth/service.rs::ensure_bootstrap_admin` | 拆分为 Path A（toml bootstrap_admin → 记账码 admin）与 Path B（空 store → seed 无密码 admin）；保留"非空 store → bootstrap_admin 被忽略"分支 |
+| `auth/service.rs::set_admin_password` + `is_restricted` | 新方法，set 校验 policy、emit 一次性 fail；is_restricted 是 middleware / status 字段的唯一判据 |
+| `gateway/mod.rs::is_first_boot_restricted` + `set_admin_password` | 公开 façade，daemon arm 用 |
+| `cli.rs::Commands::AdminSetup` | 新子命令，三种密码源（file/stdin/rprompt），**不启动 Gateway** |
+| `cli.rs` daemon arm | `is_first_boot_restricted()` → `stdin`+`stdout` 双 TTY 才 prompt（写盘后未带 `--daemon` 则退出）；**非 TTY 或 prompt 失败只 warn（stderr + 日志文件）不中断启动**，daemon 照常起 HTTP 进受限模式。见 §决策 12 v3 |
+| `http/restricted_mode.rs` | 新 middleware（已实现），装在 `auth_middleware` 之前，403 `setup_required` |
+| `http/routes.rs::SystemStatusResponse` | 新增 `requires_setup: bool` 字段，`/api/status` 序列化自动带上 |
+| Desktop `authStore` + `SetupRequiredView` | 探测 `requires_setup=true` → 切到 setup_required 状态 + 5 s 轮询 `/api/status` → flip 后自动 `init()` 继续 |
+
+**ceiling / 未做**（有意留白）：
+
+- **远程 desktop 不能自己**——first password 不能从 desktop UI 设置。要么 SSH 上去，要么 `admin-setup` 子命令，要么 toml。这是设计，不是 bug（见 §决策 12 v2 安全不变量第 1 条）。
+- **轮询间隔 5 s 是硬编码**。Setup 完成后用户最多感知 5 s 延迟。需要 sub-second 时切 WebSocket / SSE。
+- **受限模式不限制 MQTT**：依赖现有 broker CONNECT 鉴权（`mqtt.auth_enabled`）。如果运营需要"受限模式 = broker 也拒所有 user:*"，加 broker ACL 即可，**当前不做**——理由：MQTT credential 本来就跟 HTTP bearer 复用同一个 secret，没密码的 admin 拿不到 token，连不上 broker，无需额外限制。
+
+#### §决策 12 v3：首次设置与 daemon 启动解耦——daemon 永远先起 HTTP
+
+**修订动机**（实施期记录；代码注释 `cli.rs` 里已引用 v3）：v2 把首次设置的实现写成「`cli.rs` **daemon arm**：TTY 检测 + prompt + 写盘；非 TTY **退出 1**」。实测这条实现**没有修好它自己的动机场景**——受限模式在首次启动路径上根本不可达：
+
+1. `build_macos.sh --start` 用 `"$GATEWAY_EXE" ... &` 起进程。非交互 shell 里后台作业的 stdin 被赋为 `/dev/null`（POSIX 行为，pty 下实测确认），于是 `stdin.is_terminal() == false` → 走「非 TTY」分支 → **`return Err` → exit 1，HTTP 从没 listen**。Desktop 拿到的仍是 connection refused，和 v1 的黑洞等价；只是这次 accounts.json 里多了一个谁也看不到的 seed。
+2. 就算 stdin 是 TTY（前台交互启动），prompt 也排在 `if self.daemon { async_main(...) }` **之前**且阻塞：密码写完 `is_restricted()` 已经是 `false`，HTTP 才开始服务。也就是说**受限模式从来没有真正对外服务过**——`requires_setup` / `SetupRequiredView` / 5 s 轮询这套机器只会在运行期被 `reset_password` 打中时才出现（那是另一种故障，见 §决策 12 v2 的 `is_restricted()` 定义）。
+
+**v3 合约**：首次设置是 **best-effort**，永远不允许打断启动。
+
+1. `is_first_boot_restricted()` 为真时，只有 `stdin` 与 `stdout` **都是** TTY 才弹 prompt。`rpassword` 直接读写 `/dev/tty`（不看 fd 0/1），所以「stdio 两端都是终端」是「有人坐在前面」的保守代理；被重定向的启动（构建脚本 / systemd / Tauri 子进程）一律不弹。
+2. prompt 成功 → 写盘；未带 `--daemon` 时退出，让操作员自己决定何时起服务（v2 语义保留，见 `cli.rs` 的 v3 注释）。
+3. **prompt 不可用（非 TTY）或失败（两次不符 / 不满足 policy）→ 只 warn，不中断**：`eprintln!` + `tracing::warn!` 点名三条解法，然后照常继续。`--daemon` 会起 HTTP，受限模式开始**对外服务**。
+4. 因此受限模式是真的可达：`/health` 与 `/api/status`（带 `requires_setup: true`）返回 200，其余 `/api/*` 一律 403 `setup_required`；Desktop 渲染提示页并 5 s 轮询，操作员在主机上 `admin-setup` 写盘后，下一次中间件读盘即解除，**无需重启**。
+
+**为什么解法要写进日志文件**：动机场景的 stderr 被脚本丢进 `/dev/null`，所以 `warn_first_boot_restricted()` 同时发 `tracing::warn!`，落到 `data_dir/logs/*.log`——这是「用户什么都看不到」的正解。
+
+**实测**（`--home <tmp> --auth-mode multi_user --daemon --addr 127.0.0.1:21999`，stdio 全部重定向）：
+
+| 请求 | 结果 |
+|---|---|
+| 进程 | 存活（v2 下此处是 exit 1） |
+| `GET /health` | 200 |
+| `GET /api/status` | 200 + `requires_setup: true` |
+| `GET /api/users`（无 token） | **403 `setup_required`**（不是 401，见下方已修 bug） |
+| `POST /api/auth/login` | 403 `setup_required` |
+| `admin-setup --password-stdin` 之后 | `requires_setup: false`，login 拿到 token 对，`/api/users` 回到 401 |
+
+> **已修 bug（本轮）**：`restricted_mode` 中间件原先 `.layer()` 在 `auth_middleware` **之前**，而 axum 的 layer 是「后加的更外层、请求从下往上跑」——于是它实际在 auth **内层**，受限模式下的无 token 请求先被 auth 答成 401，与 v2 合约「403 不是 401」相反。现在改为挂在 auth 之外，并补了一个走真实 `build_router` 的回归用例（`real_router_answers_403_not_401_without_a_token`）。
 
 ---
 
@@ -865,7 +949,7 @@ require_mixed_case = false
 2. **session 隔离散布在 Runtime 的多个 handler**：过滤与 owner 校验必须覆盖 list / get / messages / latest / open / close / delete / visibility 全部入口；漏一处 = 数据泄漏。已收敛到两个共享谓词（`is_readable_by` / `is_writable_by`）+ 两个共享辅助（`authorize_read` / `authorize_write`），新增 handler 只需调辅助即可，但仍需 grep ceiling lint 兜底（见 §6.6）。
 3. **Desktop 双 store 并存过渡期**：`userProfileStore`（旧） + `authStore`（新）共存一段时间，迁移期两者数据可能不一致；需要清晰 deprecation 路径。
 4. **token 撤销的存储成本**：refresh token family 需要持久化以支持"该 family 全部撤销"语义，单独文件或 Redis；本期选文件（`data_dir/auth/revoked_families.txt`），量小可接受。
-5. **首次启动门槛（multi_user 模式）**：必须通过 `bootstrap_admin` 配置创建首位 admin；漏配导致系统空跑无人能登录——**fail-fast 拒启动**（决策 12 升级），而非仅告警。local 模式无此门槛（首位 user 由 `bootstrap/orchestrator.rs` 自动创建，见决策 12 "UserAccount 在 local 模式下的存在性"）。
+5. **首次启动门槛（multi_user 模式）**：~~必须通过 `bootstrap_admin` 配置创建首位 admin；漏配导致系统空跑无人能登录——fail-fast 拒启动~~（决策 12 v2 修订为 seed 无密码 admin + 受限模式，见 §决策 12 v2 / v3），而非仅告警。local 模式无此门槛（首位 user 由 `bootstrap/orchestrator.rs` 自动创建，见决策 12 "UserAccount 在 local 模式下的存在性"）。
 
 ### 5.3 边界 / 例外
 
@@ -915,7 +999,7 @@ require_mixed_case = false
 
 ## 6. 改动清单（按 crate / 文件）
 
-> **实现状态（截至 Phase 6 Desktop 聊天 UI）**：本节标注 **（已实现）** 的条目已合并并测试通过——core `src/account.rs`；gateway `src/account/store.rs` / `password.rs` / `auth/{mode,token,revoked,service}.rs` / `http/{auth_middleware,auth_api,account_api}.rs` / `chat.rs` / `http/chat_api.rs` / config `auth_mode` + `[multi_user]` + `effective_auth_mode()` / cli `--auth-mode` / `Gateway::new` 的 bootstrap_admin fail-fast / `proxy.rs` 的 14 条会话控制路由（生命周期 7 + 会话动作 7）；runtime `src/http/session_control.rs` + `conversation.rs` 的 scope/visibility + `agent/session/session_manager.rs` 的 `create_frontend_session` / `resume_session`；Desktop `authStore` / `authFetch` / `account/*` / `user-list/*` / `lib/user-chat-api.ts` / `stores/userChatStore.ts` / `views/MessagesView.tsx`。**未实现**的条目 = 后续 PR（`chat/attachments`），属计划范围，非本节遗漏。原稿的 `protocol.rs AccountPublicView` **未新增**——`acowork_core::account::AccountView` 已承担脱敏 API 返回类型，再建一个同类是重复。
+> **实现状态（截至 Phase 6 Desktop ���天 UI）**：本节标注 **（已实现）** 的条目已合并并测试通过——core `src/account.rs`；gateway `src/account/store.rs` / `password.rs` / `auth/{mode,token,revoked,service}.rs` / `http/{auth_middleware,auth_api,account_api,restricted_mode}.rs` / `chat.rs` / `http/chat_api.rs` / config `auth_mode` + `[multi_user]` + `effective_auth_mode()` / cli `--auth-mode` / `Gateway::new` 的 **passwordless-seed + 受限模式**（§决策 12 v2，取代原 bootstrap_admin fail-fast）/ `proxy.rs` 的 14 条会话控制路由（生命周期 7 + 会话动作 7）；runtime `src/http/session_control.rs` + `conversation.rs` 的 scope/visibility + `agent/session/session_manager.rs` 的 `create_frontend_session` / `resume_session`；Desktop `authStore` / `authFetch` / `account/*` / `user-list/*` / `lib/user-chat-api.ts` / `stores/userChatStore.ts` / `views/MessagesView.tsx` / `components/account/SetupRequiredView.tsx`。**未实现**的条目 = 后续 PR（`chat/attachments`），属计划范围，非本节遗漏。原稿的 `protocol.rs AccountPublicView` **未新增**——`acowork_core::account::AccountView` 已承担脱敏 API 返回类型，再建一个同类是重复。
 ### 6.1 core/acowork-core
 
 - 新增 `src/account.rs`（**已实现**）：`UserAccount`、`Role`、`AccountListFile`、`DISABLED_PASSWORD_HASH`；`UserAccount::to_public_profile()` 产出 `UserProfile` 公开视图
@@ -1191,7 +1275,7 @@ grep -nE '"/sessions' core/acowork-runtime/src/http/server.rs
 >
 > **模式分流补充（§决策 12）**：本地（bind `127.0.0.1`）部署下，**§1-§11 整套决策退化为 no-op**——问题 1（首位 admin = 物理 OS 用户）、问题 2（注销策略 = OS 账户注销）、问题 3-7（隔离/聊天/原子性/并发 = 单用户场景下不触发）按 `AUTH_MODE=local` 分流消解，不需单独决议。multi_user 模式（bind `0.0.0.0`）下问题 1-7 才进入实施路径。
 
-1. **✅ 已决议 — 首位 admin 创建流程**：选 **`bootstrap_admin` 配置驱动**（无人值守优先）。理由：Kubernetes / Consul / etcd / Docker 等集群系统均采配置文件 / 环境变量方式；"Gateway 是 keep-alive 进程不应有 stdin" 是既有架构原则（`AGENTS.md` 已明确）。交互式场景由**独立 CLI 子命令** `acowork-gateway admin create` 提供（独立进程，不破坏 keep-alive 边界），对应 [apps/cli/](apps/cli/) 增量。配置缺失时：`accounts.json` 为空 → **拒启动**（fail-fast，非告警）；非空 → 忽略（见决策 5 实施修订）。
+1. **✅ 已决议 — 首位 admin 创建流程**：选 **`bootstrap_admin` 配置驱动**（无人值守优先）。理由：Kubernetes / Consul / etcd / Docker 等集群系统均采配置文件 / 环境变量方式；"Gateway 是 keep-alive 进程不应有 stdin" 是既有架构原则（`AGENTS.md` 已明确）。交互式场景由**独立 CLI 子命令** `acowork-gateway admin create` 提供（独立进程，不破坏 keep-alive 边界），对应 [apps/cli/](apps/cli/) 增量。配置缺失时：~~`accounts.json` 为空 → 拒启动（fail-fast，非告警）~~ （**v2 修订**：空库改为 seed 无密码 admin + 受限模式，见 §决策 12 v2 / v3；原为"拒启动"）；非空 → 忽略（见决策 5 实施修订）。
 2. **✅ 已决议 — 注销策略**：本期**只软删除**（`disabled_at`，与决策 6 一致），不提供硬删除。理由：Slack / Discord / Teams 均默认软删除保留历史；硬删除仅在 GDPR 等法律强制场景需要（会破坏 session / 聊天的引用完整性），本期 YAGNI；后续若需硬删除再立独立 ADR（带宽限期 + 异步清理任务 + 引用重映射策略）。
 3. **✅ 已决议 — 群聊（group chat）**：`conversation.json` 的 `participants` 字段类型保留 `Vec<String>`，本期运行时断言 `len() == 2`；未来 group chat 通过 "len() > 2 + group metadata（name / avatar / owner）" 扩展，**零迁移**（schema 已兼容）。理由：Slack / Discord / 微信 / Telegram 均采用 DM / Group 统一 schema；本期前端仅暴露 2 人路径，schema 留口。
 4. **✅ 已决议 — 聊天附件大小限制**：**图片 25 MB / 文档 100 MB / 不引入 virus scan**。ponytail 标记：个人 / 小团队场景下 trade-off 已知；超过此规模需引入 ClamAV（独立进程）+ 对象存储分拆（独立 ADR）。理由：Discord 25 MB（图片 / 视频）、Telegram 100 MB（任意文件）是公认的 sweet spot；virus scan 在用户量 < 100 时 ROI 为负，是 over-engineering。
