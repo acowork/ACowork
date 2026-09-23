@@ -286,6 +286,13 @@ pub struct AgentCore {
     /// Admin service for HTTP memory endpoints and embedding migration.
     /// ADR-051 P4: Replaces the former `grafeo_store` compat field.
     pub(crate) memory_admin: Option<Arc<dyn MemoryAdminService>>,
+    /// The open SQLite store, when the SQLite backend is selected (ADR-082 §4).
+    ///
+    /// Kept so the conversation index can share the same connection (and
+    /// file) instead of opening a second one — `memory/private.sqlite` holds
+    /// memory nodes, session meta and the conversation index together.
+    /// `None` on the grafeo backend.
+    pub(crate) sqlite_store: Option<Arc<acowork_sqlite::SqliteStore>>,
     /// RAG provider (enterprise knowledge retrieval, orthogonal to MemoryProvider).
     /// ADR-051 C3: New field, independent from memory_provider.
     pub(crate) rag_provider: Option<Arc<dyn RagProvider>>,
@@ -583,6 +590,7 @@ impl AgentCore {
             distiller_judge_prompt: Arc::new(std::sync::RwLock::new(None)),
             memory_provider: None,
             memory_admin: None,
+            sqlite_store: None,
             rag_provider: None,
             memory_session: None,
             debug_observer: observer,
@@ -1183,6 +1191,9 @@ impl AgentCore {
                 // the legacy JSON sidecars once (no-op into a populated
                 // table, source files untouched).
                 self.install_session_meta_backend(store.clone(), work_dir);
+                // Keep a handle so the conversation index shares this
+                // connection instead of opening a second one.
+                self.sqlite_store = Some(store.clone());
                 self.install_memory_backend(store, &db_path)
             }
             Err(e) => tracing::warn!(
@@ -1312,6 +1323,14 @@ impl AgentCore {
 
     pub fn memory_provider(&self) -> Option<&Arc<dyn MemoryProvider>> {
         self.memory_provider.as_ref()
+    }
+
+    /// The open SQLite store when the SQLite backend is active (ADR-082 §4).
+    ///
+    /// Consumed by the conversation-index bootstrap so the index shares the
+    /// memory file and connection. `None` on the grafeo backend.
+    pub fn sqlite_store(&self) -> Option<Arc<acowork_sqlite::SqliteStore>> {
+        self.sqlite_store.clone()
     }
 
     /// Admin service for HTTP memory endpoints and embedding migration.
@@ -1940,6 +1959,7 @@ impl Clone for AgentCore {
             distiller_judge_prompt: Arc::clone(&self.distiller_judge_prompt),
             memory_provider: self.memory_provider.clone(),
             memory_admin: self.memory_admin.clone(),
+            sqlite_store: self.sqlite_store.clone(),
             rag_provider: self.rag_provider.clone(),
             memory_session: self.memory_session.clone(),
             debug_observer: self.debug_observer.clone_production(),

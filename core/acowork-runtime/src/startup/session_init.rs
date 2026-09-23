@@ -556,7 +556,18 @@ pub(crate) async fn phase_b_init_session(
                 .as_ref()
                 .map(|p| p.dimension())
                 .unwrap_or(DEFAULT_EMBEDDING_DIM);
-            match crate::conversation_index::ConversationIndex::open(work_dir_path, embed_dim) {
+            // ADR-082 §4 step 3: when the memory backend is SQLite, the
+            // conversation index shares that store — memory nodes, session
+            // meta and message vectors live in one `memory/private.sqlite`.
+            // On the grafeo backend it keeps its own
+            // `{work_dir}/conversation_index.sqlite`.
+            let opened = match c.sqlite_store() {
+                Some(store) => crate::conversation_index::ConversationIndex::from_store(
+                    store, work_dir_path, embed_dim,
+                ),
+                None => crate::conversation_index::ConversationIndex::open(work_dir_path, embed_dim),
+            };
+            match opened {
                 Ok(index) => {
                     let index = Arc::new(index);
                     if let Ok(mut slot) = ctx.conversation_index_slot.write() {

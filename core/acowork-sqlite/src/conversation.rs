@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
@@ -62,8 +62,13 @@ struct MessageProps {
 }
 
 /// The conversation vector index + per-session watermark.
+///
+/// Holds the [`SqliteStore`] behind an `Arc` so the memory provider, the
+/// session-meta store and this index can share one connection (and one
+/// write lock) when they live in the same file — ADR-082 §4 step 3's
+/// "one `.sqlite` file per workspace".
 pub struct ConversationStore {
-    store: SqliteStore,
+    store: Arc<SqliteStore>,
     /// Per-session watermark: next JSONL line index to index.
     ///
     /// Not persisted: it is recovered from the indexed rows at `open`, which is
@@ -78,17 +83,20 @@ impl ConversationStore {
     /// `embedding_dim` (the live provider's dimension — hardcoding 384 made
     /// every vector write mismatch a 512-dim provider).
     pub fn open(path: impl AsRef<Path>, embedding_dim: usize) -> Result<Self> {
-        let store = SqliteStore::open(path, embedding_dim)?;
+        let store = Arc::new(SqliteStore::open(path, embedding_dim)?);
         Self::from_store(store)
     }
 
     /// In-memory variant, for tests.
     pub fn open_in_memory(embedding_dim: usize) -> Result<Self> {
-        let store = SqliteStore::open_in_memory(embedding_dim)?;
+        let store = Arc::new(SqliteStore::open_in_memory(embedding_dim)?);
         Self::from_store(store)
     }
 
-    fn from_store(store: SqliteStore) -> Result<Self> {
+    /// Build the index on an already-open [`SqliteStore`], so memory, session
+    /// meta and the conversation index share one connection and one file
+    /// (ADR-082 §4 step 3).
+    pub fn from_store(store: Arc<SqliteStore>) -> Result<Self> {
         let this = Self {
             store,
             watermark: Mutex::new(HashMap::new()),

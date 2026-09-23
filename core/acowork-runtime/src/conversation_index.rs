@@ -100,6 +100,36 @@ impl ConversationIndex {
         })
     }
 
+    /// Build the index on an already-open [`acowork_sqlite::SqliteStore`], so
+    /// memory, session meta and the conversation index share one `.sqlite`
+    /// file (ADR-082 §4 step 3). `work_dir` still supplies the JSONL
+    /// `conversations/` source dir the indexer tails.
+    ///
+    /// Unlike [`open`](Self::open), no grafeo import runs: the shared store is
+    /// created by `AgentCore` only when the SQLite backend is selected, and by
+    /// then the memory import has already covered the file.
+    pub fn from_store(
+        store: std::sync::Arc<acowork_sqlite::SqliteStore>,
+        work_dir: &Path,
+        embedding_dim: usize,
+    ) -> Result<Self> {
+        let started = Instant::now();
+        let store = ConversationStore::from_store(store)
+            .map_err(|e| crate::error::RuntimeError::Memory(e.to_string()))?;
+        tracing::info!(
+            dir = %work_dir.display(),
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            dim = embedding_dim,
+            messages = store.message_count().unwrap_or(0),
+            "conversation index store opened on the shared SQLite file"
+        );
+        Ok(Self {
+            store,
+            conversations_dir: work_dir.join("conversations"),
+            indexing: AtomicBool::new(true),
+        })
+    }
+
     /// Embedding dimension this index was opened with.
     pub fn embedding_dim(&self) -> usize {
         self.store.embedding_dim()
