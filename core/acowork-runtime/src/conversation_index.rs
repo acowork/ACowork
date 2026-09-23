@@ -121,7 +121,7 @@ impl ConversationIndex {
         // be re-embedded from the JSONL.
         import_legacy_index(work_dir, &store, embedding_dim);
         tracing::info!(
-            dir = %work_dir.display(),
+            work_dir = %work_dir.display(),
             elapsed_ms = started.elapsed().as_millis() as u64,
             dim = embedding_dim,
             messages = store.message_count().unwrap_or(0),

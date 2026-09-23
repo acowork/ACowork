@@ -583,10 +583,13 @@ pub(crate) async fn phase_b_init_session(
                         ctx.agent_core_shared.clone(),
                     ));
                     tokio::spawn(async move { indexer.run().await });
-                    tracing::info!(
-                        dir = %work_dir_path.join(crate::conversation_index::STORE_FILE).display(),
-                        "conversation index: opened, tailer spawned"
-                    );
+                    // No store path here: which file backs the index depends on
+                    // the memory backend (shared `memory/private.sqlite` vs a
+                    // standalone `conversation_index.sqlite`), and it is already
+                    // reported — with the real path — by
+                    // `ConversationIndex::{open,from_store}` just above. Naming
+                    // it here too meant hardcoding one backend's filename.
+                    tracing::info!("conversation index: opened, tailer spawned");
                 }
                 Err(e) => {
                     tracing::warn!(
