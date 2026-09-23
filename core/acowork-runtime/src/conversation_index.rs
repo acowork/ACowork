@@ -105,6 +105,17 @@ impl ConversationIndex {
         self.store.embedding_dim()
     }
 
+    /// Adopt a new vector width. Only for an empty index — see
+    /// [`ConversationStore::set_embedding_dim`].
+    pub fn set_embedding_dim(&self, dim: usize) {
+        match self.store.set_embedding_dim(dim) {
+            Ok(()) => tracing::info!(dim, "conversation index: dimension adopted"),
+            Err(e) => {
+                tracing::error!(dim, error = %e, "conversation index: failed to adopt dimension")
+            }
+        }
+    }
+
     /// Number of indexed messages.
     pub fn message_count(&self) -> u64 {
         self.store.message_count().unwrap_or(0)
@@ -386,19 +397,30 @@ impl ConversationIndexer {
         }
 
         let mut found_pending = false;
-        // Dimension guard: writing a vector whose length differs from the
-        // store's HNSW dimension triggers the engine's dimension-mismatch
-        // panic. Skip the whole sweep (watermarks stay put) until the
-        // provider matches. The indexing flag stays latched `true` — the
-        // `/search` response must keep telling the user results are
-        // incomplete instead of silently going stale.
+        // Dimension guard: the store keeps the dimension it was created with,
+        // and `vector_search` ignores rows of another width, so writing a
+        // provider's vectors into a store of a different width would land them
+        // where nothing will ever look. Defer the sweep (watermarks stay put)
+        // until the two agree.
         if let Some(provider) = provider.as_deref() {
             let dim = provider.dimension();
             let index_dim = self.index.embedding_dim();
-            if dim != index_dim {
-                tracing::warn!(
+            if dim != index_dim && self.index.message_count() == 0 {
+                // An empty index's dimension is not a fact about stored data —
+                // it is whatever the index was created with, often before the
+                // provider had bound. Adopt the provider's width and index, so
+                // a model swap (or a first binding) heals itself.
+                tracing::info!(
                     provider_dim = dim,
                     index_dim,
+                    "conversation index: empty index adopting the provider dimension"
+                );
+                self.index.set_embedding_dim(dim);
+            }
+            if dim != self.index.embedding_dim() {
+                tracing::warn!(
+                    provider_dim = dim,
+                    index_dim = self.index.embedding_dim(),
                     "conversation index: provider dimension mismatch, deferring sweep"
                 );
                 self.index.set_indexing(true);
@@ -619,6 +641,33 @@ mod tests {
             hits[0].content.chars().count(),
             acowork_sqlite::conversation::MAX_INDEX_CONTENT
         );
+    }
+
+    /// A model swap leaves the index at its old width, where the indexer would
+    /// defer every sweep forever. Emptying it and adopting the new width is the
+    /// way out, and the new width has to survive a reopen — the store hands out
+    /// the dimension it was created with and ignores whatever it is passed.
+    #[test]
+    fn an_emptied_index_adopts_a_new_dimension_and_keeps_it() {
+        let (dir, index) = open_tmp();
+        let emb = vec_dim(DEFAULT_EMBEDDING_DIM, 7);
+        index
+            .index_message("s1", 0, "user", "alpha beta", &emb)
+            .expect("index");
+        assert_eq!(index.embedding_dim(), DEFAULT_EMBEDDING_DIM);
+
+        index.rebuild();
+        index.set_embedding_dim(512);
+        assert_eq!(index.embedding_dim(), 512);
+        drop(index);
+
+        let reopened = ConversationIndex::open(dir.path(), DEFAULT_EMBEDDING_DIM).expect("reopen");
+        assert_eq!(
+            reopened.embedding_dim(),
+            512,
+            "the store keeps the width it was given, not the one it is opened with"
+        );
+        assert_eq!(reopened.message_count(), 0);
     }
 
     #[test]

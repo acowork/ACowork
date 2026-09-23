@@ -156,6 +156,16 @@ impl ConversationStore {
         self.store.embedding_dim()
     }
 
+    /// Record a new vector width, for an empty index.
+    ///
+    /// The store hands out the dimension it was created with and ignores the
+    /// one a caller passes, so adopting a provider's width has to be explicit.
+    /// Only meaningful while there is nothing stored: existing vectors keep the
+    /// width they were written with.
+    pub fn set_embedding_dim(&self, dim: usize) -> Result<()> {
+        self.store.set_embedding_dim(dim)
+    }
+
     /// Flush pending writes and release the file lock.
     pub fn close(&self) -> Result<()> {
         self.store.close()
