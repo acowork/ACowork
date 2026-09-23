@@ -113,7 +113,8 @@ pub struct MemoryManagerConfig {
     ///
     /// Source of truth for the retrieval-side quality knobs that were
     /// previously separate `MemoryManagerConfig` fields:
-    /// - `quality.min_score` (replaces the old `default_min_score`)
+    /// - `quality.min_cosine` (absolute cosine floor on the retrieval gate;
+    ///   replaces the old `min_score`, which thresholded the fused rank score)
     /// - `quality.pagerank_weight` (replaces the old `pagerank_weight`)
     /// - `quality.exclude_dormant` (Dormant retrieval exclusion, D1)
     ///
@@ -298,11 +299,19 @@ impl MemoryManager {
         // ── Auto-generate embedding if needed ──
         // Timeout is handled by FallbackEmbeddingProvider internally
         // (200ms per attempt, then fallback to next provider).
+        // A missing provider used to degrade every retrieval to BM25 with no
+        // trace in the logs at all. Name it, so a `source="text"` line in
+        // "Memory search completed" always has a visible cause.
+        if query.embedding.is_none() && embedding_provider.is_none() {
+            tracing::info!(
+                "No embedding provider on the memory session handle;                  retrieval will use text (BM25) only"
+            );
+        }
         if query.embedding.is_none()
             && let Some(emb_prov) = embedding_provider {
                 match emb_prov.embed(&query.query_text).await {
                     Ok(vec) => {
-                        tracing::debug!(
+                        tracing::info!(
                             dim = vec.len(),
                             provider = emb_prov.name(),
                             "Auto-generated query embedding"
@@ -323,7 +332,7 @@ impl MemoryManager {
         } else {
             self.config.default_k
         };
-        let min_score = query.min_score.unwrap_or(self.config.quality.min_score);
+        let min_cosine = query.min_cosine.unwrap_or(self.config.quality.min_cosine);
         let hint_type = query.hint_type;
         let (vector_weight, text_weight, _graph_weight) = hint_weights(hint_type);
 
@@ -352,7 +361,7 @@ impl MemoryManager {
                         k,
                         text_weight,
                         vector_weight,
-                        Some(min_score),
+                        Some(min_cosine),
                     )
                     .map_err(|e| AcoworkError::Memory(format!("Hybrid search failed: {e}")))
             } else {
@@ -363,25 +372,30 @@ impl MemoryManager {
                         "content",
                         &query.query_text,
                         k,
-                        Some(min_score),
                     )
                     .map_err(|e| AcoworkError::Memory(format!("Text search failed: {e}")))
             };
 
             match search_result {
                 Ok(results) => {
+                    let source = if query.embedding.is_some() {
+                        "hybrid"
+                    } else {
+                        "text"
+                    };
                     tracing::info!(
                         label,
                         result_count = results.len(),
+                        source,
                         "Memory search completed (before dedup + exclude)"
                     );
                     for (node_id, score) in results {
-                        let source = if query.embedding.is_some() {
-                            "hybrid".to_string()
-                        } else {
-                            "text".to_string()
-                        };
-                        all_results.push((node_id, score, label.to_string(), source));
+                        all_results.push((
+                            node_id,
+                            score,
+                            label.to_string(),
+                            source.to_string(),
+                        ));
                     }
                 }
                 Err(e) => {
@@ -1149,7 +1163,7 @@ mod tests {
         assert_eq!(config.max_autobio_core_tokens, 100);
         assert_eq!(config.max_autobio_history_tokens, 100);
         assert_eq!(config.default_k, 10);
-        assert_eq!(config.quality.min_score, 0.0);
+        assert_eq!(config.quality.min_cosine, 0.3);
         assert!(config.quality.exclude_dormant, "D1 Dormant exclusion on by default");
         assert!(config.enable_graph_expand);
         assert!(config.record_async);

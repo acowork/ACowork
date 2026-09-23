@@ -1,13 +1,19 @@
 /**
- * ADR-073 §4: pure helper that partitions an agent list into per-node
- * groups for the remote-mode sidebar view. Kept side-effect-free so it
- * is trivially unit-testable without mocking stores.
+ * ADR-073 §4: pure helper that builds the remote-mode sidebar's per-node
+ * groups. Kept side-effect-free so it is trivially unit-testable without
+ * mocking stores.
+ *
+ * The node is the primary axis, not the agent: the sidebar is the only
+ * place a node can be acted on (e.g. installing the first agent onto an
+ * empty node), so a node with zero agents must still produce a group.
+ * Deriving the groups from `agents` instead would make an agent-less node
+ * structurally invisible — hence one group per `nodes` entry, always.
  *
  * Contract:
- *   - `agents` are partitioned by `agent.node_id` (empty/missing →
- *     bucket key `"__unknown__"`).
- *   - Groups are emitted in the order they appear in `nodes` (the
- *     Gateway's natural ordering); empty groups are skipped.
+ *   - Groups are emitted in `nodes` order (the Gateway's natural
+ *     ordering), one per node, including nodes with no agents.
+ *   - Agents are attached by `agent.node_id`; empty/missing → bucket key
+ *     `"__unknown__"`.
  *   - Agents whose `node_id` is not present in `nodes` (or whose
  *     `node_id` is missing) are appended as a trailing "unknown"
  *     bucket so they never silently disappear from the UI.
@@ -43,10 +49,9 @@ export function partitionAgentsByNode(
   }
   const ordered: AgentNodeGroup[] = [];
   for (const n of nodes) {
-    const agentsForNode = byNode.get(n.node_id);
-    if (agentsForNode && agentsForNode.length > 0) {
-      ordered.push({ nodeId: n.node_id, node: n, agents: agentsForNode });
-    }
+    // A node with zero agents is still a group: it is the only place the
+    // sidebar can offer "install the first agent here" (ADR-073 §4).
+    ordered.push({ nodeId: n.node_id, node: n, agents: byNode.get(n.node_id) ?? [] });
   }
   const knownIds = new Set(nodes.map((n) => n.node_id));
   for (const [nid, agentsForNode] of byNode) {

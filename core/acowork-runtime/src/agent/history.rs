@@ -211,7 +211,7 @@ pub struct HistoryManager {
     ///
     /// Maintained incrementally on the hot path (`append` / `extend` are
     /// O(1) per message) and recomputed on the rare structural operations
-    /// (`load_restored`, `clear`, `truncate_to`, `fit_to_budget_lossless`).
+    /// (`load_restored`, `clear`, `truncate_to`).
     /// This lets the always-on context-usage observability path report
     /// the `messages` section byte size **without** re-serializing the
     /// entire history on every LLM call.
@@ -321,6 +321,17 @@ impl HistoryManager {
     /// resumed history) and the last calibrated ratio. Missing values fall
     /// back to the default ratio / recomputed estimate — the JSONL replay
     /// in [`Self::load_restored`] already produced a sane estimate.
+    ///
+    /// Why the `last_input` anchor matters: `current_tokens` is, in a live
+    /// session, the provider-counted `prompt_tokens` of the WHOLE prompt
+    /// (history + system + tool schemas — see [`Self::calibrate_from_usage`]),
+    /// and every trim/compaction threshold compares against it. The JSONL
+    /// replay can only produce a messages-only estimate, which is strictly
+    /// smaller than the real prompt, so seeding `current_tokens` from the
+    /// persisted `last_input` is what keeps the very FIRST post-resume
+    /// request measured on the same 口径 as a live session. Without it a
+    /// resumed oversized session slips past the compaction threshold and
+    /// the provider rejects the first request.
     pub fn restore_anchor(&mut self, last_input_tokens: Option<u64>, ratio: Option<f64>) {
         if let Some(ratio) = ratio {
             self.counter.set_ratio(ratio);
@@ -521,96 +532,6 @@ impl HistoryManager {
             injected_todo_call_id = ?self.last_injected_todo_call_id,
             "HistoryManager: loaded restored history"
         );
-    }
-
-    /// Lossless trim after restore: drop the oldest **complete rounds** until
-    /// the history token count is at or below 80% of `max_tokens`.
-    ///
-    /// A "round" here is the maximal contiguous tail starting at a non-system,
-    /// non-compaction-marker message and extending up to (but not including)
-    /// the next User message. This guarantees we never split an
-    /// `Assistant{tool_calls}` from its matching `Tool` results.
-    ///
-    /// Preserved across all trims:
-    /// - Leading `MessageRole::System` messages
-    /// - The single compaction summary marker (identified by
-    ///   `name == "compaction_summary"`; stored as a `User` message — see
-    ///   [`Self::replace_middle_with_summary`]), if present
-    ///
-    /// Returns the number of messages dropped. Does not invoke any LLM.
-    ///
-    /// This is the safety net for the "model swap on resume → smaller token
-    /// budget" case: even faithful replay can overflow if the user resumed the
-    /// session under a model with a smaller context window.
-    pub fn fit_to_budget_lossless(&mut self) -> usize {
-        if self.max_tokens == 0 {
-            return 0;
-        }
-        let target = (self.max_tokens as f64 * 0.80) as u64;
-        if self.current_tokens <= target {
-            return 0;
-        }
-
-        fn is_compaction_marker(msg: &ChatMessage) -> bool {
-            // Identify by `name` only — the compaction summary lives at
-            // `User` role in memory (see `replace_middle_with_summary`),
-            // not `Assistant`.  A role-based check here would misclassify
-            // the marker as a regular user/assistant turn and let
-            // `lossless_trim` remove it.
-            msg.name.as_deref() == Some(COMPACTION_SUMMARY_NAME)
-        }
-
-        // Locate the first removable index: skip leading System and the
-        // contiguous compaction marker that follows them (if any).
-        let mut first_removable = self
-            .messages
-            .iter()
-            .position(|m| !matches!(m.role, MessageRole::System))
-            .unwrap_or(self.messages.len());
-        if first_removable < self.messages.len()
-            && is_compaction_marker(&self.messages[first_removable])
-        {
-            first_removable += 1;
-        }
-
-        let mut removed = 0;
-        while self.current_tokens > target && first_removable < self.messages.len() {
-            // Find the end of the next "round": from first_removable up to
-            // (but not including) the next User message, OR end of history.
-            let mut round_end = first_removable + 1;
-            while round_end < self.messages.len()
-                && !matches!(self.messages[round_end].role, MessageRole::User)
-            {
-                round_end += 1;
-            }
-
-            // If dropping this round would empty everything tail-side, stop:
-            // we always want at least one tail round to remain.
-            if round_end >= self.messages.len() {
-                break;
-            }
-
-            // Drop [first_removable .. round_end)
-            let dropped_tokens: u64 = self.messages[first_removable..round_end]
-                .iter()
-                .map(|m| self.counter.count_message(m, Some(&self.protocol_type)))
-                .sum();
-            self.messages_mut().drain(first_removable..round_end);
-            self.current_tokens = self.current_tokens.saturating_sub(dropped_tokens);
-            removed += round_end - first_removable;
-        }
-
-        if removed > 0 {
-            self.recompute_messages_json_bytes();
-            tracing::warn!(
-                removed,
-                remaining = self.messages.len(),
-                tokens = self.current_tokens,
-                target_budget = target,
-                "HistoryManager: lossless trim after restore"
-            );
-        }
-        removed
     }
 
     /// Clear all messages
@@ -1927,12 +1848,52 @@ mod tests {
     }
 
     #[test]
+    fn restore_recipe_keeps_full_history_above_80_percent_budget() {
+        // Regression (session 20260921_155604_a4825c): cold-start restore
+        // must NOT trim. The retired `fit_to_budget_lossless` dropped the
+        // oldest complete rounds whenever the anchored API prompt exceeded
+        // 80% of `max_tokens`, so a session whose meta said
+        // `last_input = 167098` lost 90 messages and the status panel
+        // reported `~109K` — a number the user never produced.
+        //
+        // `max_tokens = 208_000` puts 80% at 166_400, i.e. the anchor below
+        // is over the old trigger line on purpose. `HistoryManager` now
+        // exposes no restore-time trim at all.
+        let mut hm = HistoryManager::new(208_000);
+        hm.set_max_tokens(208_000);
+
+        let msgs: Vec<ChatMessage> = (0..40)
+            .map(|i| {
+                make_message(
+                    MessageRole::User,
+                    &format!("message number {i} with enough padding text to count"),
+                )
+            })
+            .collect();
+        let count = msgs.len();
+        hm.load_restored(msgs, None);
+        hm.restore_anchor(Some(167_098), Some(3.5));
+
+        assert_eq!(hm.len(), count, "restore must not drop any message");
+        assert_eq!(
+            hm.token_count(),
+            167_098,
+            "count is the persisted API prompt total, not a messages-only estimate"
+        );
+        assert!(
+            hm.token_count() > hm.max_tokens() / 100 * 80,
+            "precondition: over the old 80% trigger line"
+        );
+    }
+
+    #[test]
     fn restore_anchor_restores_last_api_count_and_ratio() {
         // Regression: resumed sessions must re-anchor the token count to the
         // last API-counted prompt (which already includes system+tools) and
         // restore the calibrated ratio — otherwise the JSONL replay's
-        // default-ratio estimate drifts (and previously triggered spurious
-        // compaction via the removed overhead compensation).
+        // default-ratio estimate is strictly smaller than the real prompt
+        // and the first post-resume request slips past the compaction
+        // threshold.
         let mut hm = HistoryManager::new(1000);
         hm.append(make_message(
             MessageRole::User,
@@ -2006,94 +1967,6 @@ mod tests {
         hm.truncate_to(3);
         assert_eq!(snap.len(), 5, "snapshot keeps pre-rewind history");
         assert_eq!(hm.messages().len(), 3, "live history truncated");
-    }
-
-    #[test]
-    fn test_fit_to_budget_lossless_drops_oldest_rounds() {
-        // Tiny budget so 5 user messages will overflow 80%.
-        // Tier3 char-based estimator gives ~content.len()/4 tokens per message;
-        // we use long content to make accounting predictable.
-        let mut hm = HistoryManager::new(100);
-        hm.append(make_message(MessageRole::System, "Sys"));
-        for i in 0..5 {
-            // ~50 chars each → ~12 tokens × 5 = ~60 tokens of user content,
-            // plus assistants → easily over 80 (= 80% of 100).
-            hm.append(make_message(
-                MessageRole::User,
-                &format!("user msg number {i} with some padding text"),
-            ));
-            hm.append(make_message(
-                MessageRole::Assistant,
-                &format!("assistant reply number {i} with padding"),
-            ));
-        }
-        assert!(
-            hm.token_count() > 80,
-            "precondition: should overflow 80% of 100"
-        );
-
-        let dropped = hm.fit_to_budget_lossless();
-        assert!(dropped > 0, "should have dropped at least one round");
-        // System always preserved.
-        assert!(matches!(hm.messages()[0].role, MessageRole::System));
-        // At least one trailing round must remain.
-        assert!(
-            hm.messages()
-                .iter()
-                .any(|m| matches!(m.role, MessageRole::User)),
-            "at least one User message must survive"
-        );
-        // Final budget should be ≤ 80% of max.
-        assert!(
-            hm.token_count() <= 80,
-            "after trim, current_tokens ({}) must be ≤ 80",
-            hm.token_count()
-        );
-    }
-
-    #[test]
-    fn test_fit_to_budget_lossless_preserves_compaction_marker() {
-        let mut hm = HistoryManager::new(100);
-        hm.append(make_message(MessageRole::System, "Sys"));
-        hm.append(ChatMessage {
-            role: MessageRole::User,
-            content: "summary of earlier conversation that we want to keep".to_string(),
-            name: Some(COMPACTION_SUMMARY_NAME.to_string()),
-            ..Default::default()
-        });
-        for i in 0..6 {
-            hm.append(make_message(
-                MessageRole::User,
-                &format!("user message {i} with some additional text padding"),
-            ));
-            hm.append(make_message(
-                MessageRole::Assistant,
-                &format!("assistant reply {i} with extra padding"),
-            ));
-        }
-
-        let _ = hm.fit_to_budget_lossless();
-
-        // Compaction marker must still be present (in addition to System).
-        let has_marker = hm
-            .messages()
-            .iter()
-            .any(|m| m.name.as_deref() == Some("compaction_summary"));
-        assert!(has_marker, "compaction marker must survive lossless trim");
-        // System must still be at index 0.
-        assert!(matches!(hm.messages()[0].role, MessageRole::System));
-    }
-
-    #[test]
-    fn test_fit_to_budget_lossless_noop_when_under_budget() {
-        let mut hm = HistoryManager::new(10000);
-        hm.append(make_message(MessageRole::System, "Sys"));
-        hm.append(make_message(MessageRole::User, "hi"));
-        hm.append(make_message(MessageRole::Assistant, "hello"));
-        let before = hm.len();
-        let dropped = hm.fit_to_budget_lossless();
-        assert_eq!(dropped, 0);
-        assert_eq!(hm.len(), before);
     }
 
     #[test]

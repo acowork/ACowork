@@ -1,4 +1,4 @@
-import type { GatewayStatus } from "../../lib/types";
+import type { GatewayAlive } from "../../stores/gatewayStore";
 
 export interface GatewayTransitionActions {
   /** Snapshot of known agents (instance id → any). The helper only needs keys. */
@@ -33,12 +33,17 @@ export interface GatewayTransitionActions {
 }
 
 /**
- * Decide what to do on a Gateway-status transition.
+ * Decide what to do on a Gateway-liveness transition.
+ *
+ * `GatewayAlive` is maintained by `gatewayStore` under the
+ * single-authority model: MQTT CONNACK (the broker lives inside the
+ * Gateway process) is the liveness authority; an HTTP `/health` probe
+ * runs only as a subordinate death classifier while MQTT is down.
  *
  *   prev=null                 → first render (SplashScreen already drove
- *                                status to `connected` before AppLayout
+ *                                liveness to `alive` before AppLayout
  *                                mounts); nothing to do.
- *   prev=connected, cur≠x    → "drop" edge: every known agent is marked
+ *   alive → dead              → "drop" edge: every known agent is marked
  *                                offline and its sessions are cleared,
  *                                mirroring the natural `agent_status
  *                                offline` MQTT flow that node-stop / an
@@ -54,7 +59,7 @@ export interface GatewayTransitionActions {
  *                                arrive — the broker died with the
  *                                Gateway — so the sidebar group headers
  *                                would otherwise stay green).
- *   prev≠connected, cur=conn  → "rise" edge: pull the fresh agent list
+ *   dead → alive              → "rise" edge: pull the fresh agent list
  *                                from the Gateway (system agent gets
  *                                respawned on restart), re-probe the
  *                                services report, resync the node
@@ -62,61 +67,68 @@ export interface GatewayTransitionActions {
  *                                `selectAgent → fetchLatestSession →
  *                                openSession` chain re-hydrate the user's
  *                                last session.
- *   other                     → no-op (e.g. connecting→connecting, or the
- *                                transient `connected→connecting→
- *                                connected` flicker during a quick restart).
+ *   anything else             → no-op. `unknown` never fires an edge: a
+ *                                link flap that was never classified
+ *                                leaves agent state untouched (the old
+ *                                behavior — the verdict stayed healthy
+ *                                through a quick MQTT reconnect — is
+ *                                preserved).
  *
  * Side-effect helper so the AppLayout effect body stays one-liner and
  * the edge-detection logic is unit-testable without rendering React.
  */
 export function applyGatewayTransition(
-  prev: GatewayStatus | null,
-  next: GatewayStatus,
+  prev: GatewayAlive | null,
+  next: GatewayAlive,
   actions: GatewayTransitionActions,
 ): void {
   if (prev === null) return;
-  if (prev === "connected" && next !== "connected") {
+  if (prev === "alive" && next === "dead") {
     actions.refreshServices();
     actions.markNodesOffline();
     for (const id of actions.getAgentIds()) {
       actions.setAgentOffline(id);
       actions.clearAgentSessions(id);
     }
-  } else if (prev !== "connected" && next === "connected") {
+  } else if (prev === "dead" && next === "alive") {
     actions.refreshServices();
     void actions.fetchAgents();
     void actions.fetchNodes();
   }
 }
 
+export interface MqttEdgeHandlers {
+  /**
+   * MQTT just went down. MQTT down alone does NOT mean the Gateway died
+   * (only the path was cut) — start the death classifier so the verdict
+   * comes from evidence, and let `applyGatewayTransition` fire once/if
+   * it lands on `dead`.
+   */
+  onDrop: () => void;
+  /**
+   * MQTT just came up (CONNACK). The broker answered from inside the
+   * Gateway process — sufficient proof of liveness. The wiring must
+   * cancel any in-flight classifier probe (its question is moot), stop
+   * the classifier watch, and mark the verdict `alive`.
+   */
+  onRise: () => void;
+}
+
 /**
- * Decide whether an MQTT connection-edge transition should trigger an
- * HTTP Gateway probe.
+ * Route an MQTT connection-edge transition to the liveness wiring.
  *
- * Why this exists: `gatewayStore.status` is only refreshed by a
- * `checkHealth()` call, and nothing polls it during steady state. When
- * the Gateway is killed externally (CLI stop, crash), the FIRST signal
- * the frontend receives is the MQTT disconnect (broker lived in the
- * Gateway) — `gatewayStatus` would otherwise stay `connected` forever
- * and the `applyGatewayTransition` drop edge would never fire.
- *
- * So on every MQTT `connected ↔ not-connected` edge we re-probe HTTP:
- *   - drop edge: distinguishes "Gateway died" (probe fails →
- *     `gatewayStatus` flips to `error` → applyGatewayTransition fires
- *     the drop) from "agents just auto-slept" (probe succeeds →
- *     `gatewayStatus` stays `connected` → correctly no-op).
- *   - rise edge: after a Gateway restart the MQTT client reconnects
- *     before the user clicks anything; the probe flips `gatewayStatus`
- *     back to `connected` so the rise edge (fetchAgents) can fire.
- *
- * `prevUp === null` (first render) never probes — the SplashScreen boot
- * path already verified the Gateway.
+ * `prevUp === null` (first render) syncs with the current state: MQTT
+ * already up takes the rise path (idempotent — SplashScreen's boot probe
+ * likely already marked the verdict `alive`), MQTT already down starts
+ * the death watch (covers a drop that happened before AppLayout
+ * mounted).
  */
 export function onMqttConnectionEdge(
   prevUp: boolean | null,
   up: boolean,
-  probe: () => void,
+  handlers: MqttEdgeHandlers,
 ): void {
-  if (prevUp === null || prevUp === up) return;
-  probe();
+  if (prevUp === up) return;
+  if (up) handlers.onRise();
+  else handlers.onDrop();
 }

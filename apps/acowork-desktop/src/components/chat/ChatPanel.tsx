@@ -15,7 +15,7 @@ import { startAgentAndSyncUI } from "../../lib/agent-start";
 import { toolbarButton } from "../../lib/ui-styles";
 import { AddProviderFlow } from "../harness/AddProviderFlow";
 import * as sessionControl from "../../lib/session-control";
-import { Bot, Play, Send, ChevronDown, ChevronRight, ChevronLeft, ChevronsDown, ChevronsUp, Wrench, AlertTriangle, X, Square, Plus, Layers, Loader, Pencil, Paperclip, Image, Brain, Circle, CircleDot, Clipboard, Upload, Check, Search } from "lucide-react";
+import { Bot, Play, Send, ChevronDown, ChevronRight, ChevronLeft, ChevronsDown, ChevronsUp, Wrench, AlertTriangle, X, Square, Plus, Layers, Loader, Pencil, Paperclip, Image, Brain, Circle, CircleDot, Clipboard, Upload, Check, Search, Clock } from "lucide-react";
 import type { ChatMessage, VaultKeyEntry, ModelEntry, ProviderAccount } from "../../lib/types";
 import { ContextUsageIcon } from "./ContextUsageIcon";
 import { SessionVisibilityToggle } from "./SessionVisibilityToggle";
@@ -177,14 +177,15 @@ function formatBytes(n: number): string {
 }
 
 /**
- * Pick the input-box placeholder from (gatewayStatus, effectiveConnection,
- * activeSkill). P0 of unified-diagnostics plan §3.1.2.
+ * Pick the input-box placeholder from (effectiveConnection, activeSkill).
+ * P0 of unified-diagnostics plan §3.1.2.
  *
- * The previous implementation only distinguished `connected` vs
- * `!mqttConnected`. The watchdog's 6-state `effectiveConnection` lets us
- * show a more accurate hint per state:
+ * The MQTT verdict is the single authority for connection gating: the
+ * old `gatewayStatus` branch was removed because the HTTP probe is a
+ * display-side signal, and a superseded probe's late failure must never
+ * decide what the user sees about the real connection (2026-09-22
+ * incident: the input box stayed "正在重新连接..." after MQTT healed).
  *
- *   - gateway disconnected → "Gateway 未连接"
  *   - connecting          → "正在连接 Agent..."
  *   - reconnecting        → "正在重新连接..."
  *   - stale               → "连接状态异常，正在恢复..."
@@ -261,11 +262,9 @@ function getInputPlaceholderKey(
  * re-renders that would trigger Zustand churn.
  */
 function ConnectionStatusBanner({
-  gatewayStatus,
   effectiveConnection,
   staleSince,
 }: {
-  gatewayStatus: string;
   effectiveConnection: ConnectionStatus;
   staleSince: number | null;
 }): React.ReactElement | null {
@@ -283,15 +282,15 @@ function ConnectionStatusBanner({
       setReconnecting(false);
     }
   }, []);
-  // Show banner only when the gateway itself is reachable. If gateway is
-  // down, the placeholder already says "Gateway 未连接" — showing a
-  // second banner above would just be noise.
+  // The banner speaks for the MQTT/agent-side liveness — the single
+  // authority for connection UI. It no longer requires the HTTP `status`
+  // to read "connected": that display-side signal must not decide what
+  // the user is told about the real connection.
   const isBannerWorthy =
-    gatewayStatus === "connected" &&
-    (effectiveConnection === "connecting" ||
-      effectiveConnection === "reconnecting" ||
-      effectiveConnection === "stale" ||
-      effectiveConnection === "disconnected");
+    effectiveConnection === "connecting" ||
+    effectiveConnection === "reconnecting" ||
+    effectiveConnection === "stale" ||
+    effectiveConnection === "disconnected";
 
   // Tick once per second so the countdown animates. Cheap (single
   // setState/ChatPanel re-render, no global store updates).
@@ -1666,7 +1665,12 @@ export function ChatPanel() {
   // missed (wake-recovery webview reload, listener registration race).
   // The previous `!mqttConnected` check stayed false forever in that
   // case, locking the input box.
-  const inputDisabled = gatewayStatus !== "connected" || effectiveConnection !== "connected";
+  //
+  // Single-authority gating: the MQTT verdict ALONE decides. The old
+  // `gatewayStatus !== "connected"` clause was removed — the HTTP probe
+  // is display-side, and a superseded probe's late failure kept the box
+  // disabled after MQTT had already healed (2026-09-22 incident).
+  const inputDisabled = effectiveConnection !== "connected";
 
   // ── Cross-platform paste handling ──────────────────────────────────
   // Three entry points — keyboard (Ctrl+V / ⌘+V), context-menu "Paste",
@@ -2680,7 +2684,6 @@ export function ChatPanel() {
               rare case where the banner isn't mounted (e.g. while the
               watchdog is still in its initial idle state). */}
           <ConnectionStatusBanner
-            gatewayStatus={gatewayStatus}
             effectiveConnection={effectiveConnection}
             staleSince={mqttStaleSince}
           />
@@ -2695,7 +2698,7 @@ export function ChatPanel() {
                   `chatPanel.${getInputPlaceholderKey(gatewayStatus, effectiveConnection, !!activeSkill, sending)}`,
                 )}
             disabled={inputDisabled || readOnlySession}
-            className="w-full resize-none border-0 bg-transparent p-3 pb-2 outline-none placeholder:text-text-disabled  disabled:cursor-not-allowed disabled:opacity-50 max-h-48 overflow-y-auto min-h-[4.5rem]"
+            className="w-full resize-none border-0 bg-transparent p-3 pb-2 outline-none placeholder:text-text-disabled  disabled:cursor-not-allowed disabled:opacity-50 max-h-48 overflow-y-auto min-h-[5rem]"
             style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}
             onKeyDown={(e) => {
               if (e.key !== "Enter" || e.shiftKey) return;
@@ -2952,6 +2955,41 @@ function UnsupportedImageDialog({
 }
 
 /**
+ * Group flat `models` into `[provider, model[]]` pairs sorted
+ * alphabetically (case-insensitive) by provider, then by model name.
+ *
+ * Stable ordering matters because the menu has a hover-fly-out anchored
+ * to a specific row's viewport rect; if providers reshuffle on every
+ * vault reload, the fly-out's cached position desyncs from the row the
+ * user is actually hovering (deepseek used to jump from first to last).
+ *
+ * `query` filters both `model.name` and `model.provider` (case-insensitive
+ * substring) — empty string disables the filter.
+ *
+ * Exported for unit testing; the ModelMenu's own useMemo is the only
+ * call site.
+ */
+export function groupModelsByProvider<
+  T extends { name: string; provider: string },
+>(
+  models: T[],
+  query: string,
+): Array<readonly [string, T[]]> {
+  const q = query.trim().toLowerCase();
+  const map = new Map<string, T[]>();
+  for (const m of models) {
+    if (q && !m.name.toLowerCase().includes(q) && !m.provider.toLowerCase().includes(q)) continue;
+    const bucket = map.get(m.provider);
+    if (bucket) bucket.push(m);
+    else map.set(m.provider, [m]);
+  }
+  const cmp = (a: string, b: string) => a.toLowerCase().localeCompare(b.toLowerCase());
+  return Array.from(map.entries())
+    .map(([provider, ms]) => [provider, [...ms].sort((a, b) => cmp(a.name, b.name))] as const)
+    .sort(([a], [b]) => cmp(a, b));
+}
+
+/**
  * Model selector popup. Models are grouped by provider (sticky header);
  * when a provider holds more than one API key, picking a model drills into
  * an account level (`provider → model → account`) instead of silently using
@@ -3075,18 +3113,10 @@ function ModelMenu({
 
   const query = search.trim().toLowerCase();
 
-  // Models grouped by provider, insertion order preserved (provider is the
-  // menu's first level, so a flat list no longer has to repeat it per row).
-  const groups = useMemo(() => {
-    const map = new Map<string, typeof models>();
-    for (const m of models) {
-      if (query && !m.name.toLowerCase().includes(query) && !m.provider.toLowerCase().includes(query)) continue;
-      const bucket = map.get(m.provider);
-      if (bucket) bucket.push(m);
-      else map.set(m.provider, [m]);
-    }
-    return Array.from(map.entries());
-  }, [models, query]);
+  // Models grouped by provider, sorted alphabetically (case-insensitive)
+  // by provider first, then by model name within each provider. See
+  // `groupModelsByProvider` for why stable ordering is required here.
+  const groups = useMemo(() => groupModelsByProvider(models, query), [models, query]);
 
   // `pending` now drives a side fly-out, not a panel swap — so the search
   // box stays scoped to the main model list, and `accounts` / `visibleAccounts`
@@ -3140,7 +3170,7 @@ function ModelMenu({
       window.removeEventListener("scroll", compute, true);
       window.removeEventListener("resize", compute);
     };
-  }, [pending, accounts.length]);
+  }, [pending, accounts.length, models]);
 
   // Last-used account per provider — display hint only, never a preselection
   // (the user always clicks). Local storage because it is pure UI memory of
@@ -3359,8 +3389,12 @@ function ModelMenu({
                       <span className="flex min-w-0 items-center gap-1">
                         <span className="truncate font-medium">{a.alias}</span>
                         {isLastUsed && !isActive && (
-                          <span className="shrink-0 text-[10px] text-text-tertiary">
-                            {t("chatPanel.modelMenuLastUsed")}
+                          <span
+                            title={t("chatPanel.modelMenuLastUsed")}
+                            aria-label={t("chatPanel.modelMenuLastUsed")}
+                            className="inline-flex shrink-0 items-center text-text-tertiary"
+                          >
+                            <Clock size={10} />
                           </span>
                         )}
                       </span>

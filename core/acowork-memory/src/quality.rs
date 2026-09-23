@@ -141,11 +141,23 @@ impl Default for ConsolidationQuality {
 pub struct MemoryQualityConfig {
     /// Exclude Dormant nodes from retrieval results (ADR-062 D1). Default `true`.
     pub exclude_dormant: bool,
-    /// RRF-domain minimum score applied to retrieval (hybrid RRF scores are
-    /// typically 0.01–0.05, so keep 0.0 unless deliberately filtering).
-    /// Default `0.0`. Auto-inject and default retrieval both resolve here
-    /// (replaces `MemoryManagerConfig::default_min_score`, ADR-062 §4.2).
-    pub min_score: f32,
+    /// Minimum cosine similarity for a retrieval result to survive filtering
+    /// (ADR-062 §4.2). Applied to the *absolute* cosine similarity recovered
+    /// from the vector index (`cos = 1 - distance`), NOT to the fused RRF
+    /// score: RRF scores encode rank position only, carry no relevance
+    /// magnitude, and are not comparable across queries nor between a
+    /// single-source and a dual-source result set. Default `0.3` (≈72°)
+    /// drops clearly unrelated candidates while keeping literal /
+    /// exact-match hits.
+    ///
+    /// ponytail: an absolute floor is provider-dependent — real sentence
+    /// embeddings are anisotropic (unrelated pairs still sit at cos 0.5–0.9,
+    /// measured on the live store: even `0.6` filtered nothing), while the
+    /// procedural fallback embedding is near-orthogonal for any two texts
+    /// (cos ≈ 0, so the floor drops everything). Upgrade path: score the
+    /// query against a corpus-mean baseline (centered cosine / per-query
+    /// z-score) instead of an absolute cut.
+    pub min_cosine: f32,
     /// Graph-expansion quality parameters.
     pub graph_expand: GraphExpandQuality,
     /// Edge-weight formula parameters.
@@ -169,7 +181,7 @@ impl Default for MemoryQualityConfig {
     fn default() -> Self {
         Self {
             exclude_dormant: true,
-            min_score: 0.0,
+            min_cosine: 0.3,
             graph_expand: GraphExpandQuality::default(),
             edge_weight: EdgeWeightQuality::default(),
             pagerank_weight: 0.1,
@@ -191,8 +203,8 @@ impl From<acowork_core::manifest::ManifestMemoryQuality> for MemoryQualityConfig
         if let Some(v) = m.exclude_dormant {
             c.exclude_dormant = v;
         }
-        if let Some(v) = m.min_score {
-            c.min_score = v;
+        if let Some(v) = m.min_cosine {
+            c.min_cosine = v;
         }
         if let Some(v) = m.pagerank_weight {
             c.pagerank_weight = v;
@@ -286,7 +298,7 @@ mod tests {
         };
         let q = MemoryQualityConfig::from(m);
         assert!(!q.exclude_dormant);
-        assert_eq!(q.min_score, 0.0, "unspecified field keeps default");
+        assert_eq!(q.min_cosine, 0.3, "unspecified field keeps default");
         assert_eq!(q.graph_expand.decay_per_hop, 0.5);
         assert_eq!(q.graph_expand.min_edge_weight, 0.1, "unspecified nested keeps default");
         assert_eq!(q.dedup.knowledge_threshold, 0.9);
@@ -303,7 +315,7 @@ mod tests {
         // default MUST mirror the pre-ADR-062 hardcoded constants.
         let q = MemoryQualityConfig::default();
         assert!(q.exclude_dormant, "D1 default on");
-        assert_eq!(q.min_score, 0.0);
+        assert_eq!(q.min_cosine, 0.3);
         assert_eq!(q.graph_expand.early_stop_thresholds, vec![0.1, 0.15, 0.2]);
         assert_eq!(q.graph_expand.min_edge_weight, 0.1);
         assert_eq!(q.graph_expand.decay_per_hop, 0.7);
@@ -330,7 +342,7 @@ mod tests {
         let json = serde_json::json!({ "exclude_dormant": false });
         let q: MemoryQualityConfig = serde_json::from_value(json).unwrap();
         assert!(!q.exclude_dormant);
-        assert_eq!(q.min_score, 0.0, "unspecified field keeps default");
+        assert_eq!(q.min_cosine, 0.3, "unspecified field keeps default");
         assert_eq!(q.dedup.knowledge_threshold, 0.95);
 
         // Partial nested section also merges with defaults.

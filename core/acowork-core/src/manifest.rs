@@ -453,9 +453,9 @@ pub struct ManifestMemoryQuality {
     /// Exclude Dormant nodes from retrieval results (default: true).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exclude_dormant: Option<bool>,
-    /// Minimum RRF-domain score for retrieval results (default: 0.0).
+    /// Minimum cosine similarity for retrieval results (default: 0.3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub min_score: Option<f32>,
+    pub min_cosine: Option<f32>,
     /// Graph-expansion parameters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub graph_expand: Option<ManifestGraphExpandQuality>,

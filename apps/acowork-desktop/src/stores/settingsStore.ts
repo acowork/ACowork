@@ -68,7 +68,11 @@ const STORAGE_KEY_CONTENT_WIDTH = "acowork-content-width";
 const STORAGE_KEY_OPACITY = "acowork-opacity";
 const STORAGE_KEY_ACCENT_COLOR = "acowork-accent-color";
 const STORAGE_KEY_GATEWAY_URL = "acowork-gateway-url";
+const STORAGE_KEY_GATEWAY_URL_HISTORY = "acowork-gateway-url-history";
 const STORAGE_KEY_GATEWAY_MODE = "acowork-gateway-mode";
+
+/** Max retained gateway URLs in localStorage. 8 covers typical LAN/office/home/relay switches without leaking storage. */
+const GATEWAY_URL_HISTORY_MAX = 8;
 const STORAGE_KEY_LOG_FILE_SIZE = "acowork-log-file-size";
 const STORAGE_KEY_LOG_FILE_COUNT = "acowork-log-file-count";
 const STORAGE_KEY_FRONTEND_LOG_LEVEL = "acowork-frontend-log-level";
@@ -203,6 +207,29 @@ function getPersistedGatewayUrl(): string {
   return DEFAULT_GATEWAY_URL;
 }
 
+/** Read persisted gateway URL history (most-recent first). Deduplicates & caps to GATEWAY_URL_HISTORY_MAX. */
+function getPersistedGatewayUrlHistory(): string[] {
+  try {
+    const stored = localStorage.getItem(STORAGE_KEY_GATEWAY_URL_HISTORY);
+    if (!stored) return [];
+    const arr = JSON.parse(stored);
+    if (!Array.isArray(arr)) return [];
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const v of arr) {
+      if (typeof v !== "string") continue;
+      const t = v.trim();
+      if (!t || seen.has(t)) continue;
+      seen.add(t);
+      out.push(t);
+      if (out.length >= GATEWAY_URL_HISTORY_MAX) break;
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
 /** Read persisted gateway mode from localStorage, fallback to "local" */
 function getPersistedGatewayMode(): GatewayMode {
   try {
@@ -267,6 +294,12 @@ interface SettingsStore {
   opacity: number;
   accentColor: string;
   gatewayUrl: string;
+  /**
+   * Recently-used gateway URLs (most-recent first). Lets the SettingsPage
+   * render a combo dropdown and lets SplashScreen probe candidates when
+   * the persisted URL is unreachable (e.g. laptop moved to a new LAN).
+   */
+  gatewayUrlHistory: string[];
   gatewayMode: GatewayMode;
   logLevel: string;
   logFileSizeMb: number;
@@ -278,6 +311,8 @@ interface SettingsStore {
   setOpacity: (opacity: number) => void;
   setAccentColor: (color: string) => void;
   setGatewayUrl: (url: string) => void;
+  /** Push a URL to the front of the history (LRU). No-ops for falsy / duplicate-of-front. */
+  recordGatewayUrl: (url: string) => void;
   setGatewayMode: (mode: GatewayMode) => void;
   setLogLevel: (level: string) => void;
   setLogFileSizeMb: (size: number) => void;
@@ -339,6 +374,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => {
     opacity: initialOpacity,
     accentColor: initialAccentColor,
     gatewayUrl: getPersistedGatewayUrl(),
+    gatewayUrlHistory: getPersistedGatewayUrlHistory(),
     gatewayMode: getPersistedGatewayMode(),
     logLevel: initialLogLevel,
     logFileSizeMb: getPersistedLogFileSizeMb(),
@@ -384,6 +420,29 @@ export const useSettingsStore = create<SettingsStore>((set, get) => {
       set({ gatewayUrl });
       // Sync to Rust so subsequent Tauri commands use the new URL
       pushGatewayConfigToRust(get().gatewayMode, gatewayUrl);
+      // NOTE: history is NOT updated here. The address hasn't necessarily
+      // connected yet — a user typo or an unreachable host would otherwise
+      // pollute the candidate list. History is updated by the connection
+      // lifecycle subscriber (see SplashScreen / AppLayout), so only URLs
+      // that ACTUALLY connected (or were just disconnected from) end up
+      // in the LRU.
+    },
+    /**
+     * LRU-push: dedupe, cap, prepend. Called by setGatewayUrl so every
+     * saved URL (combo box selection, SplashScreen timeout view edit,
+     * candidate pick) is remembered without callers needing to opt in.
+     */
+    recordGatewayUrl: (url) => {
+      const t = (url ?? "").trim();
+      if (!t) return;
+      const cur = get().gatewayUrlHistory;
+      // No-op when it would just shuffle the front entry to itself — saves
+      // a localStorage write on every SettingsPage keystroke that didn't
+      // change the value.
+      if (cur[0] === t) return;
+      const next = [t, ...cur.filter((u) => u !== t)].slice(0, GATEWAY_URL_HISTORY_MAX);
+      try { localStorage.setItem(STORAGE_KEY_GATEWAY_URL_HISTORY, JSON.stringify(next)); } catch { }
+      set({ gatewayUrlHistory: next });
     },
     setGatewayMode: (gatewayMode) => {
       try { localStorage.setItem(STORAGE_KEY_GATEWAY_MODE, gatewayMode); } catch { }

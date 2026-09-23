@@ -1558,6 +1558,85 @@ mod tests {
 
         assert!(lookup(&sections, "messages") > 0);
     }
+
+    // ── regression t-83afab47 ─────────────────────────────────────────
+    //
+    // The live `context_usage` push path has TWO independent builders:
+    //
+    //   - `compute_context_usage`         (fresh UsageInfo, all cumulative
+    //                                       fields left at None)
+    //   - `build_context_usage_from_persisted` (resume / session_state,
+    //                                       session totals patched via
+    //                                       `patch_session_totals`)
+    //
+    // Every caller must follow up with `patch_agent_totals` so the four
+    // `agent_total_*` fields land on the wire. Without that, the
+    // frontend's `mergeContextUsage` wipes them on every `session_state`
+    // re-emit and the Agent Status panel flickers between the live LLM
+    // value and a stale `agentStore` fallback.
+
+    #[test]
+    fn patch_agent_totals_fills_all_four_fields_on_fresh_compute() {
+        let caps = test_caps(200_000, 16_384);
+        let usage = acowork_core::providers::traits::UsageInfo {
+            prompt_tokens: 12_345,
+            completion_tokens: 678,
+            ..Default::default()
+        };
+        // `compute_context_usage` is the path the config-change /
+        // post-compaction pushers use; it never fills agent_total_*.
+        let mut info = compute_context_usage(&caps, &usage, 32_768, None);
+        assert_eq!(info.agent_total_input_tokens, None);
+        assert_eq!(info.agent_total_output_tokens, None);
+        assert_eq!(info.agent_total_cache_read_tokens, None);
+        assert_eq!(info.agent_total_cache_write_tokens, None);
+
+        patch_agent_totals(&mut info, (1_000, 200, 300, 50));
+
+        assert_eq!(info.agent_total_input_tokens, Some(1_000));
+        assert_eq!(info.agent_total_output_tokens, Some(200));
+        assert_eq!(info.agent_total_cache_read_tokens, Some(300));
+        assert_eq!(info.agent_total_cache_write_tokens, Some(50));
+    }
+
+    #[test]
+    fn patch_agent_totals_does_not_touch_session_totals() {
+        let caps = test_caps(200_000, 16_384);
+        let mut info = build_context_usage_from_persisted(
+            &caps,
+            10_000,
+            500,
+            32_768,
+            None,
+            None,
+            None,
+        );
+        // Pretend the session has accumulated something via a
+        // SessionTokens snapshot.
+        let persisted = crate::conversation::SessionTokens {
+            last_input: 10_000,
+            last_output: 500,
+            total_input: 25_000,
+            total_output: 2_300,
+            last_cache_read: 0,
+            last_cache_write: 0,
+            total_cache_read: 0,
+            total_cache_write: 0,
+        };
+        patch_session_totals(&mut info, &persisted);
+        patch_agent_totals(&mut info, (123_456, 7_890, 11_111, 222));
+
+        // Session totals preserved.
+        assert_eq!(info.total_input_tokens, Some(25_000));
+        assert_eq!(info.total_output_tokens, Some(2_300));
+        assert_eq!(info.total_cache_read_tokens, Some(0));
+        assert_eq!(info.total_cache_write_tokens, Some(0));
+        // Agent totals filled in.
+        assert_eq!(info.agent_total_input_tokens, Some(123_456));
+        assert_eq!(info.agent_total_output_tokens, Some(7_890));
+        assert_eq!(info.agent_total_cache_read_tokens, Some(11_111));
+        assert_eq!(info.agent_total_cache_write_tokens, Some(222));
+    }
 }
 
 /// Compute the total character count of a ChatRequest for token ratio calibration.
@@ -1896,6 +1975,76 @@ pub fn build_context_usage_from_persisted(
     info
 }
 
+/// Orchestrate the full "persisted SessionTokens → wire-ready
+/// ContextUsageInfo" build for the three non-LLM push sites that
+/// used to duplicate the same 12-line template by hand:
+///
+///   - `SessionManager::build_initial_session_state` (writes the
+///     snapshot only — caller serialises to JSON for the retained
+///     session_state payload)
+///   - `SessionManager::usage_recompute` (writes the snapshot AND
+///     broadcasts a `ChunkEvent::ContextUsage`)
+///   - `SessionTask` resume-context initial push (broadcasts a
+///     `ChunkEvent::ContextUsage` so the resumed agent lands in the
+///     UI with non-empty counters before the first LLM call)
+///
+/// All three previously called, in order:
+///   1. `AgentCore::get_model_capabilities(model_name)`
+///   2. `AgentCore::max_output_tokens_limit_for_model(model_name)`
+///   3. `session_config::resolve_effective_context_window(...)`
+///   4. `build_context_usage_from_persisted(...)`
+///   5. `patch_agent_totals(&mut ctx, core.agent_token_totals())`
+///
+/// with `model_name = conv.model().unwrap_or("unknown")` and the
+/// `last_input` / `last_output` straight from `persisted`. Steps 1–3
+/// are pure caps resolution; steps 4–5 already have their own helpers,
+/// so this function is the single entry point that ties them together.
+///
+/// Returns `None` when:
+///   - the conversation has no persisted `SessionTokens` yet
+///     (`conv.tokens()` is None — fresh session pre-first-LLM)
+///   - the model's capabilities are not registered (legacy Runtime
+///     without models.dev data)
+///
+/// Both are legitimate "skip the push" cases — the next live
+/// `ChunkEvent::ContextUsage` will fill the gap once the first LLM
+/// call completes, so callers MUST treat `None` as "no-op" rather
+/// than as an error.
+///
+/// `emit_session_state` (the status-transition path) deliberately does
+/// NOT use this helper: it needs the `live_tokens` override (uses
+/// `history.token_count()` over `persisted.last_input` to avoid showing
+/// a stale PRE-restart value after cold-start resume, incident
+/// 2026-09-06) and the cached `sections` merge for the input-box
+/// breakdown popover. Folding them in here would force 3 `Option` flags
+/// onto the signature for one caller — net negative readability.
+pub(crate) fn build_persisted_ctx_usage(
+    core: &crate::agent::agent_core::AgentCore,
+    conv: &crate::conversation::ConversationSession,
+) -> Option<acowork_core::protocol::ContextUsageInfo> {
+    let persisted = conv.tokens()?;
+    let model_name = conv.model().unwrap_or_else(|| "unknown".to_string());
+    let caps = core.get_model_capabilities(&model_name)?;
+    let max_output = core.max_output_tokens_limit_for_model(&model_name);
+    let resolved = crate::agent::session_config::resolve_effective_context_window(
+        conv.context_window(),
+        core.context_window_override,
+        core.manifest_context_window,
+        Some(&caps),
+    );
+    let mut ctx = build_context_usage_from_persisted(
+        &caps,
+        persisted.last_input,
+        persisted.last_output,
+        max_output,
+        Some(resolved),
+        Some(&persisted),
+        conv.llm_call_counter(),
+    );
+    patch_agent_totals(&mut ctx, core.agent_token_totals());
+    Some(ctx)
+}
+
 /// Patch session-level cumulative fields on a [`ContextUsageInfo`].
 ///
 /// ADR-066 §2 commits to a strict split between per-turn (filled by
@@ -1921,4 +2070,31 @@ pub fn patch_session_totals(
     info.total_output_tokens = Some(tokens.total_output);
     info.total_cache_read_tokens = Some(tokens.total_cache_read);
     info.total_cache_write_tokens = Some(tokens.total_cache_write);
+}
+
+/// Patch agent-scoped cumulative fields on a [`ContextUsageInfo`].
+///
+/// Mirror of [`patch_session_totals`] for the ADR-028 / ADR-066 agent
+/// counters that live on `AgentCore` (AtomicU64), not on the per-session
+/// `SessionTokens`. Every call site that builds a `ContextUsageInfo`
+/// from a non-LLM path (`emit_session_state`, resume snapshot, initial
+/// session-state push, etc.) MUST invoke this after constructing the
+/// per-turn + session-cumulative figures — otherwise the resulting
+/// push drops the four `agent_total_*` fields, the frontend's
+/// `mergeContextUsage` wipes them to `None`, and the Agent Status
+/// panel's "累计输入 Token" row flickers between the live value
+/// (from the LLM-call `ContextUsage` push) and the stale fallback
+/// (`agentStore.agents[id].agentTokenTotals`, refreshed only on
+/// session-list fetch) every time `session_state` is re-emitted.
+///
+/// The four-tuple mirrors `AgentCore::agent_token_totals()`:
+/// `(input, output, cache_read, cache_write)`.
+pub fn patch_agent_totals(
+    info: &mut acowork_core::protocol::ContextUsageInfo,
+    agent_totals: (u64, u64, u64, u64),
+) {
+    info.agent_total_input_tokens = Some(agent_totals.0);
+    info.agent_total_output_tokens = Some(agent_totals.1);
+    info.agent_total_cache_read_tokens = Some(agent_totals.2);
+    info.agent_total_cache_write_tokens = Some(agent_totals.3);
 }

@@ -340,7 +340,7 @@ fn eval_information_extraction() -> f32 {
                 // Negative case: the fact is stored, but a search for the
                 // *absent* information must not surface it.
                 let hits = store
-                    .text_search_with_filter("Knowledge", "object", "dogs", 5, None)
+                    .text_search_with_filter("Knowledge", "object", "dogs", 5)
                     .ok()
                     .map(|r| r.len())
                     .unwrap_or(0);

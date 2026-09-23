@@ -437,6 +437,12 @@ OpenAI 早期模型 / Ollama / Mock 等：
 - 命中率分母含 cache → 0，公式返回 `null`，UI 不显示
 - 与 ADR-027 的 "宁可 miss 也不估计" 一致
 
+**补充（2026-09-21）**：以上是"Provider 确实不报 cache"的情形，不要与"Provider 把 cache
+报在了另一个事件上"混淆 —— 后者会让 cache 静默归零，但数值其实是有的。
+Anthropic 协议的 cache 字段在 `message_start.message.usage` 与 `message_delta.usage` 上都合法，
+必须**先跨事件合并**再判定是否缺失，见
+[ADR-027「Usage 跨事件合并（Provider 适配层）」](ADR-027-conversation-meta-token-usage.md#usage-跨事件合并provider-适配层)。
+
 ### 5. OpenAI 的 cache_write_tokens 恒为 0
 
 设计上 OpenAI 自动缓存、不区分 write。`last_cache_write` / `total_cache_write` / `agent_total_cache_write_tokens` 恒为 0。

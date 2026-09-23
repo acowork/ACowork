@@ -100,6 +100,22 @@ pub const ALL_TOPIC_FILTERS: &[(&str, MqttQoS)] = &[
     // (re)connect so the Desktop always converges on the current
     // instance_id / version / phase even after a Gateway restart.
     ("acowork/global/bootstrap", MqttQoS::AtLeastOnce),
+    // ── Inventory-change signal ──
+    // Gateway emits a non-retained timestamp message here whenever its
+    // aggregated `installed_agents` table mutates (a Node finishes an
+    // install/uninstall, or a Node replays its retained inventory on
+    // reconnect). Subscribers (AgentList sidebar) treat it as "refresh
+    // now" and refetch `GET /api/agents`, which combines
+    // `installed_agents` with the MQTT AgentRegistry's liveness verdict —
+    // the signal carries the change hint, not the data.
+    //
+    // The topic lives outside `acowork/global/` on purpose: every Runtime
+    // decodes that prefix as a protobuf `DataEnvelope`, so a non-envelope
+    // payload there would log a decode failure in each Runtime. Not
+    // retained either: the signal only reaches a subscriber that is
+    // already connected, and changes missed while disconnected are caught
+    // by the sidebar's refetch on each MQTT connect edge.
+    ("acowork/desktop/inventory", MqttQoS::AtLeastOnce),
     // ADR-043: Retained per-session config + state. Runtime publishes
     // config (title/model/provider/workspace/reasoning_effort/temperature)
     // and state (status/message_count/tokens/ratio/context_usage) on
@@ -190,18 +206,32 @@ impl MqttClientHandler for DesktopHandler {
     }
 
     async fn on_disconnect(&self, _client: &AsyncClient) {
+        tracing::warn!(
+            "DesktopHandler::on_disconnect fired — about to emit mqtt-status \
+             Reconnecting event with hardcoded reason \"broker sent DISCONNECT\". \
+             Frontend chatStore will set effectiveConnection = reconnecting."
+        );
         (self.on_status)(MqttStatus::Reconnecting {
             reason: "broker sent DISCONNECT".into(),
         });
     }
 
     async fn on_error(&self, _client: &AsyncClient, _class: ErrClass, error: &str) {
+        tracing::warn!(
+            error = %error,
+            err_class = ?_class,
+            "DesktopHandler::on_error fired — about to emit mqtt-status Reconnecting event."
+        );
         (self.on_status)(MqttStatus::Reconnecting {
             reason: format!("eventloop error: {error}"),
         });
     }
 
     async fn on_soft_restart(&self) -> Option<(String, String)> {
+        tracing::warn!(
+            "DesktopHandler::on_soft_restart fired — about to emit mqtt-status \
+             Connecting event. This is the soft-restart trigger."
+        );
         // Surfacing `Connecting` here mirrors the Desktop's pre-Step-4
         // behaviour, where the inline poll task fired
         // `on_status(MqttStatus::Connecting)` immediately before

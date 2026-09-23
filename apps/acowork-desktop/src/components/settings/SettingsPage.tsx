@@ -13,9 +13,10 @@ import { RadioGroup } from "../common/RadioGroup";
 import { DEFAULT_GATEWAY_URL, getGatewayUrl, DEFAULT_THEME, DEFAULT_FONT_SIZE, DEFAULT_CONTENT_WIDTH, DEFAULT_OPACITY, DEFAULT_ACCENT_COLOR } from "../../lib/config";
 import { ACCENT_PRESETS } from "../../lib/accentPresets";
 import { Bug, Monitor } from "lucide-react";
-import { inputReadonly, inputBase } from "../../lib/ui-styles";
+import { inputReadonly } from "../../lib/ui-styles";
 import { StyledInput } from "../common/StyledInput";
 import { Dropdown } from "../common/Dropdown";
+import { UrlComboBox } from "./UrlComboBox";
 import { ProfileTab } from "./ProfileTab";
 import { ServicesPanel } from "./ServicesPanel";
 import { TabButton } from "../common/tab";
@@ -69,6 +70,7 @@ function GatewayTab() {
   const { status, health, localState, localOwnership, checkHealth, checkLocalStatus, startLocalGateway, stopLocalGateway } = useGatewayStore();
   const gatewayUrl = useSettingsStore((s) => s.gatewayUrl);
   const setGatewayUrl = useSettingsStore((s) => s.setGatewayUrl);
+  const gatewayUrlHistory = useSettingsStore((s) => s.gatewayUrlHistory);
   const gatewayMode = useSettingsStore((s) => s.gatewayMode);
   const setGatewayMode = useSettingsStore((s) => s.setGatewayMode);
   const [testing, setTesting] = useState(false);
@@ -115,12 +117,6 @@ function GatewayTab() {
       setUrlDraft(gatewayUrl);
     }
   }, [urlDraft, gatewayUrl, setGatewayUrl]);
-
-  const handleUrlKeyDown = useCallback((e: React.KeyboardEvent) => {
-    if (e.key === "Enter") {
-      handleUrlSave();
-    }
-  }, [handleUrlSave]);
 
   const handleTest = useCallback(async () => {
     // P1-5 (a): "测试连接" 按钮语义升级为"运行诊断"——
@@ -347,14 +343,13 @@ function GatewayTab() {
             <div>
               <label className="mb-1 block text-xs text-text-tertiary">{t("settings.gatewayUrl")}</label>
               <div className="flex gap-2">
-                <input
-                  type="text"
+                <UrlComboBox
                   value={urlDraft}
-                  onChange={(e) => setUrlDraft(e.target.value)}
-                  onBlur={handleUrlSave}
-                  onKeyDown={handleUrlKeyDown}
+                  onChange={setUrlDraft}
+                  onCommit={handleUrlSave}
+                  options={gatewayUrlHistory}
                   placeholder={DEFAULT_GATEWAY_URL}
-                  className={`flex-1 ${inputBase}`}
+                  ariaLabel={t("settings.gatewayUrl")}
                 />
                 {urlDraft !== gatewayUrl && (
                   <button

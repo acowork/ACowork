@@ -106,6 +106,7 @@
     "users": "メッセージ",
     "projects": "Projects",
     "docs": "Docs",
+    "extensions": "拡張機能",
     "harness": "Harness",
     "settings": "Settings",
     "ariaLabelMainNavigation": "メインナビゲーション"
@@ -1250,6 +1251,14 @@
     "retrying": "再試行中...",
     "retryConnection": "接続を再試行",
     "gatewayAddress": "ゲートウェイアドレス",
+    "candidateTitle": "他の利用可能なゲートウェイが見つかりました — 接続しますか?",
+    "candidateDetected": "検出:",
+    "candidateKeepWaiting": "待機を続ける",
+    "bannerLocalStarting": "ローカルゲートウェイを起動中",
+    "bannerLocalDown": "ローカルゲートウェイが実行されていません",
+    "bannerRemoteDown": "ゲートウェイに到達できません",
+    "bannerStart": "起動",
+    "bannerRetry": "再試行",
     "altLogo": "ACowork"
   },
   "appLayout": {
@@ -1425,6 +1434,8 @@
     "clickToEdit": "クリックして編集",
     "noDescription": "説明なし",
     "statTotal": "すべて",
+    "searchPlaceholder": "プロジェクトを検索...",
+    "noMatchingProjects": "一致するプロジェクトがありません",
     "projectListAria": "プロジェクト一覧",
     "projectMenu": "プロジェクトメニュー",
     "deleteProjectTitle": "プロジェクトを削除",

@@ -3,49 +3,22 @@
   <title>ACowork</title>
   <defs>
     <!--
-      Theme-aware monochrome mark for empty-chat backgrounds.
-      Both light (page-bg ≈ #FCFCFC) and dark (page-bg ≈ #131316) surfaces
-      are accommodated via prefers-color-scheme. All fills stay strictly
-      within the black/gray band so the mark never introduces a hue into
-      a neutral surface.
+      Monochrome gray mark for empty-chat backgrounds, single palette
+      (dark-toned; reads well on both light and dark surfaces).
+      All fills stay strictly within the black/gray band so the mark
+      never introduces a hue into a neutral surface.
 
-      Light: chip #D4D4D4 → #B0B0B0, "A" 3-tone (circle #E8, left #C8, right #A8),
-            wordmark #6B6B6B. Co (#5A5A5A) > work (#9A9A9A) so "A" first, "Co" second.
-      Dark:  chip #3A3A3A → #2A2A2A, "A" 3-tone (circle #E8, left #C8, right #A8),
-            wordmark #A8A8A8. Co (#C8C8C8) > work (#7A7A7A).
-            The A gradient runs light (circle) → mid (left stroke) → dark (right stroke),
-            mirroring the color variant's depth cue. Same A tones in both modes:
-            the chip background inverts, the A itself does not.
+      Chip #3A3A3A → #2A2A2A, "A" 3-tone (circle #E8, left #C8, right #A8),
+      wordmark #A8A8A8. Co (#C8C8C8) > work (#7A7A7A) so "A" first, "Co"
+      second. The A gradient runs light (circle) → mid (left stroke) →
+      dark (right stroke), mirroring the color variant's depth cue.
     -->
-    <style>
-      .chip-stop-a { stop-color: #D4D4D4; }
-      .chip-stop-b { stop-color: #B0B0B0; }
-      .chip-shadow { flood-color: #000000; flood-opacity: 0.08; }
-      .letter-a    { fill: #E8E8E8; }
-      .letter-a-left { stroke: #C8C8C8; }
-      .letter-a-right { stroke: #A8A8A8; }
-      .wordmark    { fill: #6B6B6B; }
-      .co          { fill: #5A5A5A; }
-      .work        { fill: #9A9A9A; }
-
-      @media (prefers-color-scheme: dark) {
-        .chip-stop-a { stop-color: #3A3A3A; }
-        .chip-stop-b { stop-color: #2A2A2A; }
-        .chip-shadow { flood-color: #000000; flood-opacity: 0.30; }
-        .letter-a    { fill: #E8E8E8; }
-        .letter-a-left { stroke: #C8C8C8; }
-        .letter-a-right { stroke: #A8A8A8; }
-        .wordmark    { fill: #A8A8A8; }
-        .co          { fill: #C8C8C8; }
-        .work        { fill: #7A7A7A; }
-      }
-    </style>
     <linearGradient id="bg" x1="14" y1="2" x2="98" y2="86" gradientUnits="userSpaceOnUse">
-      <stop offset="0%"   class="chip-stop-a"/>
-      <stop offset="100%" class="chip-stop-b"/>
+      <stop offset="0%" stop-color="#3A3A3A"/>
+      <stop offset="100%" stop-color="#2A2A2A"/>
     </linearGradient>
     <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
-      <feDropShadow dx="0" dy="1.5" stdDeviation="1.5" class="chip-shadow"/>
+      <feDropShadow dx="0" dy="1.5" stdDeviation="1.5" flood-color="#000000" flood-opacity="0.30"/>
     </filter>
     <!-- Apple-style bite: white reveals the dot; small black circle carves the C-notch.
          Small circle = half the big circle's diameter (5.1 = 10.2/2),
@@ -57,9 +30,12 @@
       <circle cx="61.1" cy="54" r="5.1" fill="black"/>
     </mask>
   </defs>
-  <!-- neutral chip (light: mid-gray; dark: near-black) -->
+  <!-- near-black neutral chip -->
   <rect x="14" y="2" width="84" height="84" rx="20" ry="20" fill="url(#bg)" filter="url(#shadow)"/>
-  <!-- "A" — always the loudest element, regardless of theme.
+  <!-- in-mark A: two strokes + a circle (replaces the crossbar).
+       A width = 48 (chip 84, ~12.5px visual margin each side).
+       Circle moved up to be tangent to the inner edges of both diagonals; diameter 20.4.
+       "A" is always the loudest element on the chip.
        Strokes are separated at the apex: the left stroke runs to the apex,
        the right stroke ends short with its own round cap (centerline end
        (63.4,34.8), ~16.5 px from the apex) leaving a ~3 px gap. -->
@@ -68,28 +44,27 @@
        crossbar, so it must shrink with the strokes to keep the "A" as a
        single coherent glyph. (A bbox incl. dot: x 32→80, y 20→68, center
        exactly the icon-tile center.) Stroke-width / radius shrink together
-       to preserve the stroke-to-edge ratio. Stroke color stays via CSS
-       classes (.letter-a-left / .letter-a-right / .letter-a). -->
+       to preserve the stroke-to-edge ratio. -->
   <g transform="translate(56 44) scale(0.9) translate(-56 -44)">
     <path d="M32 68 L56 20"
           fill="none"
-          class="letter-a-left"
+          stroke="#C8C8C8"
           stroke-width="10"
           stroke-linecap="round"/>
     <path d="M63.4 34.8 L80 68"
           fill="none"
-          class="letter-a-right"
+          stroke="#A8A8A8"
           stroke-width="10"
           stroke-linecap="round"/>
-    <circle cx="56" cy="54" r="10.2" class="letter-a" mask="url(#bite)"/>
+    <circle cx="56" cy="54" r="10.2" fill="#E8E8E8" mask="url(#bite)"/>
   </g>
   <!-- wordmark: Co > work in weight to preserve the brand's emphasis order -->
   <text x="106" y="71"
         font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif"
         font-weight="700"
         font-size="74"
-        class="wordmark"
+        fill="#A8A8A8"
         letter-spacing="-2.1">
-    <tspan class="co">Co</tspan><tspan class="work" dx="4">work</tspan>
+    <tspan fill="#C8C8C8">Co</tspan><tspan fill="#7A7A7A" dx="4">work</tspan>
   </text>
 </svg>

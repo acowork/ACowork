@@ -27,7 +27,13 @@ pub use acowork_memory::types::DEFAULT_EMBEDDING_DIM;
 
 /// Configuration for opening a Grafeo persistence store.
 pub struct GrafeoConfig {
-    /// Filesystem path to the `.grafeo` database directory.
+    /// Filesystem path to the `.grafeo` database.
+    ///
+    /// The `.grafeo` suffix selects the container's single-file layout
+    /// (snapshot file + bounded, checkpointed WAL). Any other name selects
+    /// the engine's legacy `WalDirectory` layout, whose checkpoint timer
+    /// never runs — the WAL then grows unbounded and is replayed in full on
+    /// every open. Always end this path in `.grafeo`.
     pub db_path: std::path::PathBuf,
     /// Embedding vector dimension, obtained from the active [`EmbeddingProvider`].
     /// Falls back to [`DEFAULT_EMBEDDING_DIM`] when no provider is available.
@@ -57,6 +63,8 @@ pub mod labels {
     pub const PROCEDURAL: &str = "Procedural";
     /// Autobiographical memory label (self-knowledge).
     pub const AUTOBIOGRAPHICAL: &str = "Autobiographical";
+    /// The four memory labels, which are the ones carrying vector + text indexes.
+    pub const MEMORY: [&str; 4] = [EPISODIC, KNOWLEDGE, PROCEDURAL, AUTOBIOGRAPHICAL];
     /// System configuration label.
     pub const SYSTEM_CONFIG: &str = "SystemConfig";
     /// Tool invocation record label.

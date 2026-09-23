@@ -18,7 +18,15 @@ import { RightNavBar } from "./RightNavBar";
 // a failed load requires building a new one (see editorLoadAttempt below).
 const loadFileEditorPanel = () =>
     import("../editor/FileEditorPanel").then((m) => ({ default: m.FileEditorPanel }));
-import { GatewayBanner } from "./GatewayBanner";import { useGatewayStore } from "../../stores/gatewayStore";
+import { GatewayBanner } from "./GatewayBanner";
+import {
+  useGatewayStore,
+  cancelHealthProbe,
+  markGatewayAlive,
+  startGatewayDeathWatch,
+  stopGatewayDeathWatch,
+  type GatewayAlive,
+} from "../../stores/gatewayStore";
 import { applyGatewayTransition, onMqttConnectionEdge } from "./gatewayTransition";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useAgentStore } from "../../stores/agentStore";
@@ -38,6 +46,7 @@ import { HarnessPage } from "../harness/HarnessPage";
 import { ProjectsView } from "../../views/ProjectsView";
 import { MessagesView } from "../../views/MessagesView";
 import { DocsView } from "../../views/DocsView";
+import { ExtensionsView } from "../../views/ExtensionsView";
 import { MqttDebugControls } from "../debug/MqttDebugControls";
 import { Tooltip } from "../common/Tooltip";
 import { useChatStore } from "../../stores/chatStore";
@@ -200,6 +209,7 @@ export function AppLayout() {
   }, [hasOpenFiles, sidebarWidth, rightWidth, rightPanelCollapsed]);
 
   const gatewayStatus = useGatewayStore((s) => s.status);
+  const gatewayAlive = useGatewayStore((s) => s.gatewayAlive);
   const checkHealth = useGatewayStore((s) => s.checkHealth);
   const setStatus = useStatusBarStore((s) => s.setStatus);
   const statusMsg = useStatusBarStore((s) => s.message);
@@ -567,27 +577,27 @@ export function AppLayout() {
     }
   }, [gatewayStatus, setStatus, clearStatus]);
 
-  // ── Gateway disconnect/reconnect: drive agent liveness ─────────────
-  // The MQTT broker lives inside the Gateway, so when the Gateway goes
-  // away we stop receiving `agent_status` events — without this effect
-  // `agent.alive` would stay `true` and the chat panel would keep
-  // showing the previous session's content (eventually flagged with a
-  // red `loadError`). On reconnect, agent state must also be refreshed
-  // because a Gateway restart re-spawns the system agent and clears the
-  // previous agent-registry state.
+  // ── Gateway liveness: drop/rise from the single-authority verdict ──
+  // `gatewayAlive` is maintained by `gatewayStore`: MQTT CONNACK is the
+  // liveness authority (the broker lives inside the Gateway process),
+  // and the HTTP probe is a subordinate death classifier that runs only
+  // while MQTT is down. When the verdict lands on `dead`, nothing else
+  // will arrive to refresh the UI — the broker died with the Gateway —
+  // so the drop edge mirrors the natural `agent_status offline` MQTT
+  // flow (agents marked offline, their sessions released, the node
+  // snapshot marked offline). The rise edge re-pulls the agent list +
+  // node topology and re-probes services. `unknown` never fires an
+  // edge, so a link flap that was never classified leaves the UI
+  // untouched.
   //
   // The edge-detection logic lives in `gatewayTransition.ts` so it is
   // unit-testable without rendering React. The effect here is a one-liner
   // that wires store actions into the pure helper.
-  // ponytail: prev is tracked via ref so a transient flicker
-  // (`connected → connecting → connected` during a quick Gateway restart)
-  // does NOT trip a false "drop" — the helper treats `connecting` and
-  // `disconnected` as the same non-`connected` bucket.
-  const prevGatewayStatusRef = useRef<typeof gatewayStatus | null>(null);
+  const prevGatewayAliveRef = useRef<GatewayAlive | null>(null);
   useEffect(() => {
-    const prev = prevGatewayStatusRef.current;
-    prevGatewayStatusRef.current = gatewayStatus;
-    applyGatewayTransition(prev, gatewayStatus, {
+    const prev = prevGatewayAliveRef.current;
+    prevGatewayAliveRef.current = gatewayAlive;
+    applyGatewayTransition(prev, gatewayAlive, {
       getAgentIds: () => Object.keys(useAgentStore.getState().agents),
       setAgentOffline: (id) => useAgentStore.getState().updateAgentLiveness(id, false, false),
       clearAgentSessions: (id) => useChatStore.getState().clearAgentSessions(id),
@@ -598,22 +608,30 @@ export function AppLayout() {
       fetchAgents: () => useAgentStore.getState().fetchAgents(),
       fetchNodes: () => useAgentStore.getState().fetchNodes(),
     });
-  }, [gatewayStatus]);
+  }, [gatewayAlive]);
 
-  // ── MQTT edge → HTTP probe ─────────────────────────────────────────
-  // `gatewayStatus` is NOT polled during steady state — when the Gateway
-  // is killed externally (CLI stop / crash), the first signal we get is
-  // the MQTT disconnect (the broker lives inside the Gateway). Re-probe
-  // HTTP on every MQTT edge so `gatewayStatus` converges to the real
-  // state; `applyGatewayTransition` above then fires drop/rise from that
-  // authoritative signal. See `onMqttConnectionEdge` doc for the
-  // "agents just auto-slept" (probe succeeds → correctly no-op) case.
+  // ── MQTT edge → liveness wiring ────────────────────────────────────
+  // CONNACK (rise): the broker lives inside the Gateway process, so the
+  // connack is sufficient proof of liveness. Cancel the in-flight
+  // classifier probe FIRST — its question is moot, and a superseded
+  // probe must never write a stale verdict — then stop the watch, mark
+  // the verdict `alive`, and take a fresh probe for the health payload.
+  // A drop (MQTT down) only starts the death classifier: MQTT down
+  // alone does NOT mean the Gateway died. See `onMqttConnectionEdge`.
   const prevMqttConnectedRef = useRef<boolean | null>(null);
   useEffect(() => {
     const prev = prevMqttConnectedRef.current;
     prevMqttConnectedRef.current = mqttConnected;
-    onMqttConnectionEdge(prev, mqttConnected, () => {
-      void checkHealth();
+    onMqttConnectionEdge(prev, mqttConnected, {
+      onRise: () => {
+        cancelHealthProbe("mqtt-connected");
+        stopGatewayDeathWatch();
+        markGatewayAlive("mqtt-connack");
+        void checkHealth();
+      },
+      onDrop: () => {
+        startGatewayDeathWatch();
+      },
     });
   }, [mqttConnected, checkHealth]);
 
@@ -1090,6 +1108,12 @@ export function AppLayout() {
         {currentView === "docs" && (
           <div className="flex flex-1 overflow-hidden rounded-xl bg-page-bg">
             <DocsView />
+          </div>
+        )}
+
+        {currentView === "extensions" && (
+          <div className="flex flex-1 overflow-hidden rounded-xl bg-page-bg">
+            <ExtensionsView />
           </div>
         )}
 

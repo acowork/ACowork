@@ -11,7 +11,7 @@
 use acowork_core::providers::traits::{ChatMessage, ChatResponse, MessageRole};
 use std::sync::atomic::Ordering;
 
-use crate::agent::context::build_context_usage_from_persisted;
+use crate::agent::context::{build_context_usage_from_persisted, patch_agent_totals};
 use crate::agent::session_state::SessionStatus;
 use crate::error::Result;
 
@@ -105,13 +105,17 @@ impl super::loop_::AgentLoop {
             let caps = self.core.get_model_capabilities(model_name)?;
             let max_output = self.core.max_output_tokens_limit_for_model(model_name);
             // Prefer the live in-memory history token count over the
-            // persisted snapshot. After a cold-start resume, `persisted
-            // .last_input` still holds the PRE-restart value while `history`
-            // has already been re-loaded (and lossless-trimmed) — pushing
-            // the stale number made the UI report a tiny context right up to
-            // the moment compaction fired (incident 2026-09-06). Empty/new
+            // persisted snapshot. `restore_anchor` has already seeded
+            // `history` from `persisted.last_input`, so at cold start the two
+            // agree; the live value wins afterwards because messages appended
+            // after resume are only counted in `history`. Empty/new
             // histories keep the persisted fallback so the pre-first-LLM
             // snapshot still shows something sensible.
+            //
+            // Both figures are whole-prompt API counts (history + system +
+            // tool schemas), never a messages-only estimate — mixing the two
+            // 口径 is what made a resumed session report a bogus `~109K`
+            // against a persisted `last_input` of `167098`.
             let live_tokens = self.session.history.token_count();
             let use_live = live_tokens > 0;
             let input_tokens = if use_live {
@@ -152,6 +156,15 @@ impl super::loop_::AgentLoop {
             if let Some(sections) = conv.last_context_usage_sections() {
                 ctx.sections = Some(sections);
             }
+            // ADR-028 / ADR-066: snapshot the agent-scoped cumulative
+            // counters so the `session_state` push carries the same
+            // `agent_total_*` figures as the live LLM-call
+            // `ContextUsage` push. Without this patch the frontend's
+            // `mergeContextUsage` wipes the four fields back to `None`
+            // on every `session_state` re-emit, and the Agent Status
+            // panel's "累计输入 Token" row flickers between the live
+            // value and the stale fallback (session-list fetch cache).
+            patch_agent_totals(&mut ctx, self.core.agent_token_totals());
             let json = serde_json::to_string(&ctx).ok();
             // LOG-001: fires on every emit_session_state (multiple per turn)
             // and only confirms the JSON was built — the value itself is
@@ -194,7 +207,9 @@ impl super::loop_::AgentLoop {
         // This replaces the old ChunkEvent::SessionStateChanged path.
         if let Some(ref conv) = self.session.conversation {
             let status = serde_json::to_string(&status).unwrap_or_else(|_| r#""idle""#.to_string());
-            let ratio = self.session.model_ratio().unwrap_or(0.0);
+            let ratio = self.session
+                .model_ratio()
+                .unwrap_or(crate::token::counter::DEFAULT_RATIO);
             let cu = context_usage.clone().unwrap_or_default();
             conv.update_runtime_state_cache(&status, ratio, &cu);
             conv.notify_state_change();

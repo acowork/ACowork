@@ -435,7 +435,7 @@ acowork-runtime --agent-instance-id 3f8c2a1b-... --http-port 0 ...
 | 视图 | 触发条件 | 实现 |
 |---|---|---|
 | **Local 视图**（单 Gateway 默认） | `gatewayMode === "local"` 或 `nodes.length === 0` | 每行一个 instance；列：instance_id 短码 + agent_id + display_name + 状态；同包多实例时附加 `(node_id 前 10)` 徽标区分 |
-| **Remote 视图**（多节点模式） | `gatewayMode === "remote"` 且 `nodes.length >= 1` | 按 `node_id` 分组：每组顶部插入 `NodeGroupHeader`（1/3 item 高度窄条，**无背景色、无边框**，仅分割线 + 折叠箭头 + node 名称），默认展开，点击切换；组内 item 布局与 Local 视图完全一致 |
+| **Remote 视图**（多节点模式） | `gatewayMode === "remote"` 且 `nodes.length >= 1` | 按 `node_id` 分组：每组顶部插入 `NodeGroupHeader`（1/3 item 高度窄条，**无背景色、无边框**，仅分割线 + 折叠箭头 + node 名称），默认展开，点击切换；组内 item 布局与 Local 视图完全一致。**分组以 node 为主轴：每个 node 无论当前有几个 agent 都产出一个分组**（0 个 agent 时组内渲染"安装 Agent"入口，离线 node 该入口禁用）——否则空 node 在侧边栏不可见，只能靠命令行安装。 |
 
 视图模式由 `gatewayMode` 自动判断，用户不手动切换。
 

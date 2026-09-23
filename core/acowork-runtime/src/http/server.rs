@@ -145,7 +145,7 @@ pub type SharedMemoryStore =
 /// Shared slot for the conversation vector index (ADR-081 §4.2, P1-2).
 ///
 /// Late-bind from Phase B: `ConversationIndex` is opened at
-/// `{work_dir}/conversation_index/` once the memory store is up, and a
+/// `{work_dir}/conversation_index.grafeo` once the memory store is up, and a
 /// [`crate::conversation_index::ConversationIndexer`] task tails the
 /// JSONL conversation logs. `None` until then — the `/search`
 /// conversation scope reports `not_indexed` and search degrades to the
@@ -169,9 +169,11 @@ pub type SharedRagProvider =
 /// need agent-level token totals (`list_sessions`) gracefully degrade
 /// (return 0) when it is still empty.
 ///
-/// ADR-028: the `list_sessions` handler merges disk-scanned totals into
-/// the live atomic counters and reads them back so the response always
-/// carries `agent_total_input_tokens` / `agent_total_output_tokens`.
+/// ADR-028: the `list_sessions` handler still merges disk-scanned
+/// totals into the live atomic counters (cold-start recovery) so the
+/// first post-restart `context_usage` push reflects historical totals.
+/// Since t-83afab47 the merged value is no longer echoed back in the
+/// HTTP response — agent totals live on the live push path only.
 pub type SharedAgentCore = Arc<std::sync::RwLock<Option<Arc<crate::agent::agent_core::AgentCore>>>>;
 
 /// Shared embedding-provider dimension (0 = no provider).
@@ -994,10 +996,15 @@ struct ListSessionsQuery {
 /// (the authoritative source per ADR-024). Supports `page` / `size`
 /// pagination; results are returned sorted by `last_active_at` descending.
 ///
-/// ADR-028: the response top level also carries
-/// `agent_total_input_tokens` / `agent_total_output_tokens`, computed by
-/// scanning every session on disk and merging the totals into the live
-/// `AgentCore` atomic counters (max-merge, idempotent).
+/// ADR-028 / ADR-066 (regression t-83afab47): the response top level
+/// NO LONGER carries `agent_total_*` fields — those live exclusively
+/// on the live `context_usage` push path (every MQTT `session_state`
+/// and `ChunkEvent::ContextUsage` carries them via `patch_agent_totals`).
+/// `list_sessions` still performs the cold-start merge into the live
+/// counters as a side effect (so the first post-restart push reflects
+/// historical totals); the merged value is intentionally not echoed
+/// back on the wire, and the desktop no longer maintains a stale
+/// `agentTokenTotals` fallback that drift-flickers against the push.
 ///
 /// This is the backend for `GET /api/agents/{id}/sessions` via the
 /// Gateway reverse proxy.
@@ -4489,12 +4496,16 @@ mod tests {
         assert_eq!(sessions[0]["title"], "Test Session");
         assert_eq!(sessions[0]["message_count"], 3);
 
-        // ADR-028: response must carry agent-level token totals even
-        // when no session has tokens yet (all zero is valid).
-        assert!(body.get("agent_total_input_tokens").is_some());
-        assert!(body.get("agent_total_output_tokens").is_some());
-        assert_eq!(body["agent_total_input_tokens"], 0);
-        assert_eq!(body["agent_total_output_tokens"], 0);
+        // Regression t-83afab47: agent-level token totals are NOT part of
+        // the HTTP response anymore. They live exclusively on the live
+        // `context_usage` push path (HTTP = initial/refresh snapshot,
+        // MQTT = delta push). The merge into live counters still
+        // happens server-side as a side effect; only the wire shape
+        // changes.
+        assert!(body.get("agent_total_input_tokens").is_none());
+        assert!(body.get("agent_total_output_tokens").is_none());
+        assert!(body.get("agent_total_cache_read_tokens").is_none());
+        assert!(body.get("agent_total_cache_write_tokens").is_none());
 
         // Get messages — read_messages_paginated returns chronological order
         // (oldest → newest within the page) regardless of direction, so

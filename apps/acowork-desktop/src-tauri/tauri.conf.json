@@ -37,7 +37,7 @@
         "shadow": true,
         "titleBarStyle": "Overlay",
         "hiddenTitle": true,
-        "additionalBrowserArgs": "--disable-breakpad"
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --disable-breakpad"
       }
     ]
   },

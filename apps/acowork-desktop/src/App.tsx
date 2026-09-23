@@ -11,6 +11,8 @@ import { useAuthStore } from "./stores/authStore";
 import { initMqttListener } from "./stores/chatStore";
 import { initWorkspaceFsListener } from "./lib/workspaceFsEvents";
 import { initDocTreeChangeListener } from "./lib/docFsEvents";
+import { useGatewayStore } from "./stores/gatewayStore";
+import { useSettingsStore } from "./stores/settingsStore";
 import { log } from "./lib/logger";
 
 function App() {
@@ -89,6 +91,50 @@ function App() {
     };
     showWindow();
   }, []);
+
+  // Connection lifecycle → gateway URL history.
+  //
+  //   - On CONNECTED:        record the URL (known-good Gateway).
+  //   - On DISCONNECTED:     if we WERE connected, also record (the user
+  //                          just successfully disconnected from this URL,
+  //                          typically after typing a new one — it's a
+  //                          candidate we know worked recently).
+  //
+  // We do NOT record inside `setGatewayUrl`: an address change alone
+  // doesn't mean it connected. This way typos and unreachable hosts
+  // never pollute the candidate list shown by SplashScreen's 5s
+  // fallback chooser / the SettingsPage combo.
+  useEffect(() => {
+    const unsub = useGatewayStore.subscribe((state, prev) => {
+      const record = useSettingsStore.getState().recordGatewayUrl;
+      const url = useSettingsStore.getState().gatewayUrl;
+      if (state.status === "connected" && prev.status !== "connected") {
+        record(url);
+      } else if (prev.status === "connected" && state.status !== "connected") {
+        record(url);
+      }
+    });
+    return unsub;
+  }, []);
+
+  // Steady-state drop (laptop woke from sleep / switched Wi-Fi) →
+  // probe the rest of URL history so the GatewayBanner can offer
+  // reachable candidates.
+  //
+  // We probe on EVERY `connected → *` transition into a non-connected
+  // state (the "we were fine, now we're not" family). The banner owns
+  // its own re-probe on retry so we don't double-fire. We skip
+  // `connecting` because that's the user mid-edit. To stay robust
+  // against the case where /health stays "ok" while the network is
+  // actually dead (caching, intermediate proxy) we also probe on the
+  // banner's own trigger — see GatewayBanner.
+  //
+  // The banner component drives its own probe lifecycle (on mount +
+  // on retry click), which is the simpler and more reliable hook than
+  // trying to enumerate every transition. The subscriber here exists
+  // for one specific case: the banner mounts AFTER a transition has
+  // already happened, so we need the candidate set up before the
+  // banner's first paint.
 
   if (!gatewayReady && onboardingDone) {
     return (

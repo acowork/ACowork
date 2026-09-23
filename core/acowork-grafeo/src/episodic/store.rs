@@ -30,7 +30,7 @@ impl GrafeoStore {
         );
 
         if let Some(emb) = embedding {
-            self.db.set_node_property(id, "embedding", emb);
+            self.set_node_property(id, "embedding", emb);
         }
 
         Ok(id)

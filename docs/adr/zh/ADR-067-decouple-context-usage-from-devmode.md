@@ -143,9 +143,9 @@ DevMode 路径反过来也改：`DebugObserverImpl::on_context_built` 改用
 语义恒等于 `serde_json::to_string(&messages).len()`（含 `[]` 括号）：
 
 - `append` / `extend`：O(1) 增量（单条序列化长度 + 分隔符）
-- `load_restored` / `clear` / `truncate_to` / `fit_to_budget_lossless` /
+- `load_restored` / `clear` / `truncate_to` /
   `replace_middle_with_summary` / 8 级压缩 / `abandon_tool_result` /
-  `retrieve_tool_result`：重算或调整（低频操作）
+  `retrieve_tool_result`：重算或调整（低频操作）（`fit_to_budget_lossless` 已于 2026-09 随恢复期裁剪一起删除）
 - 读取：O(1)
 
 这样非调试模式（也是默认模式）下 per-LLM-call 的额外成本只有

@@ -15,15 +15,27 @@
  * Covers: boot-result recording, status sync (recovery reload), the
  * probe-then-spawn outcome from `start_local_gateway`, and the reset on
  * stop.
+ *
+ * ── Liveness (single-authority model, 2026-09-22 incident) ────────────
+ * `gatewayAlive` facts pinned here:
+ *   - CONNACK / a successful probe ⇒ `alive`; the death-classifier watch
+ *     is the ONLY writer of `dead`.
+ *   - A plain `checkHealth()` fast failure is DISPLAY-only (ADR-051) and
+ *     must never write `dead`; a timeout writes nothing at all.
+ *   - A superseded / cancelled probe exits silently — a stale question
+ *     must never pollute a newer fact (this was the 21s-late response
+ *     that clobbered a healed status).
+ *   - The classifier tick retries every 3s while MQTT is down and never
+ *     preempts a probe already in flight.
  */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // ── Mock Tauri invoke ────────────────────────────────────────────────────
 // The store actions use `await import("@tauri-apps/api/core")` — vi.mock
 // intercepts dynamic imports too.
 
-const mockInvoke = vi.fn<[string], Promise<unknown>>();
+const mockInvoke = vi.fn<(cmd: string) => Promise<unknown>>();
 vi.mock("@tauri-apps/api/core", () => ({
     invoke: (cmd: string) => mockInvoke(cmd),
 }));
@@ -37,25 +49,56 @@ vi.mock("../lib/logger", () => ({
 }));
 
 // ── Mock global fetch (checkHealth posts to /health) ─────────────────────
+//
+// `fetchMock` is re-pointed per test: `stubFetchOk` for the happy path,
+// `stubFetchFailFast` for classifier death evidence, `stubFetchHanging`
+// for timeout / cancellation coverage (abort-aware, so AbortController
+// preemption semantics are exercised for real).
 
-vi.stubGlobal(
-    "fetch",
-    vi.fn(() =>
+const fetchMock = vi.fn();
+vi.stubGlobal("fetch", fetchMock);
+
+function stubFetchOk() {
+    fetchMock.mockImplementation(() =>
         Promise.resolve({
             ok: true,
             status: 200,
             json: () => Promise.resolve({ status: "healthy", version: "test" }),
         } as Response),
-    ),
-);
+    );
+}
+
+function stubFetchFailFast() {
+    fetchMock.mockImplementation(() => Promise.reject(new TypeError("Failed to fetch")));
+}
+
+function stubFetchHanging() {
+    fetchMock.mockImplementation((_input: unknown, init?: RequestInit) => {
+        return new Promise<Response>((_resolve, reject) => {
+            const signal = init?.signal ?? null;
+            if (signal?.aborted) {
+                reject(new Error("AbortError"));
+                return;
+            }
+            signal?.addEventListener("abort", () => reject(new Error("AbortError")), { once: true });
+        });
+    });
+}
 
 // ── SUT ───────────────────────────────────────────────────────────────��──
 
-import { useGatewayStore } from "./gatewayStore";
+import {
+    useGatewayStore,
+    cancelHealthProbe,
+    markGatewayAlive,
+    startGatewayDeathWatch,
+    stopGatewayDeathWatch,
+} from "./gatewayStore";
 
 function resetStore() {
     useGatewayStore.setState({
         status: "disconnected",
+        gatewayAlive: "unknown",
         health: null,
         localState: "idle",
         localOwnership: "none",
@@ -75,6 +118,18 @@ function stubChildAlive(running: boolean) {
 
 beforeEach(() => {
     resetStore();
+    // Tear down module-level liveness machinery left over from the
+    // previous test: an in-flight probe would leak into this one, and a
+    // running watch would keep ticking against stale stubs.
+    stopGatewayDeathWatch();
+    cancelHealthProbe("test-reset");
+    stubFetchOk();
+    fetchMock.mockClear();
+});
+
+afterEach(() => {
+    // Every fake-timer test must hand the clock back to the runner.
+    vi.useRealTimers();
 });
 
 describe("gatewayStore.localOwnership (single-topology)", () => {
@@ -187,5 +242,119 @@ describe("gatewayStore.localOwnership (single-topology)", () => {
         expect(s.localOwnership).toBe("none");
         expect(s.localState).toBe("stopped");
         expect(s.status).toBe("disconnected");
+        // The user stopped it — liveness is a confirmed fact.
+        expect(s.gatewayAlive).toBe("dead");
+    });
+});
+
+describe("gatewayStore.gatewayAlive (single-authority liveness)", () => {
+    it("starts at unknown", () => {
+        expect(useGatewayStore.getState().gatewayAlive).toBe("unknown");
+    });
+
+    it("checkHealth success writes alive + connected", async () => {
+        await useGatewayStore.getState().checkHealth();
+        const s = useGatewayStore.getState();
+        expect(s.status).toBe("connected");
+        expect(s.gatewayAlive).toBe("alive");
+        expect(s.health?.status).toBe("healthy");
+    });
+
+    it("markGatewayAlive records a CONNACK proof", () => {
+        markGatewayAlive("mqtt-connack");
+        expect(useGatewayStore.getState().gatewayAlive).toBe("alive");
+    });
+
+    it("a fast probe failure is display-only — it never writes dead", async () => {
+        useGatewayStore.setState({ status: "connected" });
+        stubFetchFailFast();
+        await useGatewayStore.getState().checkHealth();
+        const s = useGatewayStore.getState();
+        // ADR-051 display rule: a probe failing while `connected` is a
+        // genuine outage as far as the DISPLAY goes ...
+        expect(s.status).toBe("error");
+        // ... but the death conviction belongs to the classifier alone.
+        expect(s.gatewayAlive).toBe("unknown");
+    });
+
+    it("a newer checkHealth supersedes the in-flight probe — the loser stays silent", async () => {
+        stubFetchHanging();
+        const first = useGatewayStore.getState().checkHealth();
+        stubFetchOk();
+        const second = useGatewayStore.getState().checkHealth();
+        await Promise.all([first, second]);
+        const s = useGatewayStore.getState();
+        expect(s.status).toBe("connected");
+        expect(s.gatewayAlive).toBe("alive");
+        expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+
+    it("cancelHealthProbe aborts the in-flight probe silently (CONNACK hand-off)", async () => {
+        useGatewayStore.setState({ status: "connecting" });
+        stubFetchHanging();
+        const p = useGatewayStore.getState().checkHealth();
+        cancelHealthProbe("mqtt-connected");
+        await p;
+        const s = useGatewayStore.getState();
+        // A cancelled question carries no verdict: neither connected nor
+        // dead — the CONNACK is the newer fact and it is never touched.
+        expect(s.status).toBe("connecting");
+        expect(s.gatewayAlive).toBe("unknown");
+    });
+
+    it("a 10s timeout is inconclusive — nothing is written", async () => {
+        vi.useFakeTimers();
+        useGatewayStore.setState({ status: "connecting" });
+        stubFetchHanging();
+        const p = useGatewayStore.getState().checkHealth();
+        await vi.advanceTimersByTimeAsync(10_001);
+        await p;
+        const s = useGatewayStore.getState();
+        expect(s.status).toBe("connecting");
+        expect(s.gatewayAlive).toBe("unknown");
+    });
+});
+
+describe("gatewayStore death classifier (MQTT-down watch)", () => {
+    it("a fast network failure while MQTT is down declares dead", async () => {
+        stubFetchFailFast();
+        startGatewayDeathWatch();
+        await vi.waitFor(() => {
+            expect(useGatewayStore.getState().gatewayAlive).toBe("dead");
+        });
+        expect(useGatewayStore.getState().status).toBe("error");
+        stopGatewayDeathWatch();
+    });
+
+    it("a classifier timeout never declares dead", async () => {
+        vi.useFakeTimers();
+        stubFetchHanging();
+        startGatewayDeathWatch();
+        await vi.advanceTimersByTimeAsync(11_000);
+        expect(useGatewayStore.getState().gatewayAlive).toBe("unknown");
+        stopGatewayDeathWatch();
+    });
+
+    it("the tick never preempts an in-flight probe", async () => {
+        vi.useFakeTimers();
+        stubFetchHanging();
+        startGatewayDeathWatch();
+        // Ticks at 0s and 3s; the second must detect the in-flight probe
+        // and bail out instead of spawning a parallel one.
+        await vi.advanceTimersByTimeAsync(3_500);
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        stopGatewayDeathWatch();
+    });
+
+    it("stopGatewayDeathWatch halts retries", async () => {
+        vi.useFakeTimers();
+        stubFetchFailFast();
+        startGatewayDeathWatch();
+        await vi.advanceTimersByTimeAsync(1);
+        expect(useGatewayStore.getState().gatewayAlive).toBe("dead");
+        stopGatewayDeathWatch();
+        fetchMock.mockClear();
+        await vi.advanceTimersByTimeAsync(9_000);
+        expect(fetchMock).not.toHaveBeenCalled();
     });
 });

@@ -302,7 +302,7 @@ impl MetricsAggregator {
             alerts.push(MetricsAlert {
                 alert_type: MetricsAlertType::HighAbstentionRate,
                 message: format!(
-                    "Abstention rate {:.1}% exceeds {:.1}% — consider lowering min_score",
+                    "Abstention rate {:.1}% exceeds {:.1}% — consider lowering min_cosine",
                     abstention_rate * 100.0,
                     self.thresholds.abstention_rate_high * 100.0,
                 ),

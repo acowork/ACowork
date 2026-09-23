@@ -1,24 +1,26 @@
 /**
- * Self-check for the Gateway-status transition handler.
+ * Self-check for the Gateway-liveness transition handler.
  *
- * Background: the MQTT broker lives inside the Gateway, so when the
- * Gateway goes away we stop receiving `agent_status` events. Without
- * this transition handler, `agent.alive` would stay `true` and the chat
- * panel would keep showing the previous session's content. On reconnect,
- * the agent list needs to be re-pulled because Gateway restart
- * re-spawns the system agent and clears the registry snapshot.
+ * Background: the liveness verdict (`GatewayAlive`, maintained by
+ * `gatewayStore`) drives the agent-side UI state. MQTT CONNACK is the
+ * liveness authority (the broker lives inside the Gateway process);
+ * the HTTP `/health` probe is a subordinate death classifier that runs
+ * only while MQTT is down. When the verdict lands on `dead`, nothing
+ * else will arrive to refresh the UI — the broker died with the
+ * Gateway — so the drop edge must mark agents offline, release their
+ * sessions and mark the node snapshot offline; the rise re-pulls the
+ * agent list + node topology.
  *
  * Properties verified:
  *   1. First render (prev=null) is a no-op regardless of next.
- *   2. `connected → non-connected` flips every known agent offline AND
- *      releases its session runtime state (so attachment blobs can be
- *      GC'd — see `clearAgentSessions` for the GC contract).
- *   3. `non-connected → connected` triggers `fetchAgents` to reconcile
- *      and re-hydrate the user's last session.
- *   4. A `connected → connecting → connected` flicker does NOT trip a
- *      false drop — the prev ref guards against it.
- *   5. `connecting → error` and other non-`connected` transitions are
- *      no-ops (already in the disconnected bucket).
+ *   2. `alive → dead` flips every known agent offline AND releases its
+ *      session runtime state (so attachment blobs can be GC'd — see
+ *      `clearAgentSessions` for the GC contract).
+ *   3. `dead → alive` triggers `fetchAgents` to reconcile and re-hydrate
+ *      the user's last session.
+ *   4. `unknown` never fires an edge — an unclassified link flap
+ *      leaves the UI untouched.
+ *   5. Same-state transitions are no-ops.
  */
 import { describe, it, expect, vi } from "vitest";
 import {
@@ -50,9 +52,9 @@ function makeActions(): GatewayTransitionActions & {
 describe("applyGatewayTransition", () => {
   it("is a no-op on first render (prev=null) regardless of next", () => {
     const a = makeActions();
-    applyGatewayTransition(null, "connected", a);
-    applyGatewayTransition(null, "disconnected", a);
-    applyGatewayTransition(null, "error", a);
+    applyGatewayTransition(null, "alive", a);
+    applyGatewayTransition(null, "dead", a);
+    applyGatewayTransition(null, "unknown", a);
     expect(a.setAgentOffline).not.toHaveBeenCalled();
     expect(a.clearAgentSessions).not.toHaveBeenCalled();
     expect(a.refreshServices).not.toHaveBeenCalled();
@@ -61,10 +63,10 @@ describe("applyGatewayTransition", () => {
     expect(a.fetchNodes).not.toHaveBeenCalled();
   });
 
-  it("on connected→error marks every agent offline AND clears its sessions", () => {
+  it("on alive→dead marks every agent offline AND clears its sessions", () => {
     const a = makeActions();
     a.getAgentIds.mockReturnValue(["agent-a", "agent-b", "agent-c"]);
-    applyGatewayTransition("connected", "error", a);
+    applyGatewayTransition("alive", "dead", a);
     expect(a.setAgentOffline).toHaveBeenCalledTimes(3);
     expect(a.setAgentOffline).toHaveBeenNthCalledWith(1, "agent-a");
     expect(a.setAgentOffline).toHaveBeenNthCalledWith(2, "agent-b");
@@ -84,30 +86,22 @@ describe("applyGatewayTransition", () => {
     expect(a.fetchNodes).not.toHaveBeenCalled();
   });
 
-  it("on connected→disconnected (same drop bucket as error)", () => {
+  it("drop with zero agents still re-probes services AND marks nodes offline (Gateway is gone regardless)", () => {
     const a = makeActions();
-    a.getAgentIds.mockReturnValue(["agent-x"]);
-    applyGatewayTransition("connected", "disconnected", a);
-    expect(a.setAgentOffline).toHaveBeenCalledWith("agent-x");
-    expect(a.clearAgentSessions).toHaveBeenCalledWith("agent-x");
+    a.getAgentIds.mockReturnValue([]);
+    applyGatewayTransition("alive", "dead", a);
+    expect(a.setAgentOffline).not.toHaveBeenCalled();
+    expect(a.clearAgentSessions).not.toHaveBeenCalled();
+    // Even with no agents, the diagnostic report must not stay stale —
+    // and the node topology snapshot must not keep showing dead nodes.
     expect(a.refreshServices).toHaveBeenCalledTimes(1);
     expect(a.markNodesOffline).toHaveBeenCalledTimes(1);
   });
 
-  it("on connected→connecting (transient reconnect-in-progress)", () => {
+  it("on dead→alive triggers fetchAgents AND a services re-probe AND a nodes refetch", () => {
     const a = makeActions();
     a.getAgentIds.mockReturnValue(["agent-x"]);
-    applyGatewayTransition("connected", "connecting", a);
-    expect(a.setAgentOffline).toHaveBeenCalledWith("agent-x");
-    expect(a.clearAgentSessions).toHaveBeenCalledWith("agent-x");
-    expect(a.refreshServices).toHaveBeenCalledTimes(1);
-    expect(a.markNodesOffline).toHaveBeenCalledTimes(1);
-  });
-
-  it("on non-connected→connected triggers fetchAgents AND a services re-probe AND a nodes refetch", () => {
-    const a = makeActions();
-    a.getAgentIds.mockReturnValue(["agent-x"]);
-    applyGatewayTransition("error", "connected", a);
+    applyGatewayTransition("dead", "alive", a);
     expect(a.fetchAgents).toHaveBeenCalledTimes(1);
     expect(a.fetchNodes).toHaveBeenCalledTimes(1);
     expect(a.setAgentOffline).not.toHaveBeenCalled();
@@ -117,61 +111,13 @@ describe("applyGatewayTransition", () => {
     expect(a.refreshServices).toHaveBeenCalledTimes(1);
   });
 
-  it("a connected→connecting→connected flicker does NOT fire drop or rise twice", () => {
-    // Simulates the AppLayout effect running twice in quick succession
-    // (one tick for `connecting`, one for `connected` after a watchdog
-    // recovery). The user-visible outcome: agents stay alive, no
-    // sessions are cleared, and fetchAgents fires exactly once on the
-    // rise.
+  it("unknown never fires an edge (unclassified link flap leaves the UI untouched)", () => {
     const a = makeActions();
     a.getAgentIds.mockReturnValue(["agent-x"]);
-
-    // tick 1: connected → connecting
-    applyGatewayTransition("connected", "connecting", a);
-    // tick 2: connecting → connected (back to healthy)
-    applyGatewayTransition("connecting", "connected", a);
-
-    expect(a.setAgentOffline).toHaveBeenCalledTimes(1);
-    expect(a.setAgentOffline).toHaveBeenCalledWith("agent-x");
-    expect(a.clearAgentSessions).toHaveBeenCalledTimes(1);
-    expect(a.clearAgentSessions).toHaveBeenCalledWith("agent-x");
-    expect(a.refreshServices).toHaveBeenCalledTimes(2); // once on drop, once on rise
-    expect(a.markNodesOffline).toHaveBeenCalledTimes(1); // drop only
-    expect(a.fetchAgents).toHaveBeenCalledTimes(1); // rise only
-    expect(a.fetchNodes).toHaveBeenCalledTimes(1); // rise only
-  });
-
-  it("a connected→disconnected→connected sequence (full restart) flips offline then re-fetches", () => {
-    const a = makeActions();
-    a.getAgentIds.mockReturnValue(["agent-x"]);
-
-    applyGatewayTransition("connected", "disconnected", a);
-    expect(a.setAgentOffline).toHaveBeenCalledTimes(1);
-    expect(a.clearAgentSessions).toHaveBeenCalledTimes(1);
-    expect(a.refreshServices).toHaveBeenCalledTimes(1);
-    expect(a.markNodesOffline).toHaveBeenCalledTimes(1);
-
-    a.setAgentOffline.mockClear();
-    a.clearAgentSessions.mockClear();
-    a.refreshServices.mockClear();
-    a.markNodesOffline.mockClear();
-
-    applyGatewayTransition("disconnected", "connected", a);
-    expect(a.setAgentOffline).not.toHaveBeenCalled();
-    expect(a.clearAgentSessions).not.toHaveBeenCalled();
-    expect(a.markNodesOffline).not.toHaveBeenCalled();
-    // Rise re-probes services, re-fetches agents AND resyncs the node
-    // topology (the drop edge marked it offline).
-    expect(a.refreshServices).toHaveBeenCalledTimes(1);
-    expect(a.fetchAgents).toHaveBeenCalledTimes(1);
-    expect(a.fetchNodes).toHaveBeenCalledTimes(1);
-  });
-
-  it("no-op for connecting→error or other within non-connected bucket transitions", () => {
-    const a = makeActions();
-    applyGatewayTransition("connecting", "error", a);
-    applyGatewayTransition("error", "disconnected", a);
-    applyGatewayTransition("disconnected", "connecting", a);
+    // Startup: nothing verified yet → alive is a sync, not a "rise".
+    applyGatewayTransition("unknown", "alive", a);
+    // Classifier verdict before any liveness was confirmed → no "drop".
+    applyGatewayTransition("unknown", "dead", a);
     expect(a.setAgentOffline).not.toHaveBeenCalled();
     expect(a.clearAgentSessions).not.toHaveBeenCalled();
     expect(a.refreshServices).not.toHaveBeenCalled();
@@ -180,51 +126,85 @@ describe("applyGatewayTransition", () => {
     expect(a.fetchNodes).not.toHaveBeenCalled();
   });
 
-  it("drop with zero agents still re-probes services AND marks nodes offline (Gateway is gone regardless)", () => {
+  it("same-state transitions are no-ops (alive→alive, dead→dead)", () => {
     const a = makeActions();
-    a.getAgentIds.mockReturnValue([]);
-    applyGatewayTransition("connected", "error", a);
+    a.getAgentIds.mockReturnValue(["agent-x"]);
+    applyGatewayTransition("alive", "alive", a);
+    applyGatewayTransition("dead", "dead", a);
     expect(a.setAgentOffline).not.toHaveBeenCalled();
     expect(a.clearAgentSessions).not.toHaveBeenCalled();
-    // Even with no agents, the diagnostic report must not stay stale —
-    // and the node topology snapshot must not keep showing dead nodes.
+    expect(a.refreshServices).not.toHaveBeenCalled();
+    expect(a.markNodesOffline).not.toHaveBeenCalled();
+    expect(a.fetchAgents).not.toHaveBeenCalled();
+    expect(a.fetchNodes).not.toHaveBeenCalled();
+  });
+
+  it("a full alive→dead→alive sequence drops once and rises once", () => {
+    const a = makeActions();
+    a.getAgentIds.mockReturnValue(["agent-x"]);
+
+    applyGatewayTransition("alive", "dead", a);
+    expect(a.setAgentOffline).toHaveBeenCalledTimes(1);
+    expect(a.clearAgentSessions).toHaveBeenCalledTimes(1);
     expect(a.refreshServices).toHaveBeenCalledTimes(1);
     expect(a.markNodesOffline).toHaveBeenCalledTimes(1);
+    expect(a.fetchAgents).not.toHaveBeenCalled();
+
+    applyGatewayTransition("dead", "alive", a);
+    expect(a.setAgentOffline).toHaveBeenCalledTimes(1); // still just the drop
+    expect(a.clearAgentSessions).toHaveBeenCalledTimes(1);
+    expect(a.refreshServices).toHaveBeenCalledTimes(2); // once on drop, once on rise
+    expect(a.markNodesOffline).toHaveBeenCalledTimes(1); // drop only
+    expect(a.fetchAgents).toHaveBeenCalledTimes(1); // rise only
+    expect(a.fetchNodes).toHaveBeenCalledTimes(1); // rise only
   });
 });
 
 describe("onMqttConnectionEdge", () => {
-  it("does NOT probe on first render (prev=null) — SplashScreen already verified", () => {
-    const probe = vi.fn();
-    onMqttConnectionEdge(null, true, probe);
-    onMqttConnectionEdge(null, false, probe);
-    expect(probe).not.toHaveBeenCalled();
+  it("first render syncs with the current state: up → onRise, down → onDrop", () => {
+    const onRise = vi.fn();
+    const onDrop = vi.fn();
+    onMqttConnectionEdge(null, true, { onRise, onDrop });
+    expect(onRise).toHaveBeenCalledTimes(1);
+    expect(onDrop).not.toHaveBeenCalled();
+
+    onMqttConnectionEdge(null, false, { onRise, onDrop });
+    expect(onRise).toHaveBeenCalledTimes(1);
+    expect(onDrop).toHaveBeenCalledTimes(1);
   });
 
-  it("does NOT probe when MQTT state is unchanged", () => {
-    const probe = vi.fn();
-    onMqttConnectionEdge(true, true, probe);
-    onMqttConnectionEdge(false, false, probe);
-    expect(probe).not.toHaveBeenCalled();
+  it("does NOT fire when the MQTT state is unchanged", () => {
+    const onRise = vi.fn();
+    const onDrop = vi.fn();
+    onMqttConnectionEdge(true, true, { onRise, onDrop });
+    onMqttConnectionEdge(false, false, { onRise, onDrop });
+    expect(onRise).not.toHaveBeenCalled();
+    expect(onDrop).not.toHaveBeenCalled();
   });
 
-  it("probes on drop edge (connected → disconnected) to distinguish gateway death from auto-sleep", () => {
-    const probe = vi.fn();
-    onMqttConnectionEdge(true, false, probe);
-    expect(probe).toHaveBeenCalledTimes(1);
+  it("drop edge (connected → down) routes to onDrop (start the death classifier)", () => {
+    const onRise = vi.fn();
+    const onDrop = vi.fn();
+    onMqttConnectionEdge(true, false, { onRise, onDrop });
+    expect(onDrop).toHaveBeenCalledTimes(1);
+    expect(onRise).not.toHaveBeenCalled();
   });
 
-  it("probes on rise edge (disconnected → connected) to converge gatewayStatus after restart", () => {
-    const probe = vi.fn();
-    onMqttConnectionEdge(false, true, probe);
-    expect(probe).toHaveBeenCalledTimes(1);
+  it("rise edge (down → connected) routes to onRise (cancel in-flight probe, mark alive)", () => {
+    const onRise = vi.fn();
+    const onDrop = vi.fn();
+    onMqttConnectionEdge(false, true, { onRise, onDrop });
+    expect(onRise).toHaveBeenCalledTimes(1);
+    expect(onDrop).not.toHaveBeenCalled();
   });
 
-  it("probes exactly once per edge across a full drop→rise cycle", () => {
-    const probe = vi.fn();
-    onMqttConnectionEdge(true, false, probe); // drop
-    onMqttConnectionEdge(false, false, probe); // settled down
-    onMqttConnectionEdge(false, true, probe); // rise
-    expect(probe).toHaveBeenCalledTimes(2);
+  it("fires exactly one handler per edge across a full drop→rise cycle", () => {
+    const onRise = vi.fn();
+    const onDrop = vi.fn();
+    onMqttConnectionEdge(true, false, { onRise, onDrop }); // drop
+    onMqttConnectionEdge(false, false, { onRise, onDrop }); // settled down
+    onMqttConnectionEdge(false, true, { onRise, onDrop }); // rise
+    expect(onDrop).toHaveBeenCalledTimes(1);
+    expect(onRise).toHaveBeenCalledTimes(1);
   });
 });

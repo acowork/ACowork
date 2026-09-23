@@ -445,7 +445,8 @@ pub fn make_compressed_placeholder(tool_name: &str) -> String {
 
 **删除的 API**：
 - `HistoryManager::trim_fifo()` → 删除
-- `HistoryManager::emergency_trim()` → 删除（保留 `fit_to_budget_lossless` 作为恢复期的无损裁剪——它与 cache 无关，是模型切换时的防御）
+- `HistoryManager::emergency_trim()` → 删除
+- `HistoryManager::fit_to_budget_lossless()` → 删除（**2026-09 后续变更撤销**：当时作为"恢复期无损裁剪"保留，但它会静默丢弃整轮对话、丢语义，与 ADR-061 删除 `trim_fifo`/`emergency_trim` 的理由相同。恢复期现在不做任何裁剪，见 `session_manager.rs::build_initial_session_state`）
 - `trim_history_to_budget` → 重写为只走 8 级压缩，不再有 FIFO/emergency 分支
 - 上述全部调用点改道 `compact_history_if_needed`（已存在）或显式错误返回
 

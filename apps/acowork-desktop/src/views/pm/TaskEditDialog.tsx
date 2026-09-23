@@ -211,7 +211,7 @@ export function TaskEditDialog({
         aria-labelledby="pm-edit-task-title"
       >
         {/* 头部 */}
-        <header className="flex shrink-0 items-center justify-between border-b border-border-divider px-5 py-3">
+        <header className="flex shrink-0 items-center justify-between border-b border-border-divider px-5 py-3 min-h-[var(--ui-dialog-zone-h)]">
           <h3 id="pm-edit-task-title" className="text-sm font-semibold">
             {mode === "create" ? t("pm.newTask") : t("pm.task.edit")}
           </h3>
@@ -325,7 +325,7 @@ export function TaskEditDialog({
         </div>
 
         {/* 底部操作 */}
-        <footer className="flex shrink-0 justify-end gap-2 border-t border-border-divider px-5 py-3">
+        <footer className="flex shrink-0 items-center justify-end gap-2 border-t border-border-divider px-5 min-h-[var(--ui-dialog-zone-h)]">
           <button
             type="button"
             onClick={onClose}
@@ -337,7 +337,7 @@ export function TaskEditDialog({
           <button
             type="button"
             onClick={handleSave}
-            className="rounded-md bg-zinc-800 px-4 py-1.5 text-xs font-medium text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-700 dark:hover:bg-zinc-600"
+            className="rounded-md btn-accent px-4 py-1.5 text-xs font-medium disabled:opacity-50"
             disabled={saving}
           >
             {saving ? t("common.saving") : t("pm.task.save")}

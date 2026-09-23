@@ -382,7 +382,7 @@ impl MemoryProvider for InMemoryProvider {
         k: usize,
         text_weight: f64,
         vector_weight: f64,
-        min_score: Option<f32>,
+        min_cosine: Option<f32>,
     ) -> Result<Vec<(u64, f64)>> {
         let nodes = self.nodes.read().unwrap();
         let mut results: Vec<(u64, f64)> = nodes
@@ -400,7 +400,7 @@ impl MemoryProvider for InMemoryProvider {
                 let score = text_score * text_weight + vec_score * vector_weight;
                 (n.id, score)
             })
-            .filter(|(_, score)| min_score.is_none_or(|ms| *score as f32 >= ms))
+            .filter(|(_, score)| min_cosine.is_none_or(|mc| *score as f32 >= mc))
             .collect();
         results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         results.truncate(k);
@@ -413,14 +413,12 @@ impl MemoryProvider for InMemoryProvider {
         _field: &str,
         query_text: &str,
         k: usize,
-        min_score: Option<f32>,
     ) -> Result<Vec<(u64, f64)>> {
         let nodes = self.nodes.read().unwrap();
         let mut results: Vec<(u64, f64)> = nodes
             .values()
             .filter(|n| n.label == label)
             .map(|n| (n.id, Self::text_relevance(query_text, &n.content)))
-            .filter(|(_, score)| min_score.is_none_or(|ms| *score as f32 >= ms))
             .collect();
         results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         results.truncate(k);
@@ -668,7 +666,7 @@ mod tests {
                 filters: Default::default(),
                 limit: 10,
                 expand_hops: 0,
-                min_score: None,
+                min_cosine: None,
                 abstention_enabled: false,
                 hint_type: Default::default(),
                 embedding: None,

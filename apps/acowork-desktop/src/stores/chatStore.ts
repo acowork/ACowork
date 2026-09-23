@@ -5,7 +5,7 @@ import type { ChatMessage, ContextUsageInfo, TokenUsage, ToolApprovalNeededEvent
 import { toWireAttachedItems } from "../lib/types";
 import { isAtTail } from "../lib/paginationUtils";
 import { useAgentStore } from "./agentStore";
-import { useGatewayStore } from "./gatewayStore";
+import { useGatewayStore, stopGatewayDeathWatch } from "./gatewayStore";
 import { useUserProfileStore } from "./userProfileStore";
 import { useWorkspaceStore } from "./workspaceStore";
 import { releaseAdapterSession, clearOptimisticEntries, clearAllOptimisticEntries, ingestStreamDelta, ingestRecordComplete, getChatAdapterSession } from "../components/chat/chatAdapterStore";
@@ -768,6 +768,28 @@ interface ChatStore {
    * flip the dot gray, plus a UI focus to "force" it).
    */
   bootstrapVersion: number;
+  /**
+   * "The Gateway's agent inventory may have changed" counter. Bumped on
+   * two events, both of which make the AgentList sidebar's cached
+   * `GET /api/agents` result suspect:
+   *
+   * 1. Every `acowork/desktop/inventory` signal the Gateway emits when
+   *    its aggregated `installed_agents` table mutates (a Node finishes
+   *    an install/uninstall, a Node replays its retained inventory on
+   *    reconnect, or HTTP `DELETE /api/agents/{id}` drops an entry).
+   * 2. Every MQTT transition into `connected` — i.e. the initial
+   *    subscribe and every reconnect. The signal is a live,
+   *    **non-retained** message (see the Gateway's
+   *    `mqtt/inventory_notifier.rs` for why), so a change that lands
+   *    while the Desktop is disconnected would otherwise be lost. The
+   *    connection edge is the catch-up: it also closes the window
+   *    between the sidebar's mount fetch and the first subscribe.
+   *
+   * The sidebar refetches on every bump, so this replaces the previous
+   * 30 s `setInterval` polling fallback that left the sidebar stale
+   * until a tab-switch remount or the next poll tick.
+   */
+  inventoryVersion: number;
   availableModels: ModelEntry[];
   /**
    * Accounts (API keys) per provider, for the model picker's account level.
@@ -1010,6 +1032,9 @@ let _mqttStatusUnlisten: (() => void) | null = null;
 // ADR-059: `bootstrap-state` listener — bumps `bootstrapVersion` on every
 // retained snapshot. Held for `disposeMqttListener` cleanup.
 let _bootstrapUnlisten: (() => void) | null = null;
+// Inventory-change fanout handle — see the `inventory-changed` listener
+// below. Paired with `bootstrap-state` for cleanup symmetry.
+let _inventoryUnlisten: (() => void) | null = null;
 
 /// Reentrancy guard for `initMqttListener`.
 ///
@@ -1087,6 +1112,11 @@ function applyConnectionTransition(
   }
   if (prevEffective === nextEffective) return;
 
+  log.warn(
+    `[mqtt-status] applying transition ${prevEffective} → ${nextEffective}` +
+      (raw.reason ? ` (reason: ${raw.reason})` : "") +
+      (options.fromWatchdog ? " [via watchdog]" : ""),
+  );
   const nextError = dedupeError(
     state.lastMqttError,
     raw.connected ? null : raw.reason ?? null,
@@ -1109,6 +1139,15 @@ function applyConnectionTransition(
     effectiveConnection: nextEffective,
     staleSince: _connectingSince,
     transitionLog: nextLog,
+    // Inventory catch-up: the inventory-change signal is live-only
+    // (non-retained), so anything that happened while the Desktop was
+    // not subscribed is invisible to us. Every transition into
+    // `connected` means the Rust client just (re-)subscribed — refetch
+    // `GET /api/agents` so the AgentList sidebar converges. This also
+    // closes the mount-fetch-vs-first-subscribe window.
+    ...(nextEffective === "connected"
+      ? { inventoryVersion: state.inventoryVersion + 1 }
+      : {}),
   });
 }
 
@@ -1137,33 +1176,42 @@ function applyWatchdogSnapshot(snapshot: MqttStatusSnapshot): { recovered: boole
 
 function startMqttPoll(): void {
   stopMqttPoll();
+  log.warn("[mqtt-watchdog] starting 5s polling watchdog");
   _mqttPollHandle = setInterval(async () => {
     // Stop the watchdog as soon as we're back to `connected` — it's a
     // safety net, not a permanent feature.
     const cur = useChatStore.getState();
     if (cur.effectiveConnection === "connected") {
-      log.debug("[mqtt-watchdog] connected; stopping watchdog");
+      log.warn("[mqtt-watchdog] effectiveConnection=connected; stopping watchdog");
       stopMqttPoll();
       return;
     }
+    log.warn(
+      `[mqtt-watchdog] tick: effectiveConnection=${cur.effectiveConnection}, \
+       mqttConnected=${cur.mqttConnected}, will query get_mqtt_status`,
+    );
 
     // 1. Poll the Rust snapshot and apply it. This self-heals a
     //    Rust-vs-frontend inconsistency (F-3) and may promote a stuck
     //    `connecting` / `reconnecting` to `stale` (plan §3.1.1).
     try {
       const snap = await invoke<MqttStatusSnapshot>("get_mqtt_status");
-      log.debug?.("[mqtt-watchdog] snapshot:", JSON.stringify(snap));
+      log.warn(
+        "[mqtt-watchdog] get_mqtt_status returned:",
+        JSON.stringify(snap),
+      );
       if (snap.known) {
         const { recovered } = applyWatchdogSnapshot(snap);
         if (recovered) {
-          log.debug?.(
+          log.warn(
             "[mqtt-watchdog] recovered Rust-vs-frontend inconsistency; stopping watchdog",
           );
           stopMqttPoll();
           return;
         }
       }
-    } catch {
+    } catch (err) {
+      log.warn("[mqtt-watchdog] get_mqtt_status threw:", err);
       // Transient IPC failure - keep polling.
     }
 
@@ -1256,6 +1304,10 @@ async function doInitMqttListener(): Promise<void> {
     reconnecting?: boolean;
   }>("mqtt-status", (event) => {
     const { connected, reason, connecting, reconnecting } = event.payload;
+    log.warn(
+      "[mqtt-status] received from Rust:",
+      JSON.stringify({ connected, connecting, reconnecting, reason }),
+    );
     applyConnectionTransition({
       known: true,
       connected,
@@ -1285,6 +1337,23 @@ async function doInitMqttListener(): Promise<void> {
     useChatStore.setState((s) => ({ bootstrapVersion: s.bootstrapVersion + 1 }));
   });
 
+  // Inventory-change fanout. The Gateway publishes a non-retained
+  // `acowork/desktop/inventory` message whenever its
+  // aggregated `installed_agents` table mutates (remote Node finishes
+  // install / uninstall, Node replays its retained inventory on
+  // reconnect, HTTP uninstall drops an entry). The Tauri
+  // `inventory-changed` event is emitted by the Rust eventloop on each
+  // delivery; bumping `inventoryVersion` here is the realtime trigger
+  // for the AgentList sidebar to refetch `GET /api/agents`.
+  //
+  // The signal is live-only, so it cannot cover a change that happened
+  // while the Desktop was disconnected. That catch-up lives in
+  // `applyConnectionTransition` below, which bumps the same counter on
+  // every transition into `connected`.
+  _inventoryUnlisten = await listen("inventory-changed", () => {
+    useChatStore.setState((s) => ({ inventoryVersion: s.inventoryVersion + 1 }));
+  });
+
   // Pull the *current* status from the Rust side so we don't miss the
   // initial state.  The source of truth is `DesktopMqttClient::session_state`
   // (a watch channel updated synchronously by the poll task).
@@ -1295,7 +1364,10 @@ async function doInitMqttListener(): Promise<void> {
   // transition may have been emitted before this listener registered.
     try {
       const snapshot = await invoke<MqttStatusSnapshot>("get_mqtt_status");
-      log.debug("[initMqttListener] snapshot:", snapshot);
+      log.warn(
+        "[initMqttListener] initial snapshot from Rust:",
+        JSON.stringify(snapshot),
+      );
       if (snapshot.known) {
         // Pass the snapshot through verbatim so the transient
         // `connecting` / `reconnecting` flags survive the init path
@@ -1307,6 +1379,9 @@ async function doInitMqttListener(): Promise<void> {
       // It is harmless when the event stream is working and is a
       // lifeline when the initial event was lost during webview reload.
       if (!snapshot.connected) {
+        log.warn(
+          "[initMqttListener] initial snapshot not connected — starting watchdog",
+        );
         startMqttPoll();
       }
     } catch (err) {
@@ -1318,6 +1393,9 @@ async function doInitMqttListener(): Promise<void> {
 
 export function disposeMqttListener(): void {
   stopMqttPoll();
+  // The death classifier watch polls /health every 3s while MQTT is
+  // down — tear it down with the rest of the liveness machinery.
+  stopGatewayDeathWatch();
   _connectingSince = null;
   _mqttInitPromise = null;
   if (_mqttAgentEventUnlisten) {
@@ -1331,6 +1409,10 @@ export function disposeMqttListener(): void {
   if (_bootstrapUnlisten) {
     _bootstrapUnlisten();
     _bootstrapUnlisten = null;
+  }
+  if (_inventoryUnlisten) {
+    _inventoryUnlisten();
+    _inventoryUnlisten = null;
   }
   useChatStore.setState({
     mqttConnected: false,
@@ -1348,6 +1430,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   staleSince: null,
   transitionLog: [],
   bootstrapVersion: 0,
+  inventoryVersion: 0,
   availableModels: [],
   providerAccounts: {},
 

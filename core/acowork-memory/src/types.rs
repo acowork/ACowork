@@ -96,8 +96,10 @@ pub struct MemoryQuery {
     pub limit: usize,
     /// Graph expansion hops (0 = no expansion).
     pub expand_hops: u8,
-    /// Minimum relevance score threshold.
-    pub min_score: Option<f32>,
+    /// Minimum cosine similarity threshold (overrides
+    /// `MemoryQualityConfig::min_cosine` when set). Applied to absolute
+    /// cosine similarity, not to the fused ranking score.
+    pub min_cosine: Option<f32>,
     /// Enable abstention (return empty if confidence too low).
     pub abstention_enabled: bool,
     /// Hint type for retrieval strategy optimization.
@@ -114,7 +116,7 @@ impl MemoryQuery {
             filters: MemoryFilters::default(),
             limit: 10,
             expand_hops: 0,
-            min_score: None,
+            min_cosine: None,
             abstention_enabled: false,
             hint_type: HintType::default(),
             embedding: None,
@@ -137,11 +139,12 @@ impl MemoryQuery {
             },
             limit: 5,
             expand_hops: 0,
-            // NOTE (ADR-062 D1): `min_score` left as `None` so it resolves via
-            // MemoryManagerConfig.quality.min_score (default 0.0). The old
-            // hardcoded `Some(0.3)` was on the RRF score scale (~0.01-0.05)
-            // and silently filtered out every auto-inject hit.
-            min_score: None,
+            // `min_cosine` left as `None` so it resolves via
+            // MemoryManagerConfig.quality.min_cosine (default 0.3, cosine
+            // domain). The old hardcoded `Some(0.3)` was mistakenly applied to
+            // the RRF score scale (~0.01-0.05) and silently filtered out every
+            // auto-inject hit.
+            min_cosine: None,
             abstention_enabled: false,
             hint_type: HintType::Identity,
         }
@@ -161,7 +164,7 @@ impl MemoryQuery {
             },
             limit: 10,
             expand_hops: 2,
-            min_score: None,
+            min_cosine: None,
             abstention_enabled: false,
             hint_type: HintType::Semantic,
         }
@@ -623,7 +626,9 @@ pub struct SearchResult {
     pub content: String,
     /// Label of the memory node.
     pub label: String,
-    /// Relevance score [0.0, 1.0].
+    /// Relevance score; higher is more relevant. Hybrid results carry a
+    /// normalized cosine similarity in [0.0, 1.0]; text-only and
+    /// graph-expanded results use their own scales.
     pub score: f64,
     /// How this result was obtained.
     pub source: ResultSource,

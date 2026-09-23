@@ -115,15 +115,39 @@ pub type ProgressCb = dyn Fn(u64, u64) + Send + Sync;
 
 /// Thread-safe download progress tracker shared across concurrent racers.
 ///
-/// All racers update the same instance via atomic operations, so the UI
-/// always sees the progress of the fastest (winning) source.
+/// Tracks aggregate progress across all files in a multi-file model download.
+/// The downloader downloads files one at a time (sequentially) but each file
+/// is raced across multiple HTTP sources; only the winning source writes to
+/// the per-file atomics below.
+///
+/// Layout:
+/// - `file_bytes_downloaded` / `file_total_bytes` describe the **current**
+///   file being raced. Concurrent racer tasks `fetch_max` into these as
+///   they receive chunks (so a fast loser's early chunks cannot artificially
+///   inflate progress past the eventual winner).
+/// - `accum_bytes_downloaded` / `accum_total_bytes` describe all files that
+///   have been committed via [`Self::commit_file`] (i.e., already finished).
+///
+/// `snapshot()` combines both slots into a single `(downloaded, total)`
+/// ratio, so the UI sees a smooth 0→100% sweep across all files instead
+/// of snapping to 100% after the first small file (tokenizer) while the
+/// large file (model.onnx) is still in flight.
+///
+/// ponytail: cumulative bytes use `fetch_max` everywhere — multi-source
+/// races intentionally take the high-water mark so a slow loser's stale
+/// chunks can never lower the reported progress. Across files the serial
+/// `commit_file()` / `begin_file()` calls in the main download loop
+/// guarantee no race between "moving prior bytes to accum" and "starting
+/// the next file's per-file counters".
 pub struct DownloadProgress {
-    /// Bytes downloaded so far for the current file.
-    pub bytes_downloaded: AtomicU64,
-    /// Total bytes of the current file (0 if unknown).
-    pub total_bytes: AtomicU64,
-    /// Progress floor used for post-download finalization phases.
-    progress_floor: std::sync::atomic::AtomicU8,
+    /// Bytes downloaded so far for the current file (winner high-water).
+    pub file_bytes_downloaded: AtomicU64,
+    /// Total bytes of the current file (0 if unknown / not yet declared).
+    pub file_total_bytes: AtomicU64,
+    /// Sum of bytes from all previously committed files.
+    pub accum_bytes_downloaded: AtomicU64,
+    /// Sum of declared sizes from all previously committed files.
+    pub accum_total_bytes: AtomicU64,
     /// Name of the file currently being downloaded (e.g., "model.onnx").
     pub current_file: std::sync::Mutex<String>,
 }
@@ -138,28 +162,46 @@ impl DownloadProgress {
     /// Create a new progress tracker with zero state.
     pub fn new() -> Self {
         Self {
-            bytes_downloaded: AtomicU64::new(0),
-            total_bytes: AtomicU64::new(0),
-            progress_floor: std::sync::atomic::AtomicU8::new(0),
+            file_bytes_downloaded: AtomicU64::new(0),
+            file_total_bytes: AtomicU64::new(0),
+            accum_bytes_downloaded: AtomicU64::new(0),
+            accum_total_bytes: AtomicU64::new(0),
             current_file: std::sync::Mutex::new(String::new()),
         }
     }
 
-    pub fn set_progress_floor(&self, pct: u8) {
-        self.progress_floor
-            .store(pct.min(100), std::sync::atomic::Ordering::Relaxed);
+    /// Commit the just-finished file's bytes into the cumulative slot and
+    /// reset the per-file counters so the next `begin_file()` starts clean.
+    ///
+    /// Called by the main download loop after a file race completes, before
+    /// starting the next file. Safe to call when per-file counters are 0
+    /// (e.g., the file was skipped because it already existed on disk).
+    pub fn commit_file(&self) {
+        let downloaded = self.file_bytes_downloaded.swap(0, Ordering::AcqRel);
+        let total = self.file_total_bytes.swap(0, Ordering::AcqRel);
+        if downloaded > 0 {
+            self.accum_bytes_downloaded
+                .fetch_add(downloaded, Ordering::Relaxed);
+        }
+        if total > 0 {
+            self.accum_total_bytes.fetch_add(total, Ordering::Relaxed);
+        }
     }
 
-    /// Return progress as `(percentage 0-100, bytes_downloaded, total_bytes)`.
+    /// Return progress as `(percentage 0-100, bytes_downloaded, total_bytes)`
+    /// across **all** files in the download.
     pub fn snapshot(&self) -> (u8, u64, u64) {
-        let downloaded = self.bytes_downloaded.load(Ordering::Relaxed);
-        let total = self.total_bytes.load(Ordering::Relaxed);
-        let byte_pct = if total > 0 {
+        let file_downloaded = self.file_bytes_downloaded.load(Ordering::Relaxed);
+        let file_total = self.file_total_bytes.load(Ordering::Relaxed);
+        let accum_downloaded = self.accum_bytes_downloaded.load(Ordering::Relaxed);
+        let accum_total = self.accum_total_bytes.load(Ordering::Relaxed);
+        let downloaded = accum_downloaded.saturating_add(file_downloaded);
+        let total = accum_total.saturating_add(file_total);
+        let pct = if total > 0 {
             ((downloaded as f64 / total as f64) * 100.0).min(100.0) as u8
         } else {
             0
         };
-        let pct = byte_pct.max(self.progress_floor.load(Ordering::Relaxed));
         (pct, downloaded, total)
     }
 }
@@ -309,11 +351,16 @@ impl Downloader {
                 progress,
             )
             .await?;
+            // Move this file's byte counters into the cumulative slot so
+            // `snapshot()` reflects progress across all files so far —
+            // not just the current one. Without this, downloading a small
+            // tokenizer before a large model.onnx would show 100% the
+            // moment the tokenizer finishes and stay there until the
+            // ONNX file is done.
+            progress.commit_file();
 
             downloaded_files.push(local_name.to_string());
         }
-
-        progress.set_progress_floor(100);
 
         for remote_path in spec.external_data_files {
             if cancel.load(std::sync::atomic::Ordering::Relaxed) {
@@ -347,10 +394,10 @@ impl Downloader {
                 progress,
             )
             .await?;
+            progress.commit_file();
+
             downloaded_files.push(local_name.to_string());
         }
-
-        progress.set_progress_floor(100);
 
         // Atomic rename: tmp_dir → model_dir (cross-platform)
         rename_or_replace(&tmp_dir, &model_dir)?;
@@ -586,10 +633,10 @@ async fn download_single(
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(0);
         progress
-            .total_bytes
+            .file_total_bytes
             .fetch_max(resume_offset + total_from_range, Ordering::Relaxed);
         progress
-            .bytes_downloaded
+            .file_bytes_downloaded
             .fetch_max(resume_offset, Ordering::Relaxed);
         tracing::info!(
             source = idx + 1,
@@ -610,7 +657,7 @@ async fn download_single(
             let _ = std::fs::remove_file(&tmp_path);
         }
         let total = response.content_length().unwrap_or(0);
-        progress.total_bytes.fetch_max(total, Ordering::Relaxed);
+        progress.file_total_bytes.fetch_max(total, Ordering::Relaxed);
         tracing::info!(total, source = idx + 1, url, "Downloading");
         0u64
     };
@@ -631,7 +678,7 @@ async fn download_single(
         let chunk = chunk.map_err(DownloadError::Http)?;
         downloaded += chunk.len() as u64;
         progress
-            .bytes_downloaded
+            .file_bytes_downloaded
             .fetch_max(downloaded, Ordering::Relaxed);
         tokio::io::AsyncWriteExt::write_all(&mut writer, &chunk).await?;
     }
@@ -645,4 +692,75 @@ async fn download_single(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Multi-file download — e.g. small `tokenizer.json` (10 B) followed by
+    /// large `model.onnx` (1000 B). After the first file finishes, snapshot
+    /// must NOT report 100%; it should reflect `10 / (10+1000)` so the UI
+    /// keeps moving while the big file downloads.
+    ///
+    /// This is the regression test for the bug where a 100% floor was
+    /// latched after each file and the progress bar stayed pinned at
+    /// 100% for the entire duration of the second file.
+    #[test]
+    fn snapshot_reflects_aggregate_progress_across_files() {
+        let p = DownloadProgress::new();
+
+        // Initial state — no files announced yet.
+        assert_eq!(p.snapshot(), (0, 0, 0));
+
+        // File 1 (tokenizer): declare 10 B total, fully download 10 B.
+        p.file_total_bytes.store(10, Ordering::Relaxed);
+        p.file_bytes_downloaded.store(10, Ordering::Relaxed);
+
+        // Mid-flight: 5 / 10 of file 1.
+        p.file_bytes_downloaded.store(5, Ordering::Relaxed);
+        assert_eq!(p.snapshot(), (50, 5, 10));
+
+        // File 1 done.
+        p.file_bytes_downloaded.store(10, Ordering::Relaxed);
+        p.commit_file();
+        assert_eq!(p.file_bytes_downloaded.load(Ordering::Relaxed), 0);
+        assert_eq!(p.file_total_bytes.load(Ordering::Relaxed), 0);
+        // Cumulative reflects file 1 only.
+        assert_eq!(p.snapshot(), (100, 10, 10));
+
+        // File 2 (model.onnx): declare 1000 B total, download 500 B.
+        p.file_total_bytes.store(1000, Ordering::Relaxed);
+        p.file_bytes_downloaded.store(500, Ordering::Relaxed);
+
+        // Snapshot must show 510 / 1010 ≈ 50%, NOT 100%.
+        // This is the core regression: under the old `progress_floor`
+        // model, this same state would have returned (100, _, _).
+        let (pct, downloaded, total) = p.snapshot();
+        assert_eq!(downloaded, 510);
+        assert_eq!(total, 1010);
+        assert_eq!(pct, 50, "expected ~50% after half of second file, got {pct}");
+
+        // File 2 finishes.
+        p.file_bytes_downloaded.store(1000, Ordering::Relaxed);
+        assert_eq!(p.snapshot(), (100, 1010, 1010));
+        p.commit_file();
+
+        // After both files committed, accum holds the whole download.
+        assert_eq!(p.snapshot(), (100, 1010, 1010));
+    }
+
+    /// `commit_file()` is safe to call when the per-file counters are 0
+    /// (e.g., a file was skipped because it already existed on disk).
+    /// It must not corrupt the accum slot or panic.
+    #[test]
+    fn commit_file_with_zero_counters_is_noop() {
+        let p = DownloadProgress::new();
+        p.accum_bytes_downloaded.store(100, Ordering::Relaxed);
+        p.accum_total_bytes.store(200, Ordering::Relaxed);
+
+        p.commit_file();
+
+        assert_eq!(p.snapshot(), (50, 100, 200));
+    }
 }

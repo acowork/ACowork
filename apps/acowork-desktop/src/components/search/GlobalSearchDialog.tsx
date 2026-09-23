@@ -742,7 +742,7 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
 
     return (
         <div
-            className="fixed inset-0 z-50 flex items-start justify-center bg-modal-overlay pt-[10vh]"
+            className="fixed inset-0 z-50 flex items-center justify-center bg-modal-overlay"
             onMouseDown={() => closeDialog()}
         >
             <div
@@ -751,13 +751,13 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
                 onKeyDown={onKeyDown}
             >
                 {/* ── Header ──────────────────────────────────────────── */}
-                <div className="flex shrink-0 items-center gap-2 border-b border-border-divider px-5 py-3">
+                <div className="flex shrink-0 items-center gap-2 border-b border-border-divider px-5 py-3 min-h-[var(--ui-dialog-zone-h)]">
                     <Search className="h-5 w-5 text-text-tertiary" />
                     <h2 className="text-sm font-semibold">{t("globalSearch.title")}</h2>
                 </div>
 
                 {/* ── Zone 1: agent picker + search input ─────────────── */}
-                <div className="flex shrink-0 items-stretch border-b border-border-divider">
+                <div className="flex shrink-0 items-center border-b border-border-divider min-h-[var(--ui-dialog-zone-h)]">
                     <AgentPickerChip
                         agents={agentList.map((a) => a.meta)}
                         value={agentId}
@@ -770,7 +770,7 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
                             setConversationHits([]);
                         }}
                     />
-                    <div className="flex flex-1 items-center gap-1.5 border-l border-zinc-200 px-3 py-1.5 dark:border-zinc-700">
+                    <div className="flex h-full flex-1 items-center gap-1.5 border-l border-zinc-200 px-5 py-1.5 dark:border-zinc-700">
                         <Search className="h-3 w-3 shrink-0 text-text-tertiary" />
                         <input
                             ref={inputRef}
@@ -809,16 +809,16 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
                     `flex-1` lets it grow up to the 70vh dialog cap once
                     Zone 3 has claimed its fixed 140–300px. */}
                 <div className="flex min-h-[180px] flex-1 flex-col overflow-hidden border-b border-border-divider">
-                    <div className="flex shrink-0 gap-1 border-b border-border-divider px-2 pt-1">
+                    <div className="flex shrink-0 items-center justify-center gap-1 border-b border-border-divider px-5 min-h-[var(--ui-dialog-zone-h)]">
                         {TABS.map((tabDef) => (
                             <button
                                 key={tabDef.key}
                                 data-testid={`tab-${tabDef.key}`}
                                 onClick={() => setTab(tabDef.key)}
-                                className={`rounded-t px-3 py-1.5 text-xs font-medium transition-colors ${
+                                className={`rounded-full px-3 py-1.5 text-xs font-medium transition-colors ${
                                     tab === tabDef.key
-                                        ? "bg-zinc-100 text-text dark:bg-zinc-700/60"
-                                        : "text-text-secondary hover:bg-zinc-50 dark:hover:bg-zinc-700/40"
+                                        ? "bg-zinc-200 text-text dark:bg-zinc-300"
+                                        : "text-text-tertiary hover:bg-zinc-100 dark:hover:bg-zinc-700/50"
                                 }`}
                             >
                                 {tabDef.label}
@@ -937,7 +937,7 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
                 </div>
 
                 {/* ── Footer ──────────────────────────────────────────── */}
-                <div className="flex shrink-0 justify-end border-t border-border-divider px-5 py-3">
+                <div className="flex shrink-0 items-center justify-end border-t border-border-divider px-5 min-h-[var(--ui-dialog-zone-h)]">
                     <button
                         type="button"
                         onClick={() => closeDialog()}

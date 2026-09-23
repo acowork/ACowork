@@ -197,17 +197,18 @@ pub trait MemoryProvider: Send + Sync {
         k: usize,
         text_weight: f64,
         vector_weight: f64,
-        min_score: Option<f32>,
+        min_cosine: Option<f32>,
     ) -> Result<Vec<(u64, f64)>>;
 
-    /// Pure text retrieval with label filter.
+    /// Pure text retrieval with label filter. No score threshold: BM25 scores
+    /// have no cross-corpus absolute meaning (they drift with corpus size and
+    /// average document length), so only their ranking is meaningful.
     fn text_search_with_filter(
         &self,
         label: &str,
         field: &str,
         query_text: &str,
         k: usize,
-        min_score: Option<f32>,
     ) -> Result<Vec<(u64, f64)>>;
 
     // ── Phase 1: Ambiguous conflict confirmation ────────────────────────

@@ -1008,6 +1008,41 @@ impl Stream for ChannelStream {
     }
 }
 
+/// Merge a `usage` block into the running prompt accounting.
+///
+/// Anthropic-compatible providers disagree on *which* stream event carries
+/// prompt accounting: native Anthropic reports `input_tokens` plus the cache
+/// tokens on `message_start` and only output tokens on `message_delta`, while
+/// MiniMax-M3 sends an all-zero block on `message_start` and the real counts on
+/// `message_delta`. Accounting therefore has to be event-agnostic: every usage
+/// block is merged with the same rule, so no shape loses tokens.
+///
+/// The largest non-zero report wins. A zero report can never mask a value
+/// another event already reported, a later report that is *smaller* (a provider
+/// sending an increment on `message_delta` after a full count on
+/// `message_start`) cannot shrink the total, and the cache counters always come
+/// from the same report as the total so the two stay consistent.
+///
+/// Rationale and the SDK evidence for these wire shapes: ADR-027, section
+/// "Usage merge across stream events".
+fn merge_prompt_usage(
+    usage: &AnthropicUsage,
+    input_tokens: &mut u64,
+    cache_read_tokens: &mut u64,
+    cache_write_tokens: &mut u64,
+) {
+    let cache_read = usage.cache_read_input_tokens.unwrap_or(0);
+    let cache_write = usage.cache_creation_input_tokens.unwrap_or(0);
+    // Cache tokens are part of the prompt — they only appear as separate
+    // fields so callers can tell cached from fresh input apart.
+    let input = usage.input_tokens.unwrap_or(0) + cache_read + cache_write;
+    if input > *input_tokens {
+        *input_tokens = input;
+        *cache_read_tokens = cache_read;
+        *cache_write_tokens = cache_write;
+    }
+}
+
 /// Parse a single Anthropic SSE line into a StreamEvent.
 ///
 /// `block_index_map` maps Anthropic's global content_block index to a
@@ -1098,14 +1133,29 @@ fn parse_anthropic_sse_line(
             None
         }
         "message_delta" => {
-            // Contains stop_reason and output usage info.
-            // Combine accumulated input_tokens from message_start with output_tokens
-            // from message_delta to produce a complete usage report.
+            // Carries stop_reason, output tokens, and — on some
+            // Anthropic-compatible providers — the prompt accounting that
+            // native Anthropic puts on `message_start`.
             if let Some(usage) = event.usage {
+                merge_prompt_usage(
+                    &usage,
+                    accumulated_input_tokens,
+                    accumulated_cache_read_tokens,
+                    accumulated_cache_write_tokens,
+                );
                 let input = *accumulated_input_tokens;
                 let cache_read = *accumulated_cache_read_tokens;
                 let cache_write = *accumulated_cache_write_tokens;
                 let output = usage.output_tokens.unwrap_or(0);
+                if input == 0 {
+                    // No event of this response reported prompt tokens: ADR-027's
+                    // zero-skip will hold the session's `total_input` unchanged.
+                    tracing::warn!(
+                        ?usage,
+                        output_tokens = output,
+                        "anthropic stream: provider reported no prompt tokens"
+                    );
+                }
                 return Some(StreamEvent::Finished(ChatResponse {
                     content: String::new(),
                     tool_calls: None,
@@ -1120,22 +1170,24 @@ fn parse_anthropic_sse_line(
                     ..Default::default()
                 }));
             }
+            // A stream that never reports a usage block leaves
+            // `ChatResponse.usage == None`; the caller then falls back to its
+            // local estimate instead of booking provider-reported numbers.
+            tracing::warn!("anthropic stream: message_delta carried no usage block");
             None
         }
         "message_start" => {
-            // Extract input_tokens from message_start's usage for later combination
-            // with output_tokens from message_delta. Include cache tokens
-            // (cache_creation_input_tokens + cache_read_input_tokens) which
-            // are also part of the input cost but only appear in this event.
-            if let Some(ref msg) = event.message
-                && let Some(ref usage) = msg.usage
-            {
-                let cache_creation = usage.cache_creation_input_tokens.unwrap_or(0);
-                let cache_read = usage.cache_read_input_tokens.unwrap_or(0);
-                *accumulated_input_tokens =
-                    usage.input_tokens.unwrap_or(0) + cache_creation + cache_read;
-                *accumulated_cache_read_tokens = cache_read;
-                *accumulated_cache_write_tokens = cache_creation;
+            // Native Anthropic reports prompt accounting here, cache tokens
+            // included. `merge_prompt_usage` keeps whichever event actually
+            // carries the numbers, so a provider that zeroes this block out and
+            // reports on `message_delta` instead still books its input.
+            if let Some(usage) = event.message.as_ref().and_then(|msg| msg.usage.as_ref()) {
+                merge_prompt_usage(
+                    usage,
+                    accumulated_input_tokens,
+                    accumulated_cache_read_tokens,
+                    accumulated_cache_write_tokens,
+                );
             }
             None
         }
@@ -1508,6 +1560,94 @@ mod tests {
         } else {
             panic!("Expected Content event");
         }
+    }
+
+    #[test]
+    fn test_parse_sse_prompt_usage_reported_on_message_delta() {
+        // MiniMax-M3 shape: `message_start` carries an all-zero usage block and
+        // the real prompt counts only appear on `message_delta`. Reading prompt
+        // accounting from `message_start` alone yields `prompt_tokens = 0`, and
+        // ADR-027's zero-skip then freezes the session's `total_input`.
+        let mut tool_id = None;
+        let mut tool_name = None;
+        let mut input_tokens = 0u64;
+        let mut cache_read_tokens = 0u64;
+        let mut cache_write_tokens = 0u64;
+        let mut block_index_map: HashMap<u64, u64> = HashMap::new();
+
+        let started = parse_anthropic_sse_line(
+            r#"data: {"type":"message_start","message":{"id":"msg_1","content":[],"usage":{"input_tokens":0,"output_tokens":0}}}"#,
+            &mut tool_id,
+            &mut tool_name,
+            &mut input_tokens,
+            &mut cache_read_tokens,
+            &mut cache_write_tokens,
+            &mut block_index_map,
+        );
+        assert!(started.is_none());
+        assert_eq!(input_tokens, 0, "all-zero message_start reports nothing");
+
+        let finished = parse_anthropic_sse_line(
+            r#"data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":628,"output_tokens":524,"cache_read_input_tokens":32020}}"#,
+            &mut tool_id,
+            &mut tool_name,
+            &mut input_tokens,
+            &mut cache_read_tokens,
+            &mut cache_write_tokens,
+            &mut block_index_map,
+        );
+        let Some(StreamEvent::Finished(resp)) = finished else {
+            panic!("Expected Finished event");
+        };
+        let usage = resp.usage.expect("usage must be reported");
+        // Cached tokens are part of the prompt: 628 fresh + 32020 cached.
+        assert_eq!(usage.prompt_tokens, 32648);
+        assert_eq!(usage.cache_read_tokens, 32020);
+        assert_eq!(usage.completion_tokens, 524);
+        assert_eq!(usage.total_tokens, 32648 + 524);
+    }
+
+    #[test]
+    fn test_parse_sse_prompt_usage_from_message_start_survives_delta() {
+        // Native Anthropic shape: `message_start` reports `input_tokens` plus
+        // cache tokens, `message_delta` reports only `output_tokens`. The delta
+        // must not wipe the prompt accounting, and a smaller increment-style
+        // report on the delta must not shrink it either.
+        let mut tool_id = None;
+        let mut tool_name = None;
+        let mut input_tokens = 0u64;
+        let mut cache_read_tokens = 0u64;
+        let mut cache_write_tokens = 0u64;
+        let mut block_index_map: HashMap<u64, u64> = HashMap::new();
+
+        let _ = parse_anthropic_sse_line(
+            r#"data: {"type":"message_start","message":{"id":"msg_1","content":[],"usage":{"input_tokens":100,"output_tokens":1,"cache_creation_input_tokens":5,"cache_read_input_tokens":10}}}"#,
+            &mut tool_id,
+            &mut tool_name,
+            &mut input_tokens,
+            &mut cache_read_tokens,
+            &mut cache_write_tokens,
+            &mut block_index_map,
+        );
+        assert_eq!(input_tokens, 115);
+
+        let finished = parse_anthropic_sse_line(
+            r#"data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":7,"output_tokens":42}}"#,
+            &mut tool_id,
+            &mut tool_name,
+            &mut input_tokens,
+            &mut cache_read_tokens,
+            &mut cache_write_tokens,
+            &mut block_index_map,
+        );
+        let Some(StreamEvent::Finished(resp)) = finished else {
+            panic!("Expected Finished event");
+        };
+        let usage = resp.usage.expect("usage must be reported");
+        assert_eq!(usage.prompt_tokens, 115, "smaller delta report must not shrink it");
+        assert_eq!(usage.cache_read_tokens, 10);
+        assert_eq!(usage.cache_write_tokens, 5);
+        assert_eq!(usage.completion_tokens, 42);
     }
 
     #[test]

@@ -339,19 +339,28 @@ pub struct AgentCore {
     /// and from `merge_token_totals` on every `list_sessions` scan. Not
     /// persisted; on process restart the next session-list scan rebuilds the
     /// baseline via atomic-max merge with the on-disk `SessionTokens`.
-    pub(crate) agent_total_input_tokens: AtomicU64,
+    ///
+    /// `Arc`-wrapped so the four counters are genuinely shared by every
+    /// `AgentCore` clone (template / per-session task / distillation spawn —
+    /// see the manual `Clone` impl). A bare `AtomicU64` would be *copied*
+    /// on clone: a per-session task would then report only its own slice of
+    /// the agent-wide total, and the `list_sessions` disk-sum merge (which
+    /// lands on the template) could never reach an already-running session
+    /// (regression t-83afab47 follow-up: Agent Status "累计输入 Token"
+    /// showed ≈ the Session Status total).
+    pub(crate) agent_total_input_tokens: Arc<AtomicU64>,
     /// ADR-028: cumulative output tokens across every LLM call made by this
     /// agent process. See [`Self::agent_total_input_tokens`] for semantics.
-    pub(crate) agent_total_output_tokens: AtomicU64,
+    pub(crate) agent_total_output_tokens: Arc<AtomicU64>,
     /// ADR-066: cumulative prompt-cache read tokens across every LLM call
     /// made by this agent process (OpenAI `cached_tokens` / Anthropic
     /// `cache_read_input_tokens`).  Same persistence / restart semantics
     /// as [`Self::agent_total_input_tokens`].
-    pub(crate) agent_total_cache_read_tokens: AtomicU64,
+    pub(crate) agent_total_cache_read_tokens: Arc<AtomicU64>,
     /// ADR-066: cumulative prompt-cache write tokens across every LLM
     /// call made by this agent process (Anthropic
     /// `cache_creation_input_tokens`; OpenAI has no concept → always 0).
-    pub(crate) agent_total_cache_write_tokens: AtomicU64,
+    pub(crate) agent_total_cache_write_tokens: Arc<AtomicU64>,
 }
 
 /// ADR-071 D4/D6: runtime distiller settings, layered over the manifest
@@ -596,12 +605,12 @@ impl AgentCore {
             attachment_service: None,
             // ADR-028: counters start at 0; the next `list_sessions` scan
             // rebuilds the baseline via `merge_token_totals`.
-            agent_total_input_tokens: AtomicU64::new(0),
-            agent_total_output_tokens: AtomicU64::new(0),
+            agent_total_input_tokens: Arc::new(AtomicU64::new(0)),
+            agent_total_output_tokens: Arc::new(AtomicU64::new(0)),
 
             // ADR-066: cache counters follow the same lifecycle.
-            agent_total_cache_read_tokens: AtomicU64::new(0),
-            agent_total_cache_write_tokens: AtomicU64::new(0),
+            agent_total_cache_read_tokens: Arc::new(AtomicU64::new(0)),
+            agent_total_cache_write_tokens: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -1833,28 +1842,17 @@ impl Clone for AgentCore {
             consolidation_bg_task: None, // sessions don't own bg task
             consolidation_timer: self.consolidation_timer.clone(), // shared timer for idle reset
             attachment_service: self.attachment_service.clone(),
-            // ADR-028: agent-scoped counters are intentionally SHARED across
-            // clones. Cloning an `AtomicU64` snapshots the *current value*
-            // (good — every session sees the latest), and updates from any
-            // clone are visible to all other clones. This is exactly what we
-            // want: a session-task or distillation spawn should keep
-            // advancing the same agent-wide total.
-            agent_total_input_tokens: AtomicU64::new(
-                self.agent_total_input_tokens.load(Ordering::Acquire),
-            ),
-            agent_total_output_tokens: AtomicU64::new(
-                self.agent_total_output_tokens.load(Ordering::Acquire),
-            ),
+            // ADR-028: agent-scoped counters are genuinely SHARED across
+            // clones — `Arc::clone` keeps all four pointing at the same
+            // `AtomicU64`s, so an `accumulate_llm_usage` / `merge_token_totals`
+            // on any clone (template, session task, distillation spawn) is
+            // immediately visible to every other clone.
+            agent_total_input_tokens: Arc::clone(&self.agent_total_input_tokens),
+            agent_total_output_tokens: Arc::clone(&self.agent_total_output_tokens),
 
-            // ADR-066: cache counters inherit the same "snapshot value,
-            // share updates across clones" semantics as the in/out
-            // counters above.
-            agent_total_cache_read_tokens: AtomicU64::new(
-                self.agent_total_cache_read_tokens.load(Ordering::Acquire),
-            ),
-            agent_total_cache_write_tokens: AtomicU64::new(
-                self.agent_total_cache_write_tokens.load(Ordering::Acquire),
-            ),
+            // ADR-066: cache counters inherit the same sharing.
+            agent_total_cache_read_tokens: Arc::clone(&self.agent_total_cache_read_tokens),
+            agent_total_cache_write_tokens: Arc::clone(&self.agent_total_cache_write_tokens),
         }
     }
 }
@@ -3191,5 +3189,105 @@ mod tests {
             (250, 5000, 600, 1000),
             "each dimension is max'd independently"
         );
+    }
+
+    /// Regression (t-83afab47 follow-up): the four agent-scoped counters
+    /// must be *shared* by every `AgentCore` clone, not snapshotted.
+    ///
+    /// `SessionTask::new` builds the per-session core with
+    /// `(*core).clone()`. If the counters were copied, that session's
+    /// `agent_total_*` push would report only its own slice of the
+    /// agent-wide total, and the cold-start `list_sessions` disk-sum merge
+    /// (which lands on the template core) could never reach a session that
+    /// is already running — the Agent Status panel then showed ≈ the
+    /// Session Status total instead of the sum over all session metas.
+    #[test]
+    fn test_agent_counters_shared_across_clones() {
+        let template = make_minimal_core();
+        // Stands in for `SessionTask::new`'s `(*core).clone()`.
+        let session_clone = template.clone();
+
+        // Live LLM call on the template -> the session clone sees it.
+        template.accumulate_llm_usage(&UsageInfo {
+            prompt_tokens: 100,
+            completion_tokens: 10,
+            ..Default::default()
+        });
+        assert_eq!(
+            session_clone.agent_token_totals(),
+            (100, 10, 0, 0),
+            "accumulate on the template must be visible to the session clone"
+        );
+
+        // Cold-start disk scan advances the template -> the session clone's
+        // next push must carry the merged historical baseline.
+        template.merge_token_totals((Some(50_000_000), Some(500_000), None, None));
+        assert_eq!(
+            session_clone.agent_token_totals(),
+            (50_000_000, 500_000, 0, 0),
+            "list_sessions disk merge must be visible to the session clone"
+        );
+
+        // ...and the other direction: the session task's own call advances
+        // the agent-wide total seen by the template.
+        session_clone.accumulate_llm_usage(&UsageInfo {
+            prompt_tokens: 7,
+            ..Default::default()
+        });
+        assert_eq!(
+            template.agent_token_totals().0,
+            50_000_007,
+            "session clone's accumulate must be visible to the template"
+        );
+    }
+
+    /// Concurrent sessions: every session task's LLM call must land in the
+    /// *same* agent-wide counter immediately, so the Agent Status panel's
+    /// `agent_total_*` reflects all sessions running in parallel (session A's
+    /// push already includes session B's calls, and vice versa).
+    #[test]
+    fn test_agent_counters_shared_across_concurrent_sessions() {
+        let template = make_minimal_core();
+        // Two live session tasks (`SessionTask::new` clones the template).
+        let session_a = template.clone();
+        let session_b = template.clone();
+
+        // Interleaved calls, exactly like two sessions reasoning at once.
+        session_a.accumulate_llm_usage(&UsageInfo {
+            prompt_tokens: 1_000,
+            completion_tokens: 100,
+            ..Default::default()
+        });
+        session_b.accumulate_llm_usage(&UsageInfo {
+            prompt_tokens: 2_000,
+            completion_tokens: 200,
+            ..Default::default()
+        });
+        session_a.accumulate_llm_usage(&UsageInfo {
+            prompt_tokens: 3_000,
+            completion_tokens: 300,
+            ..Default::default()
+        });
+
+        // Every reader — both sessions and the template — sees the sum of all
+        // three calls (6_000 in / 600 out) at the moment it reads.
+        for (who, core) in [
+            ("session_a", &session_a),
+            ("session_b", &session_b),
+            ("template", &template),
+        ] {
+            assert_eq!(
+                core.agent_token_totals(),
+                (6_000, 600, 0, 0),
+                "{who} must see the agent-wide total of all concurrent sessions"
+            );
+        }
+
+        // A cold-start disk merge performed by the template (what
+        // `list_sessions` does) is also immediately visible to both running
+        // sessions — no re-clone, no restart.
+        template.merge_token_totals((Some(50_000_000), None, None, None));
+        assert_eq!(session_a.agent_token_totals().0, 50_000_000);
+        assert_eq!(session_b.agent_token_totals().0, 50_000_000);
     }
 }

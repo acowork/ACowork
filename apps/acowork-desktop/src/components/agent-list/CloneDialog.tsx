@@ -102,7 +102,7 @@ export function CloneDialog({
       {/* Dialog */}
       <div className="relative z-10 w-full max-w-lg rounded-md border border-border-outer bg-modal-surface shadow-xl">
         {/* Header */}
-        <div className="flex items-center gap-2 border-b border-border-divider px-5 py-3.5">
+        <div className="flex items-center gap-2 border-b border-border-divider px-5 py-3 min-h-[var(--ui-dialog-zone-h)]">
           <Copy className="h-5 w-5 text-text-tertiary " />
           <h2 className="text-sm font-semibold text-text ">
             {t("cloneDialog.title")}
@@ -177,7 +177,7 @@ export function CloneDialog({
         </div>
 
         {/* Footer */}
-        <div className="flex justify-end gap-2 border-t border-border-divider px-5 py-3">
+        <div className="flex items-center justify-end gap-2 border-t border-border-divider px-5 min-h-[var(--ui-dialog-zone-h)]">
           <button
             onClick={onClose}
             disabled={cloning}

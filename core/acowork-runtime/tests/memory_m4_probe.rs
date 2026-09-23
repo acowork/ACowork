@@ -114,7 +114,7 @@ async fn probe_min_score_domain() {
 
     // Probe 1: raw text search score domain (no min_score).
     let raw = store
-        .text_search_with_filter("Knowledge", "content", "dark mode editor", 10, None)
+        .text_search_with_filter("Knowledge", "content", "dark mode editor", 10)
         .unwrap();
     println!("raw text search scores: {:?}", raw);
 
@@ -145,7 +145,7 @@ async fn probe_min_score_domain() {
     // Probe 4: full retrieve with auto_inject, min_score=Some(0.3) and None.
     for ms in [Some(0.3f32), None] {
         let mut q = MemoryQuery::auto_inject("dark mode editor".to_string(), None);
-        q.min_score = ms;
+        q.min_cosine = ms;
         let res = manager
             .retrieve(&*store, &mut q, Some(&DeterministicEmbedding))
             .await

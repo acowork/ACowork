@@ -109,7 +109,6 @@ function seedAgent(sessions: SessionInfo[], sessionTitle: string | undefined) {
                     pageSize: 20,
                 },
                 isLoading: false,
-                agentTokenTotals: null,
                 online: true,
                 sleeping: false,
             },

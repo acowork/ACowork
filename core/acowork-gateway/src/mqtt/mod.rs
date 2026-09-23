@@ -27,6 +27,7 @@ pub mod dispatch;
 pub mod enrollment;
 pub mod global_resources_builders;
 pub mod global_resources_publisher;
+pub mod inventory_notifier;
 pub mod node_control;
 pub mod node_registry;
 pub mod sidecar;
@@ -38,6 +39,9 @@ pub use bootstrap_publisher::{BootstrapPublisher, BootstrapPublisherHandle, Boot
 pub use broker::{start_broker, start_broker_with_auth, BrokerAuth, MqttBrokerError, MqttBrokerHandle};
 pub use client::{GatewayMqttClient, GatewayMqttClientError, MqttMessageCallback, MqttQoS};
 pub use global_resources_publisher::{MqttGlobalResourcesPublisher, MqttPublisherHandle, MqttPublisherTrigger};
+pub use inventory_notifier::{
+    InventoryNotifierHandle, InventoryNotifierTrigger, MqttInventoryNotifier, TOPIC_INVENTORY,
+};
 pub use node_registry::{new_shared_registry as new_shared_node_registry, NodeRegistry, SharedNodeRegistry};
 pub use enrollment::{
     new_shared_enrollment_store, new_shared_node_token_store, EnrollmentTokenStore, NodeTokenStore,

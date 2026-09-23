@@ -548,8 +548,10 @@ pub(crate) async fn phase_b_init_session(
         // publish it to the late-bind slot, then spawn the tailer. The
         // tailer reads the live embedding provider from `agent_core_shared`
         // each sweep, so it picks up the provider whenever it binds. The
-        // index store is physically isolated (`{work_dir}/conversation_index/`)
-        // and rebuildable from the JSONL history — delete + restart rebuilds.
+        // index store is physically isolated
+        // (`{work_dir}/conversation_index.grafeo`) and rebuildable from the
+        // JSONL history — delete + restart rebuilds. Open is cheap: the
+        // store's HNSW topology is restored from the container, not rebuilt.
         {
             // Size the index to the live provider's dimension. Hardcoding
             // the default (384) made every write mismatch a 512-dim provider
@@ -576,7 +578,7 @@ pub(crate) async fn phase_b_init_session(
                     ));
                     tokio::spawn(async move { indexer.run().await });
                     tracing::info!(
-                        dir = %work_dir_path.join("conversation_index").display(),
+                        dir = %work_dir_path.join(crate::conversation_index::STORE_FILE).display(),
                         "conversation index: opened, tailer spawned"
                     );
                 }

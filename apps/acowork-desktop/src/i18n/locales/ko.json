@@ -106,6 +106,7 @@
     "users": "메시지",
     "projects": "Projects",
     "docs": "Docs",
+    "extensions": "확장",
     "harness": "Harness",
     "settings": "Settings",
     "ariaLabelMainNavigation": "기본 탐색"
@@ -1251,6 +1252,14 @@
     "retrying": "재시도 중...",
     "retryConnection": "연결 재시도",
     "gatewayAddress": "게이트웨이 주소",
+    "candidateTitle": "다른 사용 가능한 게이트웨이를 찾았습니다 — 연결하시겠습니까?",
+    "candidateDetected": "감지:",
+    "candidateKeepWaiting": "대기 계속",
+    "bannerLocalStarting": "로컬 게이트웨이 시작 중",
+    "bannerLocalDown": "로컬 게이트웨이가 실행되지 않음",
+    "bannerRemoteDown": "게이트웨이에 연결할 수 없음",
+    "bannerStart": "시작",
+    "bannerRetry": "재시도",
     "altLogo": "ACowork"
   },
   "appLayout": {
@@ -1426,6 +1435,8 @@
     "clickToEdit": "클릭하여 편집",
     "noDescription": "설명 없음",
     "statTotal": "전체",
+    "searchPlaceholder": "프로젝트 검색...",
+    "noMatchingProjects": "일치하는 프로젝트가 없습니다",
     "projectListAria": "프로젝트 목록",
     "projectMenu": "프로젝트 메뉴",
     "deleteProjectTitle": "프로젝트 삭제",

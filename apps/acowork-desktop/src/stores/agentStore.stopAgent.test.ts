@@ -57,7 +57,6 @@ function seedAgent() {
                 sessionTitle: undefined,
                 pagination: { currentPage: 1, totalPages: 1, totalCount: 0, pageSize: 20 },
                 isLoading: false,
-                agentTokenTotals: null,
             },
         },
         selectedAgentId: INSTANCE_ID,

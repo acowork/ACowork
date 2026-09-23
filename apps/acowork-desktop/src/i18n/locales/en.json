@@ -9,6 +9,7 @@
     "users": "Messages",
     "projects": "Projects",
     "docs": "Docs",
+    "extensions": "Extensions",
     "harness": "Harness",
     "settings": "Settings",
     "ariaLabelMainNavigation": "Main navigation"
@@ -433,6 +434,14 @@
     "retrying": "Retrying...",
     "retryConnection": "Retry Connection",
     "gatewayAddress": "Gateway Address",
+    "candidateTitle": "Other reachable Gateways — connect to one?",
+    "candidateDetected": "Detected:",
+    "candidateKeepWaiting": "Keep waiting",
+    "bannerLocalStarting": "Starting local Gateway",
+    "bannerLocalDown": "Local Gateway is not running",
+    "bannerRemoteDown": "Gateway unreachable",
+    "bannerStart": "Start",
+    "bannerRetry": "Retry",
     "altLogo": "ACowork"
   },
   "appLayout": {
@@ -1468,6 +1477,8 @@
     "clickToEdit": "Click to edit",
     "noDescription": "No description",
     "statTotal": "Total",
+    "searchPlaceholder": "Search projects...",
+    "noMatchingProjects": "No matching projects",
     "projectListAria": "Project list",
     "projectMenu": "Project menu",
     "deleteProjectTitle": "Delete project",

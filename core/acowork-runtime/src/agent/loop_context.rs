@@ -13,7 +13,9 @@ use std::sync::Arc;
 use acowork_core::providers::traits::Provider;
 
 use crate::agent::compression_constants::MIN_COMPRESSION_RATIO;
-use crate::agent::context::{ContextBuilder, count_chat_request_chars, patch_session_totals};
+use crate::agent::context::{
+    ContextBuilder, count_chat_request_chars, patch_agent_totals, patch_session_totals,
+};
 use crate::agent::loop_::{AgentLoop, ChunkEvent};
 use crate::agent::session::session_manager::RuntimeConfigOverrides;
 
@@ -173,12 +175,10 @@ impl AgentLoop {
                 if let Some(t) = session_tokens {
                     patch_session_totals(&mut ctx_info, &t);
                 }
-                let (agent_in, agent_out, agent_cache_read, agent_cache_write) =
-                    self.core.agent_token_totals();
-                ctx_info.agent_total_input_tokens = Some(agent_in);
-                ctx_info.agent_total_output_tokens = Some(agent_out);
-                ctx_info.agent_total_cache_read_tokens = Some(agent_cache_read);
-                ctx_info.agent_total_cache_write_tokens = Some(agent_cache_write);
+                // ADR-028 / ADR-066: same centralised patcher as the live
+                // LLM-call push, so the config-change and post-compaction
+                // pushes never drift from the main path either.
+                patch_agent_totals(&mut ctx_info, self.core.agent_token_totals());
                 let _ = self
                     .session_core
                     .try_send_chunk(ChunkEvent::ContextUsage(ctx_info));
@@ -1214,12 +1214,7 @@ impl AgentLoop {
                 if let Some(t) = session_tokens {
                     patch_session_totals(&mut ctx_info, &t);
                 }
-                let (agent_in, agent_out, agent_cache_read, agent_cache_write) =
-                    self.core.agent_token_totals();
-                ctx_info.agent_total_input_tokens = Some(agent_in);
-                ctx_info.agent_total_output_tokens = Some(agent_out);
-                ctx_info.agent_total_cache_read_tokens = Some(agent_cache_read);
-                ctx_info.agent_total_cache_write_tokens = Some(agent_cache_write);
+                patch_agent_totals(&mut ctx_info, self.core.agent_token_totals());
                 let _ = self
                     .session_core
                     .try_send_chunk(ChunkEvent::ContextUsage(ctx_info));
@@ -1636,12 +1631,7 @@ impl AgentLoop {
                 // ADR-066: agent-scoped cache totals snapshotted alongside
                 // input/output via the 4-tuple return of `agent_token_totals`.
                 self.core.accumulate_llm_usage(usage);
-                let (agent_in, agent_out, agent_cache_read, agent_cache_write) =
-                    self.core.agent_token_totals();
-                ctx_usage.agent_total_input_tokens = Some(agent_in);
-                ctx_usage.agent_total_output_tokens = Some(agent_out);
-                ctx_usage.agent_total_cache_read_tokens = Some(agent_cache_read);
-                ctx_usage.agent_total_cache_write_tokens = Some(agent_cache_write);
+                patch_agent_totals(&mut ctx_usage, self.core.agent_token_totals());
 
                 // ADR-067: populate the per-section byte sizes so the
                 // input-box context-usage popup's 5-category breakdown
