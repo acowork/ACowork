@@ -41,6 +41,19 @@ pub const MAX_INDEX_CONTENT: usize = 4_000;
 /// source *only*, so a keyword hit whose embedding is far still comes back.
 pub const DEFAULT_MIN_COSINE: f32 = 0.3;
 
+/// One indexed message read back for cross-file migration (ADR-082 §4
+/// step 3): the shared-store bootstrap copies these into
+/// `memory/private.sqlite` so an existing index does not have to be
+/// re-embedded from the JSONL.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExportedMessage {
+    pub session_id: String,
+    pub message_index: usize,
+    pub role: String,
+    pub content: String,
+    pub embedding: Vec<f32>,
+}
+
 /// One ranked conversation hit.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConversationHit {
@@ -222,6 +235,43 @@ impl ConversationStore {
         )?;
         self.mark_indexed(session_id, message_index + 1);
         Ok(id)
+    }
+
+    /// Every indexed message with its embedding, for migrating the index into
+    /// another SQLite file (ADR-082 §4 step 3).
+    ///
+    /// Reads `props` (the stored `MessageProps` JSON) and joins the shared
+    /// `vectors` table. Rows whose props do not parse or whose vector is
+    /// missing are skipped, never fatal — the source is best-effort input.
+    pub fn export_messages(&self) -> Result<Vec<ExportedMessage>> {
+        let conn = self.store.lock();
+        let mut stmt = conn.prepare(
+            "SELECT nodes.props, vectors.embedding FROM nodes \
+             JOIN vectors ON vectors.node_id = nodes.id \
+             WHERE nodes.label = ?1",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![LABEL], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (props, blob) = row?;
+            let Ok(msg) = serde_json::from_str::<MessageProps>(&props) else {
+                continue;
+            };
+            let embedding = crate::blob_to_embedding(&blob);
+            if embedding.is_empty() {
+                continue;
+            }
+            out.push(ExportedMessage {
+                session_id: msg.session_id,
+                message_index: msg.message_index.max(0) as usize,
+                role: msg.role,
+                content: msg.content,
+                embedding,
+            });
+        }
+        Ok(out)
     }
 
     /// Next JSONL line to index for `session_id` (0 = not started).

@@ -1130,37 +1130,13 @@ impl AgentCore {
             tracing::warn!(error = %e, dir = %memory_dir.display(), "Failed to create memory directory, memory features disabled");
             return;
         }
-        // ADR-082 D1: the SQLite backend always compiles in, so it is also the
-        // fallback when the grafeo feature is disabled.
-        if Self::memory_backend_is_sqlite() {
-            self.init_sqlite_backend(work_dir);
-            return;
-        }
-
-        #[cfg(feature = "grafeo-backend")]
-        {
-            self.init_grafeo_backend(&memory_dir);
-        }
-
-        #[cfg(not(feature = "grafeo-backend"))]
-        {
-            let _ = &memory_dir;
-            tracing::warn!(
-                "init_memory_provider: grafeo-backend feature not enabled, memory features disabled"
-            );
-        }
-    }
-
-    /// Which memory backend this process uses.
-    ///
-    /// `ACOWORK_MEMORY_BACKEND=sqlite` opts into the ADR-082 backend; anything
-    /// else (including unset) keeps grafeo, so the rollout is opt-in and a
-    /// regression can be reverted by unsetting one variable.
-    fn memory_backend_is_sqlite() -> bool {
-        matches!(
-            std::env::var("ACOWORK_MEMORY_BACKEND").as_deref(),
-            Ok("sqlite")
-        )
+        // ADR-082 D1: SQLite is the backend, unconditionally. The grafeo
+        // backend (`init_grafeo_backend`) is kept compiled for the transition
+        // but no longer selected; it is removed once the SQLite rollout has
+        // settled. A pre-existing `private.grafeo` is imported once inside
+        // `init_sqlite_backend`, so switching does not start from an empty
+        // store.
+        self.init_sqlite_backend(work_dir);
     }
 
     /// Create and initialise a SQLite store as the memory provider (ADR-082 D1).
@@ -1299,9 +1275,14 @@ impl AgentCore {
 
     /// Create and initialise a GrafeoStore as the memory provider.
     ///
-    /// ADR-051 P4: Feature-gated behind `grafeo-backend`. When the feature
-    /// is disabled, `init_memory_provider` logs a warning and skips.
+    /// ADR-051 P4: Feature-gated behind `grafeo-backend`.
+    ///
+    /// ponytail: no longer called — `init_memory_provider` selects SQLite
+    /// unconditionally (ADR-082 §4 step 3). Kept compiled during the
+    /// transition so the backend can be restored by reverting one call; the
+    /// whole grafeo path is deleted once the SQLite rollout has settled.
     #[cfg(feature = "grafeo-backend")]
+    #[allow(dead_code)]
     fn init_grafeo_backend(&mut self, memory_dir: &std::path::Path) {
         use acowork_grafeo::grafeo::GrafeoStore;
         use acowork_grafeo::types::GrafeoConfig;

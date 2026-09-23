@@ -116,6 +116,10 @@ impl ConversationIndex {
         let started = Instant::now();
         let store = ConversationStore::from_store(store)
             .map_err(|e| crate::error::RuntimeError::Memory(e.to_string()))?;
+        // The shared file starts empty of conversation messages on the first
+        // boot after the switch; pull the existing index in so nothing has to
+        // be re-embedded from the JSONL.
+        import_legacy_index(work_dir, &store, embedding_dim);
         tracing::info!(
             dir = %work_dir.display(),
             elapsed_ms = started.elapsed().as_millis() as u64,
@@ -354,6 +358,85 @@ fn import_grafeo_index(work_dir: &Path, target: &ConversationStore, embedding_di
 /// No old index exists when the Runtime is built without the grafeo backend.
 #[cfg(not(feature = "grafeo-backend"))]
 fn import_grafeo_index(_work_dir: &Path, _target: &ConversationStore, _embedding_dim: usize) {}
+
+/// One-shot import of a pre-existing conversation index from a legacy path
+/// into the shared SQLite store (ADR-082 §4 step 3).
+///
+/// Sources, newest layout first:
+///   * `{work_dir}/conversation_index.sqlite` — the intermediate single-file
+///     SQLite layout that predates the shared `memory/private.sqlite`;
+///   * `{work_dir}/conversation_index.grafeo` / `conversation_index/` — the
+///     original grafeo layouts (delegated to [`import_grafeo_index`]).
+///
+/// Runs only when the target holds no messages, and never deletes a source.
+fn import_legacy_index(work_dir: &Path, target: &ConversationStore, embedding_dim: usize) {
+    if target.message_count().map(|n| n > 0).unwrap_or(true) {
+        return;
+    }
+    if import_legacy_sqlite_index(work_dir, target, embedding_dim) > 0 {
+        return;
+    }
+    import_grafeo_index(work_dir, target, embedding_dim);
+}
+
+/// Copy the intermediate `{work_dir}/conversation_index.sqlite` layout into
+/// `target`. Returns the number of messages written (0 when absent or
+/// unreadable). Messages whose stored vector width differs from
+/// `embedding_dim` are skipped, never written at the wrong width.
+fn import_legacy_sqlite_index(
+    work_dir: &Path,
+    target: &ConversationStore,
+    embedding_dim: usize,
+) -> usize {
+    let src = work_dir.join(STORE_FILE);
+    if !src.exists() {
+        return 0;
+    }
+    let Ok(old) = ConversationStore::open(&src, embedding_dim) else {
+        tracing::warn!(
+            source = %src.display(),
+            "conversation index import: legacy sqlite unreadable, skipped"
+        );
+        return 0;
+    };
+    let rows = match old.export_messages() {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(error = %e, "conversation index import: legacy sqlite read failed");
+            return 0;
+        }
+    };
+    let mut imported = 0usize;
+    let mut skipped = 0usize;
+    for msg in rows {
+        if msg.embedding.len() != embedding_dim {
+            skipped += 1;
+            continue;
+        }
+        match target.index_message(
+            &msg.session_id,
+            msg.message_index,
+            &msg.role,
+            &msg.content,
+            &msg.embedding,
+        ) {
+            Ok(_) => imported += 1,
+            Err(e) => {
+                tracing::warn!(error = %e, "conversation index import: write failed");
+                skipped += 1;
+            }
+        }
+    }
+    if imported > 0 || skipped > 0 {
+        tracing::info!(
+            source = %src.display(),
+            imported,
+            skipped,
+            "conversation index: imported from legacy sqlite"
+        );
+    }
+    imported
+}
 
 fn is_indexable(entry: &ConversationEntry) -> bool {
     entry.kind.as_deref() != Some(crate::conversation::ENTRY_KIND_COMPACTION)

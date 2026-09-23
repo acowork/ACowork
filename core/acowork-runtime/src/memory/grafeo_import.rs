@@ -1,8 +1,8 @@
 //! One-shot import of a grafeo memory store into the SQLite backend
 //! (ADR-082 §4 step 2).
 //!
-//! Flipping `ACOWORK_MEMORY_BACKEND=sqlite` on a machine with history must not
-//! start from an empty store: the grafeo file is the user's memory. This reads
+//! Switching a machine with history to the SQLite backend must not start from
+//! an empty store: the grafeo file is the user's memory. This reads
 //! `{memory_dir}/private.grafeo` and writes every node into SQLite, once, before
 //! anything else can write.
 //!

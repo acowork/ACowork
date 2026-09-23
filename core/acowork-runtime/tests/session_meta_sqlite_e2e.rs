@@ -67,8 +67,8 @@ fn legacy_json_sidecars_import_then_serve_from_sqlite() -> Result<(), AcoworkErr
     let legacy_s2 = meta_dir.join("s2.json");
 
     // Open the SQLite store in the memory dir — the same file the runtime
-    // uses when ACOWORK_MEMORY_BACKEND=sqlite (one file for memory + session
-    // meta + conversation vectors).
+    // uses by default (one file for memory + session meta + conversation
+    // vectors).
     let store = Arc::new(SqliteStore::open(
         ws.path().join("memory").join("private.sqlite"),
         DIM,

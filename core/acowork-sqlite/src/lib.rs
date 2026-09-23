@@ -31,7 +31,7 @@ mod schema;
 #[cfg(test)]
 mod tests;
 
-pub use conversation::{ConversationHit, ConversationStore};
+pub use conversation::{ConversationHit, ConversationStore, ExportedMessage};
 pub use retrieval::RRF_K;
 pub use session_meta::SqliteSessionMetaStore;
 

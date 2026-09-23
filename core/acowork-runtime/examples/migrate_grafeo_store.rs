@@ -1,9 +1,9 @@
 //! Offline grafeo → SQLite migration runner (ADR-082 §4 step 2).
 //!
-//! Run this against a **copy** of an agent's workspace to see what a real
-//! migration does, before turning `ACOWORK_MEMORY_BACKEND=sqlite` on for that
-//! agent. Unit tests build their own stores; only real history has the node
-//! shapes (and the `skipped` ones) that a synthetic store cannot produce.
+//! Run this against a **copy** of an agent's workspace to see what the
+//! boot-time migration does. Unit tests build their own stores; only real
+//! history has the node shapes (and the `skipped` ones) that a synthetic
+//! store cannot produce.
 //!
 //! It copies nothing and refuses to run when the target already exists, so the
 //! live store stays read-only to it. It writes `memory/private.sqlite` and
