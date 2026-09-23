@@ -48,7 +48,7 @@
   <g transform="translate(56 44) scale(0.9) translate(-56 -44)">
     <path d="M32 68 L56 20"
           fill="none"
-          stroke="#C8C8C8"
+          stroke="#E8E8E8"
           stroke-width="10"
           stroke-linecap="round"/>
     <path d="M63.4 34.8 L80 68"
@@ -56,7 +56,7 @@
           stroke="#A8A8A8"
           stroke-width="10"
           stroke-linecap="round"/>
-    <circle cx="56" cy="54" r="10.2" fill="#E8E8E8" mask="url(#bite)"/>
+    <circle cx="56" cy="54" r="10.2" fill="#C8C8C8" mask="url(#bite)"/>
   </g>
   <!-- wordmark: Co > work in weight to preserve the brand's emphasis order -->
   <text x="106" y="71"

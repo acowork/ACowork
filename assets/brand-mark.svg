@@ -36,7 +36,7 @@
   <g transform="translate(56 44) scale(0.9) translate(-56 -44)">
     <path d="M32 68 L56 20"
           fill="none"
-          stroke="#404040"
+          stroke="#303030"
           stroke-width="10"
           stroke-linecap="round"/>
     <path d="M63.4 34.8 L80 68"
@@ -44,7 +44,7 @@
           stroke="#606060"
           stroke-width="10"
           stroke-linecap="round"/>
-    <circle cx="56" cy="54" r="10.2" fill="#303030" mask="url(#bite)"/>
+    <circle cx="56" cy="54" r="10.2" fill="#404040" mask="url(#bite)"/>
   </g>
   <!-- tighter, cleaner wordmark -->
   <text x="106" y="71"

@@ -45,7 +45,7 @@
   <g transform="translate(256 256) scale(0.9) translate(-256 -256)">
     <path d="M110 402 L256 110"
           fill="none"
-          stroke="#404040"
+          stroke="#303030"
           stroke-width="61"
           stroke-linecap="round"/>
     <path d="M300.7 199.4 L402 402"
@@ -53,6 +53,6 @@
           stroke="#606060"
           stroke-width="61"
           stroke-linecap="round"/>
-    <circle cx="256" cy="317" r="62" fill="#303030" mask="url(#bite)"/>
+    <circle cx="256" cy="317" r="62" fill="#404040" mask="url(#bite)"/>
   </g>
 </svg>
