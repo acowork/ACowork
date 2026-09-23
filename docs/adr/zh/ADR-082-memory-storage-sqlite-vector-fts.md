@@ -138,6 +138,13 @@ SQLite WAL 自动管理（默认 Batch 持久化，崩溃最多丢 100ms），ch
 2. **迁移验证**：SSE 真实数据迁入（记忆节点经 export 路径导入；对话索引从 JSONL 重建——watermark 机制已有），对比检索质量与启动时间；
 3. **切换删旧**：runtime 切换，删除 grafeo-engine 依赖、index_persist、spreading / 图层、`migrate_legacy_store` 等（预计净删 ~2k 行）。
 
+### 执行状态（截至切换）
+
+- **第 1、2 步已完成**：SQLite 后端（记忆 + session meta + 对话索引）落地，`ACOWORK_MEMORY_BACKEND` 灰度开关已在第 3 步切换时移除。
+- **第 3 步部分完成——"切换"已做，"删旧"未做**：`init_memory_provider` 无条件走 SQLite；grafeo 侧代码与文件暂时保留（`init_grafeo_backend` 标记 `dead_code`），待 SQLite 稳定后再删。
+- **三库合一**：记忆节点、session meta（原 `conversations/meta/*.json`）、对话索引共用 `memory/private.sqlite`，一个连接一把写锁。
+- **启动迁移**（均为空库才导入、不删源文件、可重复执行）：`private.grafeo` → 记忆；`conversations/meta/*.json` → `sessions` 表；旧对话索引（`conversation_index.sqlite` / `.grafeo` / 目录）→ 共享库。
+
 ---
 
 ## 5. 后果
