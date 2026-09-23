@@ -10,6 +10,11 @@
 #[cfg(all(test, feature = "grafeo-backend"))]
 mod adr071_e2e;
 
+// ADR-082 §4 step 2: one-shot grafeo → SQLite memory import. Gated with the
+// grafeo backend, which is the only configuration that has a source to read.
+#[cfg(feature = "grafeo-backend")]
+pub mod grafeo_import;
+
 pub mod consolidation_bg;
 pub mod judge_llm;
 pub mod llm_adapter;

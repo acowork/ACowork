@@ -1160,33 +1160,23 @@ impl AgentCore {
     /// `private.grafeo`) so switching backends never opens one engine's file
     /// with the other.
     ///
-    /// ponytail: the existing `private.grafeo` is NOT imported yet, so flipping
-    /// `ACOWORK_MEMORY_BACKEND=sqlite` on a machine with history starts from an
-    /// empty store (the grafeo file is left untouched, so nothing is lost, but
-    /// recall goes quiet until the importer lands). Scoped but not built, since
-    /// every piece of it can silently drop data if done loosely:
-    ///
-    /// * read via `GrafeoStore::db().graph_store()` + `get_node` +
-    ///   `properties_as_btree`, then `acowork_grafeo::types::X::from_properties`
-    ///   so no field is hand-mapped. `export_nodes_filtered` is the wrong shape
-    ///   here: it drops node ids, which `source_episode_id(s)` references.
-    /// * write via a `SqliteStore::import_node` that bypasses the write-path
-    ///   business logic: `store_knowledge` merges similar nodes and rewrites
-    ///   status, both correct for writes and wrong for a migration.
-    /// * preserve `status` and `created_at` per node — a Dormant or already
-    ///   decayed node must not come back Active (same class of bug as
-    ///   `get_node_status` reading `props` instead of the column).
-    /// * remap `source_episode_id` / `source_episode_ids` through the
-    ///   old-id → new-id map; the SQLite store allocates fresh ids.
-    /// * derive the FTS blob with the same per-label helper the write path uses,
-    ///   or imported rows and fresh rows rank differently.
-    /// * only ever run when the target store is empty, and never delete the
-    ///   source (the conversation-index importer is the working template).
+    /// A pre-existing `private.grafeo` is imported once, before anything can
+    /// write (ADR-082 §4 step 2), so switching backends does not silently start
+    /// from an empty store. The import is a no-op into a populated store and
+    /// never touches the source.
     fn init_sqlite_backend(&mut self, memory_dir: &std::path::Path) {
         let db_path = memory_dir.join("private.sqlite");
         let embedding_dim = self.memory_embedding_dim();
         match acowork_sqlite::SqliteStore::open(&db_path, embedding_dim) {
-            Ok(store) => self.install_memory_backend(std::sync::Arc::new(store), &db_path),
+            Ok(store) => {
+                #[cfg(feature = "grafeo-backend")]
+                crate::memory::grafeo_import::import_grafeo_memory(
+                    memory_dir,
+                    &store,
+                    embedding_dim,
+                );
+                self.install_memory_backend(std::sync::Arc::new(store), &db_path)
+            }
             Err(e) => tracing::warn!(
                 error = %e,
                 path = %db_path.display(),
