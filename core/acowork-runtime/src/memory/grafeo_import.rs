@@ -47,6 +47,16 @@ pub struct ImportReport {
     /// Nodes present in the source that could not be converted — an unexpected
     /// shape, not an empty node. Non-zero means the source needs a look.
     pub skipped: usize,
+    /// Nodes left behind, keyed `"<layer>/<reason>"`. A count alone cannot be
+    /// acted on: the operator needs to know whether the stragglers are a legacy
+    /// shape worth a fallback, or something that was never a memory node.
+    pub skipped_reasons: std::collections::BTreeMap<String, usize>,
+    /// First failure message behind each entry of `skipped_reasons`. "151 nodes
+    /// failed to convert" is not actionable; "unknown role \"tool\"" is.
+    pub skipped_examples: std::collections::BTreeMap<String, String>,
+    /// Structural properties filled in for legacy nodes, keyed `"<layer>/<what>"`.
+    /// A non-empty map is not a failure: nothing in it carries information.
+    pub normalized: std::collections::BTreeMap<String, usize>,
     pub references_remapped: usize,
     /// References to an episode that was itself skipped: cleared, not kept.
     pub references_dropped: usize,
@@ -66,6 +76,42 @@ impl ImportReport {
 /// Path of the grafeo store this importer reads.
 pub fn source_path(memory_dir: &Path) -> PathBuf {
     memory_dir.join(SOURCE_FILE)
+}
+
+/// The embedding width actually stored in `{memory_dir}/private.grafeo`.
+///
+/// `GrafeoConfig::embedding_dim` sizes the vector index, not the properties, so
+/// a store opens with a wrong value and still hands back its data — which makes
+/// an actual stored vector the only trustworthy source for this number. SQLite
+/// records the width it is created with, so guessing here would leave the
+/// runtime skipping every migrated vector.
+pub fn detect_embedding_dim(memory_dir: &Path) -> Option<usize> {
+    let source = source_path(memory_dir);
+    if !source.exists() {
+        return None;
+    }
+    // The open dimension is a guess only until the first stored vector answers.
+    for candidate in [384usize, 512, 768, 1024, 1536, 2560, 3072] {
+        let Ok(src) = GrafeoStore::open(&GrafeoConfig {
+            db_path: source.clone(),
+            embedding_dim: candidate,
+        }) else {
+            continue;
+        };
+        let graph = src.db().graph_store();
+        for id in graph.nodes_by_label(labels::EPISODIC) {
+            let Some(props) = read_props(&src, id) else {
+                continue;
+            };
+            if let Ok(episode) = acowork_grafeo::types::Episode::from_properties(id, &props)
+                && let Some(vector) = episode.embedding
+                && !vector.is_empty()
+            {
+                return Some(vector.len());
+            }
+        }
+    }
+    None
 }
 
 /// Import `{memory_dir}/private.grafeo` into `target`, when it exists and
@@ -145,21 +191,27 @@ fn run(src: &GrafeoStore, target: &SqliteStore) -> Result<ImportReport, Error> {
     let outcome = (|| -> Result<(), Error> {
         // Episodes first: every other layer references them.
         for id in graph.nodes_by_label(labels::EPISODIC) {
-            let Some(props) = read_props(src, id) else {
-                report.skipped += 1;
+            let Some(mut props) = read_props(src, id) else {
+                report.skip(labels::EPISODIC, "props_unreadable");
                 continue;
             };
-            let Ok(grafeo_node) = acowork_grafeo::types::Episode::from_properties(id, &props)
-            else {
-                report.skipped += 1;
-                continue;
+            normalize_props(&mut props, labels::EPISODIC, &mut report);
+            let grafeo_node = match acowork_grafeo::types::Episode::from_properties(id, &props) {
+                Ok(node) => node,
+                Err(e) => {
+                    report.skip_with(labels::EPISODIC, "from_properties_failed", e.to_string());
+                    continue;
+                }
             };
-            let Ok(episode) = to_memory::<Episode>(&grafeo_node) else {
-                report.skipped += 1;
-                continue;
+            let episode = match to_memory::<Episode>(&grafeo_node) {
+                Ok(node) => node,
+                Err(e) => {
+                    report.skip_with(labels::EPISODIC, "field_mismatch", e.to_string());
+                    continue;
+                }
             };
             let Ok(json) = serde_json::to_string(&episode) else {
-                report.skipped += 1;
+                report.skip(labels::EPISODIC, "serialize_failed");
                 continue;
             };
             let status = status_of(&props);
@@ -175,23 +227,34 @@ fn run(src: &GrafeoStore, target: &SqliteStore) -> Result<ImportReport, Error> {
         }
 
         for id in graph.nodes_by_label(labels::KNOWLEDGE) {
-            let Some(props) = read_props(src, id) else {
-                report.skipped += 1;
+            let Some(mut props) = read_props(src, id) else {
+                report.skip(labels::KNOWLEDGE, "props_unreadable");
                 continue;
             };
-            let Ok(grafeo_node) = acowork_grafeo::types::KnowledgeNode::from_properties(id, &props)
-            else {
-                report.skipped += 1;
-                continue;
-            };
-            let Ok(mut kn) = to_memory::<KnowledgeNode>(&grafeo_node) else {
-                report.skipped += 1;
-                continue;
+            normalize_props(&mut props, labels::KNOWLEDGE, &mut report);
+            let grafeo_node =
+                match acowork_grafeo::types::KnowledgeNode::from_properties(id, &props) {
+                    Ok(node) => node,
+                    Err(e) => {
+                        report.skip_with(
+                            labels::KNOWLEDGE,
+                            "from_properties_failed",
+                            e.to_string(),
+                        );
+                        continue;
+                    }
+                };
+            let mut kn = match to_memory::<KnowledgeNode>(&grafeo_node) {
+                Ok(node) => node,
+                Err(e) => {
+                    report.skip_with(labels::KNOWLEDGE, "field_mismatch", e.to_string());
+                    continue;
+                }
             };
             remap_one(&mut kn.source_episode_id, &id_map, &mut report);
             remap_many(&mut kn.source_episode_ids, &id_map, &mut report);
             let Ok(json) = serde_json::to_string(&kn) else {
-                report.skipped += 1;
+                report.skip(labels::KNOWLEDGE, "serialize_failed");
                 continue;
             };
             let status = status_of(&props);
@@ -202,23 +265,34 @@ fn run(src: &GrafeoStore, target: &SqliteStore) -> Result<ImportReport, Error> {
         }
 
         for id in graph.nodes_by_label(labels::PROCEDURAL) {
-            let Some(props) = read_props(src, id) else {
-                report.skipped += 1;
+            let Some(mut props) = read_props(src, id) else {
+                report.skip(labels::PROCEDURAL, "props_unreadable");
                 continue;
             };
-            let Ok(grafeo_node) = acowork_grafeo::types::ProceduralNode::from_properties(id, &props)
-            else {
-                report.skipped += 1;
-                continue;
-            };
-            let Ok(mut pn) = to_memory::<ProceduralNode>(&grafeo_node) else {
-                report.skipped += 1;
-                continue;
+            normalize_props(&mut props, labels::PROCEDURAL, &mut report);
+            let grafeo_node =
+                match acowork_grafeo::types::ProceduralNode::from_properties(id, &props) {
+                    Ok(node) => node,
+                    Err(e) => {
+                        report.skip_with(
+                            labels::PROCEDURAL,
+                            "from_properties_failed",
+                            e.to_string(),
+                        );
+                        continue;
+                    }
+                };
+            let mut pn = match to_memory::<ProceduralNode>(&grafeo_node) {
+                Ok(node) => node,
+                Err(e) => {
+                    report.skip_with(labels::PROCEDURAL, "field_mismatch", e.to_string());
+                    continue;
+                }
             };
             remap_many(&mut pn.source_episode_ids, &id_map, &mut report);
             pn.id = None;
             let Ok(json) = serde_json::to_string(&pn) else {
-                report.skipped += 1;
+                report.skip(labels::PROCEDURAL, "serialize_failed");
                 continue;
             };
             // `ProceduralNode::embedding` is a plain Vec, unlike every other
@@ -231,30 +305,44 @@ fn run(src: &GrafeoStore, target: &SqliteStore) -> Result<ImportReport, Error> {
         }
 
         for id in graph.nodes_by_label(labels::AUTOBIOGRAPHICAL) {
-            let Some(props) = read_props(src, id) else {
-                report.skipped += 1;
+            let Some(mut props) = read_props(src, id) else {
+                report.skip(labels::AUTOBIOGRAPHICAL, "props_unreadable");
                 continue;
             };
-            let Ok(grafeo_node) =
-                acowork_grafeo::types::AutobiographicalNode::from_properties(id, &props)
-            else {
-                report.skipped += 1;
-                continue;
-            };
-            let Ok(mut an) = to_memory::<AutobiographicalNode>(&grafeo_node) else {
-                report.skipped += 1;
-                continue;
+            normalize_props(&mut props, labels::AUTOBIOGRAPHICAL, &mut report);
+            let grafeo_node =
+                match acowork_grafeo::types::AutobiographicalNode::from_properties(id, &props) {
+                    Ok(node) => node,
+                    Err(e) => {
+                        report.skip_with(
+                            labels::AUTOBIOGRAPHICAL,
+                            "from_properties_failed",
+                            e.to_string(),
+                        );
+                        continue;
+                    }
+                };
+            let mut an = match to_memory::<AutobiographicalNode>(&grafeo_node) {
+                Ok(node) => node,
+                Err(e) => {
+                    report.skip_with(labels::AUTOBIOGRAPHICAL, "field_mismatch", e.to_string());
+                    continue;
+                }
             };
             remap_one(&mut an.source_episode_id, &id_map, &mut report);
             remap_many(&mut an.source_episode_ids, &id_map, &mut report);
             an.id = None;
             let Ok(json) = serde_json::to_string(&an) else {
-                report.skipped += 1;
+                report.skip(labels::AUTOBIOGRAPHICAL, "serialize_failed");
                 continue;
             };
             let status = status_of(&props);
-            let new_id =
-                target.import_node(labels::AUTOBIOGRAPHICAL, &json, status, an.embedding.as_deref())?;
+            let new_id = target.import_node(
+                labels::AUTOBIOGRAPHICAL,
+                &json,
+                status,
+                an.embedding.as_deref(),
+            )?;
             written.push(new_id);
             report.autobiographical += 1;
         }
@@ -271,6 +359,30 @@ fn run(src: &GrafeoStore, target: &SqliteStore) -> Result<ImportReport, Error> {
     Ok(report)
 }
 
+impl ImportReport {
+    /// Record one node that stayed behind, and why.
+    fn skip(&mut self, label: &str, reason: &str) {
+        self.count_skip(&format!("{label}/{reason}"));
+    }
+
+    /// As [`Self::skip`], keeping the first failure message for that reason.
+    fn skip_with(&mut self, label: &str, reason: &str, detail: String) {
+        let key = format!("{label}/{reason}");
+        self.skipped_examples.entry(key.clone()).or_insert(detail);
+        self.count_skip(&key);
+    }
+
+    /// Record a structural property filled in for a legacy node.
+    fn normalized(&mut self, key: String) {
+        *self.normalized.entry(key).or_insert(0) += 1;
+    }
+
+    fn count_skip(&mut self, key: &str) {
+        self.skipped += 1;
+        *self.skipped_reasons.entry(key.to_string()).or_insert(0) += 1;
+    }
+}
+
 /// Read one node's properties in the shape `from_properties` wants.
 fn read_props(src: &GrafeoStore, id: NodeId) -> Option<Vec<(String, Value)>> {
     let node = src.get_node(id)?;
@@ -280,6 +392,39 @@ fn read_props(src: &GrafeoStore, id: NodeId) -> Option<Vec<(String, Value)>> {
             .map(|(k, v)| (k.as_str().to_string(), v))
             .collect(),
     )
+}
+
+/// Fill in the structural properties a node written by an older version may
+/// predate, so an absent default cannot cost the node itself.
+///
+/// Deliberately narrow. `turn_index` is filled because nothing reads it (every
+/// writer in the workspace sets `0`), and `status` is made parseable because the
+/// reader already defaults an absent one. Anything that *does* carry meaning —
+/// content, a timestamp, `consolidated` — still fails the conversion, because
+/// inventing that is data loss wearing a default's clothes, and it has to show
+/// up in the report instead.
+fn normalize_props(props: &mut Vec<(String, Value)>, label: &str, report: &mut ImportReport) {
+    if !props.iter().any(|(key, _)| key == "turn_index") {
+        props.push(("turn_index".to_string(), Value::from(0i64)));
+        report.normalized(format!("{label}/turn_index absent => 0"));
+    }
+    match props.iter().position(|(key, _)| key == "status") {
+        None => {
+            props.push(("status".to_string(), Value::from("Active")));
+            report.normalized(format!("{label}/status absent => Active"));
+        }
+        Some(i) => {
+            let seen = props[i].1.as_str().map(str::to_string);
+            if !matches!(seen.as_deref(), Some("Active") | Some("Dormant")) {
+                let seen = seen.unwrap_or_else(|| "<not a string>".to_string());
+                // Not a status this enum knows. Dormant rather than Active: the
+                // node is kept and stays out of retrieval, where promoting an
+                // unknown lifecycle state into an active node would be a guess.
+                props[i].1 = Value::from("Dormant");
+                report.normalized(format!("{label}/status {seen} => Dormant"));
+            }
+        }
+    }
 }
 
 /// The node's persisted status. Every layer stores one as a property; a legacy
@@ -296,15 +441,13 @@ fn status_of(props: &[(String, Value)]) -> &str {
 ///
 /// The JSON hop is the field check: a field named differently on either side
 /// fails the conversion rather than silently defaulting.
-fn to_memory<M: serde::de::DeserializeOwned>(grafeo_node: &impl serde::Serialize) -> serde_json::Result<M> {
+fn to_memory<M: serde::de::DeserializeOwned>(
+    grafeo_node: &impl serde::Serialize,
+) -> serde_json::Result<M> {
     serde_json::from_value(serde_json::to_value(grafeo_node)?)
 }
 
-fn remap_one(
-    slot: &mut Option<u64>,
-    id_map: &HashMap<u64, u64>,
-    report: &mut ImportReport,
-) {
+fn remap_one(slot: &mut Option<u64>, id_map: &HashMap<u64, u64>, report: &mut ImportReport) {
     let Some(old) = *slot else { return };
     match id_map.get(&old) {
         Some(new) => {
@@ -332,4 +475,79 @@ fn remap_many(slot: &mut Vec<u64>, id_map: &HashMap<u64, u64>, report: &mut Impo
         }
     }
     *slot = kept;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn props(pairs: &[(&str, Value)]) -> Vec<(String, Value)> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect()
+    }
+
+    fn get<'a>(props: &'a [(String, Value)], key: &str) -> Option<&'a Value> {
+        props.iter().find(|(k, _)| k == key).map(|(_, v)| v)
+    }
+
+    /// The real store that prompted this: 151 of 286 episodes predate
+    /// `turn_index`, and 12 procedural nodes carry a `Pending` status the enum
+    /// cannot parse. Both used to make the node unreadable, and unreadable also
+    /// meant unmigratable — the whole node was lost, not the field.
+    #[test]
+    fn legacy_nodes_are_normalized_rather_than_dropped() {
+        let mut report = ImportReport::default();
+
+        let mut episode = props(&[
+            ("session_id", Value::from("s1")),
+            (
+                "content",
+                Value::from("an episode from before turn_index existed"),
+            ),
+        ]);
+        normalize_props(&mut episode, labels::EPISODIC, &mut report);
+        assert_eq!(get(&episode, "turn_index"), Some(&Value::from(0i64)));
+        assert_eq!(
+            get(&episode, "status").and_then(Value::as_str),
+            Some("Active")
+        );
+
+        let mut procedural = props(&[
+            ("trigger", Value::from("run the tests")),
+            ("status", Value::from("Pending")),
+        ]);
+        normalize_props(&mut procedural, labels::PROCEDURAL, &mut report);
+        // Not promoted to Active: a lifecycle value the enum rejects must not
+        // become an retrievable node just because it is being migrated.
+        assert_eq!(
+            get(&procedural, "status").and_then(Value::as_str),
+            Some("Dormant")
+        );
+
+        assert_eq!(report.skipped, 0, "normalizing is not skipping");
+        // One entry per filled field, per node: both nodes were missing
+        // `turn_index`, and `status` was missing / unparseable.
+        assert_eq!(report.normalized.len(), 4);
+        assert!(
+            report
+                .normalized
+                .contains_key("Procedural/status Pending => Dormant")
+        );
+    }
+
+    /// The boundary: `normalize_props` fills structural fields only. Content is
+    /// meaning, so it stays missing and the node still fails the conversion —
+    /// which the report has to show.
+    #[test]
+    fn normalization_does_not_invent_meaning() {
+        let mut report = ImportReport::default();
+        let mut episode = props(&[("session_id", Value::from("s1"))]);
+        normalize_props(&mut episode, labels::EPISODIC, &mut report);
+
+        assert!(get(&episode, "content").is_none());
+        assert!(get(&episode, "created_at").is_none());
+        assert!(get(&episode, "consolidated").is_none());
+    }
 }

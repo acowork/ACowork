@@ -110,6 +110,12 @@ tempfile = { workspace = true }
 reqwest = { workspace = true, features = ["json", "multipart"] }
 futures-util = { workspace = true }
 
+# ── ADR-082 §4 step 2: offline grafeo → SQLite migration runner ──────
+# Reads a source store, so it only exists alongside the grafeo backend.
+[[example]]
+name = "migrate_grafeo_store"
+required-features = ["grafeo-backend"]
+
 # ── ADR-033: Standalone MQTT integration test binary ─────────────────
 [[test]]
 name = "mqtt_integration"
