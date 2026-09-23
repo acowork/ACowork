@@ -440,6 +440,20 @@ fn text_search_matches_chinese_substring() {
 }
 
 #[test]
+fn text_search_ors_whitespace_separated_terms() {
+    let store = store();
+    store
+        .store_episode(&episode("the gateway binds 19876 while the broker takes 19875"))
+        .unwrap();
+
+    // The two words are far apart in the text, so matching the query as one
+    // phrase would find nothing — the union of terms is what makes a plain
+    // multi-word ask work.
+    let hits = store.search_episodes_by_keyword("gateway broker", 10).unwrap();
+    assert_eq!(hits.len(), 1, "terms must be OR'd, not required adjacent");
+}
+
+#[test]
 fn text_search_short_query_falls_back_to_like() {
     let store = store();
     store.store_episode(&episode("用户喜欢简洁的输出")).unwrap();

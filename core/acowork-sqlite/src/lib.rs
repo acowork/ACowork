@@ -796,9 +796,24 @@ impl SqliteStore {
                 hits.push((row? as u64, 0.0));
             }
         } else {
-            // Quote the user text as an FTS5 phrase so operators (`AND`, `*`,
-            // `(`, `-`, …) cannot leak into the MATCH expression.
-            let phrase = format!("\"{}\"", query.replace('"', "\"\""));
+            // Quote each term as an FTS5 phrase so operators (`AND`, `*`, `(`,
+            // `-`, …) cannot leak into the MATCH expression, then OR them: the
+            // trigram tokenizer matches contiguous text, so a phrase of the
+            // whole query would demand the query appear verbatim, and a
+            // multi-word ask ("网关 route 配置") would then return almost
+            // nothing. BM25 ranks the union, matching what token-based
+            // retrieval in the previous backend did.
+            //
+            // ponytail: no shingle expansion, so a Chinese query written as one
+            // long run still needs its three-character windows to appear
+            // contiguously. Upgrade path: split CJK runs into 3-grams here if
+            // partial-phrase recall turns out to matter.
+            let terms: Vec<String> = query
+                .split_whitespace()
+                .filter(|term| term.chars().count() >= 3)
+                .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
+                .collect();
+            let phrase = terms.join(" OR ");
             let mut stmt = conn.prepare(&format!(
                 "SELECT rowid, -bm25({fts}) FROM {fts} WHERE {fts} MATCH ?1 \
                  ORDER BY bm25({fts}) LIMIT ?2"
