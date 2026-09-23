@@ -84,30 +84,14 @@ pub struct SessionRuntimeSnapshot {
 
 /// A single item in the session-level todo list.
 ///
-/// `PartialEq`/`Eq` (ADR-060): content-equality drives the byte-stability
-/// check in `ConversationSession::set_todos` — unchanged snapshots must
-/// not touch the meta file.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct TodoItem {
-    /// Unique identifier for this todo item (e.g. UUID or short slug)
-    pub id: String,
-    /// Human-readable content of the task
-    pub content: String,
-    /// Current status of the task
-    pub status: TodoStatus,
-}
+/// Re-exported from `acowork_memory::session_meta::TodoItem` (canonical
+/// definition, since the `SessionMetaStore` trait needs it there). Kept
+/// here under the original name so existing call sites
+/// (`crate::agent::session_state::TodoItem`) keep compiling.
+pub use acowork_memory::session_meta::TodoItem as TodoItem;
 
-/// Status of a todo item.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TodoStatus {
-    /// Task not yet started
-    Pending,
-    /// Task currently being worked on
-    InProgress,
-    /// Task completed
-    Completed,
-}
+/// Status of a todo item. Re-exported alongside [`TodoItem`].
+pub use acowork_memory::session_meta::TodoStatus as TodoStatus;
 
 /// Lifecycle status of a session, managed by Runtime as the source of truth.
 ///

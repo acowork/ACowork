@@ -18,6 +18,7 @@ pub mod keyword;
 pub mod manager;
 pub mod provider;
 pub mod quality;
+pub mod session_meta;
 pub mod store;
 pub mod types;
 
@@ -68,6 +69,10 @@ pub use types::{
     EpisodicDecayConfig, KnowledgeNode, KnowledgeSubType, MemoryContext, MemoryNode, MemoryQuery,
     NodeStatus, PrivacyLevel, ProceduralNode, PurgeResult, ResultSource, RetrievalMetrics,
     SearchResult, StoreHealth, StoreStats,
+};
+pub use session_meta::{
+    JsonSessionMetaStore, SessionImportReport, SessionMeta, SessionMetaStore, SessionTokens,
+    TodoItem, TodoStatus,
 };
 
 // Label and edge type constants

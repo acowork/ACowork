@@ -26,12 +26,14 @@ mod admin;
 pub mod conversation;
 mod provider;
 mod retrieval;
+mod session_meta;
 mod schema;
 #[cfg(test)]
 mod tests;
 
 pub use conversation::{ConversationHit, ConversationStore};
 pub use retrieval::RRF_K;
+pub use session_meta::SqliteSessionMetaStore;
 
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};

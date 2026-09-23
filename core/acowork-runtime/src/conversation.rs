@@ -14,8 +14,20 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 
-use crate::agent::session_state::TodoItem;
 use crate::error::Result;
+
+use crate::agent::session_state::TodoItem;
+
+// Re-export session meta types from `acowork_memory::session_meta` so callers
+// using `crate::conversation::SessionMeta` keep compiling while the data model
+// lives where the `SessionMetaStore` trait lives.
+//
+// `TodoItem` / `TodoStatus` are NOT re-exported here: they live in
+// `crate::agent::session_state` (kept as a thin re-export) and the two
+// surfaces use the same type via `pub use` aliasing.
+pub use acowork_memory::{
+    SessionImportReport, SessionMeta, SessionMetaStore, SessionTokens,
+};
 use acowork_core::protocol::ContextUsageSection;
 use acowork_core::providers::traits::UsageInfo;
 
@@ -24,47 +36,6 @@ use acowork_core::providers::traits::UsageInfo;
 /// v3 (current): replaces `last_input_tokens` / `last_output_tokens` with a
 ///   structured `tokens` field on `SessionMeta`. See ADR-027.
 const CONVERSATION_FORMAT_VERSION: u32 = 3;
-
-/// Snapshot + cumulative token counts for a session.
-///
-/// Persisted in `SessionMeta.tokens` so the frontend can restore the
-/// "context usage" indicator after a session resume, and so future rounds
-/// have an authoritative cost record.
-///
-/// All four fields are **raw Provider-reported values** (or
-/// `UsageInfo::default()` zeros when the Provider didn't return usage).
-/// No local-tokenizer estimates are stored here — see ADR-027 for the
-/// "宁可 miss 也不估计" policy.
-///
-/// - `last_input` / `last_output` — usage from the most recent LLM call.
-///   Raw values are recorded verbatim, including zero, so the snapshot
-///   faithfully reflects what the Provider returned (e.g. when
-///   `prompt_tokens_reliable == false`).
-/// - `total_input` / `total_output` — saturated sums across every LLM call
-///   in this session. Only **reliable** calls (where the Provider returned
-///   a positive count) are accumulated; calls with `prompt_tokens == 0`
-///   are skipped on the input side so a Provider fallback does not
-///   silently overwrite an accumulated cost.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(default)]
-pub struct SessionTokens {
-    pub last_input: u64,
-    pub last_output: u64,
-    pub total_input: u64,
-    pub total_output: u64,
-    // ── ADR-066: prompt cache tokens (Provider-reported) ───────────────
-    /// Last-turn prompt tokens served from cache (OpenAI `cached_tokens` /
-    /// Anthropic `cache_read_input_tokens`).  `0` for providers that do
-    /// not report cache hits.
-    pub last_cache_read: u64,
-    /// Last-turn prompt tokens written to cache (Anthropic
-    /// `cache_creation_input_tokens`; OpenAI has no concept → always 0).
-    pub last_cache_write: u64,
-    /// Cumulative cache read tokens across all session LLM calls.
-    pub total_cache_read: u64,
-    /// Cumulative cache write tokens across all session LLM calls.
-    pub total_cache_write: u64,
-}
 
 /// Entry kind discriminator for `ConversationEntry.kind`.
 pub const ENTRY_KIND_COMPACTION: &str = "compaction";
@@ -271,86 +242,14 @@ pub struct AttachedFolderMeta {
 ///
 /// Field `last_compaction_offset` is an absolute byte offset (there is no
 /// header in the JSONL, so the offset is always absolute).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SessionMeta {
-    // ── Immutable fields ──
-    pub version: u32,
-    pub session_id: String,
-    pub agent_id: String,
-    pub created_at: String,
-
-    // ── User/API mutable fields ──
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider: Option<String>,
-    /// Multi-account (ADR-012): which of the provider's accounts this session
-    /// uses. `None` = provider's first account. Only the stable `account_id`
-    /// is persisted — the mutable `alias` is resolved for display elsewhere.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub account_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reasoning_effort: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub temperature: Option<f32>,
-    /// Per-session context window override (ADR-074).
-    ///
-    /// Field ABSENT ⟺ session inherits the per-agent resolution chain
-    /// (agent_config → manifest → DEFAULT_CONTEXT_WINDOW). `0` is an
-    /// invalid value (same as missing / null) — the write path normalizes
-    /// it to `None` so the field disappears from disk on clear.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub context_window: Option<u64>,
-
-    // ── ADR-060: todo snapshot (Block C source) ──
-    /// Current task list snapshot, persisted so a session restart restores
-    /// the todo list (ADR-060 §6.1). `None` when no task has been written.
-    /// Written only by [`ConversationSession::set_todos`] — the single
-    /// persistence owner; `SessionState` mirrors it in memory.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub todos: Option<Vec<TodoItem>>,
-
-    // ── Runtime statistics (updated by AgentLoop) ──
-    pub message_count: u64,
-    pub last_active_at: String,
-    /// ADR-027: snapshot + cumulative token counts (raw Provider values).
-    /// `None` until the first LLM call has been recorded.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tokens: Option<SessionTokens>,
-
-    /// Per-session lifetime LLM-call counter — the right-status-panel
-    /// "Iterations" display. 1-based: the first LLM response sets it to 1
-    /// and it only ever increases for the life of the session; it does NOT
-    /// reset when the user clicks Continue after `max_iterations` (that
-    /// per-burst loop counter resets in `loop_.rs`; this one is session
-    /// metadata). Persisted here so a resumed/historical session shows the
-    /// same count and a Continue keeps accumulating. `None` until the
-    /// first LLM call.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub llm_call_counter: Option<u32>,
-
-    // ── Token counting scene ──
-    /// Last calibrated session chars/token ratio (`input_chars / prompt_tokens`).
-    /// Persisted so a resumed session restores the token-estimation scene
-    /// instead of falling back to the default 3.5. `None` until the first
-    /// reliable LLM usage report.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_ratio: Option<f64>,
-
-    // ── Compaction ──
-    /// Absolute byte offset of the most recent compaction marker.
-    /// `None` if no compaction has occurred.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_compaction_offset: Option<u64>,
-
-    // ── Recovery flag ──
-    #[serde(default)]
-    pub corrupted: bool,
-}
+///
+/// contention, no index.json, no JSONL header line.
+///
+/// Field `last_compaction_offset` is an absolute byte offset (there is no
+/// header in the JSONL, so the offset is always absolute).
+///
+/// Struct definition lives in `acowork_memory::session_meta::SessionMeta`;
+/// re-exported above as `pub use acowork_memory::SessionMeta;`.
 
 /// Commands sent to the background writer thread.
 pub enum WriterCommand {
@@ -2107,65 +2006,51 @@ pub struct SessionInfo {
 
 // ── Per-session meta file I/O (ADR-024) ───────────────────────────────────
 
-/// Subdirectory where per-session meta files live.
-const META_DIR: &str = "meta";
+/// Subdirectory where per-session meta files live — moved into
+/// `acowork_memory::session_meta::JsonSessionMetaStore`; the path lives in
+/// one place only.
 
-/// Build the path to `conversations/meta/{session_id}.json`.
-fn meta_path(conversations_dir: &Path, session_id: &str) -> PathBuf {
-    conversations_dir
-        .join(META_DIR)
-        .join(format!("{}.json", session_id))
-}
-
-/// Atomically write session metadata to `conversations/meta/{session_id}.json`.
+/// Legacy free-function form of `JsonSessionMetaStore::upsert`.
 ///
-/// Uses write-to-temp + rename to prevent corruption on crash.
+/// New code should hold an `Arc<dyn SessionMetaStore>` (typically built by
+/// `AgentCore::init_session_meta_store`) and use `store.upsert(meta)`. This
+/// thin wrapper exists so the dozens of existing test call sites keep
+/// compiling during the migration.
 pub fn write_session_meta(conversations_dir: &Path, meta: &SessionMeta) -> std::io::Result<()> {
-    let meta_dir = conversations_dir.join(META_DIR);
-    std::fs::create_dir_all(&meta_dir)?;
-
-    let target = meta_path(conversations_dir, &meta.session_id);
-    let temp = meta_dir.join(format!("{}.json.tmp", meta.session_id));
-
-    let json = serde_json::to_string_pretty(meta)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    std::fs::write(&temp, json)?;
-    std::fs::rename(&temp, &target)?;
-    Ok(())
+    let store = acowork_memory::JsonSessionMetaStore::new(conversations_dir.to_path_buf());
+    store
+        .upsert(meta)
+        .map_err(|e| std::io::Error::other(e.to_string()))
 }
 
-/// Read session metadata from `conversations/meta/{session_id}.json`.
+/// Legacy free-function form of `JsonSessionMetaStore::get`.
 pub fn read_session_meta(
     conversations_dir: &Path,
     session_id: &str,
 ) -> std::io::Result<SessionMeta> {
-    let path = meta_path(conversations_dir, session_id);
-    let data = std::fs::read_to_string(&path)?;
-    serde_json::from_str(&data).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    let store = acowork_memory::JsonSessionMetaStore::new(conversations_dir.to_path_buf());
+    match store.get(session_id) {
+        Ok(Some(meta)) => Ok(meta),
+        Ok(None) => Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("session {session_id} not found"),
+        )),
+        Err(e) => Err(std::io::Error::other(e.to_string())),
+    }
 }
 
-/// Scan all session meta files and return them sorted by `last_active_at` descending.
-///
-/// Reads every `.json` file in `conversations/meta/`.  Files that fail to parse
-/// are silently skipped (the caller can detect missing sessions via the returned
-/// `Vec` length vs. the `.jsonl` file count).
+/// Legacy free-function form of `JsonSessionMetaStore::list_recent`,
+/// preserving the `(session_id, SessionMeta)` tuple shape every caller
+/// already destructures.
 pub fn scan_sessions_from_meta(conversations_dir: &Path) -> Vec<(String, SessionMeta)> {
-    let meta_dir = conversations_dir.join(META_DIR);
-    let Ok(rd) = std::fs::read_dir(&meta_dir) else {
-        return Vec::new();
-    };
-    let mut sessions: Vec<(String, SessionMeta)> = rd
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
-        .filter_map(|e| {
-            let data = std::fs::read_to_string(e.path()).ok()?;
-            let meta: SessionMeta = serde_json::from_str(&data).ok()?;
-            Some((meta.session_id.clone(), meta))
-        })
-        .collect();
-    // Sort descending by last_active_at (newest first).
-    sessions.sort_by(|(_, a), (_, b)| b.last_active_at.cmp(&a.last_active_at));
-    sessions
+    let store = acowork_memory::JsonSessionMetaStore::new(conversations_dir.to_path_buf());
+    match store.list_recent(usize::MAX) {
+        Ok(rows) => rows.into_iter().map(|m| (m.session_id.clone(), m)).collect(),
+        Err(e) => {
+            tracing::warn!(error = %e, "scan_sessions_from_meta: store failed");
+            Vec::new()
+        }
+    }
 }
 
 /// Prune excess sessions when the index exceeds `max_sessions`.
@@ -2187,31 +2072,28 @@ pub(crate) fn prune_excess_sessions(conversations_dir: &Path, max_sessions: usiz
         return 0;
     }
 
-    // ADR-024: scan per-session meta files instead of index.json.
-    let sessions = scan_sessions_from_meta(conversations_dir);
-
-    if sessions.len() <= max_sessions {
+    // The meta backend tells us which sessions to delete; this function
+    // owns the matching JSONL archival. The trait returns the deleted
+    // ids newest-first, but we want oldest-first because that's the
+    // historical order the old code pruned in.
+    let store = acowork_memory::JsonSessionMetaStore::new(conversations_dir.to_path_buf());
+    let victims = match store.prune_to(max_sessions) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(error = %e, "prune_excess_sessions: store failed");
+            return 0;
+        }
+    };
+    if victims.is_empty() {
         return 0;
     }
 
-    // Sort by last_active_at ascending (oldest first).
-    // `scan_sessions_from_meta` returns (session_id, meta) tuples sorted
-    // newest-first; we need oldest-first for pruning.
-    let mut sorted: Vec<_> = sessions
-        .iter()
-        .map(|(sid, meta)| (sid.as_str(), meta.last_active_at.as_str()))
-        .collect();
-    sorted.sort_by(|a, b| a.1.cmp(b.1));
-
-    let to_remove = sessions.len() - max_sessions;
+    // `JsonSessionMetaStore::prune_to` returns victims oldest-first, so we
+    // can archive the JSONL files in order without an extra sort.
     let mut pruned = 0usize;
-
-    for (session_id, _) in sorted.iter().take(to_remove) {
-        let jsonl_path = conversations_dir.join(format!("{}.jsonl", session_id));
-        let archive_path = conversations_dir.join(format!("{}.jsonl.archive", session_id));
-        let meta_path = conversations_dir
-            .join("meta")
-            .join(format!("{}.json", session_id));
+    for session_id in victims.iter() {
+        let jsonl_path = conversations_dir.join(format!("{session_id}.jsonl"));
+        let archive_path = conversations_dir.join(format!("{session_id}.jsonl.archive"));
 
         // ADR-024: archive the JSONL file (rename) instead of deleting.
         match std::fs::rename(&jsonl_path, &archive_path) {
@@ -2237,25 +2119,10 @@ pub(crate) fn prune_excess_sessions(conversations_dir: &Path, max_sessions: usiz
                 continue;
             }
         }
-
-        // Delete the per-session meta file.
-        if let Err(e) = std::fs::remove_file(&meta_path)
-            && e.kind() != std::io::ErrorKind::NotFound
-        {
-            tracing::warn!(
-                session_id = %session_id,
-                error = %e,
-                "Failed to delete meta file during session pruning"
-            );
-        }
     }
 
     if pruned > 0 {
-        tracing::info!(
-            pruned,
-            remaining = sessions.len() - pruned,
-            "Archived excess sessions"
-        );
+        tracing::info!(pruned, "Archived excess sessions");
     }
 
     pruned
@@ -2386,10 +2253,12 @@ pub type StreamingStateMap = Arc<RwLock<HashMap<String, StreamingLine>>>;
 ///
 /// ADR-024: scans per-session meta files instead of index.json.
 pub fn find_latest_session(conversations_dir: &Path) -> Option<String> {
-    // ADR-024: scan per-session meta files.
-    scan_sessions_from_meta(conversations_dir)
-        .first()
-        .map(|(sid, _)| sid.clone())
+    let store = acowork_memory::JsonSessionMetaStore::new(conversations_dir.to_path_buf());
+    store
+        .find_latest()
+        .ok()
+        .flatten()
+        .map(|m| m.session_id)
 }
 
 /// Asynchronously scan all sessions from the index file.
@@ -2425,77 +2294,39 @@ pub fn scan_sessions_async(
     size: Option<u32>,
 ) -> tokio::task::JoinHandle<(Vec<SessionInfo>, usize, (u64, u64, u64, u64))> {
     tokio::task::spawn_blocking(move || {
-        // ADR-024: scan per-session meta files instead of index.json.
-        let sessions = scan_sessions_from_meta(&conversations_dir);
+        // Page is 1-based in the legacy API; the trait takes 0-based.
+        let page_idx = page.unwrap_or(1).max(1).saturating_sub(1);
+        let row_limit = size.unwrap_or(20).max(1);
 
-        // ADR-028 / ADR-066: full-scan aggregate. Walk every meta file
-        // (not just the current page) so a single scan can rebuild the
-        // baseline even when `size` is small (e.g. title-only fetches).
-        // `None` sessions and sessions with `prompt_tokens == 0`
-        // (Provider fallback) are skipped on the input side; the output
-        // side is always accumulated (matches
-        // `ConversationSession::accumulate_llm_usage`).
-        //
-        // Cache totals sum directly — `accumulate_llm_usage` already
-        // maintains the invariant that `total_cache_read` is only
-        // incremented alongside `total_input`, so a session with
-        // `total_input == 0` cannot have `total_cache_read > 0`.  We
-        // do not need to re-check the zero-skip here.
-        //
-        // `total_cache_write` is always summed (Anthropic charges 1.25×
-        // for `cache_creation_input_tokens` regardless of the regular
-        // input count).
-        let (
-            agent_total_input,
-            agent_total_output,
-            agent_total_cache_read,
-            agent_total_cache_write,
-        ) = sessions.iter().fold(
-            (0u64, 0u64, 0u64, 0u64),
-            |(acc_in, acc_out, acc_cr, acc_cw), (_, meta)| {
-                let t = meta.tokens.as_ref();
-                (
-                    acc_in.saturating_add(t.map(|t| t.total_input).unwrap_or(0)),
-                    acc_out.saturating_add(t.map(|t| t.total_output).unwrap_or(0)),
-                    acc_cr.saturating_add(t.map(|t| t.total_cache_read).unwrap_or(0)),
-                    acc_cw.saturating_add(t.map(|t| t.total_cache_write).unwrap_or(0)),
-                )
-            },
-        );
-
-        let total = sessions.len();
-        let page = page.unwrap_or(1).max(1) as usize;
-        let size = size.unwrap_or(20).max(1) as usize;
-        let start = (page - 1) * size;
-        let end = (start + size).min(total);
-
-        let infos = sessions[start..end]
-            .iter()
-            .map(|(sid, meta)| SessionInfo {
-                session_id: sid.clone(),
-                created_at: meta.created_at.clone(),
-                last_active_at: meta.last_active_at.clone(),
-                message_count: meta.message_count as u32,
-                title: meta.title.clone(),
-                corrupted: meta.corrupted,
-                model: meta.model.clone(),
-                provider: meta.provider.clone(),
-                account_id: meta.account_id.clone(),
-                workspace_id: meta.workspace_id.clone(),
-            })
-            .collect();
-
-        (
-            infos,
-            total,
-            (
-                agent_total_input,
-                agent_total_output,
-                agent_total_cache_read,
-                agent_total_cache_write,
-            ),
-        )
+        let store = acowork_memory::JsonSessionMetaStore::new(conversations_dir);
+        let (rows, total, totals) = match store.list_with_totals(page_idx, row_limit) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, "scan_sessions_async: store failed");
+                return (Vec::new(), 0, (0, 0, 0, 0));
+            }
+        };
+        let infos = rows.into_iter().map(session_meta_to_info).collect();
+        (infos, total, totals)
     })
+}
+
+/// Convert a `SessionMeta` to the lighter `SessionInfo` shape the legacy
+/// HTTP responses have always used. Token counts / todos / model_ratio are
+/// intentionally not surfaced there.
+fn session_meta_to_info(m: SessionMeta) -> SessionInfo {
+    SessionInfo {
+        session_id: m.session_id,
+        created_at: m.created_at,
+        last_active_at: m.last_active_at,
+        message_count: m.message_count as u32,
+        title: m.title,
+        corrupted: m.corrupted,
+        model: m.model,
+        provider: m.provider,
+        account_id: m.account_id,
+        workspace_id: m.workspace_id,
+    }
 }
 
 /// Read messages from a JSONL file with offset-based pagination.

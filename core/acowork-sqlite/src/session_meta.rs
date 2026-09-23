@@ -1,0 +1,515 @@
+//! `SqliteSessionMetaStore` — SQLite-backed implementation of the
+//! [`acowork_memory::SessionMetaStore`] trait (ADR-082 §4 step 3).
+//!
+//! Lives next to the `SqliteStore` memory and `ConversationStore` index
+//! tables inside the same `.sqlite` file. The schema lives in
+//! [`schema::SCHEMA_SQL`] (the `sessions` table and `fts_sessions` virtual
+//! table); this module only knows how to map a [`acowork_memory::SessionMeta`]
+//! row to the columns.
+//!
+//! # Concurrency
+//!
+//! `SqliteStore` already serialises writes through a `Mutex<Connection>`.
+//! `upsert` and friends go through that lock exactly like the memory
+//! methods; there is no second mutex layer.
+//!
+//! # Sort key
+//!
+//! `last_active_at` is persisted as INTEGER epoch-ms so
+//! `ORDER BY last_active_at DESC` is a numeric scan (no parse on every
+//! comparison). The legacy JSON backend sorts on the ISO string; for the
+//! 99% case the two agree because RFC3339 sorts lexicographically equal to
+//! chronological, and the helper [`acowork_memory::last_active_at_ms`]
+//! converts both directions.
+//!
+//! # Import safety
+//!
+//! `import_from_json` is *additive*. It writes only into the `sessions`
+//! table, never deletes a source file, and gates on a row-count probe so
+//! re-runs are no-ops. The matching
+//! [`acowork_memory::JsonSessionMetaStore::import_from_json`] semantics
+//! apply (per-file try → upsert → count).
+
+use std::path::Path;
+use std::sync::Arc;
+
+use rusqlite::params;
+
+use acowork_core::error::{AcoworkError, Result as AcoworkResult};
+use acowork_memory::session_meta::{
+    SessionImportReport, SessionMeta, SessionMetaStore, last_active_at_ms,
+};
+
+use crate::{Error as SqliteError, Result as SqliteResult, SqliteStore};
+
+/// SQLite implementation of `SessionMetaStore`.
+///
+/// Cheap to clone — holds an `Arc<SqliteStore>` plus the read-side helpers
+/// the trait needs. The store itself owns the connection lock.
+#[derive(Clone)]
+pub struct SqliteSessionMetaStore {
+    store: Arc<SqliteStore>,
+}
+
+impl SqliteSessionMetaStore {
+    /// Wrap an existing [`SqliteStore`] so callers can hold an
+    /// `Arc<dyn SessionMetaStore>` alongside an `Arc<dyn MemoryProvider>`
+    /// without a second lock surface.
+    pub fn new(store: Arc<SqliteStore>) -> Self {
+        Self { store }
+    }
+}
+
+// ── row ↔ struct ──────────────────────────────────────────────────────
+
+fn created_at_ms(meta: &SessionMeta) -> i64 {
+    chrono::DateTime::parse_from_rfc3339(&meta.created_at)
+        .map(|dt| dt.with_timezone(&chrono::Utc).timestamp_millis())
+        .unwrap_or(0)
+}
+
+fn row_to_meta(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionMeta> {
+    let created_ms: i64 = row.get("created_at")?;
+    let last_ms: i64 = row.get("last_active_at")?;
+    let created_at = ms_to_rfc3339(created_ms);
+    let last_active_at = ms_to_rfc3339(last_ms);
+
+    let title: Option<String> = row.get("title")?;
+    let workspace_id: Option<String> = row.get("workspace_id")?;
+    let model: Option<String> = row.get("model")?;
+    let provider: Option<String> = row.get("provider")?;
+    let account_id: Option<String> = row.get("account_id")?;
+    let reasoning_effort: Option<String> = row.get("reasoning_effort")?;
+    let temperature: Option<f64> = row.get("temperature")?;
+    let context_window: Option<i64> = row.get("context_window")?;
+    let todos_json: Option<String> = row.get("todos")?;
+    let message_count: i64 = row.get("message_count")?;
+    let llm_call_counter: Option<i64> = row.get("llm_call_counter")?;
+    let model_ratio: Option<f64> = row.get("model_ratio")?;
+    let last_compaction_offset: Option<i64> = row.get("last_compaction_offset")?;
+
+    let token_last_input: i64 = row.get("token_last_input")?;
+    let token_last_output: i64 = row.get("token_last_output")?;
+    let token_total_input: i64 = row.get("token_total_input")?;
+    let token_total_output: i64 = row.get("token_total_output")?;
+    let token_last_cache_read: i64 = row.get("token_last_cache_read")?;
+    let token_last_cache_write: i64 = row.get("token_last_cache_write")?;
+    let token_total_cache_read: i64 = row.get("token_total_cache_read")?;
+    let token_total_cache_write: i64 = row.get("token_total_cache_write")?;
+
+    let tokens = if token_last_input == 0
+        && token_last_output == 0
+        && token_total_input == 0
+        && token_total_output == 0
+        && token_last_cache_read == 0
+        && token_last_cache_write == 0
+        && token_total_cache_read == 0
+        && token_total_cache_write == 0
+    {
+        None
+    } else {
+        Some(acowork_memory::SessionTokens {
+            last_input: token_last_input.max(0) as u64,
+            last_output: token_last_output.max(0) as u64,
+            total_input: token_total_input.max(0) as u64,
+            total_output: token_total_output.max(0) as u64,
+            last_cache_read: token_last_cache_read.max(0) as u64,
+            last_cache_write: token_last_cache_write.max(0) as u64,
+            total_cache_read: token_total_cache_read.max(0) as u64,
+            total_cache_write: token_total_cache_write.max(0) as u64,
+        })
+    };
+
+    let todos = match todos_json.as_deref() {
+        Some(s) => serde_json::from_str::<Vec<acowork_memory::TodoItem>>(s).ok(),
+        None => None,
+    };
+
+    Ok(SessionMeta {
+        version: 4,
+        session_id: row.get("session_id")?,
+        agent_id: row.get("agent_id")?,
+        created_at,
+        title,
+        workspace_id,
+        model,
+        provider,
+        account_id,
+        reasoning_effort,
+        temperature: temperature.map(|t| t as f32),
+        context_window: context_window.map(|c| c.max(0) as u64),
+        todos,
+        message_count: message_count.max(0) as u64,
+        last_active_at,
+        tokens,
+        llm_call_counter: llm_call_counter.map(|c| c.max(0) as u32),
+        model_ratio,
+        last_compaction_offset: last_compaction_offset.map(|o| o.max(0) as u64),
+        corrupted: false,
+    })
+}
+
+fn ms_to_rfc3339(ms: i64) -> String {
+    chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms)
+        .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+        .unwrap_or_else(|| "1970-01-01T00:00:00.000Z".to_string())
+}
+
+/// Convert the SQLite crate's local error into the workspace-wide
+/// `AcoworkError`. Centralised so the trait impl stays one-line per call.
+fn to_acowork(e: SqliteError) -> AcoworkError {
+    AcoworkError::Memory(e.to_string())
+}
+
+fn to_acowork_sqlite(e: rusqlite::Error) -> AcoworkError {
+    AcoworkError::Memory(format!("sqlite: {e}"))
+}
+
+// ── trait impl ────────────────────────────────────────────────────────
+
+impl SessionMetaStore for SqliteSessionMetaStore {
+    fn get(&self, session_id: &str) -> AcoworkResult<Option<SessionMeta>> {
+        let conn = self.store.lock();
+        match conn.query_row(SELECT_ALL_COLUMNS, params![session_id], row_to_meta) {
+            Ok(row) => Ok(Some(row)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(to_acowork_sqlite(e)),
+        }
+    }
+
+    fn upsert(&self, meta: &SessionMeta) -> AcoworkResult<()> {
+        let conn = self.store.lock();
+        let result: SqliteResult<()> = (|| {
+            upsert_row(&conn, meta).map_err(SqliteError::Sqlite)?;
+            conn.execute(
+                "DELETE FROM fts_sessions WHERE session_id = ?1",
+                params![meta.session_id],
+            )?;
+            conn.execute(
+                "INSERT INTO fts_sessions(session_id, title, agent_id, workspace_id) \
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    meta.session_id,
+                    meta.title.as_deref().unwrap_or(""),
+                    meta.agent_id,
+                    meta.workspace_id.as_deref().unwrap_or(""),
+                ],
+            )?;
+            Ok(())
+        })();
+        result.map_err(to_acowork)
+    }
+
+    fn list_recent(&self, limit: usize) -> AcoworkResult<Vec<SessionMeta>> {
+        let conn = self.store.lock();
+        let sql = format!(
+            "{SELECT_ALL_COLUMNS_PREFIX} ORDER BY last_active_at DESC LIMIT ?1"
+        );
+        let mut stmt = conn.prepare(&sql).map_err(to_acowork_sqlite)?;
+        let rows = stmt
+            .query_map(params![limit as i64], row_to_meta)
+            .map_err(to_acowork_sqlite)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(to_acowork_sqlite)?);
+        }
+        Ok(out)
+    }
+
+    fn find_latest(&self) -> AcoworkResult<Option<SessionMeta>> {
+        let conn = self.store.lock();
+        let sql = format!("{SELECT_ALL_COLUMNS_PREFIX} ORDER BY last_active_at DESC LIMIT 1");
+        let mut stmt = conn.prepare(&sql).map_err(to_acowork_sqlite)?;
+        let mut rows = stmt
+            .query_map([], row_to_meta)
+            .map_err(to_acowork_sqlite)?;
+        match rows.next() {
+            Some(Ok(row)) => Ok(Some(row)),
+            Some(Err(e)) => Err(to_acowork_sqlite(e)),
+            None => Ok(None),
+        }
+    }
+
+    fn search(&self, query: &str, limit: usize) -> AcoworkResult<Vec<SessionMeta>> {
+        if query.trim().is_empty() {
+            // Match the JSON backend: empty query degenerates to list_recent.
+            // We can't call `self.list_recent` while still holding the lock
+            // here — `list_recent` re-locks and the Mutex is not reentrant.
+            let conn = self.store.lock();
+            let sql = format!(
+                "{SELECT_ALL_COLUMNS_PREFIX} ORDER BY last_active_at DESC LIMIT ?1"
+            );
+            let mut stmt = conn.prepare(&sql).map_err(to_acowork_sqlite)?;
+            let rows = stmt
+                .query_map(params![limit as i64], row_to_meta)
+                .map_err(to_acowork_sqlite)?;
+            let mut out = Vec::new();
+            for r in rows {
+                out.push(r.map_err(to_acowork_sqlite)?);
+            }
+            return Ok(out);
+        }
+        let conn = self.store.lock();
+        let needle = format!("%{}%", query);
+        let sql = format!(
+            "{SELECT_ALL_COLUMNS_PREFIX} \
+             WHERE title LIKE ?1 COLLATE NOCASE \
+                OR agent_id LIKE ?1 COLLATE NOCASE \
+                OR workspace_id LIKE ?1 COLLATE NOCASE \
+             ORDER BY last_active_at DESC LIMIT ?2"
+        );
+        let mut stmt = conn.prepare(&sql).map_err(to_acowork_sqlite)?;
+        let rows = stmt
+            .query_map(params![needle, limit as i64], row_to_meta)
+            .map_err(to_acowork_sqlite)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(to_acowork_sqlite)?);
+        }
+        Ok(out)
+    }
+
+    fn prune_to(&self, max_sessions: usize) -> AcoworkResult<Vec<String>> {
+        let conn = self.store.lock();
+        let result: SqliteResult<Vec<String>> = (|| {
+            let mut stmt = conn.prepare(
+                "SELECT session_id FROM sessions \
+                 WHERE session_id NOT IN ( \
+                       SELECT session_id FROM sessions \
+                       ORDER BY last_active_at DESC LIMIT ?1 \
+                     )",
+            )?;
+            let victims: Vec<String> = stmt
+                .query_map(params![max_sessions as i64], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            drop(stmt);
+            if !victims.is_empty() {
+                let placeholders = std::iter::repeat_n("?", victims.len())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let sql = format!("DELETE FROM sessions WHERE session_id IN ({placeholders})");
+                let params_vec: Vec<&dyn rusqlite::ToSql> =
+                    victims.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+                conn.execute(&sql, params_vec.as_slice())?;
+                let fts_sql =
+                    format!("DELETE FROM fts_sessions WHERE session_id IN ({placeholders})");
+                conn.execute(&fts_sql, params_vec.as_slice())?;
+            }
+            Ok(victims)
+        })();
+        result.map_err(to_acowork)
+    }
+
+    fn list_with_totals(
+        &self,
+        page: u32,
+        size: u32,
+    ) -> AcoworkResult<acowork_memory::session_meta::SessionPage> {
+        let conn = self.store.lock();
+        let (total, agg) = conn
+            .query_row(
+                "SELECT COUNT(*), \
+                        COALESCE(SUM(token_total_input), 0), \
+                        COALESCE(SUM(token_total_output), 0), \
+                        COALESCE(SUM(token_total_cache_read), 0), \
+                        COALESCE(SUM(token_total_cache_write), 0) \
+                 FROM sessions",
+                [],
+                |r| {
+                    Ok((
+                        r.get::<_, i64>(0)? as usize,
+                        (
+                            r.get::<_, i64>(1)?.max(0) as u64,
+                            r.get::<_, i64>(2)?.max(0) as u64,
+                            r.get::<_, i64>(3)?.max(0) as u64,
+                            r.get::<_, i64>(4)?.max(0) as u64,
+                        ),
+                    ))
+                },
+            )
+            .map_err(to_acowork_sqlite)?;
+        let offset = page.saturating_sub(1) as i64 * size as i64;
+        let sql = format!(
+            "{SELECT_ALL_COLUMNS_PREFIX} ORDER BY last_active_at DESC LIMIT ?1 OFFSET ?2"
+        );
+        let mut stmt = conn.prepare(&sql).map_err(to_acowork_sqlite)?;
+        let rows = stmt
+            .query_map(params![size as i64, offset], row_to_meta)
+            .map_err(to_acowork_sqlite)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(to_acowork_sqlite)?);
+        }
+        Ok((out, total, agg))
+    }
+
+    fn import_from_json(
+        &self,
+        conversations_meta_dir: &Path,
+    ) -> AcoworkResult<SessionImportReport> {
+        let mut report = SessionImportReport::default();
+        let dir = conversations_meta_dir;
+        if !dir.exists() {
+            return Ok(report);
+        }
+        let conn = self.store.lock();
+        let already: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))
+            .map_err(to_acowork_sqlite)?;
+        if already > 0 {
+            report.skipped_target_non_empty = true;
+            return Ok(report);
+        }
+        let rd = match std::fs::read_dir(dir) {
+            Ok(rd) => rd,
+            Err(_) => return Ok(report),
+        };
+        for entry in rd.flatten() {
+            let path = entry.path();
+            if path.extension().is_some_and(|e| e == "json") {
+                let data = match std::fs::read_to_string(&path) {
+                    Ok(d) => d,
+                    Err(_) => {
+                        report.parse_failures += 1;
+                        continue;
+                    }
+                };
+                match serde_json::from_str::<SessionMeta>(&data) {
+                    Ok(meta) => {
+                        let result: SqliteResult<()> = (|| {
+                            upsert_row(&conn, &meta).map_err(SqliteError::Sqlite)?;
+                            conn.execute(
+                                "DELETE FROM fts_sessions WHERE session_id = ?1",
+                                params![meta.session_id],
+                            )?;
+                            conn.execute(
+                                "INSERT INTO fts_sessions(session_id, title, agent_id, workspace_id) \
+                                 VALUES (?1, ?2, ?3, ?4)",
+                                params![
+                                    meta.session_id,
+                                    meta.title.as_deref().unwrap_or(""),
+                                    meta.agent_id,
+                                    meta.workspace_id.as_deref().unwrap_or(""),
+                                ],
+                            )?;
+                            Ok(())
+                        })();
+                        match result {
+                            Ok(()) => report.imported += 1,
+                            Err(_) => report.storage_failures += 1,
+                        }
+                    }
+                    Err(_) => report.parse_failures += 1,
+                }
+            }
+        }
+        Ok(report)
+    }
+}
+
+// ── SQL building blocks ────────────────────────────────���───────────────
+
+const SELECT_ALL_COLUMNS: &str = "SELECT \
+    session_id, agent_id, created_at, last_active_at, \
+    title, workspace_id, model, provider, account_id, reasoning_effort, \
+    temperature, context_window, todos, message_count, \
+    llm_call_counter, model_ratio, last_compaction_offset, \
+    token_last_input, token_last_output, token_total_input, token_total_output, \
+    token_last_cache_read, token_last_cache_write, token_total_cache_read, token_total_cache_write \
+FROM sessions WHERE session_id = ?1";
+
+const SELECT_ALL_COLUMNS_PREFIX: &str = "SELECT \
+    session_id, agent_id, created_at, last_active_at, \
+    title, workspace_id, model, provider, account_id, reasoning_effort, \
+    temperature, context_window, todos, message_count, \
+    llm_call_counter, model_ratio, last_compaction_offset, \
+    token_last_input, token_last_output, token_total_input, token_total_output, \
+    token_last_cache_read, token_last_cache_write, token_total_cache_read, token_total_cache_write \
+FROM sessions";
+
+fn upsert_row(
+    conn: &rusqlite::Connection,
+    meta: &SessionMeta,
+) -> rusqlite::Result<()> {
+    let tokens = meta.tokens.clone().unwrap_or_default();
+    let todos_json = meta
+        .todos
+        .as_ref()
+        .map(|t| serde_json::to_string(t).unwrap_or_else(|_| "[]".to_string()));
+    conn.execute(
+        "INSERT INTO sessions( \
+            session_id, agent_id, created_at, last_active_at, \
+            title, workspace_id, model, provider, account_id, reasoning_effort, \
+            temperature, context_window, todos, message_count, \
+            llm_call_counter, model_ratio, last_compaction_offset, \
+            token_last_input, token_last_output, token_total_input, token_total_output, \
+            token_last_cache_read, token_last_cache_write, token_total_cache_read, token_total_cache_write \
+         ) VALUES ( \
+            ?1, ?2, ?3, ?4, \
+            ?5, ?6, ?7, ?8, ?9, ?10, \
+            ?11, ?12, ?13, ?14, \
+            ?15, ?16, ?17, \
+            ?18, ?19, ?20, ?21, \
+            ?22, ?23, ?24, ?25 \
+         ) \
+         ON CONFLICT(session_id) DO UPDATE SET \
+            agent_id = excluded.agent_id, \
+            created_at = excluded.created_at, \
+            last_active_at = excluded.last_active_at, \
+            title = excluded.title, \
+            workspace_id = excluded.workspace_id, \
+            model = excluded.model, \
+            provider = excluded.provider, \
+            account_id = excluded.account_id, \
+            reasoning_effort = excluded.reasoning_effort, \
+            temperature = excluded.temperature, \
+            context_window = excluded.context_window, \
+            todos = excluded.todos, \
+            message_count = excluded.message_count, \
+            llm_call_counter = excluded.llm_call_counter, \
+            model_ratio = excluded.model_ratio, \
+            last_compaction_offset = excluded.last_compaction_offset, \
+            token_last_input = excluded.token_last_input, \
+            token_last_output = excluded.token_last_output, \
+            token_total_input = excluded.token_total_input, \
+            token_total_output = excluded.token_total_output, \
+            token_last_cache_read = excluded.token_last_cache_read, \
+            token_last_cache_write = excluded.token_last_cache_write, \
+            token_total_cache_read = excluded.token_total_cache_read, \
+            token_total_cache_write = excluded.token_total_cache_write",
+        params![
+            meta.session_id,
+            meta.agent_id,
+            created_at_ms(meta),
+            last_active_at_ms(meta),
+            meta.title,
+            meta.workspace_id,
+            meta.model,
+            meta.provider,
+            meta.account_id,
+            meta.reasoning_effort,
+            meta.temperature,
+            meta.context_window.map(|c| c as i64),
+            todos_json,
+            meta.message_count as i64,
+            meta.llm_call_counter.map(|c| c as i64),
+            meta.model_ratio,
+            meta.last_compaction_offset.map(|o| o as i64),
+            tokens.last_input as i64,
+            tokens.last_output as i64,
+            tokens.total_input as i64,
+            tokens.total_output as i64,
+            tokens.last_cache_read as i64,
+            tokens.last_cache_write as i64,
+            tokens.total_cache_read as i64,
+            tokens.total_cache_write as i64,
+        ],
+    )?;
+    Ok(())
+}
+
+// ponytail: search uses `LIKE %x%` rather than FTS5 because session titles
+// are short and the dataset is small (a workspace has dozens, not millions).
+// The index on `last_active_at` is what keeps the dashboard fast; trigram
+// over a few hundred rows is overhead, not win. Upgrade path: switch to
+// `fts_sessions MATCH ?` once a workspace exceeds ~10k sessions.

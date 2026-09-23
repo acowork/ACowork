@@ -53,6 +53,49 @@ CREATE VIRTUAL TABLE IF NOT EXISTS fts_autobiographical USING fts5(content, node
 -- same trigram CJK matching and exact vector scan as memory recall.
 CREATE VIRTUAL TABLE IF NOT EXISTS fts_conversation USING fts5(content, node_id UNINDEXED, tokenize = 'trigram');
 
+-- Session metadata (ADR-082 §4 step 3, ADR-024 successor). One row per
+-- session, the JSON sidecar (`conversations/meta/*.json`) is now only a
+-- bootstrap input on first boot — the runtime reads and writes this table.
+-- `last_active_at` is INTEGER epoch-ms, not ISO string, so listing is a
+-- range scan + index, not a parse on every comparison.
+CREATE TABLE IF NOT EXISTS sessions (
+    session_id             TEXT PRIMARY KEY,
+    agent_id               TEXT NOT NULL,
+    created_at             INTEGER NOT NULL,
+    last_active_at         INTEGER NOT NULL,
+    title                  TEXT,
+    workspace_id           TEXT,
+    model                  TEXT,
+    provider               TEXT,
+    account_id             TEXT,
+    reasoning_effort       TEXT,
+    temperature            REAL,
+    context_window         INTEGER,
+    todos                  JSON,
+    message_count          INTEGER NOT NULL DEFAULT 0,
+    llm_call_counter       INTEGER,
+    model_ratio            REAL,
+    last_compaction_offset INTEGER,
+    -- Flattened token counters. The dashboard reads these on every render,
+    -- so a JSON blob here would still be parse-on-read.
+    token_last_input       INTEGER NOT NULL DEFAULT 0,
+    token_last_output      INTEGER NOT NULL DEFAULT 0,
+    token_total_input      INTEGER NOT NULL DEFAULT 0,
+    token_total_output     INTEGER NOT NULL DEFAULT 0,
+    token_last_cache_read  INTEGER NOT NULL DEFAULT 0,
+    token_last_cache_write INTEGER NOT NULL DEFAULT 0,
+    token_total_cache_read INTEGER NOT NULL DEFAULT 0,
+    token_total_cache_write INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_last_active ON sessions(last_active_at DESC);
+CREATE VIRTUAL TABLE IF NOT EXISTS fts_sessions USING fts5(
+    session_id UNINDEXED,
+    title,
+    agent_id,
+    workspace_id,
+    tokenize = 'trigram'
+);
+
 -- Forgetting archive (ADR-082 D1, replacing the grafeo PurgeLog).
 -- Decay is the one path that can destroy memory data, so an expired node is
 -- copied here *before* deletion instead of being dropped outright. Keeping the
