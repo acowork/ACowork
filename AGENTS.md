@@ -64,7 +64,7 @@ apps/
 docs/                  # Public architecture docs
   design/{zh,en}/      # 17 design docs (zh only; en TBD)
   module-design/{zh,en}/ # Rust crate specs (8 zh + en placeholder)
-  adr/{zh,en}/         # 51 ADRs (en: 1, zh: 50)
+  adr/{zh,en}/         # 78 ADRs (en: 2, zh: 76)
   prd/{zh,en}/         # Platform + Desktop UI/UX PRD
   protocols/{zh,en}/   # HTTP + MQTT + RAG protocol reference
   mcp-server-research/{zh,en}/

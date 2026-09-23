@@ -15,7 +15,7 @@ docs/
 ├── AGENTS.md                # This file (index)
 ├── design/{zh,en}/          # 架构设计（zh: 19 篇；en: 待翻译占位）
 ├── module-design/{zh,en}/   # Rust crate 规格（zh: 8 篇；en: AGENTS.md 占位）
-├── adr/{zh,en}/             # 架构决策记录（zh: 54；en: 1）
+├── adr/{zh,en}/             # 架构决策记录（zh: 76；en: 2）
 ├── prd/{zh,en}/             # 平台 PRD + Desktop UI/UX（zh: 2；en: 占位）
 ├── protocols/{zh,en}/       # API 协议参考（zh: HTTP / MQTT / RAG 集成；en: 占位）
 ├── mcp-server-research/{zh,en}/   # MCP Server 集成调研（en: 1；zh: 占位）
