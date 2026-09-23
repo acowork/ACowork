@@ -20,6 +20,7 @@ use acowork_core::providers::traits::{Provider, UsageInfo};
 use acowork_core::rag::RagProvider;
 use acowork_core::tools::traits::Tool;
 use acowork_memory::MemoryProvider;
+use acowork_memory::SessionMetaStore;
 use acowork_memory::admin::MemoryAdminService;
 use acowork_memory::consolidation::SchedulerConfig;
 use acowork_memory::types::EpisodicDecayConfig;
@@ -1124,7 +1125,7 @@ impl AgentCore {
         // ADR-082 D1: the SQLite backend always compiles in, so it is also the
         // fallback when the grafeo feature is disabled.
         if Self::memory_backend_is_sqlite() {
-            self.init_sqlite_backend(&memory_dir);
+            self.init_sqlite_backend(work_dir);
             return;
         }
 
@@ -1164,18 +1165,25 @@ impl AgentCore {
     /// write (ADR-082 §4 step 2), so switching backends does not silently start
     /// from an empty store. The import is a no-op into a populated store and
     /// never touches the source.
-    fn init_sqlite_backend(&mut self, memory_dir: &std::path::Path) {
+    fn init_sqlite_backend(&mut self, work_dir: &std::path::Path) {
+        let memory_dir = work_dir.join("memory");
         let db_path = memory_dir.join("private.sqlite");
         let embedding_dim = self.memory_embedding_dim();
         match acowork_sqlite::SqliteStore::open(&db_path, embedding_dim) {
             Ok(store) => {
+                let store = std::sync::Arc::new(store);
                 #[cfg(feature = "grafeo-backend")]
                 crate::memory::grafeo_import::import_grafeo_memory(
-                    memory_dir,
+                    &memory_dir,
                     &store,
                     embedding_dim,
                 );
-                self.install_memory_backend(std::sync::Arc::new(store), &db_path)
+                // ADR-082 §4 step 3: the same .sqlite file also carries
+                // session meta. Install it as the process backend and import
+                // the legacy JSON sidecars once (no-op into a populated
+                // table, source files untouched).
+                self.install_session_meta_backend(store.clone(), work_dir);
+                self.install_memory_backend(store, &db_path)
             }
             Err(e) => tracing::warn!(
                 error = %e,
@@ -1183,6 +1191,45 @@ impl AgentCore {
                 "Failed to open SQLite memory store, memory features disabled"
             ),
         }
+    }
+
+    /// Route session-meta storage at the SQLite store and import any legacy
+    /// `conversations/meta/*.json` side-car (ADR-082 §4 step 3).
+    ///
+    /// The import runs before the session manager starts, so every later
+    /// read/write goes to SQLite. It is a no-op once the `sessions` table
+    /// holds rows and never deletes the JSON files, so a re-run after a crash
+    /// is safe.
+    fn install_session_meta_backend(
+        &self,
+        store: std::sync::Arc<acowork_sqlite::SqliteStore>,
+        work_dir: &std::path::Path,
+    ) {
+        let sm_store = std::sync::Arc::new(acowork_sqlite::SqliteSessionMetaStore::new(store));
+        let meta_dir = work_dir.join("conversations").join("meta");
+        match sm_store.import_from_json(&meta_dir) {
+            Ok(report) if report.imported > 0 => tracing::info!(
+                imported = report.imported,
+                parse_failures = report.parse_failures,
+                storage_failures = report.storage_failures,
+                dir = %meta_dir.display(),
+                "session meta: imported legacy JSON sidecars into SQLite"
+            ),
+            Ok(report) if report.skipped_target_non_empty => tracing::debug!(
+                dir = %meta_dir.display(),
+                "session meta: SQLite table already populated, skipping import"
+            ),
+            Ok(_) => tracing::debug!(
+                dir = %meta_dir.display(),
+                "session meta: no legacy JSON sidecars to import"
+            ),
+            Err(e) => tracing::warn!(
+                error = %e,
+                dir = %meta_dir.display(),
+                "session meta: import failed; SQLite table may be incomplete"
+            ),
+        }
+        crate::conversation::install_session_meta_backend(sm_store);
     }
 
     /// Expected embedding width, warning when the provider is unavailable.

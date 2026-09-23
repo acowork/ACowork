@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
@@ -234,22 +234,6 @@ pub struct AttachedFolderMeta {
     pub abs_path: String,
     pub name: String,
 }
-
-/// Per-session metadata stored in `conversations/meta/{session_id}.json`.
-///
-/// ADR-024: each session writes only its own meta file — no cross-session
-/// contention, no index.json, no JSONL header line.
-///
-/// Field `last_compaction_offset` is an absolute byte offset (there is no
-/// header in the JSONL, so the offset is always absolute).
-///
-/// contention, no index.json, no JSONL header line.
-///
-/// Field `last_compaction_offset` is an absolute byte offset (there is no
-/// header in the JSONL, so the offset is always absolute).
-///
-/// Struct definition lives in `acowork_memory::session_meta::SessionMeta`;
-/// re-exported above as `pub use acowork_memory::SessionMeta;`.
 
 /// Commands sent to the background writer thread.
 pub enum WriterCommand {
@@ -2002,34 +1986,64 @@ pub struct SessionInfo {
 // Use `scan_sessions_from_meta()` for listing and `read_session_meta()` for
 // single-session lookup.
 
-// ── Per-session meta file I/O (ADR-024) ───────────────────────────────────
+// ── Per-session meta I/O (ADR-024, ADR-082 §4 step 3) ─────────────────────
+//
+// The path convention (`conversations/meta/{id}.json`) now lives only in
+// `acowork_memory::session_meta::JsonSessionMetaStore`. The free functions
+// below are thin wrappers over the active `SessionMetaStore` backend.
 
-// ── Per-session meta file I/O (ADR-024) ───────────────────────────────────
-
-/// Subdirectory where per-session meta files live — moved into
-/// `acowork_memory::session_meta::JsonSessionMetaStore`; the path lives in
-/// one place only.
-
-/// Legacy free-function form of `JsonSessionMetaStore::upsert`.
+/// Process-wide session-meta backend (ADR-082 §4 step 3).
 ///
-/// New code should hold an `Arc<dyn SessionMetaStore>` (typically built by
-/// `AgentCore::init_session_meta_store`) and use `store.upsert(meta)`. This
-/// thin wrapper exists so the dozens of existing test call sites keep
-/// compiling during the migration.
+/// The runtime selects its backend exactly once at startup through
+/// [`install_session_meta_backend`]. When unset — the default, and every
+/// unit / integration test — the free functions below fall back to
+/// [`acowork_memory::JsonSessionMetaStore`], preserving the legacy
+/// `conversations/meta/{id}.json` behaviour byte-for-byte.
+///
+/// ponytail: a process-global is correct here because one runtime process
+/// owns exactly one agent workspace, so the `conversations_dir` argument
+/// passed to the free functions is always the same directory the installed
+/// store was built for. The ceiling is two workspaces in one process; if
+/// that ever becomes real, thread an `Arc<dyn SessionMetaStore>` through
+/// `SessionManager` / `ConversationSession` instead.
+static SESSION_META_BACKEND: OnceLock<Arc<dyn SessionMetaStore>> = OnceLock::new();
+
+/// Install the process-wide session-meta backend. Called once at startup
+/// when the SQLite backend is selected; a no-op (and a warning) on a
+/// second call.
+pub fn install_session_meta_backend(store: Arc<dyn SessionMetaStore>) {
+    if SESSION_META_BACKEND.set(store).is_err() {
+        tracing::warn!("session-meta backend already installed; ignoring re-install");
+    }
+}
+
+/// The active session-meta store: the installed backend, or a fresh JSON
+/// store rooted at `conversations_dir` when none was installed.
+fn session_meta_store(conversations_dir: &Path) -> Arc<dyn SessionMetaStore> {
+    SESSION_META_BACKEND.get().cloned().unwrap_or_else(|| {
+        Arc::new(acowork_memory::JsonSessionMetaStore::new(
+            conversations_dir.to_path_buf(),
+        ))
+    })
+}
+
+/// Legacy free-function form of `SessionMetaStore::upsert`.
+///
+/// Routes through [`session_meta_store`] so the backend swap is transparent
+/// to callers. `conversations_dir` is only consulted when no backend has
+/// been installed (JSON fallback).
 pub fn write_session_meta(conversations_dir: &Path, meta: &SessionMeta) -> std::io::Result<()> {
-    let store = acowork_memory::JsonSessionMetaStore::new(conversations_dir.to_path_buf());
-    store
+    session_meta_store(conversations_dir)
         .upsert(meta)
         .map_err(|e| std::io::Error::other(e.to_string()))
 }
 
-/// Legacy free-function form of `JsonSessionMetaStore::get`.
+/// Legacy free-function form of `SessionMetaStore::get`.
 pub fn read_session_meta(
     conversations_dir: &Path,
     session_id: &str,
 ) -> std::io::Result<SessionMeta> {
-    let store = acowork_memory::JsonSessionMetaStore::new(conversations_dir.to_path_buf());
-    match store.get(session_id) {
+    match session_meta_store(conversations_dir).get(session_id) {
         Ok(Some(meta)) => Ok(meta),
         Ok(None) => Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
@@ -2039,12 +2053,11 @@ pub fn read_session_meta(
     }
 }
 
-/// Legacy free-function form of `JsonSessionMetaStore::list_recent`,
+/// Legacy free-function form of `SessionMetaStore::list_recent`,
 /// preserving the `(session_id, SessionMeta)` tuple shape every caller
 /// already destructures.
 pub fn scan_sessions_from_meta(conversations_dir: &Path) -> Vec<(String, SessionMeta)> {
-    let store = acowork_memory::JsonSessionMetaStore::new(conversations_dir.to_path_buf());
-    match store.list_recent(usize::MAX) {
+    match session_meta_store(conversations_dir).list_recent(usize::MAX) {
         Ok(rows) => rows.into_iter().map(|m| (m.session_id.clone(), m)).collect(),
         Err(e) => {
             tracing::warn!(error = %e, "scan_sessions_from_meta: store failed");
@@ -2076,7 +2089,7 @@ pub(crate) fn prune_excess_sessions(conversations_dir: &Path, max_sessions: usiz
     // owns the matching JSONL archival. The trait returns the deleted
     // ids newest-first, but we want oldest-first because that's the
     // historical order the old code pruned in.
-    let store = acowork_memory::JsonSessionMetaStore::new(conversations_dir.to_path_buf());
+    let store = session_meta_store(conversations_dir);
     let victims = match store.prune_to(max_sessions) {
         Ok(v) => v,
         Err(e) => {
@@ -2253,8 +2266,7 @@ pub type StreamingStateMap = Arc<RwLock<HashMap<String, StreamingLine>>>;
 ///
 /// ADR-024: scans per-session meta files instead of index.json.
 pub fn find_latest_session(conversations_dir: &Path) -> Option<String> {
-    let store = acowork_memory::JsonSessionMetaStore::new(conversations_dir.to_path_buf());
-    store
+    session_meta_store(conversations_dir)
         .find_latest()
         .ok()
         .flatten()
@@ -2298,7 +2310,7 @@ pub fn scan_sessions_async(
         let page_idx = page.unwrap_or(1).max(1).saturating_sub(1);
         let row_limit = size.unwrap_or(20).max(1);
 
-        let store = acowork_memory::JsonSessionMetaStore::new(conversations_dir);
+        let store = session_meta_store(&conversations_dir);
         let (rows, total, totals) = match store.list_with_totals(page_idx, row_limit) {
             Ok(r) => r,
             Err(e) => {
