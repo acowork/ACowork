@@ -236,13 +236,17 @@ fn import_grafeo_index(work_dir: &Path, target: &ConversationStore, embedding_di
     if target.message_count().map(|n| n > 0).unwrap_or(true) {
         return;
     }
+    // Both locations are successive layouts of the same index rather than
+    // additive data — a build that found the directory migrated it into the
+    // file. Import the newest one that exists, once.
     for source in [
         work_dir.join(GRAFEO_STORE_FILE),
         work_dir.join(GRAFEO_LEGACY_STORE_DIR),
-    ] {
-        if !source.exists() {
-            continue;
-        }
+    ]
+    .into_iter()
+    .filter(|path| path.exists())
+    .take(1)
+    {
         let Ok(src) = GrafeoStore::open(&GrafeoConfig {
             db_path: source.clone(),
             embedding_dim,
