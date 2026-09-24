@@ -59,7 +59,7 @@ fn memory_session_meta_and_conversation_index_share_one_file() -> AcoworkResult<
     // ── session meta write ─────────────────────────────────────────────
     sessions.upsert(&meta("s1", "migration talk"))?;
 
-    // ── memory node write (via the store's own import path) ────────────
+    // ── memory node write (through the ordinary write path) ─────────────
     let episode = acowork_memory::Episode {
         session_id: "s1".into(),
         turn_index: 0,
@@ -74,9 +74,8 @@ fn memory_session_meta_and_conversation_index_share_one_file() -> AcoworkResult<
         importance: 1.0,
         knowledge_subtype: None,
     };
-    let props = serde_json::to_string(&episode)?;
-    let node_id = store
-        .import_node(acowork_memory::labels::EPISODIC, &props, "active", None)?;
+    // ── memory node write ──────────────────────────────────────────────
+    let node_id = store.store_episode(&episode)?;
 
     // ── reads from each surface ────────────────────────────────────────
     let hits = conversation.search("migrate", None, 10)?;

@@ -144,8 +144,8 @@ pub type SharedMemoryStore =
 
 /// Shared slot for the conversation vector index (ADR-081 §4.2, P1-2).
 ///
-/// Late-bind from Phase B: `ConversationIndex` is opened at
-/// `{work_dir}/conversation_index.sqlite` once the memory store is up, and a
+/// Late-bind from Phase B: `ConversationIndex` is built on the memory
+/// backend's SQLite store once the memory store is up, and a
 /// [`crate::conversation_index::ConversationIndexer`] task tails the
 /// JSONL conversation logs. `None` until then — the `/search`
 /// conversation scope reports `not_indexed` and search degrades to the

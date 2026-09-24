@@ -1132,9 +1132,7 @@ impl AgentCore {
         // ADR-082 D1: SQLite is the backend, unconditionally. The grafeo
         // backend (`init_grafeo_backend`) is kept compiled for the transition
         // but no longer selected; it is removed once the SQLite rollout has
-        // settled. A pre-existing `private.grafeo` is imported once inside
-        // `init_sqlite_backend`, so switching does not start from an empty
-        // store.
+        // settled.
         self.init_sqlite_backend(work_dir);
     }
 
@@ -1143,11 +1141,6 @@ impl AgentCore {
     /// The file name is backend-specific (`private.sqlite` vs
     /// `private.grafeo`) so switching backends never opens one engine's file
     /// with the other.
-    ///
-    /// A pre-existing `private.grafeo` is imported once, before anything can
-    /// write (ADR-082 §4 step 2), so switching backends does not silently start
-    /// from an empty store. The import is a no-op into a populated store and
-    /// never touches the source.
     fn init_sqlite_backend(&mut self, work_dir: &std::path::Path) {
         let memory_dir = work_dir.join("memory");
         let db_path = memory_dir.join("private.sqlite");
@@ -1155,12 +1148,6 @@ impl AgentCore {
         match acowork_sqlite::SqliteStore::open(&db_path, embedding_dim) {
             Ok(store) => {
                 let store = std::sync::Arc::new(store);
-                #[cfg(feature = "grafeo-backend")]
-                crate::memory::grafeo_import::import_grafeo_memory(
-                    &memory_dir,
-                    &store,
-                    embedding_dim,
-                );
                 // ADR-082 §4 step 3: the same .sqlite file also carries
                 // session meta. Install it as the process backend and import
                 // the legacy JSON sidecars once (no-op into a populated

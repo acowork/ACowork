@@ -31,7 +31,7 @@ mod schema;
 #[cfg(test)]
 mod tests;
 
-pub use conversation::{ConversationHit, ConversationStore, ExportedMessage};
+pub use conversation::{ConversationHit, ConversationStore};
 pub use retrieval::RRF_K;
 pub use session_meta::SqliteSessionMetaStore;
 
@@ -289,64 +289,6 @@ impl SqliteStore {
     }
 
     // ── Episodic layer ───────────────────────────────────────────────────
-
-    /// Import a node verbatim from another backend (ADR-082 §4 step 2).
-    ///
-    /// Deliberately bypasses the write path. `store_knowledge` merges a node
-    /// into an existing one when the embeddings are similar and rewrites
-    /// `status` / `updated_at`; both are right for a write and wrong for a
-    /// migration, where the source store already made those decisions and a
-    /// merge would silently drop a node the old store had decided to keep.
-    ///
-    /// `props_json` is the caller's serialization of the typed node and is
-    /// stored as given. `status` is written as given too, so a Dormant or
-    /// already-decayed node does not come back Active.
-    ///
-    /// The FTS blob and the projected `created_at` are derived here, per label,
-    /// with the same helpers the write path uses — deriving them differently
-    /// would make imported rows rank unlike fresh ones.
-    ///
-    /// ponytail: no dedup and no cross-checking against existing rows; the
-    /// caller is a one-shot migration that has already proved uniqueness in the
-    /// source (and only runs into an empty store). Node ids are allocated here,
-    /// so the caller must remap any id references it carried over.
-    pub fn import_node(
-        &self,
-        label: &str,
-        props_json: &str,
-        status: &str,
-        embedding: Option<&[f32]>,
-    ) -> Result<u64> {
-        let content;
-        let created;
-        let updated;
-        if label == labels::EPISODIC {
-            let node: Episode = serde_json::from_str(props_json)?;
-            content = node.content.clone();
-            created = ts_text(node.timestamp);
-            updated = created.clone();
-        } else if label == labels::KNOWLEDGE {
-            let node: KnowledgeNode = serde_json::from_str(props_json)?;
-            content = knowledge_content(&node);
-            created = ts_text(node.created_at);
-            updated = ts_text(node.updated_at);
-        } else if label == labels::PROCEDURAL {
-            let node: ProceduralNode = serde_json::from_str(props_json)?;
-            content = procedural_content(&node);
-            created = ts_text(node.created_at);
-            updated = ts_text(node.updated_at);
-        } else if label == labels::AUTOBIOGRAPHICAL {
-            let node: AutobiographicalNode = serde_json::from_str(props_json)?;
-            content = autobiographical_content(&node);
-            created = ts_text(node.created_at);
-            updated = ts_text(node.updated_at);
-        } else {
-            return Err(Error::Memory(format!("cannot import label {label}")));
-        }
-        self.insert_row(
-            label, status, props_json, &content, &created, &updated, embedding,
-        )
-    }
 
     /// Insert an episode and return its assigned id.
     pub fn store_episode(&self, episode: &Episode) -> Result<u64> {

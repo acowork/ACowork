@@ -1,12 +1,11 @@
 //! Conversation vector index (ADR-081 §4.2, P1-2).
 //!
-//! One row per indexed message in the SQLite conversation index
-//! `{work_dir}/conversation_index.sqlite` — `session_id`, `message_index`
-//! (the JSONL line number), `role`, `content`, `embedding`.
-//! `session_id`, `message_index` (the JSONL line number), `role`,
-//! `content`, `embedding`. Physically isolated from the memory store:
-//! the file can be deleted and rebuilt from the JSONL history at any
-//! time (ADR-081 "索引目录独立，可删重建；降级关键词").
+//! One `ConversationMessage` node per indexed JSONL line, in the workspace's
+//! `memory/private.sqlite` — `session_id`, `message_index` (the JSONL line
+//! number), `role`, `content`, embedding in the shared `vectors` table. The
+//! rows are separable from the memory nodes by label, so the index can be
+//! dropped and rebuilt from the JSONL history at any time (ADR-081
+//! "索引目录独立，可删重建；降级关键词").
 //!
 //! The JSONL conversation log is append-only (compaction appends a
 //! `kind="compaction"` marker — never truncates), so the JSONL line
@@ -25,21 +24,6 @@ use acowork_sqlite::conversation::ConversationStore;
 use crate::conversation::ConversationEntry;
 use crate::error::Result;
 
-/// Label for every indexed conversation-message node.
-#[cfg(feature = "grafeo-backend")]
-const LABEL: &str = "ConversationMessage";
-/// The store file. SQLite, not grafeo: neither backend may open the
-/// other's file (a grafeo container read as SQLite is corrupt bytes).
-pub const STORE_FILE: &str = "conversation_index.sqlite";
-/// Pre-SQLite locations, read once by [`import_grafeo_index`].
-/// `conversation_index.grafeo` is the grafeo single-file layout;
-/// `conversation_index/` is the older `WalDirectory` layout, whose
-/// checkpoint timer never ran and whose WAL therefore grew unbounded
-/// (182 MB here) and was replayed on every boot.
-#[cfg(feature = "grafeo-backend")]
-const GRAFEO_STORE_FILE: &str = "conversation_index.grafeo";
-#[cfg(feature = "grafeo-backend")]
-const GRAFEO_LEGACY_STORE_DIR: &str = "conversation_index";
 /// One ranked conversation hit.
 #[derive(Debug, Clone)]
 pub struct ConversationHit {
@@ -63,63 +47,21 @@ pub struct ConversationIndex {
 }
 
 impl ConversationIndex {
-    /// Open (or create) the conversation index under `work_dir`, sized for
-    /// `embedding_dim` (the live provider's dimension — hardcoding the
-    /// default 384 made every vector write mismatch a 512-dim provider).
-    ///
-    /// O(1) in the number of indexed messages: no WAL to replay, no BM25 index
-    /// to rebuild, and the per-session watermark is one grouped `MAX()` instead
-    /// of the grafeo version's full node scan. A pre-existing grafeo index is
-    /// imported once, on the first open after the switch.
-    ///
-    /// ponytail: a provider dimension change is not migrated in place. The
-    /// index is re-derivable, so the recovery path is POST
-    /// /conversation/index/rebuild (ADR-081 "可删重建").
-    pub fn open(work_dir: &Path, embedding_dim: usize) -> Result<Self> {
-        let started = Instant::now();
-        let path = work_dir.join(STORE_FILE);
-        let store = ConversationStore::open(&path, embedding_dim)
-            .map_err(|e| crate::error::RuntimeError::Memory(e.to_string()))?;
-
-        import_grafeo_index(work_dir, &store, embedding_dim);
-
-        // The boot-time number users watch: with nothing to replay or rebuild
-        // this is the constant-time figure the migration was for.
-        tracing::info!(
-            path = %path.display(),
-            elapsed_ms = started.elapsed().as_millis() as u64,
-            dim = embedding_dim,
-            messages = store.message_count().unwrap_or(0),
-            "conversation index store opened"
-        );
-        Ok(Self {
-            store,
-            conversations_dir: work_dir.join("conversations"),
-            // Assume not caught up: the first indexer sweep clears it.
-            indexing: AtomicBool::new(true),
-        })
-    }
-
     /// Build the index on an already-open [`acowork_sqlite::SqliteStore`], so
     /// memory, session meta and the conversation index share one `.sqlite`
     /// file (ADR-082 §4 step 3). `work_dir` still supplies the JSONL
     /// `conversations/` source dir the indexer tails.
     ///
-    /// Unlike [`open`](Self::open), no grafeo import runs: the shared store is
-    /// created by `AgentCore` only when the SQLite backend is selected, and by
-    /// then the memory import has already covered the file.
+    /// The vector width comes from the store, which remembers the dimension it
+    /// was created with — see `SqliteStore::open`.
     pub fn from_store(
         store: std::sync::Arc<acowork_sqlite::SqliteStore>,
         work_dir: &Path,
-        embedding_dim: usize,
     ) -> Result<Self> {
         let started = Instant::now();
+        let embedding_dim = store.embedding_dim();
         let store = ConversationStore::from_store(store)
             .map_err(|e| crate::error::RuntimeError::Memory(e.to_string()))?;
-        // The shared file starts empty of conversation messages on the first
-        // boot after the switch; pull the existing index in so nothing has to
-        // be re-embedded from the JSONL.
-        import_legacy_index(work_dir, &store, embedding_dim);
         tracing::info!(
             work_dir = %work_dir.display(),
             elapsed_ms = started.elapsed().as_millis() as u64,
@@ -254,188 +196,6 @@ impl ConversationIndex {
             }
         }
     }
-}
-
-/// One-shot import of a pre-existing grafeo conversation index (ADR-082 §4
-/// step 2).
-///
-/// Each message's embedding is read straight out of the old store; re-indexing
-/// from the JSONL instead would need a reachable embedding provider and would
-/// re-encode thousands of messages — and the remote provider is not always up.
-///
-/// Runs only when the SQLite index is empty, so it can never re-import. The
-/// source is left in place: a startup path should not delete the user's only
-/// copy of their embeddings. A source that cannot be opened is skipped, never
-/// fatal — the indexer then sweeps the JSONL from watermark 0.
-///
-/// ponytail: opening a grafeo container whose persisted dimension differs from
-/// `embedding_dim` is grafeo's business (its `open` may refuse), the same
-/// exposure the pre-migration code had. Only the vector-width check below is
-/// ours.
-#[cfg(feature = "grafeo-backend")]
-fn import_grafeo_index(work_dir: &Path, target: &ConversationStore, embedding_dim: usize) {
-    use acowork_grafeo::grafeo::GrafeoStore;
-    use acowork_grafeo::types::GrafeoConfig;
-    use grafeo_common::types::Value;
-
-    if target.message_count().map(|n| n > 0).unwrap_or(true) {
-        return;
-    }
-    // Both locations are successive layouts of the same index rather than
-    // additive data — a build that found the directory migrated it into the
-    // file. Import the newest one that exists, once.
-    for source in [
-        work_dir.join(GRAFEO_STORE_FILE),
-        work_dir.join(GRAFEO_LEGACY_STORE_DIR),
-    ]
-    .into_iter()
-    .filter(|path| path.exists())
-    .take(1)
-    {
-        let Ok(src) = GrafeoStore::open(&GrafeoConfig {
-            db_path: source.clone(),
-            embedding_dim,
-        }) else {
-            tracing::warn!(
-                source = %source.display(),
-                "conversation index import: source unreadable, skipped"
-            );
-            continue;
-        };
-        let mut imported = 0usize;
-        let mut skipped = 0usize;
-        for id in src.db().graph_store().nodes_by_label(LABEL) {
-            let Some(node) = src.get_node(id) else {
-                skipped += 1;
-                continue;
-            };
-            let (Some(session_id), Some(line)) = (
-                node.get_property("session_id")
-                    .and_then(|v| v.as_str().map(str::to_string)),
-                node.get_property("message_index")
-                    .and_then(|v| v.as_int64()),
-            ) else {
-                skipped += 1;
-                continue;
-            };
-            let Some(Value::Vector(vector)) = node.get_property("embedding") else {
-                skipped += 1;
-                continue;
-            };
-            // Another width would be written as if it belonged to this store's
-            // dimension and would poison every later search silently.
-            if vector.len() != embedding_dim {
-                skipped += 1;
-                continue;
-            }
-            let role = node
-                .get_property("role")
-                .and_then(|v| v.as_str())
-                .unwrap_or("user");
-            let content = node
-                .get_property("content")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            match target.index_message(&session_id, line.max(0) as usize, role, content, vector) {
-                Ok(_) => imported += 1,
-                Err(e) => {
-                    tracing::warn!(error = %e, "conversation index import: write failed");
-                    skipped += 1;
-                }
-            }
-        }
-        if imported > 0 || skipped > 0 {
-            tracing::info!(
-                source = %source.display(),
-                imported,
-                skipped,
-                "conversation index: imported from grafeo"
-            );
-        }
-    }
-}
-
-/// No old index exists when the Runtime is built without the grafeo backend.
-#[cfg(not(feature = "grafeo-backend"))]
-fn import_grafeo_index(_work_dir: &Path, _target: &ConversationStore, _embedding_dim: usize) {}
-
-/// One-shot import of a pre-existing conversation index from a legacy path
-/// into the shared SQLite store (ADR-082 §4 step 3).
-///
-/// Sources, newest layout first:
-///   * `{work_dir}/conversation_index.sqlite` — the intermediate single-file
-///     SQLite layout that predates the shared `memory/private.sqlite`;
-///   * `{work_dir}/conversation_index.grafeo` / `conversation_index/` — the
-///     original grafeo layouts (delegated to [`import_grafeo_index`]).
-///
-/// Runs only when the target holds no messages, and never deletes a source.
-fn import_legacy_index(work_dir: &Path, target: &ConversationStore, embedding_dim: usize) {
-    if target.message_count().map(|n| n > 0).unwrap_or(true) {
-        return;
-    }
-    if import_legacy_sqlite_index(work_dir, target, embedding_dim) > 0 {
-        return;
-    }
-    import_grafeo_index(work_dir, target, embedding_dim);
-}
-
-/// Copy the intermediate `{work_dir}/conversation_index.sqlite` layout into
-/// `target`. Returns the number of messages written (0 when absent or
-/// unreadable). Messages whose stored vector width differs from
-/// `embedding_dim` are skipped, never written at the wrong width.
-fn import_legacy_sqlite_index(
-    work_dir: &Path,
-    target: &ConversationStore,
-    embedding_dim: usize,
-) -> usize {
-    let src = work_dir.join(STORE_FILE);
-    if !src.exists() {
-        return 0;
-    }
-    let Ok(old) = ConversationStore::open(&src, embedding_dim) else {
-        tracing::warn!(
-            source = %src.display(),
-            "conversation index import: legacy sqlite unreadable, skipped"
-        );
-        return 0;
-    };
-    let rows = match old.export_messages() {
-        Ok(rows) => rows,
-        Err(e) => {
-            tracing::warn!(error = %e, "conversation index import: legacy sqlite read failed");
-            return 0;
-        }
-    };
-    let mut imported = 0usize;
-    let mut skipped = 0usize;
-    for msg in rows {
-        if msg.embedding.len() != embedding_dim {
-            skipped += 1;
-            continue;
-        }
-        match target.index_message(
-            &msg.session_id,
-            msg.message_index,
-            &msg.role,
-            &msg.content,
-            &msg.embedding,
-        ) {
-            Ok(_) => imported += 1,
-            Err(e) => {
-                tracing::warn!(error = %e, "conversation index import: write failed");
-                skipped += 1;
-            }
-        }
-    }
-    if imported > 0 || skipped > 0 {
-        tracing::info!(
-            source = %src.display(),
-            imported,
-            skipped,
-            "conversation index: imported from legacy sqlite"
-        );
-    }
-    imported
 }
 
 fn is_indexable(entry: &ConversationEntry) -> bool {
@@ -620,11 +380,19 @@ mod tests {
     use crate::conversation::ENTRY_KIND_COMPACTION;
     use acowork_memory::types::DEFAULT_EMBEDDING_DIM;
 
+    /// The workspace's shared `memory/private.sqlite` — with ADR-082 §4 step 3
+    /// the only place a conversation index lives.
+    fn open_index(work_dir: &std::path::Path, dim: usize) -> ConversationIndex {
+        let db = work_dir.join("memory").join("private.sqlite");
+        let store = std::sync::Arc::new(
+            acowork_sqlite::SqliteStore::open(&db, dim).expect("open shared sqlite store"),
+        );
+        ConversationIndex::from_store(store, work_dir).expect("index open")
+    }
+
     fn open_tmp() -> (tempfile::TempDir, std::sync::Arc<ConversationIndex>) {
         let dir = tempfile::tempdir().expect("tempdir");
-        let index = std::sync::Arc::new(
-            ConversationIndex::open(dir.path(), DEFAULT_EMBEDDING_DIM).expect("index open"),
-        );
+        let index = std::sync::Arc::new(open_index(dir.path(), DEFAULT_EMBEDDING_DIM));
         (dir, index)
     }
 
@@ -774,7 +542,7 @@ mod tests {
         assert_eq!(index.embedding_dim(), 512);
         drop(index);
 
-        let reopened = ConversationIndex::open(dir.path(), DEFAULT_EMBEDDING_DIM).expect("reopen");
+        let reopened = open_index(dir.path(), DEFAULT_EMBEDDING_DIM);
         assert_eq!(
             reopened.embedding_dim(),
             512,
@@ -811,9 +579,10 @@ mod tests {
         // Regression: the index used to open at the hardcoded default (384),
         // so a 512-dim provider (bge-small-zh-v1.5) mismatched every write
         // and the indexer deferred every sweep — search always came back
-        // empty. The store must open at the dimension it is given.
+        // empty. The width now comes from the memory store, which is sized by
+        // the live embedding provider at boot.
         let dir = tempfile::tempdir().expect("tempdir");
-        let index = ConversationIndex::open(dir.path(), 512).expect("index open");
+        let index = open_index(dir.path(), 512);
         assert_eq!(index.embedding_dim(), 512);
         // And a 512-dim vector must be accepted (no dimension-mismatch panic).
         let emb = vec_dim(512, 9);
@@ -832,7 +601,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let emb = vec_dim(DEFAULT_EMBEDDING_DIM, 5);
         {
-            let idx = ConversationIndex::open(dir.path(), DEFAULT_EMBEDDING_DIM).expect("open1");
+            let idx = open_index(dir.path(), DEFAULT_EMBEDDING_DIM);
             idx.index_message("s1", 0, "user", "unique alpha marker", &emb)
                 .expect("i0");
             idx.index_message("s1", 1, "assistant", "unique beta marker", &emb)
@@ -840,7 +609,7 @@ mod tests {
             assert_eq!(idx.next_line("s1"), 2);
         }
 
-        let idx2 = ConversationIndex::open(dir.path(), DEFAULT_EMBEDDING_DIM).expect("open2");
+        let idx2 = open_index(dir.path(), DEFAULT_EMBEDDING_DIM);
         // Watermark restored from the persisted nodes, not reset to 0.
         assert_eq!(idx2.next_line("s1"), 2, "watermark recovered on reopen");
         assert_eq!(
@@ -859,10 +628,10 @@ mod tests {
             2,
             "duplicate present before recovery"
         );
-        // A restart drops the old handle before reopening — the single-file
-        // container holds one live handle at a time.
+        // A restart drops the old handle before reopening — the shared
+        // `.sqlite` file holds one live handle at a time.
         drop(idx2);
-        let idx3 = ConversationIndex::open(dir.path(), DEFAULT_EMBEDDING_DIM).expect("open3");
+        let idx3 = open_index(dir.path(), DEFAULT_EMBEDDING_DIM);
         assert_eq!(
             idx3.search("alpha", None, 10).len(),
             1,
