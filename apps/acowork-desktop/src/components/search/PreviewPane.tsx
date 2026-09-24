@@ -29,8 +29,8 @@
  *     content larger than the preview box scrolls instead of overflowing.
  */
 
-import { useEffect, useState } from "react";
-import { Brain, ChevronRight, FileText, GitCommit, Loader2 } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
+import { Brain, Check, ChevronRight, Copy, FileText, GitCommit, Loader2 } from "lucide-react";
 import type { GitCommitDto } from "../../stores/gitStore";
 import type { MemoryNodeResponse } from "../../lib/types";
 import { useTranslation } from "../../i18n/useTranslation";
@@ -124,7 +124,7 @@ export function PreviewPane({ hit, tab, agentId, workspaceId, gitCommit }: Previ
     const { t } = useTranslation();
     if (!hit) {
         return (
-            <div className="flex flex-1 items-center justify-center px-6 py-6 text-xs text-text-tertiary">
+            <div className="flex flex-1 select-text items-center justify-center px-6 py-6 text-xs text-text-tertiary">
                 {t("globalSearch.previewPlaceholder")}
             </div>
         );
@@ -284,10 +284,23 @@ function FilePreview({ hit, agentId, workspaceId }: { hit: FileHit; agentId: str
     const end = Math.min(totalLines, matchedClamped + PREVIEW_CONTEXT_LINES);
     const width = String(end).length;
     const matchedOutOfRange = matchedClamped !== state.matchedLine;
+    // Reconstruct the rendered preview as plain text: "<line>: <content>"
+    // per row, matching the gutter + content columns the user sees on
+    // screen. Used by the header's Copy button.
+    const copyText = Array.from({ length: end - start + 1 }, (_, i) => {
+        const n = start + i;
+        const line = state.lines[n - 1] ?? "";
+        return `${String(n).padStart(width, " ")}: ${line}`;
+    }).join("\n");
 
     return (
-        <div className="flex h-full flex-col">
-            <PreviewHeader icon={FileText} title={hit.title} sub={`${hit.path}:${hit.line}`} />
+        <div className="flex h-full flex-col select-text">
+            <PreviewHeader
+                icon={FileText}
+                title={hit.title}
+                sub={`${hit.path}:${hit.line}`}
+                copyText={copyText}
+            />
             {matchedOutOfRange && (
                 <div className="border-b border-border-divider px-4 py-1.5 text-[10px] text-text-tertiary">
                     匹配行 {state.matchedLine} 已超出当前文件范围（{totalLines} 行），显示附近行
@@ -340,8 +353,13 @@ function GitPreview({ commit, fallback }: { commit?: GitCommitDto; fallback: Sea
         );
     }
     return (
-        <div className="flex h-full flex-col">
-            <PreviewHeader icon={GitCommit} title={commit.subject} sub={commit.shortHash} />
+        <div className="flex h-full flex-col select-text">
+            <PreviewHeader
+                icon={GitCommit}
+                title={commit.subject}
+                sub={commit.shortHash}
+                copyText={`${commit.subject}\n\nhash: ${commit.hash}\nauthor: ${commit.author}\ndate: ${commit.date}`}
+            />
             <div className="min-h-0 flex-1 overflow-auto px-4 py-3 text-xs">
                 <dl className="grid grid-cols-[5rem_1fr] gap-x-3 gap-y-1.5 text-xs">
                     <dt className="text-text-tertiary">hash</dt>
@@ -385,11 +403,20 @@ function ProjectPreview({ hit }: { hit: ProjectHit }) {
         return <PreviewLoading icon={FileText} label={hit.sub} />;
     }
     return (
-        <div className="flex h-full flex-col">
+        <div className="flex h-full flex-col select-text">
             <PreviewHeader
                 icon={FileText}
                 title={project.title}
                 sub={hit.taskId ? `task · ${hit.taskId}` : `project · ${project.id}`}
+                copyText={
+                    [
+                        `${project.title}\n`,
+                        project.description ?? "（无描述）",
+                        hit.taskId ? `关联任务:${hit.taskId}` : "",
+                    ]
+                        .filter(Boolean)
+                        .join("\n")
+                }
             />
             <div className="min-h-0 flex-1 overflow-auto px-4 py-3 text-xs">
                 {project.description ? (
@@ -462,11 +489,24 @@ function MemoryPreview({ hit, agentId }: { hit: MemoryHit; agentId: string }) {
         node.node_type === "Episodic" ? node.importance : node.confidence;
 
     return (
-        <div className="flex h-full flex-col">
+        <div className="flex h-full flex-col select-text">
             <PreviewHeader
                 icon={Brain}
                 title={node.node_type}
                 sub={node.sub_type ? `${node.sub_type} · #${node.node_id}` : `#${node.node_id}`}
+                copyText={
+                    [
+                        node.content,
+                        "",
+                        `status: ${node.status}`,
+                        `${confidenceLabel}: ${(confidenceValue * 100).toFixed(1)}%`,
+                        `accessed: ${node.access_count} · last ${
+                            node.last_accessed_at > 0
+                                ? new Date(node.last_accessed_at * 1000).toLocaleString()
+                                : "—"
+                        }`,
+                    ].join("\n")
+                }
             />
             <div className="min-h-0 flex-1 overflow-auto px-4 py-3 text-xs">
                 <p className="whitespace-pre-wrap text-text">{node.content}</p>
@@ -492,12 +532,68 @@ function MemoryPreview({ hit, agentId }: { hit: MemoryHit; agentId: string }) {
 
 /* ── Shared chrome ──────────────────────────────────────────────────── */
 
-function PreviewHeader({ icon: Icon, title, sub }: { icon: React.ElementType; title: string; sub: string }) {
+function PreviewHeader({
+    icon: Icon,
+    title,
+    sub,
+    copyText,
+}: {
+    icon: React.ElementType;
+    title: string;
+    sub: string;
+    /** Plain-text snapshot of the entire preview body. When provided,
+     *  a Copy button is rendered on the right side of the header that
+     *  writes this string to the clipboard (with a 2s "Copied" affordance).
+     *  The PreviewPane family follows the same pattern as DebugPanel's
+     *  snapshot-copy button. */
+    copyText?: string;
+}) {
+    const { t } = useTranslation();
+    const [copied, setCopied] = useState(false);
+    const handleCopy = useCallback(async () => {
+        if (!copyText) return;
+        try {
+            await navigator.clipboard.writeText(copyText);
+        } catch {
+            // Clipboard API can fail in some sandboxed contexts; fall back
+            // to the legacy textarea + execCommand path so the user still
+            // gets their text out (same fallback DebugPanel uses).
+            const ta = document.createElement("textarea");
+            ta.value = copyText;
+            document.body.appendChild(ta);
+            ta.select();
+            document.execCommand("copy");
+            document.body.removeChild(ta);
+        }
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2000);
+    }, [copyText]);
+
     return (
         <div className="flex shrink-0 items-center gap-2 border-b border-border-divider px-4 py-2">
             <Icon className="h-4 w-4 shrink-0 text-text-tertiary" />
             <span className="truncate text-xs font-medium text-text">{title}</span>
             <span className="truncate font-mono text-[10px] text-text-tertiary">{sub}</span>
+            {copyText !== undefined && (
+                <button
+                    type="button"
+                    onClick={handleCopy}
+                    aria-label={t("common.copy")}
+                    className="ml-auto inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-text-tertiary transition-colors hover:bg-zinc-100 dark:hover:bg-zinc-700/50"
+                >
+                    {copied ? (
+                        <>
+                            <Check className="h-3 w-3 text-emerald-600 dark:text-emerald-400" aria-hidden="true" />
+                            {t("common.copied")}
+                        </>
+                    ) : (
+                        <>
+                            <Copy className="h-3 w-3" aria-hidden="true" />
+                            {t("common.copy")}
+                        </>
+                    )}
+                </button>
+            )}
         </div>
     );
 }
@@ -525,9 +621,13 @@ function PreviewEmpty({
     snippet: string;
     footer?: string;
 }) {
+    // Mirror the visible body: the <pre> snippet is what the user sees,
+    // footer is a one-liner below. Concatenating the two preserves the
+    // "copy what you see" guarantee.
+    const copyText = [snippet, footer].filter(Boolean).join("\n\n") || snippet;
     return (
-        <div className="flex h-full flex-col">
-            <PreviewHeader icon={Icon} title={title} sub={sub} />
+        <div className="flex h-full flex-col select-text">
+            <PreviewHeader icon={Icon} title={title} sub={sub} copyText={copyText} />
             <div className="min-h-0 flex-1 overflow-auto px-4 py-3">
                 {snippet ? (
                     <pre className="m-0 whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-text-secondary">

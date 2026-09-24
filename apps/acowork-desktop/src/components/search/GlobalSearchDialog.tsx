@@ -896,7 +896,7 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
                                         e.stopPropagation();
                                         activate(i);
                                     }}
-                                    className={`flex cursor-pointer items-center gap-2 px-3 py-1.5 text-xs ${
+                                    className={`flex cursor-pointer items-center gap-2 border-t border-border-divider px-3 py-1.5 text-xs first:border-t-0 ${
                                         i === focusedIdx
                                             ? "bg-zinc-100 text-text dark:bg-zinc-700/60"
                                             : "text-text-secondary hover:bg-zinc-50 dark:hover:bg-zinc-700/40"
