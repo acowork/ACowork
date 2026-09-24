@@ -154,7 +154,7 @@ export function ServicesPanel() {
           type="button"
           onClick={() => void diagnose()}
           disabled={loading}
-          className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border border-zinc-300 px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-600  dark:hover:bg-zinc-700"
+          className="btn-solid inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-3 py-1.5 text-xs font-medium disabled:opacity-50"
           aria-label={t("settings.services.diagnose")}
         >
           {loading ? (
@@ -270,7 +270,7 @@ function ServiceRow({
         type="button"
         onClick={onRetry}
         disabled={isProbing}
-        className="ml-auto inline-flex items-center gap-1 rounded border border-zinc-300 px-2 py-0.5 text-[11px] font-medium text-text-secondary hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-600  dark:hover:bg-zinc-700"
+        className="btn-solid ml-auto inline-flex items-center gap-1 rounded px-2 py-0.5 text-[11px] font-medium disabled:opacity-50"
         aria-label={t("settings.services.retry", { name: t(NAME_KEY[type]) })}
       >
         {isProbing ? (

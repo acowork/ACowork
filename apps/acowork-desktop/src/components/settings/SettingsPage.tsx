@@ -312,7 +312,7 @@ function GatewayTab() {
                 <button
                   onClick={handleStopLocal}
                   disabled={stopping}
-                  className="rounded-md border border-zinc-300 px-3 py-[var(--ui-btn-py)] text-xs font-medium text-text-secondary hover:bg-zinc-50 dark:border-zinc-600  dark:hover:bg-zinc-700 disabled:opacity-50"
+                  className="rounded btn-solid px-3 py-[var(--ui-btn-py)] text-xs font-medium disabled:opacity-50"
                 >
                   {stopping ? t("settings.stopping") : t("settings.stop")}
                 </button>
@@ -354,7 +354,7 @@ function GatewayTab() {
                 {urlDraft !== gatewayUrl && (
                   <button
                     onClick={handleUrlSave}
-                    className="rounded-md px-3 py-[var(--ui-btn-py)] text-xs font-medium text-white hover:opacity-90" style={{ backgroundColor: "var(--color-accent)" }}
+                    className="btn-accent rounded-md px-3 py-[var(--ui-btn-py)] text-xs font-medium"
                   >
                     {t("settings.apply")}
                   </button>
@@ -1052,7 +1052,7 @@ function GeneralTab() {
               <div className="flex justify-end gap-2">
                 <button
                   onClick={() => setShowDeleteConfirm(false)}
-                  className="rounded-md px-3 py-[var(--ui-btn-py)] text-xs font-medium text-text-secondary hover:bg-zinc-100  dark:hover:bg-zinc-700"
+                  className="btn-solid rounded-md px-3 py-[var(--ui-btn-py)] text-xs font-medium"
                 >
                   {t("common.cancel")}
                 </button>
