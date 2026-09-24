@@ -48,7 +48,13 @@ use acowork_memory::{
     AutobioCategory, AutobiographicalNode, Episode, KnowledgeNode, NodeStatus, ProceduralNode,
 };
 
-pub use schema::SCHEMA_SQL;
+pub use schema::{SCHEMA_SQL, SCHEMA_VERSION};
+
+/// Convenience alias for callers that want the active number without a
+/// `schema::` import path.
+pub fn schema_version() -> i64 {
+    SCHEMA_VERSION
+}
 
 /// Error type for the SQLite backend.
 #[derive(Debug, thiserror::Error)]
@@ -134,8 +140,48 @@ impl SqliteStore {
         Self::from_connection(conn, embedding_dim)
     }
 
-    fn from_connection(conn: Connection, embedding_dim: usize) -> Result<Self> {
+    /// Open (or create) the store at `path` **without recording an
+    /// embedding dimension**.
+    ///
+    /// For subsystems that share the workspace `.sqlite` file but never
+    /// touch `vectors` — session meta (ADR-082 §4 step 3), the conversation
+    /// index. Opening such a file before the memory backend does must not
+    /// mint an `embedding_dim`: the memory backend is the owner of that
+    /// value, and a guessed dimension recorded here would be adopted by the
+    /// later `open` (see [`Self::open`]) and silently break vector search.
+    /// Reads the stored dimension when present, otherwise falls back to
+    /// [`acowork_memory::types::DEFAULT_EMBEDDING_DIM`]; never writes it.
+    pub fn open_dim_agnostic(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut conn = Connection::open(path)?;
         conn.execute_batch(SCHEMA_SQL)?;
+        schema::apply_migrations(&mut conn)?;
+        let stored: Option<String> = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'embedding_dim'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let embedding_dim = stored
+            .as_deref()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(acowork_memory::types::DEFAULT_EMBEDDING_DIM);
+        Ok(Self {
+            conn: Mutex::new(conn),
+            embedding_dim: AtomicUsize::new(embedding_dim),
+            quality: RwLock::new(MemoryQualityConfig::default()),
+        })
+    }
+
+    fn from_connection(mut conn: Connection, embedding_dim: usize) -> Result<Self> {
+        conn.execute_batch(SCHEMA_SQL)?;
+        schema::apply_migrations(&mut conn)?;
         // The database remembers its own dimension: a caller that opens an
         // existing store with a stale dimension must not be believed.
         let stored: Option<String> = conn

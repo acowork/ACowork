@@ -927,9 +927,10 @@ struct ListSessionsQuery {
 
 /// `GET /sessions` — full session list.
 ///
-/// Reads per-session meta files under `workspace/conversations/meta/`
-/// (the authoritative source per ADR-024). Supports `page` / `size`
-/// pagination; results are returned sorted by `last_active_at` descending.
+/// Reads the session-meta store (ADR-082 §4 step 3: SQLite; the legacy
+/// per-session meta files under `workspace/conversations/meta/` are gone).
+/// Supports `page` / `size` pagination; results are returned sorted by
+/// `last_active_at` descending.
 ///
 /// ADR-028 / ADR-066 (regression t-83afab47): the response top level
 /// NO LONGER carries `agent_total_*` fields — those live exclusively
@@ -4199,10 +4200,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&temp_dir);
         std::fs::create_dir_all(&temp_dir).unwrap();
 
-        // ADR-024: New session storage format:
-        //   - conversations/meta/{sid}.json — SessionMeta (one file per session)
-        //   - conversations/{sid}.jsonl     — pure ConversationEntry lines, no header
+        // ADR-082 §4 step 3: session storage format:
+        //   - session-meta store (SQLite) — SessionMeta (one row per session)
+        //   - conversations/{sid}.jsonl   — pure ConversationEntry lines, no header
         let conversations_dir = temp_dir.join("conversations");
+        std::fs::create_dir_all(&conversations_dir).unwrap();
         let session_id = "20260101_120000_abc";
 
         // Persist SessionMeta via the conversation module API so the
@@ -7668,17 +7670,15 @@ mod tests {
         assert_eq!(body["provider"], "openai");
         assert!((body["temperature"].as_f64().unwrap() - 0.7).abs() < 0.01);
 
-        // 6. Verify meta.json on disk has all persisted values
-        let meta_path = temp_dir
-            .join("conversations")
-            .join("meta")
-            .join(format!("{}.json", session_id));
-        assert!(meta_path.exists(), "meta.json must exist after PUT");
-        let meta: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&meta_path).unwrap()).unwrap();
-        assert_eq!(meta["model"], "gpt-4o");
-        assert_eq!(meta["provider"], "openai");
-        assert!((meta["temperature"].as_f64().unwrap() - 0.7).abs() < 0.01);
+        // 6. Verify the persisted meta row has all values
+        let meta = crate::conversation::read_session_meta(
+            &temp_dir.join("conversations"),
+            session_id,
+        )
+        .expect("meta row must exist after PUT");
+        assert_eq!(meta.model.as_deref(), Some("gpt-4o"));
+        assert_eq!(meta.provider.as_deref(), Some("openai"));
+        assert!((meta.temperature.unwrap() - 0.7).abs() < 0.01);
 
         std::fs::remove_dir_all(&temp_dir).ok();
     }
@@ -7868,8 +7868,6 @@ mod tests {
 
         // Create a session with model set in meta
         use crate::conversation::{SessionMeta, write_session_meta};
-        let meta_dir = temp_dir.join("conversations").join("meta");
-        std::fs::create_dir_all(&meta_dir).unwrap();
         let meta = SessionMeta {
             version: 3, // CONVERSATION_FORMAT_VERSION
             session_id: session_id.to_string(),

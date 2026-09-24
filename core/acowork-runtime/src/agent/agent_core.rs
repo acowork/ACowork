@@ -20,7 +20,6 @@ use acowork_core::providers::traits::{Provider, UsageInfo};
 use acowork_core::rag::RagProvider;
 use acowork_core::tools::traits::Tool;
 use acowork_memory::MemoryProvider;
-use acowork_memory::SessionMetaStore;
 use acowork_memory::admin::MemoryAdminService;
 use acowork_memory::consolidation::SchedulerConfig;
 use acowork_memory::types::EpisodicDecayConfig;
@@ -1193,30 +1192,14 @@ impl AgentCore {
         work_dir: &std::path::Path,
     ) {
         let sm_store = std::sync::Arc::new(acowork_sqlite::SqliteSessionMetaStore::new(store));
-        let meta_dir = work_dir.join("conversations").join("meta");
-        match sm_store.import_from_json(&meta_dir) {
-            Ok(report) if report.imported > 0 => tracing::info!(
-                imported = report.imported,
-                parse_failures = report.parse_failures,
-                storage_failures = report.storage_failures,
-                dir = %meta_dir.display(),
-                "session meta: imported legacy JSON sidecars into SQLite"
-            ),
-            Ok(report) if report.skipped_target_non_empty => tracing::debug!(
-                dir = %meta_dir.display(),
-                "session meta: SQLite table already populated, skipping import"
-            ),
-            Ok(_) => tracing::debug!(
-                dir = %meta_dir.display(),
-                "session meta: no legacy JSON sidecars to import"
-            ),
-            Err(e) => tracing::warn!(
-                error = %e,
-                dir = %meta_dir.display(),
-                "session meta: import failed; SQLite table may be incomplete"
-            ),
-        }
-        crate::conversation::install_session_meta_backend(sm_store);
+        crate::conversation::import_legacy_session_meta(
+            sm_store.as_ref(),
+            &work_dir.join("conversations"),
+        );
+        crate::conversation::install_session_meta_backend(
+            &work_dir.join("conversations"),
+            sm_store,
+        );
     }
 
     /// Expected embedding width, warning when the provider is unavailable.

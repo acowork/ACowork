@@ -9,6 +9,9 @@
 //! substrings instead of collapsing into one token under `unicode61`.
 //!
 //! The DDL is idempotent: opening an existing database re-runs it harmlessly.
+//! `user_version` is the schema-version gate; every open runs
+//! [`apply_migrations`] which only executes the steps whose target version
+//! is strictly greater than the stored one.
 
 use acowork_memory::labels;
 
@@ -17,6 +20,8 @@ pub const SCHEMA_SQL: &str = r#"
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
 PRAGMA synchronous = NORMAL;
+-- `user_version` is stamped by `apply_migrations` after every step has run,
+-- NOT by this string — see `apply_migrations`.
 
 CREATE TABLE IF NOT EXISTS nodes (
     id         INTEGER PRIMARY KEY,
@@ -86,6 +91,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     token_last_cache_write INTEGER NOT NULL DEFAULT 0,
     token_total_cache_read INTEGER NOT NULL DEFAULT 0,
     token_total_cache_write INTEGER NOT NULL DEFAULT 0
+    -- Columns added by post-base-schema migrations live in `MIGRATIONS`,
+    -- never here. Bumping `SCHEMA_VERSION` means adding a step there.
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_last_active ON sessions(last_active_at DESC);
 CREATE VIRTUAL TABLE IF NOT EXISTS fts_sessions USING fts5(
@@ -112,6 +119,61 @@ CREATE TABLE IF NOT EXISTS purge_log (
 );
 CREATE INDEX IF NOT EXISTS idx_purge_log_purged_at ON purge_log(purged_at);
 "#;
+
+/// Current SQLite schema version (ADR-082 §4).
+///
+/// Bump this every time [`MIGRATIONS`] gains an entry; the upgrade is keyed
+/// strictly off `PRAGMA user_version`, so the new migration must use the
+/// next monotonic version (see [`MIGRATIONS`] for the format).
+pub const SCHEMA_VERSION: i64 = 1;
+
+/// Versioned upgrade steps, ordered.
+///
+/// Each tuple is `(target_version, sql)`. The migration runs against any
+/// database whose stored `PRAGMA user_version` is `< target_version`, in
+/// ascending order, until the stored version equals [`SCHEMA_VERSION`]. This
+/// is the SQLite-idiomatic shape: `user_version` is the upgrade key, each
+/// step is a normal forward SQL.
+///
+/// ponytail: idempotency belongs inside the SQL itself. SQLite has no
+/// `ALTER TABLE ADD COLUMN IF NOT EXISTS`, so a step that adds a column
+/// guards with `WHERE NOT EXISTS (... pragma_table_info ...)`. The same
+/// step is then a no-op against a fresh database (which got the column
+/// from [`SCHEMA_SQL`]) and a real change against an older one (which did
+/// not). [`SCHEMA_SQL`] does not stamp `user_version`; that stamp is the
+/// last statement of the migration transaction.
+const MIGRATIONS: &[(i64, &str)] = &[(
+    1,
+    "ALTER TABLE sessions ADD COLUMN version INTEGER NOT NULL DEFAULT 3; \
+     ALTER TABLE sessions ADD COLUMN corrupted INTEGER NOT NULL DEFAULT 0;",
+)];
+
+/// Apply every [`MIGRATIONS`] step whose target version is strictly greater
+/// than the database's current `PRAGMA user_version`. Safe to call on every
+/// open — a database already at [`SCHEMA_VERSION`] is a no-op (no
+/// transaction opened, no statement executed). All work runs in a single
+/// transaction so a crash mid-upgrade leaves the database at its previous
+/// version, never half-migrated.
+///
+/// Stamp: `PRAGMA user_version = SCHEMA_VERSION` is the last statement of
+/// the transaction. This is the only path that writes `user_version`; the
+/// DDL string and the open code never touch it.
+pub(crate) fn apply_migrations(conn: &mut rusqlite::Connection) -> rusqlite::Result<()> {
+    let stored: i64 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+        .unwrap_or(0);
+    if stored >= SCHEMA_VERSION {
+        return Ok(());
+    }
+    let tx = conn.transaction()?;
+    for (target, sql) in MIGRATIONS {
+        if stored < *target {
+            tx.execute_batch(sql)?;
+        }
+    }
+    tx.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))?;
+    tx.commit()
+}
 
 /// Map a node label to its FTS5 table name.
 ///

@@ -3,9 +3,9 @@
 //! installed, after a one-shot import of the legacy JSON side-car.
 //!
 //! Lives in its own integration-test binary because
-//! `conversation::install_session_meta_backend` is a process-wide `OnceLock`
-//! — a second install in the same process is ignored, so sharing a binary
-//! with other session-meta tests would make them order-dependent.
+//! `conversation::install_session_meta_backend` registers a process-wide store
+//! keyed by the workspace `.sqlite` path — another test in the same binary
+//! sharing that path would alias it.
 
 use std::sync::Arc;
 
@@ -15,7 +15,8 @@ use acowork_memory::session_meta::SessionMeta;
 use acowork_sqlite::{SqliteSessionMetaStore, SqliteStore};
 
 use acowork_runtime::conversation::{
-    install_session_meta_backend, read_session_meta, scan_sessions_from_meta, write_session_meta,
+    delete_session_meta, find_latest_session, install_session_meta_backend, read_session_meta,
+    scan_sessions_from_meta, session_meta_exists, write_session_meta,
 };
 
 const DIM: usize = 8;
@@ -80,7 +81,7 @@ fn legacy_json_sidecars_import_then_serve_from_sqlite() -> Result<(), AcoworkErr
     let report = sm.import_from_json(&meta_dir)?;
     assert_eq!(report.imported, 2, "both sidecars imported");
 
-    install_session_meta_backend(sm.clone());
+    install_session_meta_backend(&ws.path().join("conversations"), sm.clone());
 
     // Reads now come from SQLite.
     let got = read_session_meta(&ws.path().join("conversations"), "s1").unwrap();
@@ -110,5 +111,65 @@ fn legacy_json_sidecars_import_then_serve_from_sqlite() -> Result<(), AcoworkErr
     let again = sm.import_from_json(&meta_dir)?;
     assert_eq!(again.imported, 0);
     assert!(again.skipped_target_non_empty);
+
+    // ── Lifecycle probe + delete (ADR-082 §4 step 3 regression) ──────────
+    //
+    // `session_meta_exists` is what `get_lifecycle_state` / `open` consult.
+    // A session that lives only in SQLite (no JSON sidecar) must report as
+    // present — probing the legacy sidecar path reported the live session
+    // `s3` as `NotFound`, which is the bug this test locks down.
+    let conv_dir = ws.path().join("conversations");
+    assert!(
+        session_meta_exists(&conv_dir, "s3"),
+        "sqlite-backed session must be visible to the lifecycle probe"
+    );
+    assert!(
+        !meta_dir.join("s3.json").exists(),
+        "precondition: s3 has no JSON sidecar"
+    );
+    assert!(!session_meta_exists(&conv_dir, "does-not-exist"));
+
+    // Delete drops the row, so the probe flips to absent, reads fail, and
+    // the session leaves the list — i.e. it stays out of `/sessions`.
+    delete_session_meta(&conv_dir, "s3").unwrap();
+    assert!(!session_meta_exists(&conv_dir, "s3"));
+    assert!(read_session_meta(&conv_dir, "s3").is_err());
+    assert_eq!(scan_sessions_from_meta(&conv_dir).len(), 2);
+    // Idempotent: deleting an absent session is a no-op, not an error.
+    delete_session_meta(&conv_dir, "s3").unwrap();
+    Ok(())
+}
+
+/// The bootstrap has to be reachable *before* `install_session_meta_backend`:
+/// `find_latest_session` runs during session_init, ahead of the memory backend.
+/// On a pre-migration install the SQLite file does not exist yet, so the first
+/// read must import the legacy sidecars itself — otherwise the runtime reports
+/// "no sessions" on the one boot that matters.
+#[test]
+fn on_demand_open_imports_legacy_sidecars_before_install() -> Result<(), AcoworkError> {
+    let ws = tempfile::tempdir().unwrap();
+    let meta_dir = ws.path().join("conversations").join("meta");
+    std::fs::create_dir_all(&meta_dir).unwrap();
+    for (sid, stamp) in [
+        ("old1", "2025-01-01T00:00:00.000Z"),
+        ("old2", "2025-03-01T00:00:00.000Z"),
+    ] {
+        std::fs::write(
+            meta_dir.join(format!("{sid}.json")),
+            serde_json::to_string(&make_meta(sid, stamp, sid)).unwrap(),
+        )
+        .unwrap();
+    }
+
+    // No install anywhere in this test: this is the process's first
+    // session-meta touch, as it is at runtime before memory init.
+    let conv_dir = ws.path().join("conversations");
+    assert_eq!(
+        find_latest_session(&conv_dir).as_deref(),
+        Some("old2"),
+        "legacy sidecars must be importable before the backend is installed"
+    );
+    assert_eq!(scan_sessions_from_meta(&conv_dir).len(), 2);
+    assert!(session_meta_exists(&conv_dir, "old1"));
     Ok(())
 }

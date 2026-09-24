@@ -7,10 +7,11 @@
 //! 2. `list_recent` orders by `last_active_at` descending and respects `limit`.
 //! 3. `search` matches `title` / `agent_id` / `workspace_id` and falls back
 //!    to `list_recent` on empty query.
-//! 4. `prune_to` deletes the right rows and reports the deleted ids.
-//! 5. `list_with_totals` returns correct aggregates across many rows.
-//! 6. `import_from_json` is idempotent and leaves source files alone.
-//! 7. The SQLite store keeps memory + conversation index + session meta in
+//! 4. `delete` removes one row (and its FTS entry) and is idempotent.
+//! 5. `prune_to` deletes the right rows and reports the deleted ids.
+//! 6. `list_with_totals` returns correct aggregates across many rows.
+//! 7. `import_from_json` is idempotent and leaves source files alone.
+//! 8. The SQLite store keeps memory + conversation index + session meta in
 //!    the same `.sqlite` file (the user's "one file" requirement).
 
 use std::path::PathBuf;
@@ -18,8 +19,7 @@ use std::sync::Arc;
 
 use acowork_core::error::Result as AcoworkResult;
 use acowork_memory::session_meta::{
-    JsonSessionMetaStore, SessionImportReport, SessionMeta, SessionMetaStore,
-    last_active_at_ms,
+    SessionImportReport, SessionMeta, SessionMetaStore, last_active_at_ms,
 };
 use acowork_memory::{SessionTokens, TodoItem, TodoStatus};
 use acowork_sqlite::{SqliteSessionMetaStore, SqliteStore};
@@ -115,6 +115,38 @@ fn get_missing_returns_none() -> AcoworkResult<()> {
     let path = dir.path().join("store.sqlite");
     let (_store, sm) = open_pair(&path);
     assert!(sm.get("never-existed")?.is_none());
+    Ok(())
+}
+
+#[test]
+fn delete_removes_row_and_is_idempotent() -> AcoworkResult<()> {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.sqlite");
+    let (_store, sm) = open_pair(&path);
+    sm.upsert(&make_meta("keep", "2026-01-01T00:00:00.000Z", Some("keep"), "agent"))?;
+    sm.upsert(&make_meta("gone", "2026-02-01T00:00:00.000Z", Some("gone"), "agent"))?;
+
+    sm.delete("gone")?;
+    assert!(sm.get("gone")?.is_none(), "deleted row must be gone");
+    assert!(sm.get("keep")?.is_some(), "sibling row untouched");
+
+    // Both `sessions` and `fts_sessions` must be cleared — a stale
+    // `fts_sessions` row would keep the deleted title alive.
+    let conn = rusqlite::Connection::open(&path)
+        .map_err(|e| acowork_core::error::AcoworkError::Memory(format!("sqlite: {e}")))?;
+    for table in ["sessions", "fts_sessions"] {
+        let n: i64 = conn
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {table} WHERE session_id = 'gone'"),
+                [],
+                |r| r.get(0),
+            )
+            .map_err(|e| acowork_core::error::AcoworkError::Memory(format!("sqlite: {e}")))?;
+        assert_eq!(n, 0, "{table} must not retain the deleted session");
+    }
+
+    // Idempotent: deleting an already-absent session is a no-op.
+    sm.delete("gone")?;
     Ok(())
 }
 
@@ -303,29 +335,29 @@ fn import_from_json_returns_zero_when_source_absent() -> AcoworkResult<()> {
 }
 
 #[test]
-fn json_and_sqlite_round_trip_to_the_same_meta() -> AcoworkResult<()> {
+fn json_import_round_trips_to_the_same_meta() -> AcoworkResult<()> {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.sqlite");
     let (_store, sqlite_sm) = open_pair(&path);
 
-    // JSON backend writes a file, SQLite backend reads it via import.
-    let json_store = JsonSessionMetaStore::new(dir.path().join("conv").to_path_buf());
-    let meta = make_meta("x", "2026-04-05T06:07:08.090Z", Some("from json"), "agent");
-    json_store.upsert(&meta)?;
-
+    // Seed a legacy `meta/{id}.json` sidecar by hand — the pre-migration
+    // format `import_from_json` reads exactly once.
     let meta_dir = dir.path().join("conv").join("meta");
+    std::fs::create_dir_all(&meta_dir).unwrap();
+    let meta = make_meta("x", "2026-04-05T06:07:08.090Z", Some("from json"), "agent");
+    std::fs::write(meta_dir.join("x.json"), serde_json::to_vec(&meta).unwrap()).unwrap();
+
     let report = sqlite_sm.import_from_json(&meta_dir)?;
     assert_eq!(report.imported, 1);
 
-    let json_meta = json_store.get("x")?.expect("json row");
     let sqlite_meta = sqlite_sm.get("x")?.expect("sqlite row");
 
     // Same field-for-field after the import.
-    assert_eq!(json_meta.title, sqlite_meta.title);
-    assert_eq!(json_meta.model, sqlite_meta.model);
-    assert_eq!(json_meta.temperature, sqlite_meta.temperature);
+    assert_eq!(meta.title, sqlite_meta.title);
+    assert_eq!(meta.model, sqlite_meta.model);
+    assert_eq!(meta.temperature, sqlite_meta.temperature);
     assert_eq!(
-        json_meta.tokens.as_ref().map(|t| t.total_input),
+        meta.tokens.as_ref().map(|t| t.total_input),
         sqlite_meta.tokens.as_ref().map(|t| t.total_input),
     );
     Ok(())
@@ -365,6 +397,138 @@ fn sessions_table_cohabits_with_memory_and_conversation_index() -> AcoworkResult
     let meta = sm.get("demo")?.expect("session meta row present");
     let ms = last_active_at_ms(&meta);
     assert!(ms > 0);
+    Ok(())
+}
+
+/// `version` and `corrupted` used to be dropped on write (hardcoded to `4` /
+/// `false` on read), so a corrupted session came back healthy.
+#[test]
+fn version_and_corrupted_round_trip() -> AcoworkResult<()> {
+    let dir = tempfile::tempdir().unwrap();
+    let (_store, sm) = open_pair(&dir.path().join("store.sqlite"));
+
+    let mut meta = make_meta("c", "2026-01-01T00:00:00.000Z", None, "agent");
+    meta.version = 7;
+    meta.corrupted = true;
+    sm.upsert(&meta)?;
+
+    let back = sm.get("c")?.expect("row");
+    assert_eq!(back.version, 7);
+    assert!(back.corrupted);
+    Ok(())
+}
+
+/// A pre-v1 `sessions` table (no `version` / `corrupted` columns) is upgraded
+/// in place by the v1 migration: DDL skips the existing table, the migration
+/// adds the columns, the row survives, and `PRAGMA user_version` is stamped
+/// to the current schema version in a single transaction. Reopening the
+/// store must be a no-op (no extra statements, no file mtime change).
+#[test]
+fn migrations_run_in_order_and_stop_at_stored_version() -> AcoworkResult<()> {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.sqlite");
+
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sessions (
+                session_id              TEXT PRIMARY KEY,
+                agent_id                TEXT NOT NULL,
+                created_at              INTEGER NOT NULL,
+                last_active_at          INTEGER NOT NULL,
+                title                   TEXT,
+                workspace_id            TEXT,
+                model                   TEXT,
+                provider                TEXT,
+                account_id              TEXT,
+                reasoning_effort        TEXT,
+                temperature             REAL,
+                context_window          INTEGER,
+                todos                   JSON,
+                message_count           INTEGER NOT NULL DEFAULT 0,
+                llm_call_counter        INTEGER,
+                model_ratio             REAL,
+                last_compaction_offset  INTEGER,
+                token_last_input        INTEGER NOT NULL DEFAULT 0,
+                token_last_output       INTEGER NOT NULL DEFAULT 0,
+                token_total_input       INTEGER NOT NULL DEFAULT 0,
+                token_total_output      INTEGER NOT NULL DEFAULT 0,
+                token_last_cache_read   INTEGER NOT NULL DEFAULT 0,
+                token_last_cache_write  INTEGER NOT NULL DEFAULT 0,
+                token_total_cache_read  INTEGER NOT NULL DEFAULT 0,
+                token_total_cache_write INTEGER NOT NULL DEFAULT 0
+            );
+            INSERT INTO sessions(session_id, agent_id, created_at, last_active_at, title)
+            VALUES ('old', 'agent', 0, 0, 'legacy');",
+        )
+        .unwrap();
+    }
+
+    let (_store, sm) = open_pair(&path);
+
+    // v1 migration added the two columns and stamped the version.
+    let cols: Vec<String> = rusqlite::Connection::open(&path)
+        .map_err(|e| acowork_core::error::AcoworkError::Memory(format!("sqlite: {e}")))?
+        .prepare("SELECT name FROM pragma_table_info('sessions')")
+        .map_err(|e| acowork_core::error::AcoworkError::Memory(format!("sqlite: {e}")))?
+        .query_map([], |r| r.get::<_, String>(0))
+        .map_err(|e| acowork_core::error::AcoworkError::Memory(format!("sqlite: {e}")))?
+        .filter_map(|r| r.ok())
+        .collect();
+    assert!(cols.iter().any(|c| c == "version"), "v1 added `version`");
+    assert!(cols.iter().any(|c| c == "corrupted"), "v1 added `corrupted`");
+
+    let v: i64 = rusqlite::Connection::open(&path)
+        .map_err(|e| acowork_core::error::AcoworkError::Memory(format!("sqlite: {e}")))?
+        .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+        .map_err(|e| acowork_core::error::AcoworkError::Memory(format!("sqlite: {e}")))?;
+    assert_eq!(v, acowork_sqlite::schema_version());
+
+    // Legacy row survives with DDL defaults.
+    let row = sm.get("old")?.expect("legacy row survives");
+    assert_eq!(row.title.as_deref(), Some("legacy"));
+    assert_eq!(row.version, 3);
+    assert!(!row.corrupted);
+
+    // Reopen is a no-op: file mtime unchanged (no transaction, no rewrite).
+    let mtime_before = std::fs::metadata(&path).unwrap().modified().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let _ = open_pair(&path);
+    let mtime_after = std::fs::metadata(&path).unwrap().modified().unwrap();
+    assert_eq!(
+        mtime_before, mtime_after,
+        "reopening an up-to-date store must not rewrite the file"
+    );
+    Ok(())
+}
+
+
+/// Fresh databases must record the schema version so external tooling can
+/// tell which schema it is looking at, and older databases must be upgraded
+/// to it. Reopening a store whose stored version already matches must be a
+/// no-op (no extra PRAGMA, no row churn).
+#[test]
+fn user_version_is_stamped_on_open_and_is_idempotent() -> AcoworkResult<()> {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.sqlite");
+
+    // First open on a fresh file.
+    let (store, _sm) = open_pair(&path);
+    let v1: i64 = rusqlite::Connection::open(&path)
+        .map_err(|e| acowork_core::error::AcoworkError::Memory(format!("sqlite: {e}")))?
+        .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+        .map_err(|e| acowork_core::error::AcoworkError::Memory(format!("sqlite: {e}")))?;
+    assert_eq!(v1, acowork_sqlite::schema_version());
+    drop(store);
+
+    // Reopen: the stored version already matches, so opening must not touch
+    // anything. We assert that by checking `sessions` row count is unchanged.
+    let _ = open_pair(&path);
+    let row_count: i64 = rusqlite::Connection::open(&path)
+        .map_err(|e| acowork_core::error::AcoworkError::Memory(format!("sqlite: {e}")))?
+        .query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get::<_, i64>(0))
+        .map_err(|e| acowork_core::error::AcoworkError::Memory(format!("sqlite: {e}")))?;
+    assert_eq!(row_count, 0, "reopen must not synthesize rows");
     Ok(())
 }
 

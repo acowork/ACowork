@@ -132,9 +132,9 @@ fn git_scope_hits(commits: Vec<crate::usecases::git_query::GitCommitDto>, q: &st
 
 /// Map `ConversationIndex::search` hits to aggregate `SearchHit`s.
 /// Each hit becomes one row; the displayed title is the session title
-/// from `conversations/meta/{session_id}.json` when one exists, falling
-/// back to the raw session id. The payload always carries the raw
-/// `session_id` + `#message_index` for locate (ADR-081 §4.2).
+/// from the session-meta store (ADR-082 §4 step 3: SQLite) when one
+/// exists, falling back to the raw session id. The payload always carries
+/// the raw `session_id` + `#message_index` for locate (ADR-081 §4.2).
 fn conversation_hits_to_search_hits(
     hits: Vec<crate::conversation_index::ConversationHit>,
     titles: &std::collections::HashMap<String, Option<String>>,
@@ -160,9 +160,9 @@ fn conversation_hits_to_search_hits(
         .collect()
 }
 
-/// Resolve `session_id → title` from `conversations/meta/*.json`
-/// (blocking disk reads off the async runtime). Missing/unparseable
-/// meta files map to `None` — the caller falls back to the raw id.
+/// Resolve `session_id → title` from the session-meta store (ADR-082 §4
+/// step 3: SQLite; blocking reads off the async runtime). Missing rows map
+/// to `None` — the caller falls back to the raw id.
 async fn resolve_session_titles(
     conversations_dir: &std::path::Path,
     session_ids: &[String],

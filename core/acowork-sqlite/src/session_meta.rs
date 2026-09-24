@@ -26,9 +26,8 @@
 //!
 //! `import_from_json` is *additive*. It writes only into the `sessions`
 //! table, never deletes a source file, and gates on a row-count probe so
-//! re-runs are no-ops. The matching
-//! [`acowork_memory::JsonSessionMetaStore::import_from_json`] semantics
-//! apply (per-file try → upsert → count).
+//! re-runs are no-ops. Semantics: per-file try → upsert → count, so one
+//! malformed sidecar never aborts the import.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -73,6 +72,9 @@ fn row_to_meta(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionMeta> {
     let last_ms: i64 = row.get("last_active_at")?;
     let created_at = ms_to_rfc3339(created_ms);
     let last_active_at = ms_to_rfc3339(last_ms);
+
+    let version: i64 = row.get("version")?;
+    let corrupted: i64 = row.get("corrupted")?;
 
     let title: Option<String> = row.get("title")?;
     let workspace_id: Option<String> = row.get("workspace_id")?;
@@ -126,7 +128,7 @@ fn row_to_meta(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionMeta> {
     };
 
     Ok(SessionMeta {
-        version: 4,
+        version: version.max(0) as u32,
         session_id: row.get("session_id")?,
         agent_id: row.get("agent_id")?,
         created_at,
@@ -145,7 +147,7 @@ fn row_to_meta(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionMeta> {
         llm_call_counter: llm_call_counter.map(|c| c.max(0) as u32),
         model_ratio,
         last_compaction_offset: last_compaction_offset.map(|o| o.max(0) as u64),
-        corrupted: false,
+        corrupted: corrupted != 0,
     })
 }
 
@@ -194,6 +196,22 @@ impl SessionMetaStore for SqliteSessionMetaStore {
                     meta.agent_id,
                     meta.workspace_id.as_deref().unwrap_or(""),
                 ],
+            )?;
+            Ok(())
+        })();
+        result.map_err(to_acowork)
+    }
+
+    fn delete(&self, session_id: &str) -> AcoworkResult<()> {
+        let conn = self.store.lock();
+        let result: SqliteResult<()> = (|| {
+            conn.execute(
+                "DELETE FROM sessions WHERE session_id = ?1",
+                params![session_id],
+            )?;
+            conn.execute(
+                "DELETE FROM fts_sessions WHERE session_id = ?1",
+                params![session_id],
             )?;
             Ok(())
         })();
@@ -411,6 +429,7 @@ impl SessionMetaStore for SqliteSessionMetaStore {
 
 const SELECT_ALL_COLUMNS: &str = "SELECT \
     session_id, agent_id, created_at, last_active_at, \
+    version, corrupted, \
     title, workspace_id, model, provider, account_id, reasoning_effort, \
     temperature, context_window, todos, message_count, \
     llm_call_counter, model_ratio, last_compaction_offset, \
@@ -420,12 +439,24 @@ FROM sessions WHERE session_id = ?1";
 
 const SELECT_ALL_COLUMNS_PREFIX: &str = "SELECT \
     session_id, agent_id, created_at, last_active_at, \
+    version, corrupted, \
     title, workspace_id, model, provider, account_id, reasoning_effort, \
     temperature, context_window, todos, message_count, \
     llm_call_counter, model_ratio, last_compaction_offset, \
     token_last_input, token_last_output, token_total_input, token_total_output, \
     token_last_cache_read, token_last_cache_write, token_total_cache_read, token_total_cache_write \
 FROM sessions";
+
+/// Clamp a `u64` token counter into SQLite's `i64` column.
+///
+/// ponytail: the `sessions` token columns are `INTEGER` (i64), so a counter
+/// above `i64::MAX` would wrap negative through `as i64` and then be clamped to
+/// 0 on read — silent data loss. Saturating at the storage ceiling keeps the
+/// value monotone instead. Ceiling: ~9.2e18 tokens; the upgrade path is a
+/// `TEXT` column, not worth it for counters that move in the thousands.
+fn token_to_i64(v: u64) -> i64 {
+    v.min(i64::MAX as u64) as i64
+}
 
 fn upsert_row(
     conn: &rusqlite::Connection,
@@ -443,14 +474,16 @@ fn upsert_row(
             temperature, context_window, todos, message_count, \
             llm_call_counter, model_ratio, last_compaction_offset, \
             token_last_input, token_last_output, token_total_input, token_total_output, \
-            token_last_cache_read, token_last_cache_write, token_total_cache_read, token_total_cache_write \
+            token_last_cache_read, token_last_cache_write, token_total_cache_read, token_total_cache_write, \
+            version, corrupted \
          ) VALUES ( \
             ?1, ?2, ?3, ?4, \
             ?5, ?6, ?7, ?8, ?9, ?10, \
             ?11, ?12, ?13, ?14, \
             ?15, ?16, ?17, \
             ?18, ?19, ?20, ?21, \
-            ?22, ?23, ?24, ?25 \
+            ?22, ?23, ?24, ?25, \
+            ?26, ?27 \
          ) \
          ON CONFLICT(session_id) DO UPDATE SET \
             agent_id = excluded.agent_id, \
@@ -476,7 +509,9 @@ fn upsert_row(
             token_last_cache_read = excluded.token_last_cache_read, \
             token_last_cache_write = excluded.token_last_cache_write, \
             token_total_cache_read = excluded.token_total_cache_read, \
-            token_total_cache_write = excluded.token_total_cache_write",
+            token_total_cache_write = excluded.token_total_cache_write, \
+            version = excluded.version, \
+            corrupted = excluded.corrupted",
         params![
             meta.session_id,
             meta.agent_id,
@@ -495,14 +530,16 @@ fn upsert_row(
             meta.llm_call_counter.map(|c| c as i64),
             meta.model_ratio,
             meta.last_compaction_offset.map(|o| o as i64),
-            tokens.last_input as i64,
-            tokens.last_output as i64,
-            tokens.total_input as i64,
-            tokens.total_output as i64,
-            tokens.last_cache_read as i64,
-            tokens.last_cache_write as i64,
-            tokens.total_cache_read as i64,
-            tokens.total_cache_write as i64,
+            token_to_i64(tokens.last_input),
+            token_to_i64(tokens.last_output),
+            token_to_i64(tokens.total_input),
+            token_to_i64(tokens.total_output),
+            token_to_i64(tokens.last_cache_read),
+            token_to_i64(tokens.last_cache_write),
+            token_to_i64(tokens.total_cache_read),
+            token_to_i64(tokens.total_cache_write),
+            meta.version as i64,
+            meta.corrupted as i64,
         ],
     )?;
     Ok(())

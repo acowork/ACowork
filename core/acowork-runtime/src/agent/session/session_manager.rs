@@ -1297,24 +1297,23 @@ impl SessionManager {
         &self.core.config.agent_id
     }
 
-    /// Delete a session: close the task, remove index entry, and delete JSONL file.
+    /// Delete a session: close the task, drop the meta row, and delete the JSONL file.
     ///
     /// This is an atomic operation from the caller's perspective — after this
     /// returns, the session no longer exists in memory or on disk (unless the
-    /// join times out, in which case the task continues but its index entry and
+    /// join times out, in which case the task continues but its meta row and
     /// JSONL file are still cleaned up).
     ///
     /// Works for sessions both in memory and already evicted from memory
     /// (e.g., idle eviction, reaped handles, or previous Runtime restarts).
     /// When the session is not in `self.sessions`, the Close/join steps are
-    /// skipped and only the on-disk resources are cleaned up.
+    /// skipped and only the persisted resources are cleaned up.
     ///
     /// A 30-second timeout is applied to the session task join.  If the task
     /// does not finish within this window (e.g. distillation hangs), resources
-    /// are still cleaned up and the method returns successfully — the background
-    /// task's eventual `Drop` may briefly re-write the index entry, but the end
-    /// result is a tombstone-free index after the next call to
-    /// [`remove_session_from_index`] on a subsequent delete or prune.
+    /// are still cleaned up and the method returns successfully — the
+    /// background task's eventual `Drop` cannot re-create the row because
+    /// `ConversationSession::write_meta` returns early once the JSONL is gone.
     pub async fn delete_session(&mut self, session_id: &str) {
         // 1. If in memory, close the task cleanly (with timeout)
         if let Some(handle) = self.sessions.remove(session_id) {
@@ -1372,19 +1371,17 @@ impl SessionManager {
             tracing::info!(session_id = %session_id, "Session already evicted, skipping task close");
         }
 
-        // 2. ADR-024: remove the per-session meta file (replaces index.json update).
+        // 2. ADR-082 §4 step 3: drop the session-meta row from the store
+        // (SQLite). The legacy JSON sidecar no longer exists — leaving the
+        // row behind is what would keep a deleted session in `/sessions`
+        // and in `find_latest_session`.
         let conversations_dir =
             std::path::Path::new(&self.core.config.work_dir).join("conversations");
-        let meta_path = conversations_dir
-            .join("meta")
-            .join(format!("{}.json", session_id));
-        if let Err(e) = std::fs::remove_file(&meta_path)
-            && e.kind() != std::io::ErrorKind::NotFound
-        {
+        if let Err(e) = crate::conversation::delete_session_meta(&conversations_dir, session_id) {
             tracing::warn!(
                 session_id = %session_id,
                 error = %e,
-                "Failed to delete session meta file"
+                "Failed to delete session meta row"
             );
         }
 
@@ -1408,14 +1405,14 @@ impl SessionManager {
         }
 
         // 4. If the deleted session was the "latest", recompute the latest
-        //    from the remaining sessions on disk (or clear it if none remain).
+        //    from the remaining sessions (or clear it if none remain).
         //    Without this, `/sessions/latest` keeps returning the deleted
         //    session_id and the frontend tries to resume a session whose
         //    JSONL is gone — the exact "deleted session reloaded as latest"
-        //    failure. `find_latest_session` scans the meta files, which are
-        //    guaranteed to be consistent here because `write_meta` refuses to
-        //    re-create a meta file once its JSONL is gone (see
-        //    `ConversationSession::write_meta`).
+        //    failure. `find_latest_session` reads the session-meta store
+        //    (SQLite), which is already consistent here because step 2 above
+        //    dropped this session's row, and `write_meta` refuses to re-create
+        //    a row once the JSONL is gone (see `ConversationSession::write_meta`).
         if let Some((latest_id, _)) = self.latest_session()
             && latest_id == session_id
         {
@@ -1523,7 +1520,7 @@ impl SessionManager {
     /// ADR-038: Observe the lifecycle state of a session.
     ///
     /// - `Active` if a session handle exists in the in-memory map.
-    /// - `Closed` if a meta file exists on disk but no handle is loaded.
+    /// - `Closed` if the session-meta store holds a row but no handle is loaded.
     /// - `NotFound` if neither exists.
     ///
     /// Lifecycle is now explicit (ADR-038 §3): there is no lazy-resume
@@ -1535,9 +1532,13 @@ impl SessionManager {
         if self.sessions.contains_key(session_id) {
             return SessionLifecycleState::Active;
         }
-        let meta_dir = work_dir.join("conversations").join("meta");
-        let meta_path = meta_dir.join(format!("{}.json", session_id));
-        if meta_path.exists() {
+        // ADR-082 §4 step 3: the session-meta store (SQLite) is the sole
+        // source of truth post-migration. The legacy
+        // `conversations/meta/{sid}.json` sidecar is bootstrap-only and no
+        // longer written by the runtime — probing it here is what made a
+        // valid SQLite-backed session report `NotFound`.
+        let conversations_dir = work_dir.join("conversations");
+        if crate::conversation::session_meta_exists(&conversations_dir, session_id) {
             return SessionLifecycleState::Closed;
         }
         SessionLifecycleState::NotFound
@@ -1560,11 +1561,12 @@ impl SessionManager {
             return Ok(SessionOpenOutcome::AlreadyActive);
         }
 
-        // Validate disk presence up-front so callers get a clear error
-        // instead of a generic "Session not found on disk" buried inside the
-        // resume path. ADR-024: meta file is the canonical "session exists" marker.
-        let meta_dir = work_dir.join("conversations").join("meta");
-        if !meta_dir.join(format!("{}.json", session_id)).exists() {
+        // Validate existence up-front so callers get a clear error instead of
+        // a generic failure buried inside the resume path. ADR-082 §4 step 3:
+        // the session-meta store (SQLite) is the canonical "session exists"
+        // marker — the JSON sidecar is bootstrap-only and no longer written.
+        let conversations_dir = work_dir.join("conversations");
+        if !crate::conversation::session_meta_exists(&conversations_dir, session_id) {
             return Err(RuntimeError::Config(format!(
                 "Session not found on disk: {}",
                 session_id
@@ -4681,11 +4683,11 @@ mod tests {
         ));
         let mut manager = SessionManager::new(core, SessionManagerConfig::default());
 
-        // Seed a surviving session on disk (meta + jsonl) so the recompute
-        // has something to find.
+        // Seed a surviving session (meta row + jsonl) so the recompute has
+        // something to find.
         let survivor_id = "20260101_000000_survivor";
         let conversations_dir = dir.path().join("conversations");
-        std::fs::create_dir_all(conversations_dir.join("meta")).unwrap();
+        std::fs::create_dir_all(&conversations_dir).unwrap();
         std::fs::write(conversations_dir.join(format!("{}.jsonl", survivor_id)), "").unwrap();
         write_session_meta(
             &conversations_dir,
