@@ -239,8 +239,6 @@ pub struct RetrievalMetrics {
     pub filtered_count: usize,
     /// Degradation level (0-3).
     pub retrieval_level: u8,
-    /// Number of nodes expanded via graph_expand.
-    pub graph_expand_nodes: usize,
     /// memory_hint.type used.
     pub hint_type: HintType,
 }
@@ -262,16 +260,6 @@ pub mod labels {
 
     /// All memory labels in a static slice (for iteration).
     pub const ALL: &[&str] = &[EPISODIC, KNOWLEDGE, PROCEDURAL, AUTOBIOGRAPHICAL];
-}
-
-/// LPG edge types used in the ACowork memory system.
-pub mod edge_types {
-    /// Knowledge node references another knowledge node.
-    pub const REFERENCES: &str = "REFERENCES";
-    /// Autobiographical node self-references.
-    pub const SELF_REFERENCES: &str = "SELF_REFERENCES";
-    /// Knowledge node derived from an episodic node.
-    pub const DERIVED_FROM: &str = "DERIVED_FROM";
 }
 
 // ============================================================================

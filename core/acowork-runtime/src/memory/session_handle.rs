@@ -27,7 +27,7 @@ pub struct MemorySessionHandle {
     /// Agent-level `MemoryManagerConfig`, set once at memory initialization.
     ///
     /// Config consistency: the `memory_recall` tool reads this so it uses the
-    /// SAME quality config (min_score / graph_expand / …) as auto-inject,
+    /// SAME quality config (min_cosine / exclude_dormant / …) as auto-inject,
     /// instead of hardcoded defaults. Falls back to default when unset.
     memory_config: RwLock<Option<MemoryManagerConfig>>,
 }

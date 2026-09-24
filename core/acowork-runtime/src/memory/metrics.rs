@@ -407,7 +407,6 @@ mod tests {
             abstention_triggered: abstention,
             filtered_count: 0,
             retrieval_level: level,
-            graph_expand_nodes: 0,
             hint_type: HintType::Semantic,
         }
     }

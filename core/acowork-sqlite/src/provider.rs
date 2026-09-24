@@ -228,11 +228,6 @@ impl MemoryProvider for SqliteStore {
         Ok(all)
     }
 
-    /// Graph expansion — always empty (ADR-082 D4).
-    fn graph_expand(&self, _seeds: &[SearchResult], _hops: u8) -> AcoworkResult<Vec<SearchResult>> {
-        Ok(Vec::new())
-    }
-
     // ── Forgetting ───────────────────────────────────────────────────────
 
     /// Pure time-decay scan over `Episodic` nodes only.
@@ -440,32 +435,7 @@ impl MemoryProvider for SqliteStore {
         Ok(SqliteStore::update_autobiographical(self, node)?)
     }
 
-    /// Memory edges are dropped (ADR-082 D4): nothing reads them any more, and
-    /// a table nothing reads is the dead layering this ADR removed.
-    fn create_memory_edge(
-        &self,
-        _from: u64,
-        _to: u64,
-        _edge_type: &str,
-        _properties: Vec<(&str, String)>,
-    ) -> AcoworkResult<()> {
-        Ok(())
-    }
-
     // ── Retrieval pipeline support ───────────────────────────────────────
-
-    /// Graph expansion from seeds — always empty (ADR-082 D4).
-    ///
-    /// Returning an empty expansion is the documented D4 behaviour, and
-    /// `MemoryManager` already treats a failed/short expansion as "no extra
-    /// context" rather than an error.
-    fn graph_expand_seeded(
-        &self,
-        _seeds: &[(u64, f64)],
-        _hint_type: &str,
-    ) -> AcoworkResult<Vec<(u64, f64, String)>> {
-        Ok(Vec::new())
-    }
 
     fn get_node_content(&self, node_id: u64) -> AcoworkResult<Option<String>> {
         let Some((_, props)) = self.node_row(node_id)? else {
@@ -514,13 +484,6 @@ impl MemoryProvider for SqliteStore {
         Ok(())
     }
 
-    /// PageRank boost is a graph operation — a no-op (ADR-082 D4).
-    ///
-    /// Scores pass through unchanged, which is exactly what
-    /// `MemoryManagerConfig::enable_graph_expand = false` produced before.
-    fn apply_pagerank_boost(&self, _scores: &mut [(u64, f64)], _weight: f64) -> AcoworkResult<()> {
-        Ok(())
-    }
 }
 
 // ── Internal helpers ─────────────────────────────────────────────────────

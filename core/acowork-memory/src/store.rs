@@ -68,13 +68,6 @@ pub trait MemoryStore: Send + Sync {
     /// Searches across all labels (Episodic/Knowledge/Procedural/Autobiographical).
     fn hybrid_search(&self, query: &MemoryQuery) -> Result<Vec<SearchResult>>;
 
-    /// Graph expansion: diffuse from seed nodes along edges.
-    ///
-    /// # Arguments
-    /// * `seeds` - Seed nodes from hybrid_search
-    /// * `hops` - Maximum expansion depth (capped at 3)
-    fn graph_expand(&self, seeds: &[SearchResult], hops: u8) -> Result<Vec<SearchResult>>;
-
     // ── Forgetting ───────────────────────────────────────────────────────
 
 

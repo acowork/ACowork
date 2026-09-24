@@ -1611,13 +1611,6 @@ mod tests {
         fn hybrid_search(&self, _q: &MemoryQuery) -> acowork_core::error::Result<Vec<SearchResult>> {
             Ok(vec![])
         }
-        fn graph_expand(
-            &self,
-            _s: &[SearchResult],
-            _h: u8,
-        ) -> acowork_core::error::Result<Vec<SearchResult>> {
-            Ok(vec![])
-        }
         fn run_episodic_decay_scan(
             &self,
             _c: &EpisodicDecayConfig,
@@ -1705,22 +1698,6 @@ mod tests {
         fn update_autobiographical(&self, _n: &AutobiographicalNode) -> acowork_core::error::Result<()> {
             unreachable!()
         }
-        fn create_memory_edge(
-            &self,
-            _f: u64,
-            _t: u64,
-            _e: &str,
-            _p: Vec<(&str, String)>,
-        ) -> acowork_core::error::Result<()> {
-            unreachable!()
-        }
-        fn graph_expand_seeded(
-            &self,
-            _s: &[(u64, f64)],
-            _h: &str,
-        ) -> acowork_core::error::Result<Vec<(u64, f64, String)>> {
-            unreachable!()
-        }
         fn get_node_content(&self, _id: u64) -> acowork_core::error::Result<Option<String>> {
             unreachable!()
         }
@@ -1734,13 +1711,6 @@ mod tests {
             unreachable!()
         }
         fn apply_quality_config(&self, _c: &MemoryQualityConfig) -> acowork_core::error::Result<()> {
-            Ok(())
-        }
-        fn apply_pagerank_boost(
-            &self,
-            _s: &mut [(u64, f64)],
-            _w: f64,
-        ) -> acowork_core::error::Result<()> {
             Ok(())
         }
     }

@@ -1159,26 +1159,11 @@ fn provider_quality_config_drives_dedup() {
     assert_eq!(strict.node_count_by_label(labels::KNOWLEDGE).unwrap(), 2);
 }
 
-/// Graph operations are documented no-ops (ADR-082 D4): no expansion, no
-/// topology boost, no edge writes.
+/// Confirmation hooks are still no-ops for the SQLite provider.
 #[test]
-fn provider_graph_ops_are_noops() {
+fn provider_confirmation_hooks_are_noops() {
     let store = store();
-    let id = store.store_episode(&episode("seed")).unwrap();
-
-    assert!(
-        store
-            .graph_expand_seeded(&[(id, 0.9)], "s")
-            .unwrap()
-            .is_empty()
-    );
-    store
-        .create_memory_edge(id, id, "REFERENCES", vec![])
-        .unwrap();
-
-    let mut scores = vec![(id, 0.5)];
-    store.apply_pagerank_boost(&mut scores, 0.1).unwrap();
-    assert_eq!(scores, vec![(id, 0.5)]);
+    store.store_episode(&episode("seed")).unwrap();
 
     assert!(!store.should_trigger_confirmation().unwrap());
     assert_eq!(store.generate_confirmation_hint().unwrap(), None);

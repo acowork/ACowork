@@ -115,14 +115,12 @@ pub struct MemoryManagerConfig {
     /// previously separate `MemoryManagerConfig` fields:
     /// - `quality.min_cosine` (absolute cosine floor on the retrieval gate;
     ///   replaces the old `min_score`, which thresholded the fused rank score)
-    /// - `quality.pagerank_weight` (replaces the old `pagerank_weight`)
     /// - `quality.exclude_dormant` (Dormant retrieval exclusion, D1)
     ///
-    /// The write-path thresholds (dedup / consolidation / graph expansion /
-    /// edge weight) are pushed down to the `MemoryProvider` via
-    /// `MemoryProvider::apply_quality_config` so engine internals read from
-    /// the same config (ADR-062 §4.1). `Default` mirrors current behaviour
-    /// ("zero configuration = current behaviour").
+    /// The write-path thresholds (dedup / consolidation) are pushed down to
+    /// the `MemoryProvider` via `MemoryProvider::apply_quality_config` so
+    /// engine internals read from the same config (ADR-062 §4.1). `Default`
+    /// mirrors current behaviour ("zero configuration = current behaviour").
     pub quality: MemoryQualityConfig,
     /// Retrieval-side episodic time decay (memory forgetting). Default:
     /// disabled. When enabled, Episodic search scores are multiplied by the
@@ -139,8 +137,6 @@ pub struct MemoryManagerConfig {
     /// This layer must NOT import `acowork-grafeo` (dependency direction),
     /// hence the constant lives here.
     pub abstention_prompt: Option<String>,
-    /// Enable graph expansion (default: true).
-    pub enable_graph_expand: bool,
     /// Record episodes asynchronously (default: true).
     pub record_async: bool,
     /// Per-turn auto-injection of retrieved memories (default: **true**,
@@ -178,7 +174,6 @@ impl Default for MemoryManagerConfig {
             quality: MemoryQualityConfig::default(),
             forgetting: EpisodicDecayConfig::default(),
             abstention_prompt: None,
-            enable_graph_expand: true,
             record_async: true,
             auto_inject_enabled: false,
         }
@@ -283,8 +278,7 @@ impl MemoryManager {
     /// proceeding to hybrid search. On timeout or failure, falls back to
     /// text-only search (graceful degradation).
     ///
-    /// Pipeline: (auto-embed) → Grafeo hybrid_search → graph_expand → dedup →
-    /// PageRank boost (topology re-rank) → merge & rank
+    /// Pipeline: (auto-embed) → hybrid_search → dedup → merge & rank
     /// + RAG channel (if rag_provider is Some, run in parallel).
     ///
     /// RAG channel uses the user message as query with default top_k=3.
@@ -334,7 +328,7 @@ impl MemoryManager {
         };
         let min_cosine = query.min_cosine.unwrap_or(self.config.quality.min_cosine);
         let hint_type = query.hint_type;
-        let (vector_weight, text_weight, _graph_weight) = hint_weights(hint_type);
+        let (vector_weight, text_weight) = hint_weights(hint_type);
 
         // G10 (design §6.6): search ALL 4 labels regardless of hint type.
         // The design explicitly states that "searching all 4 labels is the
@@ -405,36 +399,9 @@ impl MemoryManager {
             }
         }
 
-        // Graph expansion (if enabled and we have seed results).
-        let mut graph_expand_count = 0;
-        if self.config.enable_graph_expand && !all_results.is_empty() {
-            let seeds: Vec<(u64, f64)> = all_results
-                .iter()
-                .map(|(id, score, _, _)| (*id, *score))
-                .collect();
-
-            match provider
-                .graph_expand_seeded(&seeds, hint_type.as_str())
-                .map_err(|e| AcoworkError::Memory(format!("Graph expand failed: {e}")))
-            {
-                Ok(expanded) => {
-                    graph_expand_count = expanded.len();
-                    for (node_id, score, label) in expanded {
-                        all_results.push((node_id, score, label, "graph".to_string()));
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!("Graph expand failed: {}", e);
-                }
-            }
-        }
-
         // ADR-062 D1: Exclude Dormant nodes from the final result set.
         // Dormant nodes are decayed below threshold but retained (design
-        // §5.2) — they may still act as graph-expansion seeds (kept in
-        // `all_results` during expansion above) but must NOT appear in
-        // retrieval results. Filtering here (before dedup / best_by_id)
-        // preserves graph bridging.
+        // §5.2) — they must NOT appear in retrieval results.
         //
         // Pending nodes intentionally remain retrievable: they are
         // low-confidence but searchable, and are naturally down-ranked by
@@ -515,31 +482,6 @@ impl MemoryManager {
                 until = %until,
                 "Applied time-range filter to retrieval"
             );
-        }
-
-        // Apply PageRank topology boost for re-ranking (S2.8.3).
-        // Only when graph expansion is enabled and weight > 0.
-        if self.config.enable_graph_expand
-            && self.config.quality.pagerank_weight > 0.0
-            && !best_by_id.is_empty()
-        {
-            let mut scored: Vec<(u64, f64)> = best_by_id
-                .iter()
-                .map(|(id, (score, _, _))| (*id, *score))
-                .collect();
-
-            if let Err(e) =
-                provider.apply_pagerank_boost(&mut scored, self.config.quality.pagerank_weight)
-            {
-                tracing::warn!("PageRank boost failed, continuing with unboosted scores: {e}");
-            } else {
-                // Map boosted scores back to best_by_id.
-                for (node_id, boosted_score) in scored {
-                    if let Some(entry) = best_by_id.get_mut(&node_id) {
-                        entry.0 = boosted_score;
-                    }
-                }
-            }
         }
 
         // Episodic time-decay (memory forgetting, ADR-057 §5.3 redesign):
@@ -625,16 +567,14 @@ impl MemoryManager {
             abstention_triggered,
             filtered_count: 0,
             retrieval_level: 0,
-            graph_expand_nodes: graph_expand_count,
             hint_type: query.hint_type,
         };
 
         tracing::debug!(
-            "Retrieved {} memories (max_score={:.3}, avg_score={:.3}, graph_expanded={})",
+            "Retrieved {} memories (max_score={:.3}, avg_score={:.3})",
             result_count,
             max_score,
             avg_score,
-            graph_expand_count,
         );
 
         Ok(RetrievalResult {
@@ -1004,14 +944,13 @@ fn apply_retrieval_decay(
 
 /// Get hybrid search weights based on hint type.
 ///
-/// Returns `(vector_weight, text_weight, graph_weight)`.
-/// Inlined from `acowork_grafeo::spreading::get_hint_weights` (ADR-051 C4).
-fn hint_weights(hint_type: HintType) -> (f64, f64, f64) {
+/// Returns `(vector_weight, text_weight)`.
+fn hint_weights(hint_type: HintType) -> (f64, f64) {
     match hint_type {
-        HintType::Semantic => (0.8, 0.2, 0.0),
-        HintType::Factual => (0.5, 0.5, 0.0),
-        HintType::Relational => (0.6, 0.2, 0.2),
-        HintType::Identity => (0.3, 0.7, 0.0),
+        HintType::Semantic => (0.8, 0.2),
+        HintType::Factual => (0.5, 0.5),
+        HintType::Relational => (0.6, 0.2),
+        HintType::Identity => (0.3, 0.7),
     }
 }
 
@@ -1165,7 +1104,6 @@ mod tests {
         assert_eq!(config.default_k, 10);
         assert_eq!(config.quality.min_cosine, 0.3);
         assert!(config.quality.exclude_dormant, "D1 Dormant exclusion on by default");
-        assert!(config.enable_graph_expand);
         assert!(config.record_async);
         // auto-injection is OFF by default (per-agent opt-in via manifest
         // `[memory.quality].auto_inject_enabled = true`). Rationale: the LLM

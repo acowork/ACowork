@@ -61,10 +61,7 @@ pub use consolidation::MemoryStoreResult as ProcessResult;
 pub use judge::{JudgeConfig, JudgeResult, should_sample};
 
 // Re-exports: memory quality config (ADR-062 D2)
-pub use quality::{
-    ConsolidationQuality, DedupQuality, EdgeWeightQuality, GraphExpandQuality,
-    MemoryQualityConfig,
-};
+pub use quality::{ConsolidationQuality, DedupQuality, MemoryQualityConfig};
 
 // Re-exports: core memory types
 pub use types::{
@@ -78,7 +75,6 @@ pub use session_meta::{
     SessionMeta, SessionMetaStore, SessionTokens, TodoItem, TodoStatus,
 };
 
-// Label and edge type constants
-pub use types::edge_types;
+// Label constants
 pub use types::labels;
 pub use types::{HintType, MemoryFilters, NodeTypeFilter};

@@ -145,13 +145,6 @@ pub trait MemoryProvider: Send + Sync {
     /// Searches across all labels (Episodic/Knowledge/Procedural/Autobiographical).
     fn hybrid_search(&self, query: &MemoryQuery) -> Result<Vec<SearchResult>>;
 
-    /// Graph expansion: diffuse from seed nodes along edges.
-    ///
-    /// # Arguments
-    /// * `seeds` - Seed nodes from hybrid_search
-    /// * `hops` - Maximum expansion depth (capped at 3)
-    fn graph_expand(&self, seeds: &[SearchResult], hops: u8) -> Result<Vec<SearchResult>>;
-
     // ── Forgetting ───────────────────────────────────────────────────────
 
 
@@ -245,32 +238,7 @@ pub trait MemoryProvider: Send + Sync {
     /// Update an autobiographical memory node.
     fn update_autobiographical(&self, node: &AutobiographicalNode) -> Result<()>;
 
-    /// Create a memory edge between two nodes.
-    fn create_memory_edge(
-        &self,
-        from: u64,
-        to: u64,
-        edge_type: &str,
-        properties: Vec<(&str, String)>,
-    ) -> Result<()>;
-
     // ── Phase 1 C4: Retrieval pipeline support ──────────────────────────
-
-    /// Graph expansion from seed nodes using hint-based configuration.
-    ///
-    /// Returns `(node_id, accumulated_score, label)` tuples for expanded nodes.
-    /// The `hint_type` parameter controls spreading configuration ("s", "f",
-    /// "r", "i") and is translated to internal expansion parameters by the
-    /// Provider implementation.
-    ///
-    /// This method bridges the gap between `hybrid_search_full()` (which
-    /// returns raw `(u64, f64)` pairs) and the need for graph-extended
-    /// results with labels. ADR-051 C4.
-    fn graph_expand_seeded(
-        &self,
-        seeds: &[(u64, f64)],
-        hint_type: &str,
-    ) -> Result<Vec<(u64, f64, String)>>;
 
     /// Extract human-readable content from a node by ID.
     ///
@@ -325,17 +293,5 @@ pub trait MemoryProvider: Send + Sync {
     /// `MemoryQualityConfig`; the same config is embedded in
     /// `MemoryManagerConfig.quality` for the retrieval side.
     fn apply_quality_config(&self, config: &MemoryQualityConfig) -> Result<()>;
-
-    /// Apply PageRank topology boost to re-rank retrieval scores.
-    ///
-    /// Modifies `scores` in-place: `new_score = original * (1 - weight) +
-    /// pagerank * weight`. This is a topology-aware re-ranking step that
-    /// boosts well-connected nodes. ADR-051 C4.
-    fn apply_pagerank_boost(
-        &self,
-        scores: &mut [(u64, f64)],
-        weight: f64,
-    ) -> Result<()>;
-
 
 }
