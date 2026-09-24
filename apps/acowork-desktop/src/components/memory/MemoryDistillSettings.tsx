@@ -210,7 +210,7 @@ export function MemoryDistillSettings({
 
   // ── Render ────────────────────────────────────────────────────────────
   const numInputCls =
-    "rounded-md border border-border-outer bg-modal-surface px-2 py-1 text-[11px] outline-none focus:border-[var(--color-accent)] ";
+    "rounded-md border border-input-border bg-input-bg px-2 py-1 text-[11px] outline-none focus:border-[var(--color-accent)] ";
 
   // Backlog / last-run hint lives INSIDE the expanded body — it is
   // status info about the runtime, not metadata about the card itself,

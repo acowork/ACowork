@@ -207,7 +207,7 @@ export function CreateWizard({ open, onCreated, onClose }: CreateWizardProps) {
                   value={form.agent_id}
                   onChange={(e) => update({ agent_id: e.target.value })}
                   placeholder="com.example.myagent"
-                  className="bg-modal-surface"
+                  className=""
                 />
               </div>
               <div>
@@ -219,7 +219,7 @@ export function CreateWizard({ open, onCreated, onClose }: CreateWizardProps) {
                   value={form.name}
                   onChange={(e) => update({ name: e.target.value })}
                   placeholder={t("createWizard.placeholderAgentName")}
-                  className="bg-modal-surface"
+                  className=""
                 />
               </div>
               <div className="grid grid-cols-2 gap-3">
@@ -232,7 +232,7 @@ export function CreateWizard({ open, onCreated, onClose }: CreateWizardProps) {
                     value={form.version}
                     onChange={(e) => update({ version: e.target.value })}
                     placeholder="0.1.0"
-                    className="bg-modal-surface"
+                    className=""
                   />
                 </div>
                 <div>
@@ -244,7 +244,7 @@ export function CreateWizard({ open, onCreated, onClose }: CreateWizardProps) {
                     value={form.author}
                     onChange={(e) => update({ author: e.target.value })}
                     placeholder={t("createWizard.placeholderYourName")}
-                    className="bg-modal-surface"
+                    className=""
                   />
                 </div>
               </div>
@@ -257,7 +257,7 @@ export function CreateWizard({ open, onCreated, onClose }: CreateWizardProps) {
                   onChange={(e) => update({ description: e.target.value })}
                   placeholder={t("createWizard.placeholderDescribe")}
                   rows={3}
-                  className="resize-none bg-modal-surface"
+                  className="resize-none"
                 />
               </div>
             </div>

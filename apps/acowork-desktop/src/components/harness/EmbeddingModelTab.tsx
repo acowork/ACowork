@@ -1567,7 +1567,7 @@ function AddCustomEmbeddingProviderDialog({
                             value={name}
                             onChange={(e) => handleNameChange(e.target.value)}
                             placeholder={t("embedding.customProviderNamePlaceholder")}
-                            className="w-full rounded-md border border-border-outer bg-modal-surface px-3 py-2 text-xs"
+                            className="w-full rounded-md border border-input-border bg-input-bg px-3 py-2 text-xs"
                         />
                     </div>
 
@@ -1581,7 +1581,7 @@ function AddCustomEmbeddingProviderDialog({
                             value={id}
                             onChange={(e) => setId(e.target.value)}
                             placeholder={t("embedding.customProviderIdPlaceholder")}
-                            className="w-full rounded-md border border-border-outer bg-modal-surface px-3 py-2 text-xs font-mono"
+                            className="w-full rounded-md border border-input-border bg-input-bg px-3 py-2 text-xs font-mono"
                         />
                     </div>
 
@@ -1595,7 +1595,7 @@ function AddCustomEmbeddingProviderDialog({
                             value={api}
                             onChange={(e) => setApi(e.target.value)}
                             placeholder="https://api.example.com/v1"
-                            className="w-full rounded-md border border-border-outer bg-modal-surface px-3 py-2 text-xs font-mono"
+                            className="w-full rounded-md border border-input-border bg-input-bg px-3 py-2 text-xs font-mono"
                         />
                     </div>
 
@@ -1610,7 +1610,7 @@ function AddCustomEmbeddingProviderDialog({
                             value={apiKey}
                             onChange={(e) => setApiKey(e.target.value)}
                             placeholder="sk-..."
-                            className="w-full rounded-md border border-border-outer bg-modal-surface px-3 py-2 text-xs"
+                            className="w-full rounded-md border border-input-border bg-input-bg px-3 py-2 text-xs"
                         />
                     </div>
 
@@ -1643,7 +1643,7 @@ function AddCustomEmbeddingProviderDialog({
                                                 updateModel(idx, { id: e.target.value })
                                             }
                                             placeholder={t("embedding.customModelIdPlaceholder")}
-                                            className="rounded-md border border-border-outer bg-modal-surface px-2 py-1 text-[11px] font-mono"
+                                            className="rounded-md border border-input-border bg-input-bg px-2 py-1 text-[11px] font-mono"
                                         />
                                         <input
                                             type="text"
@@ -1652,7 +1652,7 @@ function AddCustomEmbeddingProviderDialog({
                                                 updateModel(idx, { name: e.target.value })
                                             }
                                             placeholder={t("embedding.customModelNamePlaceholder")}
-                                            className="rounded-md border border-border-outer bg-modal-surface px-2 py-1 text-[11px]"
+                                            className="rounded-md border border-input-border bg-input-bg px-2 py-1 text-[11px]"
                                         />
                                     </div>
                                     <div className="flex items-center gap-2">
@@ -1663,7 +1663,7 @@ function AddCustomEmbeddingProviderDialog({
                                                 updateModel(idx, { dimensions: e.target.value })
                                             }
                                             placeholder={t("embedding.customModelDimensionsPlaceholder")}
-                                            className="w-24 rounded-md border border-border-outer bg-modal-surface px-2 py-1 text-[11px]"
+                                            className="w-24 rounded-md border border-input-border bg-input-bg px-2 py-1 text-[11px]"
                                         />
                                         <input
                                             type="number"
@@ -1674,7 +1674,7 @@ function AddCustomEmbeddingProviderDialog({
                                                 })
                                             }
                                             placeholder={t("embedding.customModelContextLengthPlaceholder")}
-                                            className="w-28 rounded-md border border-border-outer bg-modal-surface px-2 py-1 text-[11px]"
+                                            className="w-28 rounded-md border border-input-border bg-input-bg px-2 py-1 text-[11px]"
                                         />
                                         {models.length > 1 && (
                                             <button

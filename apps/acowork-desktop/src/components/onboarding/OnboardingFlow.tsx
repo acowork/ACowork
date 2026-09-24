@@ -338,7 +338,7 @@ function GatewayStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => voi
                 value={urlDraft}
                 onChange={(e) => setUrlDraft(e.target.value)}
                 placeholder={DEFAULT_GATEWAY_URL}
-                className="flex-1 rounded-md border border-border-outer px-3 py-2 text-sm  dark:bg-zinc-800"
+                className="flex-1 rounded-md border border-input-border bg-input-bg px-3 py-2 text-sm"
               />
               {urlDraft !== gatewayUrl && (
                 <button
@@ -509,7 +509,7 @@ function ApiKeyStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => void
               value={apiKey}
               onChange={(e) => { setApiKey(e.target.value); setSaved(false); }}
               placeholder={keyPlaceholder(provider)}
-              className="mt-2 w-full rounded-md border border-border-outer px-3 py-2 text-sm  dark:bg-zinc-800"
+              className="mt-2 w-full rounded-md border border-input-border bg-input-bg px-3 py-2 text-sm"
             />
           )}
 
@@ -520,7 +520,7 @@ function ApiKeyStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => void
               value={baseUrl}
               onChange={(e) => { setBaseUrl(e.target.value); setSaved(false); }}
               placeholder={t("onboarding.apiKey.baseUrlPlaceholder")}
-              className="mt-2 w-full rounded-md border border-border-outer px-3 py-2 text-xs font-mono  dark:bg-zinc-800"
+              className="mt-2 w-full rounded-md border border-input-border bg-input-bg px-3 py-2 text-xs font-mono"
             />
           )}
 
@@ -606,7 +606,7 @@ function IdentityStep({
             value={name}
             onChange={(e) => onUpdate({ name: e.target.value })}
             placeholder={t("onboarding.identity.namePlaceholder")}
-            className="rounded-md border border-border-outer px-3 py-2 text-sm  dark:bg-zinc-800"
+            className="rounded-md border border-input-border bg-input-bg px-3 py-2 text-sm"
           />
         </div>
         <div>
@@ -644,7 +644,7 @@ function IdentityStep({
             type="text"
             value={city}
             onChange={(e) => onUpdate({ city: e.target.value })}
-            className="w-full rounded-md border border-zinc-200 px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 "
+            className="w-full rounded-md border border-input-border bg-input-bg px-3 py-2 text-sm "
           />
         </div>
         <div>
@@ -653,7 +653,7 @@ function IdentityStep({
             type="text"
             value={occupation}
             onChange={(e) => onUpdate({ occupation: e.target.value })}
-            className="w-full rounded-md border border-zinc-200 px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 "
+            className="w-full rounded-md border border-input-border bg-input-bg px-3 py-2 text-sm "
           />
         </div>
       </div>

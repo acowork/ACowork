@@ -159,7 +159,7 @@ export function MemoryForgettingSettings({
 
   // ── Render ────────────────────────────────────────────────────────────
   const numInputCls =
-    "rounded-md border border-border-outer bg-modal-surface px-2 py-1 text-[11px] outline-none focus:border-[var(--color-accent)] ";
+    "rounded-md border border-input-border bg-input-bg px-2 py-1 text-[11px] outline-none focus:border-[var(--color-accent)] ";
 
   // Visual grammar mirrors the distill card (MemoryDistillSettings.tsx):
   //   - Title row: chevron + "记忆遗忘" + trailing Switch.

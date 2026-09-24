@@ -113,7 +113,7 @@ export function ProjectHeader({ project, onNewTask }: ProjectHeaderProps) {
                   setEditingTitle(false);
                 }
               }}
-              className="w-full rounded border border-border-outer bg-modal-surface px-2 py-0.5 text-base font-semibold text-text outline-none focus:border-[var(--color-accent)]  dark:bg-zinc-900"
+              className="w-full rounded border border-input-border bg-input-bg px-2 py-0.5 text-base font-semibold text-text outline-none focus:border-[var(--color-accent)]"
               aria-label={t("pm.projectTitleEdit")}
             />
           ) : (
@@ -149,7 +149,7 @@ export function ProjectHeader({ project, onNewTask }: ProjectHeaderProps) {
                   setEditingDesc(false);
                 }
               }}
-              className="mt-1 w-full resize-y rounded border border-border-outer bg-modal-surface px-2 py-1 text-xs text-text-tertiary outline-none focus:border-[var(--color-accent)]  dark:bg-zinc-900"
+              className="mt-1 w-full resize-y rounded border border-input-border bg-input-bg px-2 py-1 text-xs text-text-tertiary outline-none focus:border-[var(--color-accent)]"
               rows={2}
               aria-label={t("pm.projectDescEdit")}
             />

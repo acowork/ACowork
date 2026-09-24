@@ -7,7 +7,7 @@
 
 /** Standard input field (text, number, etc.) */
 export const inputBase =
-  "w-full rounded border border-zinc-200 px-3 py-[var(--ui-input-py)] text-xs outline-none transition-colors focus:border-[var(--color-accent)] dark:border-zinc-700 dark:bg-zinc-900 ";
+  "w-full rounded border border-input-border bg-input-bg px-3 py-[var(--ui-input-py)] text-xs outline-none transition-colors focus:border-[var(--color-accent)] ";
 
 /** Read-only input field */
 export const inputReadonly =

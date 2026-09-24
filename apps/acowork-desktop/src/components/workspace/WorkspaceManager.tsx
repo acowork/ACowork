@@ -315,7 +315,7 @@ function AddWorkspaceDialog({ onClose, onAdd, recentPaths: _recentPaths }: { onC
                 value={path}
                 onChange={(e) => setPath(e.target.value)}
                 placeholder="e.g. F:/work/project"
-                className="flex-1 border-zinc-300 bg-modal-surface py-2 text-sm dark:border-zinc-600"
+                className="flex-1 py-2 text-sm"
               />
               <button
                 onClick={handleBrowse}
@@ -335,7 +335,7 @@ function AddWorkspaceDialog({ onClose, onAdd, recentPaths: _recentPaths }: { onC
               value={alias}
               onChange={(e) => setAlias(e.target.value)}
               placeholder="e.g. my-project"
-              className="border-zinc-300 bg-modal-surface py-2 text-sm dark:border-zinc-600"
+              className="py-2 text-sm"
             />
           </div>
 

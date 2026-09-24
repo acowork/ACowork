@@ -176,6 +176,30 @@
   /* = #EEEEF0 — sidebar container (light) */
   --color-nav-control: hsl(240 5% 87%);
   /* = #D8D9DC — input/button static bg (light) */
+  --color-chat-input-bg: hsl(0 0% 98%);
+  /* = #FFFFFF — chat input box background (light).
+     Standalone token, not yet wired to any component —
+     tweak here to recolor the chat input surface. */
+  --color-input-bg: hsl(0 0% 98%);
+  /* Unified generic input box background (light) — covers
+     StyledInput / search boxes / settings-panel inputs / wizard
+     inputs / UrlComboBox etc. Tweak here to recolor every generic
+     input across the app. The chat input box is intentionally NOT
+     routed through this token — it stays on its own
+     --color-chat-input-bg. NOTE: must be a literal value here (not
+     a var() alias) for Tailwind v4 to generate the .bg-input-bg
+     utility class. */
+  --color-input-border: hsl(240 5.9% 90.6%);
+  /* Unified generic input box outline (light) — tweak here. Must be
+     a literal value for Tailwind v4 to generate the
+     .border-input-border utility class. */
+  --color-dropdown-bg: hsl(0 0% 98%);
+  /* Dropdown / <select> background (light). Defaults to the unified
+     input box bg. Tweak here to recolor every Dropdown across the
+     app. Must be a literal value for Tailwind v4 utility generation. */
+  --color-dropdown-border: hsl(240 5.9% 90.6%);
+  /* Dropdown / <select> outline (light). Defaults to the unified
+     input border. Literal value for Tailwind utility generation. */
   --color-nav-control-hover: hsl(240 5% 82%);
   /* = #C8C9CC — primary action hover (light) */
   --color-nav-item-hover: hsl(240 6% 90%);
@@ -498,6 +522,21 @@
   /* = #2F2F30 — sidebar container (dark) */
   --color-nav-control: hsl(0 0% 24%);
   /* = #3D3D3F — input/button static bg (dark) */
+  --color-chat-input-bg: hsl(0 0% 11.7%);
+  /* ≈ zinc-900, #18181B — chat input box background (dark).
+     Standalone token, not yet wired to any component —
+     tweak here to recolor the chat input surface. */
+  --color-input-bg: hsl(240 3.8% 16.7%);
+  /* Unified generic input box background (dark) — preserve the
+     value the user tuned. Must be a literal value for Tailwind v4 to
+     generate the .bg-input-bg utility class. */
+  --color-input-border: hsl(0 0% 13%);
+  /* Unified generic input box outline (dark) — literal value for
+     Tailwind v4 utility generation. */
+  --color-dropdown-bg: hsl(240 3.8% 16.7%);
+  /* Dropdown / <select> background (dark). Literal value. */
+  --color-dropdown-border: hsl(0 0% 13%);
+  /* Dropdown / <select> outline (dark). Literal value. */
   --color-nav-control-hover: hsl(0 0% 28%);
   /* = #474749 — primary action hover (dark) */
   --color-nav-item-hover: hsl(0 0% 22%);

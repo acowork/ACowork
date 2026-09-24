@@ -140,7 +140,7 @@ export function CloneDialog({
                 if (e.key === "Enter") void handleClone();
               }}
               placeholder={t("cloneDialog.newAgentIdPlaceholder")}
-              className="bg-modal-surface"
+              className=""
             />
           </div>
 
