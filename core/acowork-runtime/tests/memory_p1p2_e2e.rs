@@ -47,17 +47,12 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::Utc;
 
 use acowork_core::EmbeddingProvider;
-use acowork_core::packaging::PackageOptions;
 use acowork_core::tools::traits::Tool;
 
-use acowork_grafeo::grafeo::GrafeoStore;
-use acowork_grafeo::spreading::{GraphExpandConfig, get_expand_thresholds};
-use acowork_grafeo::types::KnowledgeNode as GrafeoKnowledgeNode;
 
 use acowork_memory::{
     EpisodicDecayConfig, HintType, KnowledgeSubType, MemoryManager, MemoryManagerConfig,
@@ -67,7 +62,6 @@ use acowork_memory::{
 use acowork_runtime::memory::MemorySessionHandle;
 use acowork_runtime::tools::builtin::memory_store::MemoryStoreTool;
 
-use grafeo_common::types::{NodeId, Timestamp, Value};
 
 /// Deterministic embedding provider (same text → same 384-dim vector).
 /// Mirrors the production fallback chain's deterministic behavior so recall
@@ -104,17 +98,22 @@ impl EmbeddingProvider for DeterministicEmbedding {
     }
 }
 
-/// Shared e2e harness: a real in-memory `GrafeoStore` wired into a real
+/// Shared e2e harness: a real in-memory store wired into a real
 /// `MemorySessionHandle` (provider + embedding), ready for `MemoryStoreTool`
 /// and `MemoryManager::retrieve`.
 struct MemoryE2e {
-    store: Arc<GrafeoStore>,
+    store: Arc<acowork_sqlite::SqliteStore>,
     handle: Arc<MemorySessionHandle>,
 }
 
 impl MemoryE2e {
     fn new() -> Self {
-        let store = Arc::new(GrafeoStore::new_in_memory().expect("in-memory store"));
+        let store = Arc::new(
+            acowork_sqlite::SqliteStore::open_in_memory(
+                acowork_memory::types::DEFAULT_EMBEDDING_DIM,
+            )
+            .expect("in-memory store"),
+        );
         let handle = Arc::new(MemorySessionHandle::new(Some(Arc::new(
             DeterministicEmbedding,
         ))));
@@ -127,8 +126,8 @@ impl MemoryE2e {
         MemoryStoreTool::new("com.test.agent", Some(self.handle.clone()))
     }
 
-    /// Seed a sediment-layer (Knowledge) node directly through `GrafeoStore`'s
-    /// native store path (label + typed properties), returning its node id.
+    /// Seed a sediment-layer (Knowledge) node directly through the provider's
+    /// store path, returning its node id.
     ///
     /// ADR-068 §3.2 removed the LLM tool's direct sediment write: the
     /// `memory_store` tool now emits Episodes only, and sediment-layer nodes
@@ -151,8 +150,7 @@ impl MemoryE2e {
             .embed(content)
             .await
             .expect("embed ok");
-        let node = GrafeoKnowledgeNode {
-            id: None,
+        let node = acowork_memory::KnowledgeNode {
             subject: "user".to_string(),
             predicate: String::new(),
             object: content.to_string(),
@@ -169,26 +167,33 @@ impl MemoryE2e {
             privacy,
             importance,
         };
-        self.store
-            .store_node(
-                labels::KNOWLEDGE,
-                node.to_properties()
-                    .iter()
-                    .map(|(k, v)| (k.as_str(), v.clone())),
-            )
-            .expect("store_node ok")
-            .0
+        acowork_memory::MemoryProvider::store_knowledge(self.store.as_ref(), &node)
+            .expect("store_knowledge ok")
     }
-}
 
-/// Microseconds timestamp for `days` days ago (for decay / episodic-cleanup
-/// age control).
-fn micros_days_ago(days: i64) -> i64 {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock before epoch")
-        .as_micros() as i64;
-    now - days * 86_400 * 1_000_000
+    /// Seed an Episode whose `timestamp` is `days` days in the past.
+    async fn seed_episode_aged(&self, content: &str, days: i64) -> u64 {
+        let provider: &dyn MemoryProvider = self.store.as_ref();
+        provider
+            .store_episode(&acowork_memory::types::Episode {
+                session_id: "p1p2-e2e".to_string(),
+                turn_index: 0,
+                role: "user".to_string(),
+                content: content.to_string(),
+                embedding: Some(
+                    DeterministicEmbedding
+                        .embed(content)
+                        .await
+                        .expect("embed ok"),
+                ),
+                timestamp: Utc::now() - chrono::Duration::days(days),
+                consolidated: false,
+                metadata: Default::default(),
+                importance: 0.5,
+                knowledge_subtype: None,
+            })
+            .expect("store_episode ok")
+    }
 }
 
 // ============================================================================
@@ -383,110 +388,12 @@ async fn store_autobio_rejected_by_schema() {
 }
 
 // ============================================================================
-// B series — export privacy filtering (P1-2 export)
-// ============================================================================
-
-/// B1 (P1-2 export): `export_nodes_filtered` with default `PackageOptions`
-/// excludes `Personal`/`Sensitive` knowledge, keeping only `Public`.
-///
-/// Sediment data is seeded directly (ADR-068: the LLM tool writes Episodes,
-/// not Knowledge nodes — see file header for the rationale).
-#[tokio::test]
-async fn export_filters_private_knowledge() {
-    let e2e = MemoryE2e::new();
-
-    // public knowledge
-    e2e.seed_knowledge(
-        "Company is called ACowork",
-        KnowledgeSubType::Fact,
-        0.8,
-        0.5,
-        PrivacyLevel::Public,
-        NodeStatus::Active,
-    )
-    .await;
-
-    // personal (default) knowledge — should be excluded by default export
-    e2e.seed_knowledge(
-        "User likes green tea",
-        KnowledgeSubType::Preference,
-        0.8,
-        0.5,
-        PrivacyLevel::Personal,
-        NodeStatus::Active,
-    )
-    .await;
-
-    let filtered = e2e
-        .store
-        .export_nodes_filtered(&PackageOptions::default())
-        .expect("export ok");
-
-    let knowledge: Vec<_> = filtered
-        .iter()
-        .filter(|n| n.label == labels::KNOWLEDGE)
-        .collect();
-    assert_eq!(knowledge.len(), 1, "only public knowledge exported");
-
-    let data = knowledge[0].data.as_object().expect("data is object");
-    let privacy = data
-        .get("privacy")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
-    assert_eq!(privacy, "Public");
-}
-
-/// B2 (P1-2 export): with `include_private_knowledge = true`, private
-/// knowledge is included.
-///
-/// Sediment data is seeded directly (ADR-068 — see file header).
-#[tokio::test]
-async fn export_includes_private_when_requested() {
-    let e2e = MemoryE2e::new();
-
-    e2e.seed_knowledge(
-        "Company is called ACowork",
-        KnowledgeSubType::Fact,
-        0.8,
-        0.5,
-        PrivacyLevel::Public,
-        NodeStatus::Active,
-    )
-    .await;
-
-    e2e.seed_knowledge(
-        "User likes green tea",
-        KnowledgeSubType::Preference,
-        0.8,
-        0.5,
-        PrivacyLevel::Personal,
-        NodeStatus::Active,
-    )
-    .await;
-
-    let options = PackageOptions {
-        include_private_knowledge: true,
-        ..PackageOptions::default()
-    };
-    let filtered = e2e
-        .store
-        .export_nodes_filtered(&options)
-        .expect("export ok");
-
-    let knowledge: Vec<_> = filtered
-        .iter()
-        .filter(|n| n.label == labels::KNOWLEDGE)
-        .collect();
-    assert_eq!(
-        knowledge.len(),
-        2,
-        "both public and private knowledge exported"
-    );
-}
-
-// ============================================================================
 // C series — retrieval behavior (P2 G9 abstention, P2 G10 Identity labels)
 // ============================================================================
+//
+// The former B series pinned `export_nodes_filtered` (memory export into a
+// package). That method belonged to the grafeo store, had no production
+// caller, and has no SQLite equivalent, so it was not carried over.
 
 /// C1 (P2 G9): an empty result set with `abstention_enabled` injects the
 /// built-in abstention prompt and reports `abstention_triggered`.
@@ -634,11 +541,9 @@ async fn retrieve_excludes_dormant_keeps_active() {
     );
 
     // Transition A to Dormant (write side exercised by D4).
-    e2e.store.db().set_node_property(
-        NodeId::new(a_id),
-        "status",
-        Value::from(NodeStatus::Dormant.as_str()),
-    );
+    e2e.store
+        .transition_to_dormant(a_id)
+        .expect("transition A to Dormant");
 
     // After: A excluded, B (Pending) still returned.
     let after_a = manager
@@ -687,84 +592,50 @@ async fn retrieve_excludes_dormant_keeps_active() {
 /// (retention < dormant_threshold) → Dormant; Dormant episodes dormant past
 /// `archive_days` → archived to the PurgeLog; fresh episodes and the
 /// sediment layer (Knowledge) are never touched.
-#[test]
-fn episodic_decay_progressive_lifecycle() {
+/// D4 (ADR-057 §5.3 redesign): `run_episodic_decay_scan` drives the single
+/// time-decay lifecycle over Episodic nodes — very old Active episodes
+/// (retention < dormant_threshold) → Dormant; Dormant episodes dormant past
+/// `archive_days` → archived to the PurgeLog; fresh episodes and the sediment
+/// layer (Knowledge) are never touched.
+#[tokio::test]
+async fn episodic_decay_progressive_lifecycle() {
     let e2e = MemoryE2e::new();
+    // `archive_days = 0` keeps the archive branch reachable through the public
+    // API: a node transitioned to Dormant now is already past the deadline.
     let cfg = EpisodicDecayConfig {
         enabled: true,
         half_life_days: 180,
         dormant_threshold: 0.1,
-        archive_days: 90,
+        archive_days: 0,
     };
 
-    // Case 1: very old Active episode (~3.9× half-life → retention < 0.1)
+    // Case 1: very old Active episode (~3.9x half-life → retention < 0.1)
     // → Dormant on the next scan.
-    let old_active = e2e
-        .store
-        .store_node(
-            labels::EPISODIC,
-            [("content", Value::from("a very old event record"))],
-        )
-        .expect("store_node ok");
-    e2e.store.db().set_node_property(
-        old_active,
-        "created_at",
-        Value::from(Timestamp::from_micros(micros_days_ago(700))),
-    );
+    let old_active = e2e.seed_episode_aged("a very old event record", 700).await;
 
-    // Case 2: Dormant for 100 days (past archive_days = 90) → PurgeLog.
+    // Case 2: Dormant episode whose archive deadline has already passed.
     let dormant_old = e2e
-        .store
-        .store_node(
-            labels::EPISODIC,
-            [(
-                "content",
-                Value::from("dormant event past archive deadline"),
-            )],
-        )
-        .expect("store_node ok");
-    e2e.store.db().set_node_property(
-        dormant_old,
-        "status",
-        Value::from(NodeStatus::Dormant.as_str()),
-    );
-    e2e.store.db().set_node_property(
-        dormant_old,
-        "dormant_since",
-        Value::from(Timestamp::from_micros(micros_days_ago(100))),
-    );
+        .seed_episode_aged("dormant event past archive deadline", 1)
+        .await;
+    e2e.store
+        .transition_to_dormant(dormant_old)
+        .expect("transition to Dormant");
 
     // Case 3: fresh episode (retention ≈ 0.96) stays Active.
-    let fresh = e2e
-        .store
-        .store_node(
-            labels::EPISODIC,
-            [("content", Value::from("a recent event record"))],
-        )
-        .expect("store_node ok");
-    e2e.store.db().set_node_property(
-        fresh,
-        "created_at",
-        Value::from(Timestamp::from_micros(micros_days_ago(10))),
-    );
+    let fresh = e2e.seed_episode_aged("a recent event record", 10).await;
 
-    // Case 4: sediment-layer (Knowledge) node as old as case 1 — the scan
-    // must never touch non-Episodic labels.
+    // Case 4: sediment-layer (Knowledge) node as old as case 1 — the scan must
+    // never touch non-Episodic labels.
     let knowledge = e2e
-        .store
-        .store_node(
-            labels::KNOWLEDGE,
-            [
-                ("content", Value::from("User's critical preference")),
-                ("importance", Value::from(0.9f64)),
-            ],
+        .seed_knowledge(
+            "User's critical preference",
+            KnowledgeSubType::Preference,
+            0.9,
+            0.9,
+            PrivacyLevel::Personal,
+            NodeStatus::Active,
         )
-        .expect("store_node ok");
-    e2e.store.db().set_node_property(
-        knowledge,
-        "created_at",
-        Value::from(Timestamp::from_micros(micros_days_ago(700))),
-    );
+        .await;
 
     let result = e2e
         .store
@@ -779,201 +650,27 @@ fn episodic_decay_progressive_lifecycle() {
         "only the stale Dormant episode is archived"
     );
 
-    let status = |id: NodeId| -> String {
-        e2e.store
-            .db()
-            .get_node(id)
-            .expect("node exists")
-            .get_property("status")
-            .and_then(Value::as_str)
-            .unwrap_or("Active")
-            .to_string()
-    };
+    let provider: &dyn MemoryProvider = e2e.store.as_ref();
+    let status = |id: u64| -> Option<NodeStatus> { provider.get_node_status(id).unwrap() };
 
     assert_eq!(
         status(old_active),
-        NodeStatus::Dormant.as_str(),
+        Some(NodeStatus::Dormant),
         "old episode transitions Active → Dormant"
     );
     assert_eq!(
         status(fresh),
-        NodeStatus::Active.as_str(),
+        Some(NodeStatus::Active),
         "fresh episode must stay Active"
     );
     assert_eq!(
         status(knowledge),
-        NodeStatus::Active.as_str(),
+        Some(NodeStatus::Active),
         "sediment layer must never be decayed by the episodic scan"
     );
-    assert!(
-        e2e.store.db().get_node(dormant_old).is_none(),
-        "stale Dormant episode must be archived (node deleted; PurgeLog holds it)"
-    );
-}
-
-// ============================================================================
-// E series — graph behavior (P2 G11 expand thresholds, P2 G12 edge weight)
-// ============================================================================
-
-/// E1 (P2 G11): default `GraphExpandConfig` and `"s"` branch use
-/// `[0.1, 0.15, 0.2]`; the `"r"` branch stays at `[0.1, 0.12, 0.15]`.
-#[test]
-fn graph_expand_thresholds_aligned() {
-    let default_thresholds = GraphExpandConfig::default().early_stop_thresholds;
     assert_eq!(
-        default_thresholds,
-        vec![0.1, 0.15, 0.2],
-        "default expand thresholds must be [0.1, 0.15, 0.2]"
-    );
-
-    let s_thresholds = get_expand_thresholds("s");
-    assert_eq!(
-        s_thresholds,
-        vec![0.1, 0.15, 0.2],
-        "'s' branch must match default [0.1, 0.15, 0.2]"
-    );
-
-    let r_thresholds = get_expand_thresholds("r");
-    assert_eq!(
-        r_thresholds,
-        vec![0.1, 0.12, 0.15],
-        "'r' branch keeps [0.1, 0.12, 0.15]"
-    );
-}
-
-/// E2 (P2 G12): `create_memory_edge` without an explicit weight computes it
-/// from the endpoints' confidence via `compute_edge_weight(avg, days=0)`.
-#[tokio::test]
-async fn edge_weight_auto_computed() {
-    let e2e = MemoryE2e::new();
-
-    let a = e2e
-        .store
-        .store_node(
-            labels::KNOWLEDGE,
-            [
-                ("content", Value::from("node A")),
-                ("confidence", Value::from(0.8f64)),
-            ],
-        )
-        .expect("store_node ok");
-    let b = e2e
-        .store
-        .store_node(
-            labels::KNOWLEDGE,
-            [
-                ("content", Value::from("node B")),
-                ("confidence", Value::from(0.6f64)),
-            ],
-        )
-        .expect("store_node ok");
-
-    e2e.store
-        .create_memory_edge(a, b, "REFERENCES", Vec::new())
-        .expect("create edge ok");
-
-    let edges = e2e
-        .store
-        .get_edges_by_type(a, "REFERENCES")
-        .expect("get edges ok");
-    assert_eq!(edges.len(), 1, "one edge created");
-
-    let (_, _, props) = &edges[0];
-    let weight = props
-        .iter()
-        .find(|(k, _)| k == "weight")
-        .map(|(_, v)| v.as_float64().expect("weight is float"))
-        .expect("auto-computed weight present");
-
-    // Hardcoded expectation (NOT derived from the function under test):
-    // compute_edge_weight(0.7, 0.0) = min(0.8, 0.7 * exp(0)) = 0.7.
-    // Deriving the expected value from `compute_edge_weight` itself would let
-    // a broken implementation pass (mutation-tested smell).
-    let expected = 0.7f64;
-    assert!(
-        (weight - expected).abs() < 1e-6,
-        "auto weight {weight} != expected {expected}"
-    );
-}
-
-/// E3 (P2 G12): an explicit `weight` property is honored (not overridden by
-/// auto-computation).
-#[tokio::test]
-async fn edge_weight_explicit_not_overridden() {
-    let e2e = MemoryE2e::new();
-
-    let a = e2e
-        .store
-        .store_node(
-            labels::KNOWLEDGE,
-            [
-                ("content", Value::from("node A")),
-                ("confidence", Value::from(0.9f64)),
-            ],
-        )
-        .expect("store_node ok");
-    let b = e2e
-        .store
-        .store_node(
-            labels::KNOWLEDGE,
-            [
-                ("content", Value::from("node B")),
-                ("confidence", Value::from(0.9f64)),
-            ],
-        )
-        .expect("store_node ok");
-
-    e2e.store
-        .create_memory_edge(
-            a,
-            b,
-            "REFERENCES",
-            vec![("weight".to_string(), Value::from(0.2f64))],
-        )
-        .expect("create edge ok");
-
-    let edges = e2e
-        .store
-        .get_edges_by_type(a, "REFERENCES")
-        .expect("get edges ok");
-    let (_, _, props) = &edges[0];
-    let weight = props
-        .iter()
-        .find(|(k, _)| k == "weight")
-        .map(|(_, v)| v.as_float64().expect("weight is float"))
-        .expect("explicit weight present");
-    assert!(
-        (weight - 0.2).abs() < 1e-6,
-        "explicit weight 0.2 must not be overridden, got {weight}"
-    );
-}
-
-/// E4 (P2 G12): when neither endpoint carries a `confidence` property, weight
-/// auto-computation is skipped (no `weight` property is written).
-#[tokio::test]
-async fn edge_weight_no_confidence_skips() {
-    let e2e = MemoryE2e::new();
-
-    let a = e2e
-        .store
-        .store_node(labels::KNOWLEDGE, [("content", Value::from("node A"))])
-        .expect("store_node ok");
-    let b = e2e
-        .store
-        .store_node(labels::KNOWLEDGE, [("content", Value::from("node B"))])
-        .expect("store_node ok");
-
-    e2e.store
-        .create_memory_edge(a, b, "REFERENCES", Vec::new())
-        .expect("create edge ok");
-
-    let edges = e2e
-        .store
-        .get_edges_by_type(a, "REFERENCES")
-        .expect("get edges ok");
-    let (_, _, props) = &edges[0];
-    assert!(
-        !props.iter().any(|(k, _)| k == "weight"),
-        "no confidence → weight auto-computation skipped"
+        status(dormant_old),
+        None,
+        "stale Dormant episode must be archived (row deleted; PurgeLog holds it)"
     );
 }

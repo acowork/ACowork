@@ -71,10 +71,4 @@ impl From<String> for AcoworkError {
     }
 }
 
-impl From<grafeo_common::Error> for AcoworkError {
-    fn from(e: grafeo_common::Error) -> Self {
-        AcoworkError::Memory(e.to_string())
-    }
-}
-
 pub type Result<T> = std::result::Result<T, AcoworkError>;

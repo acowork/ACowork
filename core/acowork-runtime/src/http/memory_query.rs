@@ -5,7 +5,7 @@
 //! `MemoryAdminService` trait implementation in `acowork-grafeo`. This
 //! module now provides thin wrappers that call the trait and convert
 //! results to the intermediate types consumed by the HTTP handlers and
-//! the `GrafeoMemoryAdapter`.
+//! the `MemoryAdminAdapter`.
 //!
 //! All entry points take `Option<&Arc<dyn MemoryAdminService>>` and report
 //! graceful "no store" responses when the store has not been

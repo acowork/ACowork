@@ -94,15 +94,6 @@ pub enum RuntimeError {
 
 pub type Result<T> = std::result::Result<T, RuntimeError>;
 
-/// ADR-051 P4: GrafeoError conversion is feature-gated because
-/// `acowork-grafeo` is an optional dependency.
-#[cfg(feature = "grafeo-backend")]
-impl From<acowork_grafeo::GrafeoError> for RuntimeError {
-    fn from(e: acowork_grafeo::GrafeoError) -> Self {
-        RuntimeError::Memory(e.to_string())
-    }
-}
-
 impl RuntimeError {
     /// Whether this error is a transient, retryable failure (network /
     /// transport / stream). Auth, 429 (quota), and other permanent errors

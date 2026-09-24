@@ -1124,26 +1124,18 @@ impl AgentCore {
             tracing::debug!("init_memory_provider: already initialized, skipping");
             return;
         }
-        let memory_dir = work_dir.join("memory");
+        let memory_dir = work_dir.join(acowork_core::workspace::MEMORY_DIR);
         if let Err(e) = std::fs::create_dir_all(&memory_dir) {
             tracing::warn!(error = %e, dir = %memory_dir.display(), "Failed to create memory directory, memory features disabled");
             return;
         }
-        // ADR-082 D1: SQLite is the backend, unconditionally. The grafeo
-        // backend (`init_grafeo_backend`) is kept compiled for the transition
-        // but no longer selected; it is removed once the SQLite rollout has
-        // settled.
         self.init_sqlite_backend(work_dir);
     }
 
-    /// Create and initialise a SQLite store as the memory provider (ADR-082 D1).
-    ///
-    /// The file name is backend-specific (`private.sqlite` vs
-    /// `private.grafeo`) so switching backends never opens one engine's file
-    /// with the other.
+    /// Create and initialise the workspace store as the memory provider
+    /// (ADR-082 D1).
     fn init_sqlite_backend(&mut self, work_dir: &std::path::Path) {
-        let memory_dir = work_dir.join("memory");
-        let db_path = memory_dir.join("private.sqlite");
+        let db_path = acowork_core::workspace::store_path(work_dir);
         let embedding_dim = self.memory_embedding_dim();
         match acowork_sqlite::SqliteStore::open(&db_path, embedding_dim) {
             Ok(store) => {
@@ -1219,8 +1211,6 @@ impl AgentCore {
             tracing::warn!(error = %e, "Failed to apply memory quality config, using defaults");
         }
 
-        // Autobiographical bootstrap is still grafeo-side (world-model traits).
-        #[cfg(feature = "grafeo-backend")]
         self.bootstrap_autobiographical_from_manifest(&*store);
         if let Some(ref session) = self.memory_session {
             session.set_provider(store.clone());
@@ -1234,43 +1224,14 @@ impl AgentCore {
         self.start_consolidation_pipeline();
     }
 
-    /// Create and initialise a GrafeoStore as the memory provider.
-    ///
-    /// ADR-051 P4: Feature-gated behind `grafeo-backend`.
-    ///
-    /// ponytail: no longer called — `init_memory_provider` selects SQLite
-    /// unconditionally (ADR-082 §4 step 3). Kept compiled during the
-    /// transition so the backend can be restored by reverting one call; the
-    /// whole grafeo path is deleted once the SQLite rollout has settled.
-    #[cfg(feature = "grafeo-backend")]
-    #[allow(dead_code)]
-    fn init_grafeo_backend(&mut self, memory_dir: &std::path::Path) {
-        use acowork_grafeo::grafeo::GrafeoStore;
-        use acowork_grafeo::types::GrafeoConfig;
-
-        let db_path = memory_dir.join("private.grafeo");
-        let config = GrafeoConfig {
-            db_path: db_path.clone(),
-            embedding_dim: self.memory_embedding_dim(),
-        };
-        match GrafeoStore::open(&config) {
-            Ok(store) => self.install_memory_backend(std::sync::Arc::new(store), &db_path),
-            Err(e) => tracing::warn!(
-                error = %e,
-                path = %db_path.display(),
-                "Failed to open Grafeo memory store, memory features disabled"
-            ),
-        }
-    }
-
     pub fn memory_provider(&self) -> Option<&Arc<dyn MemoryProvider>> {
         self.memory_provider.as_ref()
     }
 
-    /// The open SQLite store when the SQLite backend is active (ADR-082 §4).
+    /// The open workspace store (ADR-082 §4).
     ///
     /// Consumed by the conversation-index bootstrap so the index shares the
-    /// memory file and connection. `None` on the grafeo backend.
+    /// memory file and connection.
     pub fn sqlite_store(&self) -> Option<Arc<acowork_sqlite::SqliteStore>> {
         self.sqlite_store.clone()
     }
@@ -1286,7 +1247,6 @@ impl AgentCore {
         self.memory_provider.as_ref()
     }
 
-    #[cfg(feature = "grafeo-backend")]
     fn bootstrap_autobiographical_from_manifest(&self, provider: &dyn MemoryProvider) {
         // ADR-068 M8 — bootstrap scope is intentionally narrow (Identity +
         // Capability only; see module docs). The logic lives in the free
@@ -1509,10 +1469,8 @@ impl AgentCore {
     /// distiller is enabled, and the endpoint defends the same invariant
     /// server-side.
     ///
-    /// Returns `Ok(Some(result))` after a grafeo-backed run,
-    /// `Ok(None)` when the `grafeo-backend` feature is off, and `Err(...)`
-    /// when the distiller is disabled or the memory/embedding provider is
-    /// unavailable.
+    /// Returns `Ok(Some(result))` after a run and `Err(...)` when the
+    /// distiller is disabled or the memory/embedding provider is unavailable.
     pub(crate) async fn run_episodic_distill_once(
         &self,
     ) -> Result<Option<acowork_memory::consolidation::DistillerResult>, String> {
@@ -2389,13 +2347,13 @@ mod tests {
     #[tokio::test]
     async fn test_consolidation_timer_stored_and_notify_resets_idle() {
         use acowork_core::embedding::EmbeddingProvider;
-        use acowork_grafeo::GrafeoStore;
 
         let mut core = make_core(Some(8192), None, None, 0);
 
-        // Set up a real in-memory GrafeoStore as the memory provider.
-        let store: Arc<dyn acowork_memory::MemoryProvider> =
-            Arc::new(GrafeoStore::new_in_memory().unwrap());
+        // A real in-memory store as the memory provider.
+        let store: Arc<dyn acowork_memory::MemoryProvider> = Arc::new(
+            acowork_sqlite::SqliteStore::open_in_memory(768).unwrap(),
+        );
         core.memory_provider = Some(store);
 
         // Set up a dummy embedding provider (required by start_consolidation_pipeline).
@@ -2468,12 +2426,12 @@ mod tests {
     #[tokio::test]
     async fn test_consolidation_timer_shared_across_session_clone() {
         use acowork_core::embedding::EmbeddingProvider;
-        use acowork_grafeo::GrafeoStore;
 
         let mut core = make_core(Some(8192), None, None, 0);
 
-        let store: Arc<dyn acowork_memory::MemoryProvider> =
-            Arc::new(GrafeoStore::new_in_memory().unwrap());
+        let store: Arc<dyn acowork_memory::MemoryProvider> = Arc::new(
+            acowork_sqlite::SqliteStore::open_in_memory(768).unwrap(),
+        );
         core.memory_provider = Some(store);
 
         struct DummyEmbeddingProvider;
@@ -2619,17 +2577,16 @@ mod tests {
     /// G1d: With the distiller enabled and providers wired, a manual run
     /// completes and returns a real DistillerResult (empty backlog → zero
     /// promotions, but the pipeline runs).
-    #[cfg(feature = "grafeo-backend")]
     #[tokio::test]
     async fn test_manual_distill_runs_when_enabled() {
         use acowork_core::embedding::EmbeddingProvider;
-        use acowork_grafeo::GrafeoStore;
 
         let mut core = make_core_with_memory_toml("[memory.distiller]\nenabled = true\n");
         assert!(core.manifest.memory.distiller_enabled());
 
-        let store: Arc<dyn acowork_memory::MemoryProvider> =
-            Arc::new(GrafeoStore::new_in_memory().unwrap());
+        let store: Arc<dyn acowork_memory::MemoryProvider> = Arc::new(
+            acowork_sqlite::SqliteStore::open_in_memory(768).unwrap(),
+        );
         core.memory_provider = Some(store);
 
         struct DummyEmbeddingProvider;
@@ -2663,7 +2620,7 @@ mod tests {
             .run_episodic_distill_once()
             .await
             .expect("manual distill should succeed when enabled");
-        let result = result.expect("grafeo-backend is on → Some(result)");
+        let result = result.expect("manual distill returns a result");
         // Empty store: the distiller scans nothing and promotes nothing.
         assert_eq!(result.episodes_scanned, 0);
         assert_eq!(result.facts_promoted, 0);

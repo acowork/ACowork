@@ -3,7 +3,7 @@
 //! Lives in-crate (not `tests/`) because `AgentCore::new` is `pub(crate)`
 //! and this suite must inject `memory_provider` / `embedding_provider` /
 //! `consolidation_timer` (all `pub(crate)` fields) to wire a REAL
-//! `GrafeoStore` behind the HTTP endpoint. `prompts_reload_e2e` documents
+//! real store behind the HTTP endpoint. `prompts_reload_e2e` documents
 //! why an integration test cannot construct an `AgentCore`.
 //!
 //! Covers the ADR-071 W2 claim that was previously only stated in a commit
@@ -11,7 +11,7 @@
 //! AgentCore." Scenarios:
 //!
 //! 1. **E1 — HTTP manual distill promotes episodes**: seed two classified
-//!    episodes (Fact + Preference) into a real in-memory GrafeoStore, run
+//!    episodes (Fact + Preference) into a real in-memory store, run
 //!    `POST /memory/distill`, and assert the HTTP `DistillResponse`, the
 //!    promoted `KnowledgeNode`s (with `promotion_metadata`), the
 //!    consolidated-episode cleanup, and the `GET /memory/consolidation/status`
@@ -26,14 +26,13 @@
 //! embedding bridge (current-thread runtimes degrade to exact-key clustering).
 
 #![cfg(test)]
-#![cfg(feature = "grafeo-backend")]
 
 use std::sync::Arc;
 
 use acowork_core::EmbeddingProvider;
 use acowork_core::providers::mock::{MockProvider, MockResponse};
-use acowork_grafeo::grafeo::GrafeoStore;
 use acowork_memory::MemoryProvider;
+use acowork_sqlite::SqliteStore;
 use acowork_memory::types::{Episode, KnowledgeSubType};
 use chrono::{Duration as ChronoDuration, Utc};
 
@@ -102,22 +101,25 @@ fn judge_response(decision: &str, confidence: f32, content: &str) -> String {
 // Harness
 // ============================================================================
 
+/// Width of `DeterministicEmbedding`, and therefore of the store's vectors.
+const EMBED_DIM: usize = 384;
+
 struct Adr071E2e {
     core: Arc<AgentCore>,
-    store: Arc<GrafeoStore>,
+    store: Arc<SqliteStore>,
     timer: Arc<ConsolidationTimer>,
 }
 
-/// Build a real AgentCore wired to the given real in-memory GrafeoStore,
-/// with the given scripted LLM response queue. `enabled=false` omits the
+/// Build a real AgentCore wired to the given real in-memory store, with the
+/// given scripted LLM response queue. `enabled=false` omits the
 /// `[memory.distiller]` manifest section (opt-in off).
 ///
 /// The store is passed in so callers can seed episodes and read their REAL
-/// node ids FIRST, then build the extract JSON with those ids (GrafeoStore
-/// node ids are not 0-based sequential).
+/// node ids FIRST and then build the extract JSON with those ids, instead of
+/// hard-coding ids the store is free to assign.
 fn build_core(
     enabled: bool,
-    store: Arc<GrafeoStore>,
+    store: Arc<SqliteStore>,
     llm_responses: Vec<MockResponse>,
 ) -> Adr071E2e {
     let config = crate::config::RuntimeConfig::default();
@@ -182,9 +184,6 @@ impl Adr071E2e {
             importance: 0.5,
             knowledge_subtype: Some(subtype),
         };
-        // Go through the trait (`dyn MemoryProvider`) so the acowork-memory
-        // `Episode` type is stored — GrafeoStore has an inherent
-        // `store_episode` for its own `grafeo::Episode` that would shadow it.
         let provider: Arc<dyn MemoryProvider> = self.store.clone();
         provider.store_episode(&ep).expect("store_episode ok")
     }
@@ -289,7 +288,7 @@ async fn spawn_server(e2e: &Adr071E2e) -> u16 {
 #[tokio::test(flavor = "multi_thread")]
 async fn e1_http_manual_distill_promotes_episodes() {
     let now = Utc::now();
-    let store = Arc::new(GrafeoStore::new_in_memory().expect("in-memory store"));
+    let store = Arc::new(SqliteStore::open_in_memory(EMBED_DIM).expect("in-memory store"));
     let mut e2e = build_core(true, store.clone(), Vec::new());
 
     // Seed evidence episodes per subtype so the distiller's evidence gate
@@ -379,7 +378,7 @@ async fn e1_http_manual_distill_promotes_episodes() {
     );
 
     // ── Sediment layer: promoted nodes carry full provenance ────────────
-    let fact = e2e
+    let (_, fact) = e2e
         .store
         .find_knowledge_by_subject("user", "lives_in")
         .expect("lookup ok")
@@ -396,7 +395,7 @@ async fn e1_http_manual_distill_promotes_episodes() {
     );
     assert!(meta.llm_judge_confidence > 0.0);
 
-    let pref = e2e
+    let (_, pref) = e2e
         .store
         .find_knowledge_by_subject("user", "prefers")
         .expect("lookup ok")
@@ -463,7 +462,7 @@ async fn e1_http_manual_distill_promotes_episodes() {
 #[tokio::test(flavor = "multi_thread")]
 async fn e2_disabled_distiller_refuses_manual_trigger() {
     let now = Utc::now();
-    let store = Arc::new(GrafeoStore::new_in_memory().expect("in-memory store"));
+    let store = Arc::new(SqliteStore::open_in_memory(EMBED_DIM).expect("in-memory store"));
     let e2e = build_core(false, store.clone(), Vec::new());
     e2e.seed_episode(
         "User lives in Beijing",

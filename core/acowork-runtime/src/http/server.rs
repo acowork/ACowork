@@ -19,7 +19,7 @@
 //! GET    /sessions/{sid}/messages                // retained
 //! POST   /sessions/{sid}/files                   // ADR-046: upload file/image
 //! GET    /files/{document_id}                    // ADR-046: download blob
-//! GET    /memory/graph                           // FIXED: now uses Grafeo
+//! GET    /memory/graph                           // reads the memory store
 //! GET    /memory/nodes                           // retained
 //! GET    /memory/nodes/{nid}                     // NEW: memory_query::get_node
 //! DELETE /memory/nodes/{nid}                     // retained
@@ -1124,7 +1124,7 @@ async fn get_messages(
 
 /// `GET /memory/graph` — full memory graph (ADR-034 §11.2 #10).
 ///
-/// Phase 3 (ADR-034): now reads from the Grafeo memory store via
+/// Phase 3 (ADR-034): reads from the memory store via
 /// [`memory_query::list_nodes`] (with no pagination), instead of the
 /// legacy `.jsonl` file fallback. Returns all four user-visible memory
 /// labels (`Episodic`/`Knowledge`/`Procedural`/`Autobiographical`) so
@@ -4019,7 +4019,7 @@ mod tests {
         memory_store: SharedMemoryStore,
         embed_dim: SharedEmbedDimension,
     ) -> Arc<dyn crate::usecases::MemoryQueryService> {
-        Arc::new(crate::usecases::GrafeoMemoryAdapter::new(
+        Arc::new(crate::usecases::MemoryAdminAdapter::new(
             memory_store,
             embed_dim,
         ))
@@ -6358,18 +6358,20 @@ mod tests {
     /// End-to-end smoke test for the four memory-write endpoints
     /// (POST /memory/nodes, GET /memory/nodes/{nid}, PUT
     /// /memory/nodes/{nid}, DELETE /memory/nodes/{nid}) backed by a real
-    /// GrafeoStore.
+    /// store.
     #[tokio::test]
     async fn test_http_server_memory_crud_endpoints() {
         let temp_dir = std::env::temp_dir().join("acowork-test-runtime-http-mem-crud");
         let _ = std::fs::remove_dir_all(&temp_dir);
         std::fs::create_dir_all(&temp_dir).unwrap();
 
-        // Build a real GrafeoStore — `new_in_memory` keeps the test
-        // hermetic and lets the adapter report `index_health = healthy`.
+        // Build a real store — `open_in_memory` keeps the test hermetic and
+        // lets the adapter report `index_health = healthy`.
         let store = std::sync::Arc::new(
-            acowork_grafeo::grafeo::GrafeoStore::new_in_memory()
-                .expect("in-memory store should open"),
+            acowork_sqlite::SqliteStore::open_in_memory(
+                acowork_memory::types::DEFAULT_EMBEDDING_DIM,
+            )
+            .expect("in-memory store should open"),
         );
         let memory_store: SharedMemoryStore =
             std::sync::Arc::new(std::sync::RwLock::new(Some(store)));
@@ -6512,8 +6514,10 @@ mod tests {
         std::fs::create_dir_all(&temp_dir).unwrap();
 
         let store = std::sync::Arc::new(
-            acowork_grafeo::grafeo::GrafeoStore::new_in_memory()
-                .expect("in-memory store should open"),
+            acowork_sqlite::SqliteStore::open_in_memory(
+                acowork_memory::types::DEFAULT_EMBEDDING_DIM,
+            )
+            .expect("in-memory store should open"),
         );
 
         let memory_store: SharedMemoryStore =

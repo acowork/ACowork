@@ -1,9 +1,9 @@
 //! Consolidation background task - timing policy and background loop.
 //!
-//! ADR-051 P4: Replaces the grafeo `ConsolidationScheduler` with a
+//! ADR-051 P4: Replaces the offline `ConsolidationScheduler` with a
 //! lightweight `ConsolidationTimer` that lives in the Runtime. The timer
 //! implements interval-gated triggers (distiller + episodic forgetting)
-//! without needing a GrafeoStore. The legacy Pending-count accumulation /
+//! without needing a concrete storage backend. The legacy Pending-count accumulation /
 //! idle-timeout triggers are gone — Pending nodes have had no producer
 //! since ADR-068, so those triggers could never fire.
 //!
@@ -46,12 +46,12 @@ pub enum TriggerReason {
 }
 
 // ---------------------------------------------------------------------------
-// Consolidation timer (replaces grafeo's ConsolidationScheduler)
+// Consolidation timer (replaces the offline ConsolidationScheduler)
 // ---------------------------------------------------------------------------
 
 /// Lightweight scheduling policy for consolidation runs.
 ///
-/// ADR-051 P4: Replaces `acowork_grafeo::consolidation::ConsolidationScheduler`.
+/// ADR-051 P4: Replaces the offline `ConsolidationScheduler`.
 /// Does NOT hold a store reference - the background loop calls
 /// `dyn MemoryProvider` for all data operations.
 pub struct ConsolidationTimer {
@@ -497,34 +497,20 @@ fn build_embedding_bridge(
 /// Autobiographical nodes. The step is off-by-default (`distiller_enabled`),
 /// so this function is a no-op unless explicitly configured.
 ///
-/// Returns `Some(result)` after a real grafeo-backed run; `None` when the
-/// `grafeo-backend` feature is off or when the run failed. The background
-/// loop ignores the return value; the manual HTTP trigger (`POST
+/// Returns `Some(result)` after a run and `None` when the run failed. The
+/// background loop ignores the return value; the manual HTTP trigger (`POST
 /// /memory/distill`, ADR-071 D2) surfaces it to the caller.
 ///
-/// The distiller lives in `acowork-grafeo`, which is an optional runtime
-/// dependency behind the `grafeo-backend` feature. When that feature is
-/// disabled the step degrades to a logged no-op.
+/// The pipeline itself is storage-agnostic
+/// ([`acowork_memory::consolidation::EpisodicDistiller`]).
 async fn run_episodic_distiller_step(
     provider: &dyn acowork_memory::MemoryProvider,
     llm: &dyn TripleExtractorLlm,
     embedding_fn: Option<&DistillerEmbeddingFn>,
     config: &SchedulerConfig,
 ) -> Option<acowork_memory::consolidation::DistillerResult> {
-    // When grafeo is not compiled in, nothing to do.
-    #[cfg(not(feature = "grafeo-backend"))]
     {
-        let _ = (provider, llm, embedding_fn, config);
-        tracing::warn!(
-            "EpisodicDistiller step requested but acowork-grafeo is not enabled \
-             (feature 'grafeo-backend' is off); skipping"
-        );
-        None
-    }
-
-    #[cfg(feature = "grafeo-backend")]
-    {
-        use acowork_grafeo::consolidation::{DefaultEpisodicDistiller, EpisodicDistiller};
+        use acowork_memory::consolidation::{DefaultEpisodicDistiller, EpisodicDistiller};
 
         let distiller = DefaultEpisodicDistiller;
         let distiller_config = config.distiller_config.clone().unwrap_or_default();
@@ -608,7 +594,7 @@ pub struct ConsolidationParams {
 /// background task handle (to be stored in AgentCore).
 ///
 /// ADR-051 P4: Uses `ConsolidationTimer` (Runtime-internal) instead of
-/// grafeo's `ConsolidationScheduler`. No GrafeoStore dependency.
+/// that scheduler. No storage-backend dependency.
 pub fn start_consolidation_pipeline(
     params: ConsolidationParams,
 ) -> (Arc<ConsolidationTimer>, ConsolidationBgTask) {
@@ -633,7 +619,7 @@ pub fn start_consolidation_pipeline(
 /// (`run_episodic_distiller_step`), so the manual endpoint and the periodic
 /// scheduler behave identically.
 ///
-/// Returns the distilled-run summary (`None` when the `grafeo-backend`
+/// Returns the distilled-run summary (`None` when the
 /// feature is off, so the caller can report "not available").
 pub(crate) async fn run_episodic_distiller_step_once(
     provider: Arc<dyn acowork_memory::MemoryProvider>,
@@ -876,8 +862,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_consolidation_bg_task_starts_and_stops() {
-        let store: Arc<dyn acowork_memory::MemoryProvider> =
-            Arc::new(acowork_grafeo::GrafeoStore::new_in_memory().unwrap());
+        let store: Arc<dyn acowork_memory::MemoryProvider> = Arc::new(
+            acowork_sqlite::SqliteStore::open_in_memory(
+                acowork_memory::types::DEFAULT_EMBEDDING_DIM,
+            )
+            .unwrap(),
+        );
 
         struct NoopLlm;
         #[async_trait::async_trait]
@@ -1014,7 +1004,6 @@ mod tests {
         let _ = cfg;
     }
 
-    #[cfg(feature = "grafeo-backend")]
     #[tokio::test]
     async fn test_distiller_step_promotes_facts_when_enabled() {
         use super::distiller_fixture::{
@@ -1031,7 +1020,6 @@ mod tests {
         assert_eq!(result.facts_promoted, 1);
     }
 
-    #[cfg(feature = "grafeo-backend")]
     #[tokio::test]
     async fn test_distiller_step_noop_when_disabled() {
         use super::distiller_fixture::{
@@ -1050,7 +1038,7 @@ mod tests {
     }
 }
 
-#[cfg(all(test, feature = "grafeo-backend"))]
+#[cfg(test)]
 mod distiller_fixture {
     use super::*;
     use acowork_memory::consolidation::{DistillerResult, LlmMessage, LlmResponse};
@@ -1081,9 +1069,13 @@ mod distiller_fixture {
         }
     }
 
-    pub fn build_distiller_test_fixture()
-    -> (Arc<acowork_grafeo::GrafeoStore>, Arc<MockDistillerLlm>) {
-        let store = Arc::new(acowork_grafeo::GrafeoStore::new_in_memory().unwrap());
+    pub fn build_distiller_test_fixture() -> (Arc<acowork_sqlite::SqliteStore>, Arc<MockDistillerLlm>) {
+        let store = Arc::new(
+            acowork_sqlite::SqliteStore::open_in_memory(
+                acowork_memory::types::DEFAULT_EMBEDDING_DIM,
+            )
+            .unwrap(),
+        );
         let provider: Arc<dyn acowork_memory::MemoryProvider> = store.clone();
         // Seed 2 unconsolidated Fact episodes.
         use acowork_memory::types::{Episode, KnowledgeSubType};
@@ -1133,7 +1125,7 @@ mod distiller_fixture {
         llm: &dyn TripleExtractorLlm,
         config: SchedulerConfig,
     ) -> DistillerResult {
-        use acowork_grafeo::consolidation::{DefaultEpisodicDistiller, EpisodicDistiller};
+        use acowork_memory::consolidation::{DefaultEpisodicDistiller, EpisodicDistiller};
         if !config.distiller_enabled {
             return DistillerResult::default();
         }

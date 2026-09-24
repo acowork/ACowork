@@ -3,7 +3,7 @@
 //! assumption on the RRF scale). Runs against the Knowledge (sediment) layer.
 //!
 //! ADR-068 note: `MemoryStoreTool` only writes Episodes now, so this probe
-//! seeds Knowledge nodes directly through `GrafeoStore`'s native path — the
+//! seeds Knowledge nodes directly through the provider's store path — the
 //! same path the EpisodicDistiller uses on promotion — to keep measuring the
 //! sediment-layer retrieval score domain.
 
@@ -14,12 +14,10 @@ use chrono::Utc;
 
 use acowork_core::EmbeddingProvider;
 
-use acowork_grafeo::grafeo::GrafeoStore;
-use acowork_grafeo::types::KnowledgeNode as GrafeoKnowledgeNode;
 
 use acowork_memory::{
     KnowledgeSubType, MemoryManager, MemoryManagerConfig, MemoryProvider, MemoryQuery, NodeStatus,
-    PrivacyLevel, labels,
+    PrivacyLevel,
 };
 
 use acowork_runtime::memory::MemorySessionHandle;
@@ -54,7 +52,7 @@ impl EmbeddingProvider for DeterministicEmbedding {
 
 /// Seed a Knowledge node directly (ADR-068 — see file header).
 async fn seed_knowledge_fact(
-    store: &GrafeoStore,
+    store: &acowork_sqlite::SqliteStore,
     content: &str,
     confidence: f32,
     importance: f32,
@@ -63,8 +61,7 @@ async fn seed_knowledge_fact(
         .embed(content)
         .await
         .expect("embed ok");
-    let node = GrafeoKnowledgeNode {
-        id: None,
+    let node = acowork_memory::KnowledgeNode {
         subject: "user".to_string(),
         predicate: String::new(),
         object: content.to_string(),
@@ -81,20 +78,17 @@ async fn seed_knowledge_fact(
         privacy: PrivacyLevel::Personal,
         importance,
     };
-    store
-        .store_node(
-            labels::KNOWLEDGE,
-            node.to_properties()
-                .iter()
-                .map(|(k, v)| (k.as_str(), v.clone())),
-        )
-        .expect("store_node ok")
-        .0
+    acowork_memory::MemoryProvider::store_knowledge(store, &node).expect("store_knowledge ok")
 }
 
 #[tokio::test]
 async fn probe_min_score_domain() {
-    let store = Arc::new(GrafeoStore::new_in_memory().expect("store"));
+    let store = Arc::new(
+        acowork_sqlite::SqliteStore::open_in_memory(
+            acowork_memory::types::DEFAULT_EMBEDDING_DIM,
+        )
+        .expect("store"),
+    );
     let handle = Arc::new(MemorySessionHandle::new(Some(Arc::new(
         DeterministicEmbedding,
     ))));

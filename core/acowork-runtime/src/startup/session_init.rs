@@ -525,11 +525,11 @@ pub(crate) async fn phase_b_init_session(
             );
         }
 
-        // ADR-040: Publish GrafeoMemoryAdapter to the HTTP server's
+        // ADR-040: Publish MemoryAdminAdapter to the HTTP server's
         // late-bind slot so memory handlers can use the trait path.
         {
             let adapter: Arc<dyn crate::usecases::MemoryQueryService> = Arc::new(
-                crate::usecases::memory_query_impl::GrafeoMemoryAdapter::new(
+                crate::usecases::memory_query_impl::MemoryAdminAdapter::new(
                     ctx.memory_store_shared.clone(),
                     ctx.embed_dim_shared.clone(),
                 ),

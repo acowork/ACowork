@@ -1,7 +1,9 @@
 //! acowork-memory - MemoryProvider trait and shared memory types
 //!
-//! This crate defines the MemoryProvider trait abstraction and shared types.
-//! Grafeo (acowork-grafeo) is the primary implementation.
+//! This crate defines the MemoryProvider trait abstraction, the shared memory
+//! types, and the storage-agnostic logic built on top of them (the episodic
+//! distiller, retrieval-quality metrics). Storage backends live elsewhere
+//! (`acowork-sqlite`).
 //!
 //! The `MemoryProvider` trait (ADR-051) extends the original `MemoryStore`
 //! trait with additional methods for consolidation, CRUD, and lifecycle
@@ -18,6 +20,7 @@ pub mod keyword;
 pub mod manager;
 pub mod provider;
 pub mod quality;
+pub mod retrieval_metrics;
 pub mod session_meta;
 pub mod store;
 pub mod types;
@@ -42,6 +45,7 @@ pub use manager::{
 
 // Re-exports: consolidation types
 pub use consolidation::{
+    DefaultEpisodicDistiller, EpisodicDistiller,
     AutobioAspect, AutobioCandidate, BehaviorPattern, ConflictAction, ConflictResolutionDetail,
     DistillerConfig, DistillerResult, EmbeddingFn, ExtractedKind, ExtractedStructure,
     GeneralizationConfig, GeneralizationResult, LlmMessage, LlmResponse, MemoryStoreInput,

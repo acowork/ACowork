@@ -316,7 +316,7 @@ impl DebugController {
         if let Some(snap) = self.context_snapshots.get_mut(&iteration)
             && let Some(section) = snap.sections.find_mut("messages")
         {
-            let json = serde_json::to_string(&messages).unwrap_or_default();
+            let json = serde_json::to_string(&*messages).unwrap_or_default();
             use sha2::{Digest, Sha256};
             let mut hasher = Sha256::new();
             hasher.update(json.as_bytes());

@@ -4,10 +4,10 @@
 //! This module re-exports them for backward compatibility.
 
 // ADR-071 e2e: manual-distill full chain (HTTP → AgentCore → distiller →
-// real GrafeoStore). Sits in-crate because `AgentCore::new` is `pub(crate)`
-// and the test needs to inject `memory_provider` / `embedding_provider` /
+// real store). Sits in-crate because `AgentCore::new` is `pub(crate)` and the
+// test needs to inject `memory_provider` / `embedding_provider` /
 // `consolidation_timer` (all `pub(crate)` fields).
-#[cfg(all(test, feature = "grafeo-backend"))]
+#[cfg(test)]
 mod adr071_e2e;
 
 pub mod consolidation_bg;

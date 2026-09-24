@@ -333,7 +333,7 @@ impl MetricsAggregator {
             alerts.push(MetricsAlert {
                 alert_type: MetricsAlertType::HighDegradationRate,
                 message: format!(
-                    "Degradation level 2+ rate {:.1}% exceeds {:.1}% — check Grafeo health",
+                    "Degradation level 2+ rate {:.1}% exceeds {:.1}% — check store health",
                     degradation_rate * 100.0,
                     self.thresholds.degradation_rate_high * 100.0,
                 ),

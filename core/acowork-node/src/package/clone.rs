@@ -6,7 +6,7 @@
 //!
 //! Skeleton clone (mode=skeleton): copies manifest, prompts, config,
 //! tools, resources. Full clone (mode=full): additionally copies
-//! skills, data, conversations, memory.
+//! skills, data, conversations and the agent-private SQLite store.
 
 use std::path::Path;
 
@@ -126,18 +126,21 @@ pub fn clone_agent(
             copy_dir_all(&conversations_src, &target_path.join("conversations"))?;
         }
 
-        // Copy memory/private.grafeo
-        let memory_src = source_path.join("memory");
-        if memory_src.exists() {
-            let private_grafeo = memory_src.join("private.grafeo");
-            if private_grafeo.exists() {
-                let target_memory = target_path.join("memory");
-                std::fs::create_dir_all(&target_memory).map_err(|e| {
-                    NodeError::Package(format!("Failed to create memory dir: {}", e))
+        // Copy the agent-private SQLite store: memory nodes, conversation
+        // index and session meta all live in `memory/private.sqlite` (ADR-082).
+        let store_files = acowork_core::workspace::store_files(source_path);
+        if store_files.first().is_some_and(|db| db.exists()) {
+            let target_memory = target_path.join(acowork_core::workspace::MEMORY_DIR);
+            std::fs::create_dir_all(&target_memory).map_err(|e| {
+                NodeError::Package(format!("Failed to create memory dir: {}", e))
+            })?;
+            for src in store_files.iter().filter(|f| f.exists()) {
+                let file_name = src.file_name().ok_or_else(|| {
+                    NodeError::Package(format!("Store file has no name: {}", src.display()))
                 })?;
-                std::fs::copy(&private_grafeo, target_memory.join("private.grafeo")).map_err(
-                    |e| NodeError::Package(format!("Failed to copy private.grafeo: {}", e)),
-                )?;
+                std::fs::copy(src, target_memory.join(file_name)).map_err(|e| {
+                    NodeError::Package(format!("Failed to copy {}: {}", src.display(), e))
+                })?;
             }
         }
     }
@@ -265,7 +268,11 @@ mod tests {
             r#"{"role":"user","content":"hello"}"#,
         )
         .unwrap();
-        std::fs::write(memory_dir.join("private.grafeo"), b"grafeo-data").unwrap();
+        std::fs::write(
+            memory_dir.join(acowork_core::workspace::STORE_FILE),
+            b"sqlite-data",
+        )
+        .unwrap();
     }
 
     fn add_agent_to_state(state: &mut NodeState, agent_id: &str, install_path: &str) {
@@ -376,8 +383,11 @@ mod tests {
             "conversations should be copied"
         );
         assert!(
-            target.join("memory/private.grafeo").exists(),
-            "private.grafeo should be copied"
+            target
+                .join(acowork_core::workspace::MEMORY_DIR)
+                .join(acowork_core::workspace::STORE_FILE)
+                .exists(),
+            "the agent-private store should be copied"
         );
 
         let _ = std::fs::remove_dir_all(&temp_dir);

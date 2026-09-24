@@ -23,20 +23,20 @@
 
 use std::collections::HashMap;
 
-use acowork_memory::consolidation::{
+use crate::consolidation::{
     AutobioAspect, AutobioCandidate, DistillerConfig, DistillerResult, EmbeddingFn,
     ExtractedKind, ExtractedStructure, HistoryMilestoneEvent, LlmMessage, PromotionDecision,
     PromotionEvaluation, PromotionKind, PromotionMetadata, TripleExtractorLlm,
 };
-use acowork_memory::types::{
+use crate::types::{
     AutobioCategory, AutobiographicalNode, Episode, KnowledgeNode, KnowledgeSubType, NodeStatus,
     PrivacyLevel, ProceduralNode,
 };
-use acowork_memory::MemoryProvider;
+use crate::MemoryProvider;
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
-use crate::error::{GrafeoError, Result};
+use acowork_core::error::{AcoworkError, Result};
 
 // ============================================================================
 // Trait
@@ -84,7 +84,7 @@ pub trait EpisodicDistiller: Send + Sync {
         &self,
         provider: &dyn MemoryProvider,
     ) -> Result<Option<PromotionEvaluation>> {
-        let Some(span) = provider.collaboration_span().map_err(grafeo_err)? else {
+        let Some(span) = provider.collaboration_span()? else {
             return Ok(None);
         };
         let span_days = (Utc::now() - span.earliest_episode_at).num_days();
@@ -94,7 +94,7 @@ pub trait EpisodicDistiller: Send + Sync {
         // Idempotency: Relationship nodes are created once per collaboration.
         let existing = provider
             .find_autobiographical_by_category(AutobioCategory::Relationship)
-            .map_err(grafeo_err)?;
+            ?;
         if !existing.is_empty() {
             return Ok(None);
         }
@@ -131,7 +131,7 @@ pub trait EpisodicDistiller: Send + Sync {
             source: "self_evaluation".to_string(),
             metadata: std::collections::HashMap::new(),
         };
-        let node_id = provider.store_autobiographical(&node).map_err(grafeo_err)?;
+        let node_id = provider.store_autobiographical(&node)?;
         Ok(Some(PromotionEvaluation {
             source_episode_ids: Vec::new(),
             promoted_kind: PromotionKind::AutobioRelationship,
@@ -167,7 +167,7 @@ pub trait EpisodicDistiller: Send + Sync {
         // Idempotency: one node per milestone.
         if provider
             .find_autobiographical_by_key(&node_key)
-            .map_err(grafeo_err)?
+            ?
             .is_some()
         {
             return Ok(None);
@@ -202,7 +202,7 @@ pub trait EpisodicDistiller: Send + Sync {
             source: "important_event".to_string(),
             metadata: std::collections::HashMap::new(),
         };
-        let node_id = provider.store_autobiographical(&node).map_err(grafeo_err)?;
+        let node_id = provider.store_autobiographical(&node)?;
         Ok(Some(PromotionEvaluation {
             source_episode_ids: Vec::new(),
             promoted_kind: PromotionKind::AutobioHistory,
@@ -321,7 +321,7 @@ impl EpisodicDistiller for DefaultEpisodicDistiller {
         // episodic layer forever.
         let raw = provider
             .get_episodes_by_subtype(None, config.batch_size)
-            .map_err(grafeo_err)?;
+            ?;
         let candidates: Vec<(u64, Episode)> = raw
             .into_iter()
             .filter(|(_, ep)| ep.knowledge_subtype.is_some())
@@ -491,15 +491,15 @@ async fn extract_structures(
     let response = llm
         .chat(messages)
         .await
-        .map_err(|e| GrafeoError::Memory(format!("Step 2a LLM call failed: {e}")))?;
+        .map_err(|e| AcoworkError::Memory(format!("Step 2a LLM call failed: {e}")))?;
 
     let raws: Vec<RawExtract> = parse_json_array(&response.content)
-        .map_err(|e| GrafeoError::Memory(format!("Step 2a JSON parse failed: {e}")))?
+        .map_err(|e| AcoworkError::Memory(format!("Step 2a JSON parse failed: {e}")))?
         .into_iter()
         .map(serde_json::from_value)
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(|e: serde_json::Error| {
-            GrafeoError::Memory(format!("Step 2a JSON schema mismatch: {e}"))
+            AcoworkError::Memory(format!("Step 2a JSON schema mismatch: {e}"))
         })?;
 
     let by_id: HashMap<u64, RawExtract> = raws.into_iter().map(|r| (r.episode_id, r)).collect();
@@ -806,7 +806,7 @@ async fn promote_knowledge_cluster(
                 } else {
                     write_knowledge_node(cluster, &judge, embedding_fn, span_days, provider)?
                 });
-                provider.mark_consolidated(&ids).map_err(grafeo_err)?;
+                provider.mark_consolidated(&ids)?;
                 PromotionDecision::Promoted
             }
             JudgeDecision::Skip => PromotionDecision::Skipped {
@@ -825,7 +825,7 @@ async fn promote_knowledge_cluster(
     if let PromotionDecision::Skipped { reason } = &decision {
         provider
             .mark_episodes_skipped(&ids, &cluster.key_string(), reason)
-            .map_err(grafeo_err)?;
+            ?;
     }
 
     Ok(PromotionEvaluation {
@@ -910,7 +910,7 @@ async fn promote_autobio_cluster(
                     span_days,
                     provider,
                 )?);
-                provider.mark_consolidated(&ids).map_err(grafeo_err)?;
+                provider.mark_consolidated(&ids)?;
                 PromotionDecision::Promoted
             }
             JudgeDecision::Skip => PromotionDecision::Skipped {
@@ -927,7 +927,7 @@ async fn promote_autobio_cluster(
         let cluster_key = format!("{:?}/{}", cluster.aspect, cluster.key_hint);
         provider
             .mark_episodes_skipped(&ids, &cluster_key, reason)
-            .map_err(grafeo_err)?;
+            ?;
     }
 
     Ok(PromotionEvaluation {
@@ -1034,7 +1034,7 @@ async fn judge_cluster(
     let response = llm
         .chat(judge_messages(&label, &cluster.members, judge_prompt))
         .await
-        .map_err(|e| GrafeoError::Memory(format!("Step 4 judge LLM call failed: {e}")))?;
+        .map_err(|e| AcoworkError::Memory(format!("Step 4 judge LLM call failed: {e}")))?;
     parse_judge(&response.content)
 }
 
@@ -1054,16 +1054,16 @@ async fn judge_autobio_cluster(
     let response = llm
         .chat(judge_messages(&label, &cluster.members, judge_prompt))
         .await
-        .map_err(|e| GrafeoError::Memory(format!("Step 4 judge LLM call failed: {e}")))?;
+        .map_err(|e| AcoworkError::Memory(format!("Step 4 judge LLM call failed: {e}")))?;
     parse_judge(&response.content)
 }
 
 fn parse_judge(content: &str) -> Result<JudgeOutput> {
     let raw: RawJudge = parse_json_value(content)
-        .map_err(|e| GrafeoError::Memory(format!("Step 4 judge JSON parse failed: {e}")))
+        .map_err(|e| AcoworkError::Memory(format!("Step 4 judge JSON parse failed: {e}")))
         .and_then(|v| {
             serde_json::from_value(v).map_err(|e: serde_json::Error| {
-                GrafeoError::Memory(format!("Step 4 judge JSON schema mismatch: {e}"))
+                AcoworkError::Memory(format!("Step 4 judge JSON schema mismatch: {e}"))
             })
         })?;
     let decision = match raw.decision.to_lowercase().as_str() {
@@ -1071,7 +1071,7 @@ fn parse_judge(content: &str) -> Result<JudgeOutput> {
         "skip" => JudgeDecision::Skip,
         "defer" => JudgeDecision::Defer,
         other => {
-            return Err(GrafeoError::Memory(format!(
+            return Err(AcoworkError::Memory(format!(
                 "Step 4 judge returned unknown decision: {other}"
             )))
         }
@@ -1138,7 +1138,7 @@ fn write_knowledge_node(
         privacy: PrivacyLevel::Personal,
         importance: 0.6,
     };
-    let id = provider.store_knowledge(&node).map_err(grafeo_err)?;
+    let id = provider.store_knowledge(&node)?;
     Ok(id)
 }
 
@@ -1191,7 +1191,7 @@ fn write_procedural_node(
         promotion_metadata: Some(promotion_metadata(&ids, span_days, judge)),
         metadata: HashMap::new(),
     };
-    let id = provider.store_procedural(&node).map_err(grafeo_err)?;
+    let id = provider.store_procedural(&node)?;
     Ok(id)
 }
 
@@ -1237,7 +1237,7 @@ fn write_autobio_node(
         source: "offline_consolidation".to_string(),
         metadata: HashMap::new(),
     };
-    let id = provider.store_autobiographical(&node).map_err(grafeo_err)?;
+    let id = provider.store_autobiographical(&node)?;
     Ok(id)
 }
 
@@ -1373,18 +1373,15 @@ fn parse_json_value(content: &str) -> std::result::Result<serde_json::Value, Str
     serde_json::from_str(&candidate).map_err(|e| format!("invalid JSON: {e}"))
 }
 
-fn grafeo_err(e: acowork_core::error::AcoworkError) -> GrafeoError {
-    GrafeoError::Memory(e.to_string())
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
 
-    use acowork_memory::consolidation::LlmResponse;
-    use acowork_memory::types::{AutobioCategory, CollaborationSpan, MemoryQuery, SearchResult};
-    use acowork_memory::{
+    use crate::consolidation::LlmResponse;
+    use crate::types::{AutobioCategory, CollaborationSpan, MemoryQuery, SearchResult};
+    use crate::{
         DecayScanResult, EpisodicDecayConfig, MemoryQualityConfig, StoreHealth, StoreStats,
     };
     use async_trait::async_trait;
@@ -1614,7 +1611,11 @@ mod tests {
         fn hybrid_search(&self, _q: &MemoryQuery) -> acowork_core::error::Result<Vec<SearchResult>> {
             Ok(vec![])
         }
-        fn graph_expand(&self, _s: &[SearchResult], _h: u8) -> acowork_core::error::Result<Vec<SearchResult>> {
+        fn graph_expand(
+            &self,
+            _s: &[SearchResult],
+            _h: u8,
+        ) -> acowork_core::error::Result<Vec<SearchResult>> {
             Ok(vec![])
         }
         fn run_episodic_decay_scan(
@@ -1829,7 +1830,7 @@ mod tests {
     // fails the build and forces an explicit review. These are the
     // fallback constants every package without `distiller-extraction.md`
     // / `distiller-judge.md` runs with (ADR-071 D7/D9). To update after
-    // an intentional change: `UPDATE_EXPECT=1 cargo test -p acowork-grafeo
+    // an intentional change: `UPDATE_EXPECT=1 cargo test -p acowork-memory
     // golden_` then review the diff.
     #[test]
     fn golden_extraction_system_prompt() {
@@ -2433,7 +2434,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_d8_history_promoted_from_event_without_episodes() {
-        use acowork_memory::consolidation::HistoryMilestoneEvent;
+        use crate::consolidation::HistoryMilestoneEvent;
 
         // ADR-068 D8 acceptance: "no episode input + hint -> History node".
         let provider = TestProvider::default();
@@ -2477,7 +2478,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_d8_history_milestone_key_slugified() {
-        use acowork_memory::consolidation::HistoryMilestoneEvent;
+        use crate::consolidation::HistoryMilestoneEvent;
 
         let provider = TestProvider::default();
         let distiller = DefaultEpisodicDistiller;

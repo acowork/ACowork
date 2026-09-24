@@ -7,7 +7,6 @@ members = [
     "acowork-runtime",
     "acowork-gateway",
     "acowork-node",
-    "acowork-grafeo",
     "acowork-sqlite",
     "acowork-vault",
     "acowork-sign",
@@ -77,21 +76,6 @@ clap = { version = "4.5", features = ["derive", "env"] }
 
 # Database
 rusqlite = { version = "0.37", features = ["bundled"] }
-grafeo-engine = { version = "0.5.42", default-features = false, features = [
-    "lpg",
-    "gql",
-    "vector-index",
-    "text-index",
-    "hybrid-search",
-    "wal",
-    "grafeo-file",
-    "algos",
-    "cdc",
-    "parallel",
-    "regex",
-] }
-grafeo-common = "0.5.42"
-grafeo-core = "0.5.42"
 
 # HTTP
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
@@ -214,7 +198,6 @@ ndarray = "0.17"
 acowork-core = { path = "acowork-core" }
 acowork-mcp = { path = "acowork-mcp" }
 acowork-memory = { path = "acowork-memory" }
-acowork-grafeo = { path = "acowork-grafeo" }
 acowork-sqlite = { path = "acowork-sqlite" }
 acowork-runtime = { path = "acowork-runtime" }
 acowork-gateway = { path = "acowork-gateway" }

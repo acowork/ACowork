@@ -20,12 +20,12 @@
 //!   - Query set: 5 fixed queries, each with a ground-truth relevant node id.
 //!
 //! ADR-068 note: `MemoryStoreTool` only writes Episodes now, so the corpus is
-//! seeded directly into the Knowledge (sediment) layer via `GrafeoStore`'s
+//! seeded directly into the Knowledge (sediment) layer through the provider's
 //! native store path — the same path the EpisodicDistiller uses on promotion.
 //! This benchmark measures sediment-layer retrieval quality (D1/D2 gates) and
 //! is intentionally independent of the LLM write chain.
 //!
-//! IMPORTANT: self-contained — uses an in-memory `GrafeoStore`, never touches
+//! IMPORTANT: self-contained — uses an in-memory SQLite store, never touches
 //! the running Gateway / Runtime / Desktop processes or their ports.
 
 use std::collections::HashMap;
@@ -35,16 +35,13 @@ use chrono::Utc;
 
 use acowork_core::EmbeddingProvider;
 
-use acowork_grafeo::grafeo::GrafeoStore;
-use acowork_grafeo::retrieval_metrics::{EvalQuery, evaluate_retrieval_quality};
-use acowork_grafeo::types::KnowledgeNode as GrafeoKnowledgeNode;
+use acowork_memory::retrieval_metrics::{EvalQuery, evaluate_retrieval_quality};
 
 use acowork_memory::{
     KnowledgeSubType, MemoryManager, MemoryManagerConfig, MemoryProvider, MemoryQuery, NodeStatus,
-    PrivacyLevel, labels,
+    PrivacyLevel,
 };
 
-use grafeo_common::types::NodeId;
 
 /// Deterministic embedding provider (same text → same 384-dim vector).
 /// Mirrors the production fallback chain's deterministic behavior so retrieval
@@ -84,29 +81,32 @@ impl EmbeddingProvider for DeterministicEmbedding {
 /// Shared harness: a real in-memory `GrafeoStore`, ready for sediment seeding
 /// and `MemoryManager::retrieve`.
 struct BenchE2e {
-    store: Arc<GrafeoStore>,
+    store: Arc<acowork_sqlite::SqliteStore>,
 }
 
 impl BenchE2e {
     fn new() -> Self {
-        let store = Arc::new(GrafeoStore::new_in_memory().expect("in-memory store"));
+        let store = Arc::new(
+            acowork_sqlite::SqliteStore::open_in_memory(
+                acowork_memory::types::DEFAULT_EMBEDDING_DIM,
+            )
+            .expect("in-memory store"),
+        );
         Self { store }
     }
 
     /// Seed a Knowledge node directly and return its node id.
     ///
     /// ADR-068 — see file header: the benchmark exercises sediment-layer
-    /// retrieval quality, so it seeds Knowledge nodes through `GrafeoStore`'s
-    /// native store path (the same path the EpisodicDistiller uses on
-    /// promotion) instead of the LLM `memory_store` tool, which now only
-    /// writes Episodes.
+    /// retrieval quality, so it seeds Knowledge nodes through the provider's
+    /// store path (the same path the EpisodicDistiller uses on promotion)
+    /// instead of the LLM `memory_store` tool, which only writes Episodes.
     async fn store_knowledge(&self, content: &str, confidence: f32, importance: f32) -> u64 {
         let embedding = DeterministicEmbedding
             .embed(content)
             .await
             .expect("embed ok");
-        let node = GrafeoKnowledgeNode {
-            id: None,
+        let node = acowork_memory::KnowledgeNode {
             subject: "user".to_string(),
             predicate: String::new(),
             object: content.to_string(),
@@ -123,15 +123,8 @@ impl BenchE2e {
             privacy: PrivacyLevel::Personal,
             importance,
         };
-        self.store
-            .store_node(
-                labels::KNOWLEDGE,
-                node.to_properties()
-                    .iter()
-                    .map(|(k, v)| (k.as_str(), v.clone())),
-            )
-            .expect("store_node ok")
-            .0
+        acowork_memory::MemoryProvider::store_knowledge(self.store.as_ref(), &node)
+            .expect("store_knowledge ok")
     }
 }
 
@@ -214,25 +207,15 @@ struct RunSummary {
     ai_hit: f32,
 }
 
-/// Run the full query set under one D1 state, one auto_inject min_score,
-/// and one graph-expand (pagerank) toggle.
-///
-/// `enable_graph_expand=false` disables PageRank boost too (it is gated on
-/// `enable_graph_expand` in `manager.rs`), producing a deterministic retrieval
-/// pipeline. This is REQUIRED for reproducible MRR: the default pipeline's
-/// PageRank computation iterates HashMaps/HashSets (RandomState), so scores
-/// for near-tied nodes flip across processes → MRR varies run-to-run while
-/// P@5 / Dormant-garbage / auto_inject (membership metrics) stay stable.
+/// Run the full query set under one D1 state and one auto_inject min_score.
 async fn run_state(
     e2e: &BenchE2e,
     relevant: &[EvalQuery],
     exclude_dormant: bool,
     auto_inject_min_score: Option<f32>,
-    enable_graph_expand: bool,
 ) -> RunSummary {
     let mut cfg = MemoryManagerConfig::default();
     cfg.quality.exclude_dormant = exclude_dormant;
-    cfg.enable_graph_expand = enable_graph_expand;
     let manager = MemoryManager::new(cfg);
 
     let mut per_query: Vec<Vec<u64>> = Vec::with_capacity(QUERIES.len());
@@ -324,7 +307,7 @@ async fn m4_benchmark_before_after() {
     for key in DORMANT_KEYS {
         let id = ids_by_key[key];
         e2e.store
-            .transition_to_dormant(NodeId::new(id))
+            .transition_to_dormant(id)
             .expect("transition ok");
         let status = e2e.store.get_node_status(id).ok().flatten().unwrap();
         assert_eq!(status, NodeStatus::Dormant, "{key} must be Dormant");
@@ -345,11 +328,10 @@ async fn m4_benchmark_before_after() {
         .collect();
 
     // ── 3. BEFORE: D1 off (old behaviour) + auto_inject min_score 0.3 ──
-    // Deterministic pipeline (graph_expand=false) for reproducible MRR.
-    let before = run_state(&e2e, &relevant, false, Some(0.3), false).await;
+    let before = run_state(&e2e, &relevant, false, Some(0.3)).await;
 
     // ── 4. AFTER: D1 on (default) + auto_inject min_score → quality.min_score ──
-    let after = run_state(&e2e, &relevant, true, None, false).await;
+    let after = run_state(&e2e, &relevant, true, None).await;
 
     // ── 5. Report (before/after comparison table) ──
     println!("\n===== ADR-062 M4: before/after retrieval benchmark =====");

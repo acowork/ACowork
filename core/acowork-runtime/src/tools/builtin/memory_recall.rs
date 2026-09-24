@@ -2,7 +2,7 @@
 //!
 //! Adapted from zeroclaw/src/tools/memory_recall.rs
 //! ACowork deviation: uses acowork_core::Tool trait; replaces Memory trait
-//! with GrafeoStore backend; adds agent_id isolation. The retrieval strategy
+//! against the memory provider; adds agent_id isolation. The retrieval strategy
 //! (hybrid/BM25/vector) is decided by the engine based on embedding
 //! availability — NOT exposed to the LLM (ADR-062: strategy is an engine
 //! concern, see memory_recall.md).
@@ -142,7 +142,7 @@ impl Tool for MemoryRecallTool {
 
         // Resolve provider and session context.
         // ADR-051 C3: Use grafeo_store() compat accessor for MemoryManager
-        // (which still takes &GrafeoStore in C3; C4 will migrate to trait).
+        // (which takes a `&dyn MemoryProvider`).
         let provider = match self.handle.as_ref().and_then(|h| h.provider()) {
             Some(p) => p,
             None => {
@@ -184,7 +184,7 @@ impl Tool for MemoryRecallTool {
         }
 
         // Config consistency (ADR-062 M5): use the agent's MemoryManagerConfig
-        // (quality min_score / graph_expand / …) so `memory_recall` behaves
+        // (quality min_cosine / exclude_dormant / …) so `memory_recall` behaves
         // identically to auto-inject for the same agent. Falls back to
         // defaults when the handle has no config (tests, degraded mode).
         let config = self
@@ -243,11 +243,14 @@ impl Tool for MemoryRecallTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use acowork_grafeo::GrafeoStore;
-
-    /// Helper: create a MemoryRecallTool backed by an in-memory GrafeoStore.
+    /// Helper: create a MemoryRecallTool backed by an in-memory store.
     fn test_tool() -> MemoryRecallTool {
-        let store = Arc::new(GrafeoStore::new_in_memory().unwrap());
+        let store = Arc::new(
+            acowork_sqlite::SqliteStore::open_in_memory(
+                acowork_memory::types::DEFAULT_EMBEDDING_DIM,
+            )
+            .unwrap(),
+        );
         let handle = Arc::new(crate::memory::MemorySessionHandle::new(None));
         handle.set_provider(store);
         MemoryRecallTool {
@@ -412,7 +415,7 @@ mod tests {
     }
 
     // ── ADR-051 C5: InMemoryProvider tests ──────────────────────────────
-    // These tests prove the Runtime can work without GrafeoStore.
+    // These tests prove the Runtime can work without a memory store.
 
     use crate::test_support::InMemoryProvider;
     use acowork_memory::MemoryProvider;
@@ -429,7 +432,7 @@ mod tests {
         (tool, provider)
     }
     /// Migrated from test_memory_recall_empty_result: uses InMemoryProvider
-    /// instead of GrafeoStore to verify empty retrieval works.
+    /// instead of a real store to verify empty retrieval works.
     #[tokio::test]
     async fn test_memory_recall_empty_result_inmemory() {
         let (tool, _provider) = test_tool_inmemory();
@@ -575,15 +578,19 @@ mod tests {
         );
     }
 
-    /// GrafeoStore variant of the time-range filter test — covers
-    /// `GrafeoProvider::get_node_created_at` (real property read path).
+    /// Store variant of the time-range filter test — covers the real
+    /// `created_at` read path (`get_node_created_at`).
     #[tokio::test]
-    async fn test_memory_recall_since_filters_by_created_at_grafeo() {
+    async fn test_memory_recall_since_filters_by_created_at() {
         use acowork_memory::types::{KnowledgeNode, KnowledgeSubType, NodeStatus, PrivacyLevel};
         use chrono::{Duration, Utc};
 
-        let store: Arc<dyn acowork_memory::MemoryProvider> =
-            Arc::new(GrafeoStore::new_in_memory().unwrap());
+        let store: Arc<dyn acowork_memory::MemoryProvider> = Arc::new(
+            acowork_sqlite::SqliteStore::open_in_memory(
+                acowork_memory::types::DEFAULT_EMBEDDING_DIM,
+            )
+            .unwrap(),
+        );
         let handle = Arc::new(crate::memory::MemorySessionHandle::new(None));
         handle.set_provider(store.clone());
         let tool = MemoryRecallTool {
@@ -611,11 +618,8 @@ mod tests {
         };
         store.store_knowledge(&old).unwrap();
 
-        // NOTE: use a different `subject` than `old` — GrafeoStore's semantic
-        // dedup (semantic/knowledge.rs) merges same (subject, predicate) nodes
-        // when embeddings are absent, keeping the *old* created_at. That would
-        // collapse both nodes into one 30-day-old node and `since` would
-        // correctly filter it out (not what this test targets).
+        // NOTE: use a different `subject` than `old` so the two nodes stay
+        // distinct rows and the `since` filter has something to keep.
         let mut recent = old.clone();
         recent.subject = "colleague".to_string();
         recent.object = "rust".to_string();

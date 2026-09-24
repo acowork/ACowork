@@ -1,4 +1,5 @@
-//! Consolidation types for the memory system.
+//! Consolidation: the data structures *and* the episodic distiller
+//! (ADR-068) of the memory system.
 //!
 //! These types define the data structures used by the consolidation pipeline:
 //! - Instant extraction (memory_store tool calls)
@@ -6,6 +7,10 @@
 //! - Experience generalization (pattern extraction from repeated episodes)
 //! - Triple extraction (LLM-driven knowledge extraction)
 //! - Scheduling configuration
+//!
+//! [`distiller`] holds the promotion pipeline itself. It consumes
+//! `dyn MemoryProvider`, so it lives with the trait rather than with any
+//! single storage backend (relocated from `acowork-grafeo`, ADR-082 §4).
 //!
 //! All types use `u64` for node IDs (not grafeo_common::NodeId) to keep
 //! this crate independent of the storage engine.
@@ -702,3 +707,11 @@ pub struct DistillerResult {
     /// One entry per candidate cluster evaluated — the audit trail.
     pub promotion_evaluations: Vec<PromotionEvaluation>,
 }
+
+// ============================================================================
+// Promotion pipeline (ADR-068)
+// ============================================================================
+
+mod distiller;
+
+pub use distiller::{DefaultEpisodicDistiller, EpisodicDistiller};
