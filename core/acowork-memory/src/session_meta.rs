@@ -23,8 +23,6 @@
 //! are not this backend's concern — the caller cleans them up. Keeping the
 //! side-effect split lets the trait stay pure on the storage axis.
 
-use std::path::Path;
-
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -45,11 +43,11 @@ pub type SessionPage = (Vec<SessionMeta>, usize, SessionTotals);
 /// Per-session token counters (ADR-027 snapshot + cumulative).
 ///
 /// Persisted as seven flattened integer columns in SQLite (see
-/// `SqliteSessionMetaStore`); JSON storage serialises them whole.
+/// `SqliteSessionMetaStore`).
 ///
-/// `#[serde(default)]` keeps legacy meta files from before ADR-066 readable
-/// (they omit the four cache fields; defaults are all zero, matching the
-/// "宁可 miss 也不估计" policy).
+/// `#[serde(default)]` keeps a row written before ADR-066 — which omits the
+/// four cache fields — deserialisable; the defaults are all zero, matching the
+/// "宁可 miss 也不估计" policy.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SessionTokens {
@@ -79,13 +77,12 @@ pub enum TodoStatus {
     Completed,
 }
 
-/// One persisted session. Identical wire shape to the legacy
-/// `conversations/meta/{session_id}.json` so the SQLite backend can import the
-/// JSON files verbatim (ADR-082 §4 step 3 boot-time migration).
+/// One persisted session, mapped 1:1 onto the `sessions` row.
 ///
-/// `version` and `corrupted` are read back by the JSON backend's own
-/// deserialisation; the SQLite backend ignores them and writes only the
-/// columns it persists. They will go away in a later step.
+/// `version` is the `conversations/{id}.jsonl` format version the row was
+/// written by (the runtime's `CONVERSATION_FORMAT_VERSION`), `corrupted` is set
+/// when the JSONL had to be salvaged. Both round-trip through
+/// `SqliteSessionMetaStore` and are served verbatim by the `/sessions` API.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionMeta {
     pub version: u32,
@@ -127,21 +124,6 @@ pub struct SessionMeta {
     pub corrupted: bool,
 }
 
-/// Outcome of an `import_from_json` call. Surfaced so a future telemetry hook
-/// can see what landed; the runtime logs it on the way through.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct SessionImportReport {
-    /// Files actually imported (after dedup and parse errors).
-    pub imported: usize,
-    /// Files skipped because the target store is not empty.
-    pub skipped_target_non_empty: bool,
-    /// Source files that failed to parse.
-    pub parse_failures: usize,
-    /// `session_id`s present in `import_file` whose import was attempted but
-    /// failed at the storage layer (rolled back row-by-row).
-    pub storage_failures: usize,
-}
-
 /// Trait every session-meta backend implements.
 ///
 /// Method semantics:
@@ -149,22 +131,18 @@ pub struct SessionImportReport {
 /// - `upsert`: replaces the entire row. No `insert_or_update` distinction.
 /// - `delete`: removes one session row (and any derived index entry). No-op
 ///   when the session is absent, so callers do not need a pre-check.
-/// - `list_recent`: cap `limit`; the JSON backend scans + sorts, the SQLite
-///   backend reads an index. Order is `last_active_at` descending.
+/// - `list_recent`: cap `limit`. Order is `last_active_at` descending, read off
+///   the `last_active_at` index.
 /// - `find_latest`: zero-cost shortcut for `list_recent(1).into_iter().next()`.
 /// - `search`: substring query against `title` first, falling back to
-///   `agent_id` / `workspace_id`. SQLite uses FTS5 trigram; the JSON backend
-///   scans + filter. Empty `query` returns the same as `list_recent`.
+///   `agent_id` / `workspace_id` (FTS5 trigram). Empty `query` returns the same
+///   as `list_recent`.
 /// - `prune_to`: leaves the first `max_sessions` newest rows and removes the
 ///   rest, returning the deleted ids.
 /// - `list_with_totals`: paginated list + agent-wide token aggregates, used by
 ///   the `/sessions` HTTP API. The aggregates are *full-scan*, not page-bound;
 ///   implementations should compute them in a single pass, not by re-reading
 ///   the page slice.
-/// - `import_from_json`: idempotent. The JSON backend is no-op when the
-///   directory is absent and skips entirely when the store already holds a
-///   row. The SQLite backend gates on `COUNT(*) > 0`. **No implementation ever
-///   deletes or modifies the source files.**
 pub trait SessionMetaStore: Send + Sync {
     fn get(&self, session_id: &str) -> Result<Option<SessionMeta>>;
     fn upsert(&self, meta: &SessionMeta) -> Result<()>;
@@ -181,13 +159,11 @@ pub trait SessionMetaStore: Send + Sync {
     /// - `totals` is `(input, output, cache_read, cache_write)` summed
     ///   across *all* sessions, not just the page.
     fn list_with_totals(&self, page: u32, size: u32) -> Result<SessionPage>;
-    fn import_from_json(&self, conversations_meta_dir: &Path) -> Result<SessionImportReport>;
 }
 
-/// Helper that converts the legacy `last_active_at` ISO string to an epoch-ms
-/// `i64` for SQLite indexing. Returns 0 for unparseable input (the SQLite
-/// backend sorts the row to the bottom, same as the legacy JSON behaviour of
-/// putting malformed rows in an unspecified order).
+/// Converts `last_active_at` (RFC3339 string) to the epoch-ms `i64` the
+/// `last_active_at` column indexes. Returns 0 for unparseable input, which
+/// sorts the row to the bottom (SQLite compares `INTEGER` numerically).
 pub fn last_active_at_ms(meta: &SessionMeta) -> i64 {
     DateTime::parse_from_rfc3339(&meta.last_active_at)
         .map(|dt| dt.with_timezone(&Utc).timestamp_millis())

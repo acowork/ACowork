@@ -26,7 +26,7 @@ use crate::agent::session_state::TodoItem;
 // `crate::agent::session_state` (kept as a thin re-export) and the two
 // surfaces use the same type via `pub use` aliasing.
 pub use acowork_memory::{
-    SessionImportReport, SessionMeta, SessionMetaStore, SessionTokens,
+    SessionMeta, SessionMetaStore, SessionTokens,
 };
 use acowork_core::protocol::ContextUsageSection;
 use acowork_core::providers::traits::UsageInfo;
@@ -1991,10 +1991,8 @@ pub struct SessionInfo {
 // ── Per-session meta I/O (ADR-024, ADR-082 §4 step 3) ─────────────────────
 //
 // Session meta lives in the workspace's `memory/private.sqlite` (`sessions` /
-// `fts_sessions`) — there is no JSON backend. `conversations/meta/{id}.json` is
-// read exactly once, by `import_from_json`, to bootstrap an empty database from
-// a pre-migration install. The free functions below are thin wrappers over the
-// SQLite store.
+// `fts_sessions`) — there is no JSON backend. The free functions below are thin
+// wrappers over the SQLite store.
 
 /// Session-meta stores keyed by the `.sqlite` file they serve.
 ///
@@ -2019,40 +2017,6 @@ fn session_meta_db_path(conversations_dir: &Path) -> PathBuf {
         .join("private.sqlite")
 }
 
-/// One-shot ADR-082 §4 step 3 bootstrap: pull the legacy
-/// `conversations/meta/{id}.json` sidecars into an empty SQLite table.
-///
-/// `import_from_json` is a no-op once the table has rows and never touches the
-/// source files, so calling it on every fresh open is safe.
-///
-/// ponytail: temporary by design — delete this and its two callers once no
-/// install can predate SQLite.
-pub(crate) fn import_legacy_session_meta(store: &dyn SessionMetaStore, conversations_dir: &Path) {
-    let meta_dir = conversations_dir.join("meta");
-    match store.import_from_json(&meta_dir) {
-        Ok(report) if report.imported > 0 => tracing::info!(
-            imported = report.imported,
-            parse_failures = report.parse_failures,
-            storage_failures = report.storage_failures,
-            dir = %meta_dir.display(),
-            "session meta: imported legacy JSON sidecars into SQLite"
-        ),
-        Ok(report) if report.skipped_target_non_empty => tracing::debug!(
-            dir = %meta_dir.display(),
-            "session meta: SQLite table already populated, skipping import"
-        ),
-        Ok(_) => tracing::debug!(
-            dir = %meta_dir.display(),
-            "session meta: no legacy JSON sidecars to import"
-        ),
-        Err(e) => tracing::warn!(
-            error = %e,
-            dir = %meta_dir.display(),
-            "session meta: legacy import failed; continuing with SQLite as-is"
-        ),
-    }
-}
-
 /// Install the session-meta backend for a workspace (ADR-082 §4 step 3).
 ///
 /// Called once at startup with the same `Arc<SqliteStore>` the memory backend
@@ -2073,11 +2037,9 @@ pub fn install_session_meta_backend(
 /// A registered store wins (production: the memory-shared connection).
 /// Otherwise the workspace's `private.sqlite` is opened on demand — dim-agnostic
 /// so a later memory-backend open still gets to record the real embedding
-/// dimension, see `SqliteStore::open_dim_agnostic` — and the legacy JSON
-/// sidecars are imported once, before anyone can read. `find_latest_session`
-/// runs before the memory backend is up, so the bootstrap has to live here
-/// rather than only in [`install_session_meta_backend`]; without it a
-/// pre-migration install would report "no sessions" on its first boot.
+/// dimension, see `SqliteStore::open_dim_agnostic`. `find_latest_session` runs
+/// before the memory backend is up, so the open has to live here rather than
+/// only in [`install_session_meta_backend`].
 fn session_meta_store(conversations_dir: &Path) -> std::io::Result<Arc<dyn SessionMetaStore>> {
     let db_path = session_meta_db_path(conversations_dir);
     if let Some(store) = session_meta_registry().lock().unwrap().get(&db_path) {
@@ -2088,8 +2050,6 @@ fn session_meta_store(conversations_dir: &Path) -> std::io::Result<Arc<dyn Sessi
     })?;
     let store: Arc<dyn SessionMetaStore> =
         Arc::new(acowork_sqlite::SqliteSessionMetaStore::new(Arc::new(db)));
-
-    import_legacy_session_meta(store.as_ref(), conversations_dir);
 
     session_meta_registry()
         .lock()

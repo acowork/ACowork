@@ -1149,9 +1149,7 @@ impl AgentCore {
             Ok(store) => {
                 let store = std::sync::Arc::new(store);
                 // ADR-082 §4 step 3: the same .sqlite file also carries
-                // session meta. Install it as the process backend and import
-                // the legacy JSON sidecars once (no-op into a populated
-                // table, source files untouched).
+                // session meta. Install it as the process backend.
                 self.install_session_meta_backend(store.clone(), work_dir);
                 // Keep a handle so the conversation index shares this
                 // connection instead of opening a second one.
@@ -1166,23 +1164,16 @@ impl AgentCore {
         }
     }
 
-    /// Route session-meta storage at the SQLite store and import any legacy
-    /// `conversations/meta/*.json` side-car (ADR-082 §4 step 3).
+    /// Route session-meta storage at the SQLite store (ADR-082 §4 step 3).
     ///
-    /// The import runs before the session manager starts, so every later
-    /// read/write goes to SQLite. It is a no-op once the `sessions` table
-    /// holds rows and never deletes the JSON files, so a re-run after a crash
-    /// is safe.
+    /// The store is registered before the session manager starts, so every
+    /// later read/write goes to SQLite.
     fn install_session_meta_backend(
         &self,
         store: std::sync::Arc<acowork_sqlite::SqliteStore>,
         work_dir: &std::path::Path,
     ) {
         let sm_store = std::sync::Arc::new(acowork_sqlite::SqliteSessionMetaStore::new(store));
-        crate::conversation::import_legacy_session_meta(
-            sm_store.as_ref(),
-            &work_dir.join("conversations"),
-        );
         crate::conversation::install_session_meta_backend(
             &work_dir.join("conversations"),
             sm_store,

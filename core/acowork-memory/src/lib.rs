@@ -71,7 +71,7 @@ pub use types::{
     SearchResult, StoreHealth, StoreStats,
 };
 pub use session_meta::{
-    SessionImportReport, SessionMeta, SessionMetaStore, SessionTokens, TodoItem, TodoStatus,
+    SessionMeta, SessionMetaStore, SessionTokens, TodoItem, TodoStatus,
 };
 
 // Label and edge type constants

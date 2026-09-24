@@ -17,27 +17,22 @@
 //!
 //! `last_active_at` is persisted as INTEGER epoch-ms so
 //! `ORDER BY last_active_at DESC` is a numeric scan (no parse on every
-//! comparison). The legacy JSON backend sorts on the ISO string; for the
-//! 99% case the two agree because RFC3339 sorts lexicographically equal to
-//! chronological, and the helper [`acowork_memory::last_active_at_ms`]
-//! converts both directions.
+//! comparison), and the helper [`acowork_memory::last_active_at_ms`] converts
+//! the RFC3339 string both ways.
 //!
-//! # Import safety
+//! # Derived index
 //!
-//! `import_from_json` is *additive*. It writes only into the `sessions`
-//! table, never deletes a source file, and gates on a row-count probe so
-//! re-runs are no-ops. Semantics: per-file try → upsert → count, so one
-//! malformed sidecar never aborts the import.
+//! Every write mirrors `session_id` / `title` / `agent_id` / `workspace_id`
+//! into `fts_sessions`. [`search`](SessionMetaStore::search) itself still uses
+//! `LIKE %x%` (see the note at the bottom of this file) — the FTS table is kept
+//! in sync so the upgrade to `MATCH` is a query change, not a backfill.
 
-use std::path::Path;
 use std::sync::Arc;
 
 use rusqlite::params;
 
 use acowork_core::error::{AcoworkError, Result as AcoworkResult};
-use acowork_memory::session_meta::{
-    SessionImportReport, SessionMeta, SessionMetaStore, last_active_at_ms,
-};
+use acowork_memory::session_meta::{SessionMeta, SessionMetaStore, last_active_at_ms};
 
 use crate::{Error as SqliteError, Result as SqliteResult, SqliteStore};
 
@@ -359,69 +354,6 @@ impl SessionMetaStore for SqliteSessionMetaStore {
             out.push(r.map_err(to_acowork_sqlite)?);
         }
         Ok((out, total, agg))
-    }
-
-    fn import_from_json(
-        &self,
-        conversations_meta_dir: &Path,
-    ) -> AcoworkResult<SessionImportReport> {
-        let mut report = SessionImportReport::default();
-        let dir = conversations_meta_dir;
-        if !dir.exists() {
-            return Ok(report);
-        }
-        let conn = self.store.lock();
-        let already: i64 = conn
-            .query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))
-            .map_err(to_acowork_sqlite)?;
-        if already > 0 {
-            report.skipped_target_non_empty = true;
-            return Ok(report);
-        }
-        let rd = match std::fs::read_dir(dir) {
-            Ok(rd) => rd,
-            Err(_) => return Ok(report),
-        };
-        for entry in rd.flatten() {
-            let path = entry.path();
-            if path.extension().is_some_and(|e| e == "json") {
-                let data = match std::fs::read_to_string(&path) {
-                    Ok(d) => d,
-                    Err(_) => {
-                        report.parse_failures += 1;
-                        continue;
-                    }
-                };
-                match serde_json::from_str::<SessionMeta>(&data) {
-                    Ok(meta) => {
-                        let result: SqliteResult<()> = (|| {
-                            upsert_row(&conn, &meta).map_err(SqliteError::Sqlite)?;
-                            conn.execute(
-                                "DELETE FROM fts_sessions WHERE session_id = ?1",
-                                params![meta.session_id],
-                            )?;
-                            conn.execute(
-                                "INSERT INTO fts_sessions(session_id, title, agent_id, workspace_id) \
-                                 VALUES (?1, ?2, ?3, ?4)",
-                                params![
-                                    meta.session_id,
-                                    meta.title.as_deref().unwrap_or(""),
-                                    meta.agent_id,
-                                    meta.workspace_id.as_deref().unwrap_or(""),
-                                ],
-                            )?;
-                            Ok(())
-                        })();
-                        match result {
-                            Ok(()) => report.imported += 1,
-                            Err(_) => report.storage_failures += 1,
-                        }
-                    }
-                    Err(_) => report.parse_failures += 1,
-                }
-            }
-        }
-        Ok(report)
     }
 }
 

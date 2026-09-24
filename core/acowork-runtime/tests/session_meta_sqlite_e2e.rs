@@ -1,6 +1,6 @@
 //! End-to-end wiring test for ADR-082 §4 step 3: the runtime's session-meta
-//! free functions must serve from the SQLite store once the backend is
-//! installed, after a one-shot import of the legacy JSON side-car.
+//! free functions must serve from the SQLite store, and that store must be
+//! reachable before the memory backend is installed.
 //!
 //! Lives in its own integration-test binary because
 //! `conversation::install_session_meta_backend` registers a process-wide store
@@ -47,25 +47,8 @@ fn make_meta(sid: &str, last_active: &str, title: &str) -> SessionMeta {
 }
 
 #[test]
-fn legacy_json_sidecars_import_then_serve_from_sqlite() -> Result<(), AcoworkError> {
+fn session_meta_is_served_from_the_memory_file() -> Result<(), AcoworkError> {
     let ws = tempfile::tempdir().unwrap();
-    let meta_dir = ws.path().join("conversations").join("meta");
-    std::fs::create_dir_all(&meta_dir).unwrap();
-
-    // Two legacy JSON side-car files, as an install predating ADR-082 would
-    // have on disk.
-    for (sid, stamp, title) in [
-        ("s1", "2025-01-01T00:00:00.000Z", "first session"),
-        ("s2", "2025-02-01T00:00:00.000Z", "second session"),
-    ] {
-        std::fs::write(
-            meta_dir.join(format!("{sid}.json")),
-            serde_json::to_string(&make_meta(sid, stamp, title)).unwrap(),
-        )
-        .unwrap();
-    }
-    let legacy_s1 = meta_dir.join("s1.json");
-    let legacy_s2 = meta_dir.join("s2.json");
 
     // Open the SQLite store in the memory dir — the same file the runtime
     // uses by default (one file for memory + session meta + conversation
@@ -76,56 +59,46 @@ fn legacy_json_sidecars_import_then_serve_from_sqlite() -> Result<(), AcoworkErr
     )?);
     let sm = Arc::new(SqliteSessionMetaStore::new(store));
 
-    // Import before installing so the backend is populated when the free
-    // functions first consult it (mirrors the runtime boot order).
-    let report = sm.import_from_json(&meta_dir)?;
-    assert_eq!(report.imported, 2, "both sidecars imported");
+    // Two existing sessions, as a booted install has.
+    for (sid, stamp, title) in [
+        ("s1", "2025-01-01T00:00:00.000Z", "first session"),
+        ("s2", "2025-02-01T00:00:00.000Z", "second session"),
+    ] {
+        sm.upsert(&make_meta(sid, stamp, title))?;
+    }
 
     install_session_meta_backend(&ws.path().join("conversations"), sm.clone());
 
-    // Reads now come from SQLite.
+    // Reads come from SQLite.
     let got = read_session_meta(&ws.path().join("conversations"), "s1").unwrap();
     assert_eq!(got.title.as_deref(), Some("first session"));
     assert_eq!(got.model.as_deref(), Some("test-model"));
 
-    // A brand-new write lands in SQLite only — no new JSON file appears.
+    // A brand-new write lands in SQLite only — no JSON sidecar, no `meta/`
+    // directory.
     let s3 = make_meta("s3", "2026-06-01T00:00:00.000Z", "third session");
     write_session_meta(&ws.path().join("conversations"), &s3).unwrap();
     assert!(
-        !meta_dir.join("s3.json").exists(),
-        "sqlite backend must not write a JSON sidecar"
+        !ws.path().join("conversations").join("meta").exists(),
+        "the SQLite backend must not create a meta/ directory"
     );
     let round = read_session_meta(&ws.path().join("conversations"), "s3").unwrap();
     assert_eq!(round.title.as_deref(), Some("third session"));
-
-    // The import never deletes its source.
-    assert!(legacy_s1.exists(), "legacy JSON sidecar must survive the import");
-    assert!(legacy_s2.exists(), "legacy JSON sidecar must survive the import");
 
     // The list path sees all three rows, newest first.
     let all = scan_sessions_from_meta(&ws.path().join("conversations"));
     assert_eq!(all.len(), 3);
     assert_eq!(all[0].0, "s3", "newest session first");
 
-    // Re-running the import is a no-op (table is populated).
-    let again = sm.import_from_json(&meta_dir)?;
-    assert_eq!(again.imported, 0);
-    assert!(again.skipped_target_non_empty);
-
     // ── Lifecycle probe + delete (ADR-082 §4 step 3 regression) ──────────
     //
     // `session_meta_exists` is what `get_lifecycle_state` / `open` consult.
-    // A session that lives only in SQLite (no JSON sidecar) must report as
-    // present — probing the legacy sidecar path reported the live session
-    // `s3` as `NotFound`, which is the bug this test locks down.
+    // Probing the legacy sidecar path reported a live session as `NotFound`,
+    // which is the bug this test locks down.
     let conv_dir = ws.path().join("conversations");
     assert!(
         session_meta_exists(&conv_dir, "s3"),
         "sqlite-backed session must be visible to the lifecycle probe"
-    );
-    assert!(
-        !meta_dir.join("s3.json").exists(),
-        "precondition: s3 has no JSON sidecar"
     );
     assert!(!session_meta_exists(&conv_dir, "does-not-exist"));
 
@@ -140,34 +113,31 @@ fn legacy_json_sidecars_import_then_serve_from_sqlite() -> Result<(), AcoworkErr
     Ok(())
 }
 
-/// The bootstrap has to be reachable *before* `install_session_meta_backend`:
+/// The store must be reachable *before* `install_session_meta_backend`:
 /// `find_latest_session` runs during session_init, ahead of the memory backend.
-/// On a pre-migration install the SQLite file does not exist yet, so the first
-/// read must import the legacy sidecars itself — otherwise the runtime reports
-/// "no sessions" on the one boot that matters.
+/// With nothing registered, the first read opens the workspace's
+/// `memory/private.sqlite` itself.
 #[test]
-fn on_demand_open_imports_legacy_sidecars_before_install() -> Result<(), AcoworkError> {
+fn on_demand_open_reads_the_workspace_store_before_install() -> Result<(), AcoworkError> {
     let ws = tempfile::tempdir().unwrap();
-    let meta_dir = ws.path().join("conversations").join("meta");
-    std::fs::create_dir_all(&meta_dir).unwrap();
-    for (sid, stamp) in [
-        ("old1", "2025-01-01T00:00:00.000Z"),
-        ("old2", "2025-03-01T00:00:00.000Z"),
-    ] {
-        std::fs::write(
-            meta_dir.join(format!("{sid}.json")),
-            serde_json::to_string(&make_meta(sid, stamp, sid)).unwrap(),
-        )
-        .unwrap();
-    }
+    let db_path = ws.path().join("memory").join("private.sqlite");
 
-    // No install anywhere in this test: this is the process's first
-    // session-meta touch, as it is at runtime before memory init.
+    // Populate the file through a store that is never registered, then drop
+    // it — the process's first session-meta touch looks exactly like this: a
+    // populated file, no backend installed.
+    {
+        let store = Arc::new(SqliteStore::open(&db_path, DIM)?);
+        let sm = SqliteSessionMetaStore::new(store);
+        sm.upsert(&make_meta("old1", "2025-01-01T00:00:00.000Z", "old1"))?;
+        sm.upsert(&make_meta("old2", "2025-03-01T00:00:00.000Z", "old2"))?;
+    }
+    assert!(db_path.exists());
+
     let conv_dir = ws.path().join("conversations");
     assert_eq!(
         find_latest_session(&conv_dir).as_deref(),
         Some("old2"),
-        "legacy sidecars must be importable before the backend is installed"
+        "the on-demand open must read the workspace store"
     );
     assert_eq!(scan_sessions_from_meta(&conv_dir).len(), 2);
     assert!(session_meta_exists(&conv_dir, "old1"));

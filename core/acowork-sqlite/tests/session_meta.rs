@@ -10,17 +10,16 @@
 //! 4. `delete` removes one row (and its FTS entry) and is idempotent.
 //! 5. `prune_to` deletes the right rows and reports the deleted ids.
 //! 6. `list_with_totals` returns correct aggregates across many rows.
-//! 7. `import_from_json` is idempotent and leaves source files alone.
-//! 8. The SQLite store keeps memory + conversation index + session meta in
+//! 7. The SQLite store keeps memory + conversation index + session meta in
 //!    the same `.sqlite` file (the user's "one file" requirement).
+//! 8. `version` / `corrupted` round-trip, and `PRAGMA user_version` +
+//!    `MIGRATIONS` upgrade an older file in order.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use acowork_core::error::Result as AcoworkResult;
-use acowork_memory::session_meta::{
-    SessionImportReport, SessionMeta, SessionMetaStore, last_active_at_ms,
-};
+use acowork_memory::session_meta::{SessionMeta, SessionMetaStore, last_active_at_ms};
 use acowork_memory::{SessionTokens, TodoItem, TodoStatus};
 use acowork_sqlite::{SqliteSessionMetaStore, SqliteStore};
 
@@ -273,93 +272,6 @@ fn list_with_totals_aggregates_across_pages() -> AcoworkResult<()> {
     assert_eq!(page2.len(), 2);
     let (page3, _, _) = sm.list_with_totals(3, 2)?;
     assert_eq!(page3.len(), 1);
-    Ok(())
-}
-
-#[test]
-fn import_from_json_loads_legacy_dir_and_is_idempotent() -> AcoworkResult<()> {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("store.sqlite");
-    let (_store, sm) = open_pair(&path);
-
-    // Pre-populate the legacy dir with two JSON sidecar files.
-    let meta_dir = dir.path().join("conversations").join("meta");
-    std::fs::create_dir_all(&meta_dir).unwrap();
-    let m1 = make_meta("legacy-1", "2025-08-01T00:00:00.000Z", Some("from json 1"), "agent");
-    let m2 = make_meta("legacy-2", "2025-09-01T00:00:00.000Z", Some("from json 2"), "agent");
-    std::fs::write(
-        meta_dir.join("legacy-1.json"),
-        serde_json::to_string(&m1).unwrap(),
-    )
-    .unwrap();
-    std::fs::write(
-        meta_dir.join("legacy-2.json"),
-        serde_json::to_string(&m2).unwrap(),
-    )
-    .unwrap();
-    let file_one = meta_dir.join("legacy-1.json");
-    let file_two = meta_dir.join("legacy-2.json");
-    assert!(file_one.exists());
-    assert!(file_two.exists());
-
-    let report = sm.import_from_json(&meta_dir)?;
-    assert_eq!(report.imported, 2);
-    assert!(!report.skipped_target_non_empty);
-    assert_eq!(report.parse_failures, 0);
-
-    // Source files must remain on disk.
-    assert!(file_one.exists());
-    assert!(file_two.exists());
-
-    // Rows are present.
-    let got = sm.get("legacy-1")?.expect("imported row visible");
-    assert_eq!(got.title.as_deref(), Some("from json 1"));
-
-    // Re-run is a no-op because the SQLite table is non-empty.
-    let again = sm.import_from_json(&meta_dir)?;
-    assert_eq!(again.imported, 0);
-    assert!(again.skipped_target_non_empty);
-    Ok(())
-}
-
-#[test]
-fn import_from_json_returns_zero_when_source_absent() -> AcoworkResult<()> {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("store.sqlite");
-    let (_store, sm) = open_pair(&path);
-    let report: SessionImportReport =
-        sm.import_from_json(&dir.path().join("conversations").join("meta"))?;
-    assert_eq!(report.imported, 0);
-    assert_eq!(report.parse_failures, 0);
-    Ok(())
-}
-
-#[test]
-fn json_import_round_trips_to_the_same_meta() -> AcoworkResult<()> {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("store.sqlite");
-    let (_store, sqlite_sm) = open_pair(&path);
-
-    // Seed a legacy `meta/{id}.json` sidecar by hand — the pre-migration
-    // format `import_from_json` reads exactly once.
-    let meta_dir = dir.path().join("conv").join("meta");
-    std::fs::create_dir_all(&meta_dir).unwrap();
-    let meta = make_meta("x", "2026-04-05T06:07:08.090Z", Some("from json"), "agent");
-    std::fs::write(meta_dir.join("x.json"), serde_json::to_vec(&meta).unwrap()).unwrap();
-
-    let report = sqlite_sm.import_from_json(&meta_dir)?;
-    assert_eq!(report.imported, 1);
-
-    let sqlite_meta = sqlite_sm.get("x")?.expect("sqlite row");
-
-    // Same field-for-field after the import.
-    assert_eq!(meta.title, sqlite_meta.title);
-    assert_eq!(meta.model, sqlite_meta.model);
-    assert_eq!(meta.temperature, sqlite_meta.temperature);
-    assert_eq!(
-        meta.tokens.as_ref().map(|t| t.total_input),
-        sqlite_meta.tokens.as_ref().map(|t| t.total_input),
-    );
     Ok(())
 }
 
