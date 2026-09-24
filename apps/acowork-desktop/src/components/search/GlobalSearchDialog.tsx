@@ -817,7 +817,7 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
                                 onClick={() => setTab(tabDef.key)}
                                 className={`rounded-full px-3 py-1.5 text-xs font-medium transition-colors ${
                                     tab === tabDef.key
-                                        ? "bg-zinc-200 text-text dark:bg-zinc-300"
+                                        ? "bg-zinc-200 text-text dark:bg-zinc-700"
                                         : "text-text-tertiary hover:bg-zinc-100 dark:hover:bg-zinc-700/50"
                                 }`}
                             >
