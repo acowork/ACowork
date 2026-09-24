@@ -1,6 +1,6 @@
 //! Runtime-internal retrieval quality metrics aggregator.
 //!
-//! Replaces the previous dependency on `acowork_grafeo::retrieval_metrics::MetricsAggregator`.
+//! Replaces the former dependency on `acowork_grafeo`'s retrieval metrics.
 //! Data sources are `acowork_memory::RetrievalMetrics` and `acowork_memory::HintType`,
 //! eliminating the HintType conversion code that previously coupled Runtime to Grafeo.
 //!
@@ -141,7 +141,7 @@ impl ConflictAccuracyStats {
 /// Runtime-internal retrieval quality metrics aggregator.
 ///
 /// Data source: `acowork_memory::RetrievalMetrics` returned by `MemoryProvider::retrieve()`.
-/// Does NOT depend on `acowork_grafeo::retrieval_metrics` types.
+/// Does NOT depend on the `acowork_memory::retrieval_metrics` evaluation types.
 ///
 /// Tracks:
 /// - NRR (Normalized Retrieval Relevance) sliding window

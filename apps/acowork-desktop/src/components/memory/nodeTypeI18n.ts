@@ -86,7 +86,7 @@ export function subTypeLabel(
 /**
  * Return the list of selectable sub-filter options for a given
  * `node_type`. The order matches the enum declaration order in
- * `acowork-grafeo::types` so the dropdown stays stable across locales.
+ * `acowork_memory::types` so the dropdown stays stable across locales.
  */
 export function subTypeOptions(
   t: (key: string) => string,

@@ -2,7 +2,8 @@
 //!
 //! ADR-051 P4: All business logic (pagination, filtering, keyword search,
 //! stats aggregation, consolidation trigger) has been moved to the
-//! `MemoryAdminService` trait implementation in `acowork-grafeo`. This
+//! `MemoryAdminService` trait implementation in the storage backend
+//! (`acowork-sqlite`). This
 //! module now provides thin wrappers that call the trait and convert
 //! results to the intermediate types consumed by the HTTP handlers and
 //! the `MemoryAdminAdapter`.

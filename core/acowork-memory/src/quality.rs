@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 /// Dedup thresholds (ADR-062 §4.1).
 ///
 /// Cosine-similarity above which two nodes are considered duplicates
-/// (see `acowork-grafeo/src/consolidation/instant.rs`).
+/// (see the dedup path in `acowork-sqlite`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DedupQuality {

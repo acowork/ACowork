@@ -453,8 +453,8 @@ mod tests {
     /// (knowledge / procedural / autobiographical nodes), not the
     /// episodic layer. So this test now verifies the write+search
     /// round trip on the episodic layer directly. The cross-layer
-    /// promotion path is owned by the offline distiller (acowork-grafeo
-    /// tests).
+    /// promotion path is owned by the offline distiller (its own tests
+    /// cover it).
     #[tokio::test]
     async fn test_memory_recall_store_and_recall_inmemory() {
         let (_tool, provider) = test_tool_inmemory();

@@ -1,6 +1,6 @@
 //! P3-3: LLM-based retrieval quality Judge.
 //!
-//! Replaces the mock `evaluate_retrieval()` in `acowork-grafeo::judge`.
+//! Replaces the mock `evaluate_retrieval()` of the former grafeo crate.
 //! Uses the cheapest available model to evaluate retrieval quality on a
 //! sampled basis (default 10% of retrievals, top-3 results only).
 //!

@@ -88,5 +88,5 @@ acowork-pm ──uses──▶ acowork-core    (共享错误/health/supervisor �
                 ──▶ (无 storage crate 依赖，目录树直接走 tokio::fs)
 ```
 
-PM 服务**不**依赖 acowork-memory / acowork-grafeo —— 存储层走目录树，独立演进。
+PM 服务**不**依赖 acowork-memory —— 存储层走目录树，独立演进。
 Gateway **不编译** PM 代码（`cargo tree -p acowork-gateway` 不含 `acowork-pm`）。

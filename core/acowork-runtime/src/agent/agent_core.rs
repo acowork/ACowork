@@ -249,9 +249,8 @@ pub struct AgentCore {
     /// ADR-068 rewrites the LLM→memory boundary — LLM writes only
     /// Episode nodes via `memory_store`; grafeo's distillation is
     /// driven by the offline `EpisodicDistiller` pipeline (which
-    /// owns its own internal prompts and constants). Grafeo-internal
-    /// prompt constants remain in `acowork-grafeo` for any future
-    /// intra-crate caller.
+    /// owns its own internal prompts and constants). Those constants stay
+    /// private to the distiller module in `acowork-memory`.
     pub(crate) abstention_prompt: Arc<std::sync::RwLock<Option<String>>>,
 
     // ── ADR-071 D7/D9: per-agent EpisodicDistiller prompt overrides ──
@@ -264,20 +263,20 @@ pub struct AgentCore {
     // re-adds two distiller overrides because the offline
     // `EpisodicDistiller` pipeline now needs per-agent prompt control
     // (independent of the compaction/search/title prompts). Consumers
-    // are the grafeo distiller Steps 2a / 4 — resolved via
+    // are the offline distiller Steps 2a / 4 — resolved via
     // `distiller_scheduler_config()` which projects these slots onto
     // `DistillerConfig.{extraction_prompt_override,judge_prompt_override}`.
     /// Override for the built-in `EXTRACTION_SYSTEM_PROMPT` in
-    /// `acowork-grafeo` (distiller Step 2a, `prompts/distiller-extraction.md`).
+    /// `acowork-memory` (distiller Step 2a, `prompts/distiller-extraction.md`).
     /// Inner `None` = use the built-in constant.
     pub(crate) distiller_extraction_prompt: Arc<std::sync::RwLock<Option<String>>>,
 
     /// Override for the built-in `JUDGE_SYSTEM_PROMPT` in
-    /// `acowork-grafeo` (distiller Step 4, `prompts/distiller-judge.md`).
+    /// `acowork-memory` (distiller Step 4, `prompts/distiller-judge.md`).
     /// Inner `None` = use the built-in constant.
     pub(crate) distiller_judge_prompt: Arc<std::sync::RwLock<Option<String>>>,
 
-    /// Grafeo memory store (shared across all sessions of this agent).
+    /// Memory store (SQLite, shared across all sessions of this agent).
     /// ADR-051 P4: Primary field is `memory_provider` (trait object).
     /// `memory_admin` is the admin interface for HTTP endpoints and
     /// embedding migration.

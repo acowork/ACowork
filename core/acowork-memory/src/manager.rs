@@ -36,16 +36,16 @@ use acowork_core::error::{AcoworkError, Result};
 // moment it is written.
 //
 // This is intentionally a pure function with no external dependencies so it
-// can live in `acowork-memory` (upstream of `acowork-grafeo`).
+// can live in `acowork-memory` (storage-agnostic).
 
 /// Default embedding dimension. Must match `HnswConfig::default().vector_dim`.
 pub const PROCEDURAL_FALLBACK_DIM: usize = 384;
 
 /// Default abstention guidance prompt (G9).
 ///
-/// Mirrors `AbstentionConfig::default().abstention_prompt` in `acowork-grafeo`.
-/// Kept as a constant here so `acowork-memory` (upstream) never imports the
-/// grafeo crate; `MemoryManagerConfig.abstention_prompt` overrides it.
+/// Mirrors the offline distiller's `AbstentionConfig::default().abstention_prompt`.
+/// Kept as a constant here so `acowork-memory` never depends on a storage
+/// backend; `MemoryManagerConfig.abstention_prompt` overrides it.
 pub const DEFAULT_ABSTENTION_PROMPT: &str = "When you are not confident about the \
     information from memory, respond with 'I'm not sure about this' rather than guessing.";
 
@@ -133,8 +133,8 @@ pub struct MemoryManagerConfig {
     /// and `query.abstention_enabled` is true (G9).
     ///
     /// When `None` (default), the built-in default text is used — mirroring
-    /// `AbstentionConfig::default().abstention_prompt` in `acowork-grafeo`.
-    /// This layer must NOT import `acowork-grafeo` (dependency direction),
+    /// the offline distiller's `AbstentionConfig::default().abstention_prompt`.
+    /// This layer must not depend on a storage backend (dependency direction),
     /// hence the constant lives here.
     pub abstention_prompt: Option<String>,
     /// Record episodes asynchronously (default: true).

@@ -9,11 +9,11 @@
 //! (`extraction`, `conflict-classification`, `generalization`) were
 //! removed in this revision because ADR-068 rewrites the LLM→memory
 //! boundary (LLM writes only Episode nodes via `memory_store`; the
-//! grafeo distillation path is owned by the offline `EpisodicDistiller`
-//! pipeline). Grafeo-internal constants (`EXTRACTION_SYSTEM_PROMPT` /
-//! `CONFLICT_CLASSIFICATION_PROMPT` / `GENERALIZATION_PROMPT`) are
-//! retained inside `acowork-grafeo` for any future intra-crate caller,
-//! but they are no longer exposed via the package `prompts/` overlay.
+//! distillation path is owned by the offline `EpisodicDistiller`
+//! pipeline). Its internal constants (`EXTRACTION_SYSTEM_PROMPT` /
+//! `CONFLICT_CLASSIFICATION_PROMPT` / `GENERALIZATION_PROMPT`) stay
+//! private to the distiller module in `acowork-memory`, and they are not
+//! exposed via the package `prompts/` overlay.
 //!
 //! | Method | Path                                | Handler         |
 //! |--------|-------------------------------------|-----------------|
@@ -217,19 +217,18 @@ const PROMPT_ENTRIES: &[PromptEntry] = &[
         name: "distiller-extraction",
         file: "distiller-extraction.md",
         purpose: "Offline memory distiller Step 2a — extract structured facts/preferences/relations from episodes (ADR-071).",
-        // The real fallback is `acowork-grafeo::consolidation::distiller::EXTRACTION_SYSTEM_PROMPT`
-        // (~3 KiB, private const). acowork-grafeo is feature-gated in the
-        // runtime build, so the canonical text cannot be referenced here
-        // without duplicating it; keep the reference note instead of a
+        // The real fallback is `acowork_memory::consolidation::distiller::EXTRACTION_SYSTEM_PROMPT`
+        // (~3 KiB, private const), so the canonical text cannot be referenced
+        // here without duplicating it; keep the reference note instead of a
         // drifting copy (see module docs: long built-ins are not mirrored).
-        fallback_constant: "(built-in grafeo EXTRACTION_SYSTEM_PROMPT, ~3 KiB — see acowork-grafeo/src/consolidation/distiller.rs)",
+        fallback_constant: "(built-in EXTRACTION_SYSTEM_PROMPT, ~3 KiB — see acowork-memory/src/consolidation/distiller.rs)",
         required: false,
     },
     PromptEntry {
         name: "distiller-judge",
         file: "distiller-judge.md",
         purpose: "Offline memory distiller Step 4 — judge whether a clustered candidate promotes/skips/defers (ADR-071).",
-        fallback_constant: "(built-in grafeo JUDGE_SYSTEM_PROMPT — see acowork-grafeo/src/consolidation/distiller.rs)",
+        fallback_constant: "(built-in JUDGE_SYSTEM_PROMPT — see acowork-memory/src/consolidation/distiller.rs)",
         required: false,
     },
 ];

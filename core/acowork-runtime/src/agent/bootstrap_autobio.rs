@@ -10,7 +10,7 @@
 //! We DO NOT bootstrap Relationship, Limitation, Preference, or History
 //! nodes — those require observational evidence that only emerges at
 //! runtime and are produced by the EpisodicDistiller (see
-//! `acowork_grafeo::consolidation::EpisodicDistiller::promote_*`).
+//! `acowork_memory::consolidation::EpisodicDistiller::promote_*`).
 //!
 //! This module is a free function (not an `AgentCore` method) so the e2e
 //! suite can exercise the bootstrap path without constructing a full agent
