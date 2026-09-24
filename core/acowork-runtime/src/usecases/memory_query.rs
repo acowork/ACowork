@@ -111,6 +111,9 @@ pub struct MemoryStats {
     pub nodes_with_embedding: u64,
     /// Embedding dimension of the active embedding model (0 if none).
     pub model_dim: u64,
+    /// On-disk schema version of the underlying store (`PRAGMA user_version`
+    /// for SQLite; 0 when the engine has no equivalent knob).
+    pub schema_version: u64,
 }
 
 /// Result of an embedding-dimension rebuild.

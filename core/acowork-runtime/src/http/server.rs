@@ -4444,6 +4444,7 @@ mod tests {
         assert_eq!(body["by_status"], serde_json::json!({}));
         assert_eq!(body["stored_dim"], 0);
         assert_eq!(body["nodes_with_embedding"], 0);
+        assert_eq!(body["schema_version"], 0);
 
         // DELETE /memory/nodes/{nid} — store is None, adapter returns Ok(()) trivially.
         let url = format!("http://127.0.0.1:{}/memory/nodes/12345", server.port);

@@ -289,6 +289,11 @@ impl MemoryAdminService for SqliteStore {
             index_health: "healthy".to_string(),
             stored_dim,
             nodes_with_embedding,
+            // `PRAGMA user_version` is a 32-bit integer SQLite preserves
+            // across connections; bump it from `schema.rs` whenever the
+            // table layout changes. 0 is the implicit value before any
+            // migration sets it — not an error, just "untouched".
+            schema_version: read_user_version(&self.lock()),
         }
     }
 
@@ -656,4 +661,18 @@ fn parse_timestamp(text: &str) -> Option<DateTime<Utc>> {
 
 fn f64_prop(props: &Value, key: &str) -> f64 {
     props.get(key).and_then(Value::as_f64).unwrap_or(0.0)
+}
+
+/// Read `PRAGMA user_version` from a held SQLite connection. SQLite stores
+/// this as a 32-bit signed integer but the engine bumps it as a u32
+/// counter, so we widen to `u64` to match `AdminStats::schema_version`.
+///
+/// Failures (no DB, pragma rejected) are swallowed and reported as 0 —
+/// `user_version` is observability metadata, not a correctness invariant,
+/// and a stuck read must not prevent the stats endpoint from returning.
+fn read_user_version(conn: &rusqlite::Connection) -> u64 {
+    conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+        .ok()
+        .and_then(|v| u64::try_from(v).ok())
+        .unwrap_or(0)
 }

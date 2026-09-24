@@ -921,7 +921,7 @@
     "totalNodes": "総ノード数",
     "active": "アクティブ",
     "dormant": "休眠",
-    "health": "健全性",
+    "version": "バージョン",
     "typeKnowledge": "ナレッジ",
     "typeEpisodic": "エピソード",
     "typeProcedural": "手続き",

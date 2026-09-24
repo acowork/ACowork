@@ -247,8 +247,8 @@ export function MemoryPanel() {
           <StatCard label={t("memoryPanel.active")} value={stats.by_status?.["Active"] ?? 0} />
           <StatCard label={t("memoryPanel.dormant")} value={stats.by_status?.["Dormant"] ?? 0} />
           <StatCard
-            label={t("memoryPanel.health")}
-            value={stats.index_health}
+            label={t("memoryPanel.version")}
+            value={stats.schema_version}
           />
         </div>
       )}

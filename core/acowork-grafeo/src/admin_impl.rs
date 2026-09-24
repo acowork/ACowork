@@ -603,6 +603,10 @@ impl MemoryAdminService for GrafeoStore {
                     index_health,
                     stored_dim,
                     nodes_with_embedding,
+                    // Grafeo has no `PRAGMA user_version` analogue; report 0
+                    // so the field compiles. This implementation is being
+                    // phased out in favour of `acowork-sqlite`.
+                    schema_version: 0,
                 }
             }
             Err(e) => {
@@ -615,6 +619,7 @@ impl MemoryAdminService for GrafeoStore {
                     index_health: format!("error: {}", e),
                     stored_dim: 0,
                     nodes_with_embedding: 0,
+                    schema_version: 0,
                 }
             }
         }

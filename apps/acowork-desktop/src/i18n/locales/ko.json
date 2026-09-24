@@ -922,7 +922,7 @@
     "totalNodes": "총 노드 수",
     "active": "활성",
     "dormant": "휴면",
-    "health": "건강도",
+    "version": "버전",
     "typeKnowledge": "지식",
     "typeEpisodic": "에피소드",
     "typeProcedural": "절차",
