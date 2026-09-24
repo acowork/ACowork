@@ -3,16 +3,29 @@
  * tabs in FileEditorPanel.
  *
  * Mounted inside the editor area only when the active tab has
- * `kind === "diff" | "log"`. Renders TWO side-by-side buttons at the
- * top-right corner (`top-3 right-4`), stacked horizontally via a
- * `flex gap-2` container.
+ * `kind === "diff" | "log"`. Renders two-to-three side-by-side
+ * buttons at the top-right corner (`top-10 right-4`), stacked
+ * horizontally via a `flex gap-2` container.
  *
- *   - **diff tabs** — `↑ Previous change` / `↓ Next change` wired to
- *     Monaco's `IStandaloneDiffEditor.goToDiff("previous" | "next")`.
- *     On mount we call `revealFirstDiff()` so the user lands on the
- *     first hunk immediately. Buttons disable at the file's first /
- *     last hunk — no cycling (Monaco's goToDiff otherwise wraps
- *     around and the user can't tell head from tail).
+ * Why top-10 (40px) and not top-3 (12px): the floating overlay is
+ * positioned relative to the same `relative` div that holds the diff
+ * banner ("HEAD | src/foo.ts" / "Working Tree" row) at the top of
+ * the editor area. With `top-3` the buttons sat at y=12..40px which
+ * lands the upper half of each button on top of the banner — visually
+ * it looked like the buttons were clipping the banner. 40px clears
+ * the ~25-30px-tall banner (text-[11px] + py-1 + border-b) with a
+ * ~10-15px visual gap so the banner reads as a separate strip.
+ *
+ *   - **diff tabs** — three buttons, left-to-right: a diff-mode toggle
+ *     (`<Columns2>` / `<Rows2>`) for switching between inline and
+ *     side-by-side (ADR-078 extension; state on OpenFile.diffInlineMode,
+ *     `true` = inline / default), then `↑ Previous change` /
+ *     `↓ Next change` wired to Monaco's
+ *     `IStandaloneDiffEditor.goToDiff("previous" | "next")`. On mount
+ *     we call `revealFirstDiff()` so the user lands on the first
+ *     hunk immediately. Buttons disable at the file's first / last
+ *     hunk — no cycling (Monaco's goToDiff otherwise wraps around and
+ *     the user can't tell head from tail).
  *
  *   - **log tabs** — `↑ Previous commits` / `↓ Next commits` for
  *     BIDIRECTIONAL pagination over a local cache:
@@ -27,7 +40,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import type { editor } from "monaco-editor";
-import { ChevronDown, ChevronUp } from "lucide-react";
+import { ChevronDown, ChevronUp, Columns2, Rows2 } from "lucide-react";
 import { useGitStore, type GitCommitDto } from "../../stores/gitStore";
 import { useFileEditorStore } from "../../stores/fileEditorStore";
 import { useTranslation } from "../../i18n/useTranslation";
@@ -56,7 +69,7 @@ const BUTTON_CLASS =
     "rounded-full bg-zinc-100 dark:bg-zinc-700 border border-zinc-200 dark:border-zinc-600 shadow-md p-1.5 opacity-90 hover:opacity-100 focus-visible:opacity-100 hover:bg-zinc-200 dark:hover:bg-zinc-600 transition-all animate-in fade-in zoom-in disabled:opacity-20 disabled:cursor-not-allowed";
 
 const CONTAINER_CLASS =
-    "absolute top-3 right-4 z-10 flex items-center gap-2";
+    "absolute top-10 right-4 z-10 flex items-center gap-2";
 
 interface HunkLike {
     modifiedStartLineNumber: number;
@@ -87,6 +100,9 @@ export function GitVirtualNav({ file, diffEditor }: GitVirtualNavProps) {
     const fetchLog = useGitStore((s) => s.fetchLog);
     const setVirtualFileContent = useFileEditorStore(
         (s) => s.setVirtualFileContent,
+    );
+    const setDiffInlineMode = useFileEditorStore(
+        (s) => s.setDiffInlineMode,
     );
 
     const isDiff = file.kind === "diff";
@@ -249,6 +265,16 @@ export function GitVirtualNav({ file, diffEditor }: GitVirtualNavProps) {
         if (!diffEditor) return;
         diffEditor.goToDiff("next");
     }, [diffEditor]);
+    // Flip between inline (default — single pane +/- colour blocks) and
+    // side-by-side (two-pane) layouts. The store mutation cascades to
+    // FileEditorPanel, which passes `!diffInlineMode` as Monaco's
+    // `renderSideBySide` option — @monaco-editor/react's options-watcher
+    // calls editor.updateOptions for us, so no direct Monaco call needed
+    // here. Log tabs ignore this (setDiffInlineMode is a no-op for them).
+    const onToggleDiffMode = useCallback(() => {
+        if (!isDiff) return;
+        setDiffInlineMode(file.id, !file.diffInlineMode);
+    }, [isDiff, file.id, file.diffInlineMode, setDiffInlineMode]);
 
     // ── Render ──────────────────────────────────────────────────────
     const showContainer = isDiff ? !!diffEditor : isLog;
@@ -270,6 +296,34 @@ export function GitVirtualNav({ file, diffEditor }: GitVirtualNavProps) {
 
     return (
         <div className={CONTAINER_CLASS}>
+            {/* View-mode toggle — diff only. Shows the icon of the
+                mode you'd switch INTO (current state is encoded in
+                the aria-label). Log tabs skip this button entirely
+                (the icon would be misleading there). */}
+            {isDiff && (
+                <button
+                    type="button"
+                    onClick={onToggleDiffMode}
+                    data-testid="git-diff-mode-toggle"
+                    aria-label={
+                        file.diffInlineMode
+                            ? t("gitStatus.switchToSideBySide")
+                            : t("gitStatus.switchToInline")
+                    }
+                    title={
+                        file.diffInlineMode
+                            ? t("gitStatus.switchToSideBySide")
+                            : t("gitStatus.switchToInline")
+                    }
+                    className={BUTTON_CLASS}
+                >
+                    {file.diffInlineMode ? (
+                        <Columns2 className="h-4 w-4 text-text-tertiary " />
+                    ) : (
+                        <Rows2 className="h-4 w-4 text-text-tertiary " />
+                    )}
+                </button>
+            )}
             <button
                 type="button"
                 onClick={isDiff ? onJumpPrev : onPrevCommits}

@@ -151,7 +151,7 @@
   "chatPanel": {
     "sessionLoadFailed": "Session 加载失败",
     "retry": "重试",
-    "taskList": "任务列表 ({{completed}}/{{total}})",
+    "taskList": "待办 ({{completed}}/{{total}})",
     "currentTask": "当前任务：{{current}}",
     "messageQueue": "消息队列 ({{count}})",
     "uploadFile": "上传文件",
@@ -1274,6 +1274,8 @@
     "nextChange": "下一处修改",
     "prevCommits": "更近的提交",
     "nextCommits": "更早的提交",
+    "switchToInline": "切换为内联 diff (单文件视图)",
+    "switchToSideBySide": "切换为并排 diff (双文件视图)",
     "prevPage": "上一页",
     "nextPage": "下一页",
     "headLabel": "HEAD",

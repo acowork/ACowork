@@ -54,7 +54,7 @@
   "chatPanel": {
     "sessionLoadFailed": "Session failed to load",
     "retry": "Retry",
-    "taskList": "Tasks ({{completed}}/{{total}})",
+    "taskList": "to dos ({{completed}}/{{total}})",
     "currentTask": "Current: {{current}}",
     "messageQueue": "Message queue ({{count}})",
     "uploadFile": "Upload file",
@@ -447,6 +447,8 @@
     "nextChange": "Next change",
     "prevCommits": "Previous commits",
     "nextCommits": "Next commits",
+    "switchToInline": "Switch to inline diff (single pane)",
+    "switchToSideBySide": "Switch to side-by-side diff (two panes)",
     "prevPage": "Previous page",
     "nextPage": "Next page",
     "headLabel": "HEAD",

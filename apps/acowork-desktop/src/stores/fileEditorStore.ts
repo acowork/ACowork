@@ -165,6 +165,15 @@ export interface OpenFile {
      *  "" (default) means the working tree; any git ref is accepted.
      *  Set when the user picks a different compare via the diff banner. */
     diffHeadRef?: string;
+    /** ADR-078 diff-mode toggle: when true (default for new diff
+     *  tabs — seeded by openVirtualFile), render the virtual diff tab
+     *  in Monaco's INLINE form (one pane, +/- colour-coded blocks).
+     *  When false, the side-by-side two-pane layout is used.
+     *  User flips via the GitVirtualNav toggle; persists with the tab
+     *  until closed. Inline is the default because single-file +/- diff
+     *  is denser on narrow editor widths and matches the "what
+     *  changed here" reading the user does in 90% of cases. */
+    diffInlineMode?: boolean;
     /** Pagination state for kind === "log" virtual tabs.
      *
      *  - `loadedCommits` is the cache of every commit we've fetched for
@@ -280,6 +289,9 @@ interface FileEditorState {
      *  banner labels render correctly and a later commit-picker
      *  selection knows what to highlight. */
     updateDiffRefs: (fileId: string, baseRef?: string, headRef?: string) => void;
+    /** Flip a diff tab between side-by-side (default) and inline
+     *  (single-pane +/- colour blocks). No-op for non-diff tabs. */
+    setDiffInlineMode: (fileId: string, inline: boolean) => void;
     /** Save file content to Gateway */
     saveFile: (fileId: string) => Promise<void>;
     /** Re-fetch file content from disk and replace both content and originalContent.
@@ -570,6 +582,11 @@ export const useFileEditorStore = create<FileEditorState>((set, get) => ({
             gitDiffKind,
             diffBaseRef,
             diffHeadRef,
+            // Diff tabs open in INLINE mode by default — single-pane +/-
+            // colour blocks. User can flip to side-by-side via the
+            // GitVirtualNav toggle (which writes back through
+            // setDiffInlineMode). Log tabs ignore this field.
+            diffInlineMode: kind === "diff" ? true : undefined,
         };
 
         set((state) => ({
@@ -681,6 +698,19 @@ export const useFileEditorStore = create<FileEditorState>((set, get) => ({
                           diffBaseRef: baseRef ?? f.diffBaseRef,
                           diffHeadRef: headRef ?? f.diffHeadRef,
                       }
+                    : f,
+            ),
+        }));
+    },
+
+    /** Flip a diff tab between inline (default) and side-by-side.
+     *  No-op for non-diff tabs — keeps the toggle from accidentally
+     *  marking a real file or log tab as "diff mode set". */
+    setDiffInlineMode: (fileId, inline) => {
+        set((state) => ({
+            openFiles: state.openFiles.map((f) =>
+                f.id === fileId && f.kind === "diff"
+                    ? { ...f, diffInlineMode: inline }
                     : f,
             ),
         }));

@@ -119,6 +119,7 @@ describe("GitVirtualNav — diff mode", () => {
             activeFileId: null,
             openVirtualFile: vi.fn(),
             setVirtualFileContent: vi.fn(),
+            setDiffInlineMode: vi.fn(),
         } as unknown as Parameters<typeof useFileEditorStore.setState>[0]);
     });
 
@@ -247,6 +248,112 @@ describe("GitVirtualNav — diff mode", () => {
         expect(diffEditor.goToDiff).toHaveBeenNthCalledWith(1, "next");
         expect(diffEditor.goToDiff).toHaveBeenNthCalledWith(2, "previous");
     });
+
+    // ── Diff-mode toggle (single-pane vs. side-by-side) ────────
+    it("renders a diff-mode toggle button with the right label per state", () => {
+        const diffEditor = makeDiffEditorStub({ cursor: 1, hunks: [] });
+        const { rerender } = render(
+            <GitVirtualNav
+                file={{
+                    id: "diff-1",
+                    kind: "diff",
+                    agentId: "a",
+                    workspaceId: "w",
+                    relPath: "x.ts",
+                    content: "x",
+                    language: "plaintext",
+                    originalContent: "y",
+                    mode: "normal",
+                    dirty: false,
+                    isReadOnly: true,
+                    lastModified: 0,
+                    diffInlineMode: true, // default — inline
+                }}
+                diffEditor={diffEditor}
+            />,
+        );
+        // Currently inline → click should switch to side-by-side.
+        const btn = screen.getByTestId("git-diff-mode-toggle");
+        expect(btn.getAttribute("aria-label")).toBe(
+            "gitStatus.switchToSideBySide",
+        );
+
+        // Flip the file's flag and re-render — label flips too.
+        rerender(
+            <GitVirtualNav
+                file={{
+                    id: "diff-1",
+                    kind: "diff",
+                    agentId: "a",
+                    workspaceId: "w",
+                    relPath: "x.ts",
+                    content: "x",
+                    language: "plaintext",
+                    originalContent: "y",
+                    mode: "normal",
+                    dirty: false,
+                    isReadOnly: true,
+                    lastModified: 0,
+                    diffInlineMode: false, // now side-by-side
+                }}
+                diffEditor={diffEditor}
+            />,
+        );
+        expect(screen.getByTestId("git-diff-mode-toggle").getAttribute("aria-label")).toBe(
+            "gitStatus.switchToInline",
+        );
+    });
+
+    it("writes the flipped mode through setDiffInlineMode on click", () => {
+        const diffEditor = makeDiffEditorStub({ cursor: 1, hunks: [] });
+        render(
+            <GitVirtualNav
+                file={{
+                    id: "diff-1",
+                    kind: "diff",
+                    agentId: "a",
+                    workspaceId: "w",
+                    relPath: "x.ts",
+                    content: "x",
+                    language: "plaintext",
+                    originalContent: "y",
+                    mode: "normal",
+                    dirty: false,
+                    isReadOnly: true,
+                    lastModified: 0,
+                    diffInlineMode: true, // start inline
+                }}
+                diffEditor={diffEditor}
+            />,
+        );
+        fireEvent.click(screen.getByTestId("git-diff-mode-toggle"));
+        const setDiffInlineMode = useFileEditorStore.getState()
+            .setDiffInlineMode as unknown as ReturnType<typeof vi.fn>;
+        expect(setDiffInlineMode).toHaveBeenCalledWith("diff-1", false);
+    });
+
+    it("does not render the diff-mode toggle for log tabs", () => {
+        render(
+            <GitVirtualNav
+                file={{
+                    id: "log-1",
+                    kind: "log",
+                    agentId: "a",
+                    workspaceId: "w",
+                    relPath: "x.ts",
+                    content: "x",
+                    language: "plaintext",
+                    originalContent: "y",
+                    mode: "normal",
+                    dirty: false,
+                    isReadOnly: true,
+                    lastModified: 0,
+                }}
+                diffEditor={null}
+            />,
+        );
+        expect(screen.queryByTestId("git-diff-mode-toggle")).toBeNull();
+    });
 });
 
 // ── Tests: log mode — the bug we just fixed ───────────────────────
@@ -259,6 +366,7 @@ describe("GitVirtualNav — log mode (reachedEnd)", () => {
             activeFileId: null,
             openVirtualFile: vi.fn(),
             setVirtualFileContent: vi.fn(),
+            setDiffInlineMode: vi.fn(),
         } as unknown as Parameters<typeof useFileEditorStore.setState>[0]);
     });
 
@@ -288,6 +396,7 @@ describe("GitVirtualNav — log mode (reachedEnd)", () => {
             activeFileId: null,
             openVirtualFile: vi.fn(),
             setVirtualFileContent,
+            setDiffInlineMode: vi.fn(),
         } as unknown as Parameters<typeof useFileEditorStore.setState>[0]);
         render(<GitVirtualNav file={logFile(true, 50, 50)} diffEditor={null} />);
         const next = screen.getByLabelText("gitStatus.nextCommits");
@@ -312,6 +421,7 @@ describe("GitVirtualNav — log mode (reachedEnd)", () => {
             activeFileId: null,
             openVirtualFile: vi.fn(),
             setVirtualFileContent,
+            setDiffInlineMode: vi.fn(),
         } as unknown as Parameters<typeof useFileEditorStore.setState>[0]);
         render(<GitVirtualNav file={logFile(false, 100, 100)} diffEditor={null} />);
         fireEvent.click(screen.getByLabelText("gitStatus.prevCommits"));
@@ -330,6 +440,7 @@ describe("GitVirtualNav — log mode (reachedEnd)", () => {
             activeFileId: null,
             openVirtualFile: vi.fn(),
             setVirtualFileContent,
+            setDiffInlineMode: vi.fn(),
         } as unknown as Parameters<typeof useFileEditorStore.setState>[0]);
         // File has only 10 commits — reachedEnd already true on first open.
         render(<GitVirtualNav file={logFile(true, 10, 10)} diffEditor={null} />);

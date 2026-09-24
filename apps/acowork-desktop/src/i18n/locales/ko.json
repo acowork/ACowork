@@ -1215,6 +1215,8 @@
     "nextChange": "다음 변경",
     "prevCommits": "더 최근 커밋",
     "nextCommits": "더 오래된 커밋",
+    "switchToInline": "인라인 diff로 전환 (단일 패널)",
+    "switchToSideBySide": "나란히 보기 diff로 전환 (두 패널)",
     "prevPage": "이전 페이지",
     "nextPage": "다음 페이지",
     "headLabel": "HEAD",

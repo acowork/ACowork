@@ -1214,6 +1214,8 @@
     "nextChange": "次の変更",
     "prevCommits": "新しいコミット",
     "nextCommits": "古いコミット",
+    "switchToInline": "インライン diff に切り替え(単一ペイン)",
+    "switchToSideBySide": "サイドバイサイド diff に切り替え(2 ペイン)",
     "prevPage": "前のページ",
     "nextPage": "次のページ",
     "headLabel": "HEAD",

@@ -1643,17 +1643,23 @@ export function FileEditorPanel({ width }: { width: number }) {
                                             lineNumbers: "on",
                                             scrollBeyondLastLine: false,
                                             readOnly: true,
-                                            renderSideBySide: true,
-                                            // ADR-078 decision 7: side-by-side is part of
-                                            // the "two-file diff" semantics — must hold at
-                                            // any editor width. Monaco otherwise auto-
-                                            // switches to inline mode when the container
-                                            // is narrower than renderSideBySideInlineBreakpoint
-                                            // (default 900 px; see
-                                            // monaco-editor/.../diffEditorOptions.js L32).
-                                            // Forcing it off keeps the two-pane layout
-                                            // intact even when FileEditorPanel is
-                                            // squeezed by a wide right panel / agent list.
+                                            // Diff mode follows the per-tab toggle
+                                            // (OpenFile.diffInlineMode, seeded to
+                                            // `true` by openVirtualFile for new diff
+                                            // tabs). Inline is the default — single
+                                            // pane with +/- colour blocks; flipping
+                                            // to false restores the side-by-side
+                                            // two-pane layout (ADR-078 decision 7).
+                                            renderSideBySide: !activeFile.diffInlineMode,
+                                            // ADR-078 decision 7: when side-by-side
+                                            // is explicitly chosen, hold the two-
+                                            // pane layout at any editor width.
+                                            // Monaco otherwise auto-switches to
+                                            // inline when the container is narrower
+                                            // than renderSideBySideInlineBreakpoint
+                                            // (default 900 px). For inline mode
+                                            // the option is irrelevant — Monaco is
+                                            // already single-pane.
                                             useInlineViewWhenSpaceIsLimited: false,
                                             // Disable Monaco's diff overview ruler. The
                                             // ruler paints a 30-px-wide marker strip on
