@@ -1,6 +1,6 @@
 # ADR-082：记忆存储后端迁移至 SQLite（纯向量 + FTS，去图化）
 
-**状态**：已定案（待实施）
+**状态**：已实施
 **日期**：2026-09
 **决策者**：大鱼
 **前置 ADR**：ADR-051（Runtime / Grafeo 解耦——本文成立的直接前提：engine 只被 `acowork-grafeo` 一个 crate 触碰）、ADR-062（MemoryQualityConfig，其 §6.4 `min_score` 决策由本文 D5 最终取代）、ADR-081（全局搜索 / 对话索引）
@@ -138,12 +138,15 @@ SQLite WAL 自动管理（默认 Batch 持久化，崩溃最多丢 100ms），ch
 2. **迁移验证**：SSE 真实数据迁入（记忆节点经 export 路径导入；对话索引从 JSONL 重建——watermark 机制已有），对比检索质量与启动时间；
 3. **切换删旧**：runtime 切换，删除 grafeo-engine 依赖、index_persist、spreading / 图层、`migrate_legacy_store` 等（预计净删 ~2k 行）。
 
-### 执行状态（截至切换）
+### 执行状态（已实施）
 
-- **第 1、2 步已完成**：SQLite 后端（记忆 + session meta + 对话索引）落地，`ACOWORK_MEMORY_BACKEND` 灰度开关已在第 3 步切换时移除。
-- **第 3 步部分完成——"切换"已做，"删旧"未做**：`init_memory_provider` 无条件走 SQLite；grafeo 侧代码与文件暂时保留（`init_grafeo_backend` 标记 `dead_code`），待 SQLite 稳定后再删。
-- **三库合一**：记忆节点、session meta（原 `conversations/meta/*.json`）、对话索引共用 `memory/private.sqlite`，一个连接一把写锁。
-- **启动迁移**（均为空库才导入、不删源文件、可重复执行）：`private.grafeo` → 记忆；`conversations/meta/*.json` → `sessions` 表；旧对话索引（`conversation_index.sqlite` / `.grafeo` / 目录）→ 共享库。
+- **第 1、2 步已完成**：SQLite 后端（记忆 + session meta + 对话索引）落地并跑绿；`ACOWORK_MEMORY_BACKEND` 灰度开关已在第 3 步删除。
+- **第 3 步完成（"切换 + 删旧"）**：`init_memory_provider` 无条件走 SQLite；`acowork-grafeo` crate（45 文件 / ~1.7 万行）、`grafeo-engine` / `grafeo-common` / `grafeo-core` 依赖、`grafeo-backend` feature（原为 default）、19 处 feature 门控、`init_grafeo_backend` 与两处 `From<GrafeoError>` 全部删除；D4 图层随之落地——`graph_expand` / `graph_expand_seeded` / `create_memory_edge` / `apply_pagerank_boost` / `enable_graph_expand` / `pagerank_weight` / `edge_types` 及 manifest 侧配置一并下线（SQLite 侧这些方法本就是返回空结果的 stub，行为不变）。
+- **两个与存储无关的模块迁出 grafeo**：ADR-068 episodic distiller（`acowork-memory/src/consolidation/distiller.rs`，仅改错误类型 `GrafeoError` → `AcoworkError`）与检索质量评估（`acowork-memory/src/retrieval_metrics.rs`）。
+- **三库合一**：记忆节点、session meta（原 `conversations/meta/*.json`）、对话索引共用 `memory/private.sqlite`，一个连接一把写锁；`acowork-core::workspace` 是私有库路径的唯一来源，node 全量克隆拷贝 `private.sqlite`（含 `-wal` / `-shm`），packaging 排除规则同步更新。
+- **旧数据源与一次性导入代码已全部删除**（开发期决策：不保留中间态）：`private.grafeo` → 记忆、`conversations/meta/*.json` → `sessions`、`conversation_index.grafeo` / 独立 `conversation_index.sqlite` → 共享库三条导入路径，以及 `ConversationIndex::open` 回退到独立库的路径。旧文件（`meta/*.json`、`private.grafeo`、`conversation_index.grafeo`、独立 `conversation_index.sqlite`）可安全删除。
+- **保留**：`acowork-sqlite::schema` 的 `SCHEMA_VERSION` / `MIGRATIONS` / `apply_migrations`（`PRAGMA user_version` 门控）。这是 SQLite 库自身的版本升级机制，与旧数据源无关，属长期机制。
+- **落地提交**：`61bb765e` / `69180f27`（删一次性导入）、`14c523a4`（删 `acowork-grafeo` 并迁移 distiller / retrieval_metrics）、`5780a826`（删图层 API，D4）。
 
 ---
 
