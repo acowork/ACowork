@@ -2,10 +2,11 @@
 //!
 //! ADR-051 P4: All business logic (pagination, filtering, keyword search,
 //! stats aggregation, consolidation trigger) has been moved to the
-//! `MemoryAdminService` trait implementation in `acowork-grafeo`. This
+//! `MemoryAdminService` trait implementation in the storage backend
+//! (`acowork-sqlite`). This
 //! module now provides thin wrappers that call the trait and convert
 //! results to the intermediate types consumed by the HTTP handlers and
-//! the `GrafeoMemoryAdapter`.
+//! the `MemoryAdminAdapter`.
 //!
 //! All entry points take `Option<&Arc<dyn MemoryAdminService>>` and report
 //! graceful "no store" responses when the store has not been
@@ -146,6 +147,9 @@ fn empty_stats_output(embed_provider_dim: u64) -> StatsOutput {
         stored_dim: 0,
         nodes_with_embedding: 0,
         model_dim: embed_provider_dim,
+        // No store → no schema version either. 0 is the implicit
+        // `user_version` value, mirroring SQLite's own default.
+        schema_version: 0,
     }
 }
 
@@ -260,6 +264,7 @@ pub(crate) fn get_stats(
         stored_dim: stats.stored_dim,
         nodes_with_embedding: stats.nodes_with_embedding,
         model_dim: embed_provider_dim,
+        schema_version: stats.schema_version,
     }
 }
 
@@ -363,6 +368,7 @@ mod tests {
         assert_eq!(out.stored_dim, 0);
         assert_eq!(out.nodes_with_embedding, 0);
         assert_eq!(out.model_dim, 512);
+        assert_eq!(out.schema_version, 0);
     }
 
     #[test]
@@ -379,6 +385,7 @@ mod tests {
             "stored_dim",
             "nodes_with_embedding",
             "model_dim",
+            "schema_version",
         ] {
             assert!(obj.contains_key(key), "stats JSON missing field: {}", key);
         }

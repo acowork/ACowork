@@ -146,6 +146,16 @@ pub struct AdminStats {
     pub stored_dim: u64,
     /// Number of nodes that have an embedding vector.
     pub nodes_with_embedding: u64,
+    /// On-disk schema version of the underlying store.
+    ///
+    /// For SQLite-backed implementations this is `PRAGMA user_version`, a
+    /// 32-bit integer the engine bumps when the schema layout changes. The
+    /// desktop Memory panel surfaces this on the overview strip so an
+    /// operator can tell at a glance which schema an agent's store is on
+    /// (and spot drift across machines). Engines without a comparable
+    /// schema-version knob (e.g. Grafeo, which is being phased out) report
+    /// 0.
+    pub schema_version: u64,
 }
 
 

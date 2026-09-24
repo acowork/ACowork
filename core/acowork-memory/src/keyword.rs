@@ -23,7 +23,7 @@
 //! Call sites (idempotent, defensive at both boundaries):
 //!   - [`crate::manager`]'s tool-facing path (`memory_store` in runtime) —
 //!     the LLM boundary
-//!   - `acowork-grafeo::consolidation::instant` — defensive fallback at the
+//!   - the storage backend (`acowork-sqlite`) — defensive fallback at the
 //!     persistence boundary
 
 /// Maximum number of characters a single keyword may have (rule 1).

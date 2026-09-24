@@ -1,4 +1,4 @@
-# Desktop App（桌面应用）
+﻿# Desktop App（桌面应用）
 
 > 版本：v3.4 | 更新日期：2026-04-16
 
@@ -262,7 +262,7 @@ Step 5: 安装第一个 Agent
 
 - 用户输入消息 → Desktop App 调用 Gateway `/api/agents/:id/message` → Gateway 通过 Intent Router 转发给 Agent Runtime
 - Agent 响应通过 WebSocket 流式推送回 Desktop App
-- 对话历史存储在 Agent 的私有 Grafeo 中，Desktop App 不持久化对话数据
+- 对话历史存储在 Agent 的私有 SQLite 中，Desktop App 不持久化对话数据
 
 ### 4.4 设置页面
 
@@ -308,7 +308,7 @@ Desktop App 的 Agent 列表右键菜单提供"克隆"选项（开发者模式�
   ├─ 源 Agent: com.example.weather
   ├─ 克隆模式:
   │   ○ 骨架克隆（仅 manifest + prompts + config）
-  │   ● 完整克隆（+ skills + data + Grafeo 快照）
+  │   ● 完整克隆（+ skills + data + SQLite 记忆层 快照）
   ├─ 新 Agent ID: [com.example.weather-dev    ]
   └─ [取消]  [克隆]
        │

@@ -55,7 +55,7 @@ ACowork 是一个"**Agent as APP**"平台。核心隐喻借鉴 Android：Agent �
 | PKG-06 | 提供签名工具链（`acowork-sign` 含 `keygen / sign / verify` 子命令） | P1 | 开发者自签流程 |
 | PKG-07 | 提供 Debug 签名模式（本地开发自动签名） | P1 | 降低开发门槛 |
 | PKG-08 | 支持远程仓库（多 HTTP 源、定期检查更新） | P2 | 生态分发——**未实现**，Phase 6 计划 |
-| PKG-08a | 仓库上架安全扫描：六维度自动化扫描（Manifest/Prompt/Skill/WASM/Grafeo/结构），判定 Pass/Warn/Reject | P2 | 发布侧安全关卡——**未实现**，依赖 PKG-08 |
+| PKG-08a | 仓库上架安全扫描：六维度自动化扫描（Manifest/Prompt/Skill/WASM/Memory/结构），判定 Pass/Warn/Reject | P2 | 发布侧安全关卡——**未实现**，依赖 PKG-08 |
 | PKG-09 | 支持双密钥模型（Upload Key + Distribution Key） | P3 | 商店分发阶段——**未实现**，Phase 6+ |
 | PKG-10 | 支持密钥轮换（Proof-of-Rotation） | P3 | 长期运维——**未实现**，Phase 6+ |
 | PKG-11 | 支持证书吊销列表（CRL） | P3 | 安全事件响应——**未实现**，Phase 6+ |
@@ -96,7 +96,7 @@ ACowork 是一个"**Agent as APP**"平台。核心隐喻借鉴 Android：Agent �
 
 | 编号 | 需求 | 优先级 | 说明 |
 |------|------|--------|------|
-| MEM-01 | 每个 Agent 拥有完全独立的私有 Grafeo，不存在公共数据库 | P0 | 数据隔离底线 |
+| MEM-01 | 每个 Agent 拥有完全独立的私有 SQLite 记忆层（`memory/private.sqlite`），不存在公共数据库 | P0 | 数据隔离底线 |
 | MEM-02 | 三层五类仿生分层：瞬态层（工作记忆）→ 经历层（情景记忆）→ 沉淀层（语义+程序+自传体） | P0 | 仿生记忆架构 |
 | MEM-03 | 即时提取：LLM 通过 memory_store 工具自主判断是否存储，零额外 API 成本 | P0 | 记忆积累的核心机制 |
 | MEM-04 | 遗忘机制：分级衰减模型 — ①后台定期扫描（`run_decay_scan`）计算 decay_score = importance × activity_signal，低于阈值的节点 Active→Dormant；②Dormant 节点超期后自动 Purge；③容量压力触发 eviction（按 decay_score 最低优先）。后台扫描非阻塞，由 Gateway Cron 调度，扫描粒度按 label 分批 | P1 | 防止记忆膨胀 |
@@ -104,9 +104,9 @@ ACowork 是一个"**Agent as APP**"平台。核心隐喻借鉴 Android：Agent �
 | MEM-06 | 自传体记忆：六维度自我认知，从 manifest 自动派生，注入 System Prompt | P1 | Agent 自我认知 |
 | MEM-07 | 程序记忆：跨 Skill 的通用行为模式 | P2 | 自学习能力 |
 | MEM-08 | 隐私分级：PrivacyLevel（Public/Personal/Sensitive），LLM 自动判断。控制的是"数据打包分享时是否包含该节点"——Personal/Sensitive 节点在 Agent 分享导出时剥离，Public 节点保留。LLM 上下文中的数据无法从技术上访问控制，只能通过 prompt 约定约束 | P1 | 打包边界隐私保护 |
-| MEM-09 | 离线巩固：空闲时触发专用 LLM 调用，将经历层提炼到沉淀层 | P3 | 记忆质量提升——`acowork-grafeo/src/consolidation/`（`offline.rs` / `scheduler.rs` / `generalization.rs` / `triple_extraction.rs`）已有骨架与调度框架；Runtime 侧 `memory/consolidation_bg.rs` 提供 `ConsolidationBgTask` 接入点。完整 LLM 驱动的离线巩固仍待 Phase 6 激活 |
-| MEM-10 | Grafeo 全 Zone 跨设备完整同步（平台明文托管，多设备体验一致）。enterprise Zone 改名为 work Zone（个人工作记忆，与企业 RAG 无关）。隐私分级与同步策略完全解耦——PrivacyLevel 控制打包边界（分享时 Personal/Sensitive 数据是否剥离），Zone 仅作为打包边界的语义标记，不影响同步范围 | P1 | 多设备同步——MemoryStore 当前仅本地（Grafeo 文件位于 `{agent_home}/data/grafeo/`），**云端同步尚未实现**。Cloud Sync 与企业级 MemStore 计划 Phase 6 一并实现 |
-| MEM-11 | 内容分类压缩：工件性内容（代码/文件/命令输出）仅存摘要 + ArtifactRef 引用 | P1 | 防 Grafeo 膨胀 |
+| MEM-09 | 离线巩固：空闲时触发专用 LLM 调用，将经历层提炼到沉淀层 | P3 | 记忆质量提升——`acowork-sqlite/src/consolidation/`（`offline.rs` / `scheduler.rs` / `generalization.rs` / `triple_extraction.rs`）已有骨架与调度框架；Runtime 侧 `memory/consolidation_bg.rs` 提供 `ConsolidationBgTask` 接入点。完整 LLM 驱动的离线巩固仍待 Phase 6 激活 |
+| MEM-10 | SQLite 记忆层 全 Zone 跨设备完整同步（平台明文托管，多设备体验一致）。enterprise Zone 改名为 work Zone（个人工作记忆，与企业 RAG 无关）。隐私分级与同步策略完全解耦——PrivacyLevel 控制打包边界（分享时 Personal/Sensitive 数据是否剥离），Zone 仅���为打包边界的语义标记，不影响同步范围 | P1 | 多设备同步——MemoryStore 当前仅本地（`memory/private.sqlite`），**云端同步尚未实现**。Cloud Sync 与企业级 MemStore 计划 Phase 6 一并实现 |
+| MEM-11 | 内容分类压缩：工件性内容（代码/文件/命令输出）仅存摘要 + ArtifactRef 引用 | P1 | 防 SQLite 记忆层 膨胀 |
 | MEM-12 | Embedding 生成：Ollama local（`/api/embed`）→ Remote API（`/embeddings`）降级链，`MemoryManager.retrieve()` 内部 200ms 超时自动生成 | P1 | 向量检索前提 |
 
 ### 1.5 工具系统
@@ -158,9 +158,9 @@ ACowork 是一个"**Agent as APP**"平台。核心隐喻借鉴 Android：Agent �
 
 | 编号 | 需求 | 优先级 | 说明 |
 |------|------|--------|------|
-| SKL-01 | 双层模型：SKILL.md（静态定义层）+ Grafeo（动态经验层）——Phase 2 完成 SKILL.md 解析，agentskills.io 兼容延期至 Phase 3 | P0 | Skill 架构基础 |
+| SKL-01 | 双层模型：SKILL.md（静态定义层）+ SQLite 经验层（动态经验层）——Phase 2 完成 SKILL.md 解析，agentskills.io 兼容延期至 Phase 3 | P0 | Skill 架构基础 |
 | SKL-02 | SKILL.md 兼容 agentskills.io 开放标准 | P2 | 复用社区技能——延期至 Phase 3 |
-| SKL-03 | 调试流程：Agent 在 Grafeo 中创建草稿 → Debug 模式试运行 → 用户确认 → 提交到 SKILL.md | P2 | Skill 开发闭环——依赖 Debug Protocol（Phase 5），建议 Phase 2 末提供简易 SKILL.md 热加载 |
+| SKL-03 | 调试流程：Agent 在 SQLite 中创建草稿 → Debug 模式试运行 → 用户确认 → 提交到 SKILL.md | P2 | Skill 开发闭环——依赖 Debug Protocol（Phase 5），建议 Phase 2 末提供简易 SKILL.md 热加载 |
 | SKL-04 | 自学习闭环：发布后积累经验，经验达到阈值时提示用户更新 SKILL.md | P2 | 持续改进 |
 | SKL-05 | 模型兼容性：SkillExecution 记录模型信息，SkillExperience 按模型聚合，运行时自动注入适配指令 | P2 | 跨模型可移植 |
 
@@ -315,7 +315,7 @@ graph TB
 | SEC-06 | 沙箱强化——Linux 使用 bubblewrap + seccomp-bpf | P2 | 深度隔离——延后至 Phase 7（ADR-007） |
 | SEC-07 | API Key 不通过环境变量分发，通过 Socket 一次性传输 | P0 | 防 ps/procfs 泄露 |
 | SEC-08 | Shell 命令风险分级 + 文件来源追踪（FileProvenance）+ 审计日志 | P3 | Runtime 层 Shell 安全防线——延期至 Phase 3 |
-| SEC-09 | Agent 仓库上架安全扫描：Manifest 合规性 + Prompt/Skill 行为分析 + WASM 二进制扫描 + Grafeo 记忆扫描 + 包结构合规 | P2 | 发布侧安全关卡，与运行时防御形成纵深 |
+| SEC-09 | Agent 仓库上架安全扫描：Manifest 合规性 + Prompt/Skill 行为分析 + WASM 二进制扫描 + SQLite 记忆层 记忆扫描 + 包结构合规 | P2 | 发布侧安全关卡，与运行时防御形成纵深 |
 
 ### 1.11 Desktop App
 
@@ -346,7 +346,7 @@ graph TB
 **设计原则**：
 
 - **纯对接，不托管**：ACowork 不运营 RAG 服务，知识属于企业自己；ACowork 定义标准查询协议（请求/响应 JSON Schema），企业 RAG 自行适配此协议，ACowork 不为各家 RAG 系统实现 adapter
-- **隔离优先**：本地 Grafeo（个人记忆）和企业 RAG（集体知识）是两条独立的检索通道，互不干扰
+- **隔离优先**：本地记忆层（个人记忆）和企业 RAG（集体知识）是两条独立的检索通道，互不干扰
 - **配置驱动 Opt-In**：RAG 不是默认能力，仅当 Agent manifest 声明 `[[tools]] type = "rag"` 时使能；无 RAG 声明的 Agent 行为与无 RAG 完全一致，零侵入
 - **混合双触发**：自动触发（MemoryManager Retrieve 阶段）+ 显式触发（LLM tool_call），均由 manifest 配置驱动
 
@@ -354,7 +354,7 @@ graph TB
 
 | 通道 | 存储 | 内容 | 所有权 |
 |------|------|------|--------|
-| 本地记忆通道 | Grafeo（图数据库） | 个人偏好、交互历史、自传体、经历、语义沉淀 | 用户本地 |
+| 本地记忆通道 | SQLite 记忆层（`nodes`/`edges`/`vectors`） | 个人偏好、交互历史、自传体、经历、语义沉淀 | 用户本地 |
 | 企业知识通道 | 企业自建 RAG | 产品文档、业务流程、行业知识、内部规范 | 企业所有 |
 
 Agent 检索记忆时并行执行两条通道，检索结果按来源标记后拼接送入 LLM 上下文。LLM 能够同时引用个人经验和企业知识，但两者的隐私边界和所有权清晰：个人的不上去，企业的不下来。
@@ -368,7 +368,7 @@ Agent 检索记忆时并行执行两条通道，检索结果按来源标记后�
 
 自动触发结果作为"背景上下文"注入，显式工具结果作为"工具返回值"追加到 History，两者在上下文中位置不同，语义不重叠。
 
-无 RAG 声明的 Agent，MemoryManager.retrieve() 仅查 Grafeo 通道，Tool Dispatcher 不注册 RAG 工具，行为与无 RAG 完全一致。
+无 RAG 声明的 Agent，MemoryManager.retrieve() 仅查 SQLite 记忆通道，Tool Dispatcher 不注册 RAG 工具，行为与无 RAG 完全一致。
 
 #### 1.13.2 RAG 工具定义
 
@@ -384,7 +384,7 @@ Agent 检索记忆时并行执行两条通道，检索结果按来源标记后�
 
 #### 1.13.3 架构边界
 
-企业 RAG 集成严格限定为检索通道，不向上整合进 Memory 系统抽象层。原因：Grafeo 是图数据库（支持关联扩散、遗忘衰减），RAG 是向量检索（批量查询、无状态），两者查询范式和存储模型完全不同。强行统一抽象会引入不必要的复杂度，且企业 RAG 的多租户隔离、数据写入权限与 Grafeo 的模型不兼容。
+企业 RAG 集成严格限定为检索通道，不向上整合进 Memory 系统抽象层。原因：SQLite 记忆层 是图数据库（支持关联扩散、遗忘衰减），RAG 是向量检索（批量查询、无状态），两者查询范式和存储模型完全不同。强行统一抽象会引入不必要的复杂度，且企业 RAG 的多租户隔离、数据写入权限与 SQLite 的模型不兼容。
 
 企业 RAG 集成属于"企业级 Agent 开发范式"，不要求所有 Agent 都支持 RAG，也不出现在 ACowork 核心平台的功能承诺中。RAG 仅当 manifest 声明时使能，Runtime 行为由配置驱动。
 
@@ -407,7 +407,7 @@ Agent 检索记忆时并行执行两条通道，检索结果按来源标记后�
 | 编号 | 需求 | 目标 |
 |------|------|------|
 | REL-01 | Agent 进程崩溃不影响其他 Agent | 进程级隔离保障 |
-| REL-02 | Agent 崩溃后状态不丢失 | 私有 Grafeo 持久化 |
+| REL-02 | Agent 崩溃后状态不丢失 | 私有 SQLite 持久化 |
 | REL-03 | LLM Provider 失败自动 fallback | 多 Provider + 重试机制 |
 | REL-04 | 对话写入不丢失 | WAL + 写队列 + 超时降级重试 |
 
@@ -418,13 +418,13 @@ Agent 检索记忆时并行执行两条通道，检索结果按来源标记后�
 | SECR-01 | .agent 包未签名或签名无效，拒绝安装 | 安装时强制校验 |
 | SECR-02 | API Key 不泄露到进程参数或环境变量 | Socket 一次性分发 |
 | SECR-03 | WASM 工具无法越权访问 | Wasmtime + WASI Preview 2 |
-| SECR-04 | Agent 间数据默认不可见 | 私有 Grafeo + 进程隔离 |
+| SECR-04 | Agent 间数据默认不可见 | 私有 SQLite 记忆层 + 进程隔离 |
 
 ### 2.4 可维护性
 
 | 编号 | 需求 | 目标 |
 |------|------|------|
-| MNT-01 | Rust workspace 模块化（**13 crate**） | acowork-core / acowork-embed / acowork-gateway / acowork-grafeo / acowork-lsp-relay / acowork-mcp / acowork-memory / acowork-mqtt-session / acowork-node / acowork-runtime / acowork-sign / acowork-tool-sdk / acowork-vault |
+| MNT-01 | Rust workspace 模块化（**13 crate**） | acowork-core / acowork-embed / acowork-gateway / acowork-sqlite / acowork-lsp-relay / acowork-mcp / acowork-memory / acowork-mqtt-session / acowork-node / acowork-runtime / acowork-sign / acowork-tool-sdk / acowork-vault |
 | MNT-02 | 配置驱动——Agent 行为由 manifest + prompt 定义，无需改代码 | 声明式架构保障 |
 | MNT-03 | ADR 记录所有重大技术决策 | 每个设计文档内含决策记录表 |
 
@@ -522,7 +522,7 @@ RUN-04~06, RUN-10~12, RUN-13a, MEM-04~06, MEM-08, MEM-10~12, TOL-06, TOL-10, GTW
 
 ### 5.1 个人用户日常场景
 
-用户安装天气 Agent 和日历 Agent（或自行打包）。每天早上 7 点，天气 Agent 通过 cron 自动获取天气，发送 Intent 给日历 Agent 创建提醒（如"带伞"）。天气 Agent 从私有 Grafeo 记住用户城市，无需每次询问。
+用户安装天气 Agent 和日历 Agent（或自行打包）。每天早上 7 点，天气 Agent 通过 cron 自动获取天气，发送 Intent 给日历 Agent 创建提醒（如"带伞"）。天气 Agent 从私有 SQLite 记忆层 记住用户城市，无需每次询问。
 
 ### 5.2 开发者创建 Agent 场景
 
@@ -538,11 +538,11 @@ RUN-04~06, RUN-10~12, RUN-13a, MEM-04~06, MEM-08, MEM-10~12, TOL-06, TOL-10, GTW
 
 ### 5.5 企业 Agent 场景
 
-某企业开发"销售助手 Agent"，manifest 声明 `[[tools]] type = "rag"`，指向企业内部的 Qdrant RAG 服务（含产品知识库、销售话术库、合规文档）。用户安装后在 Desktop App 与 Agent 对话，Agent 同时查询本地 Grafeo（记住该用户的偏好、历史提问）和企业 RAG（检索产品参数、竞品对比、合规要点），拼接后给出回答。RAG 服务由企业自己运维，ACowork 平台不接触任何企业数据，用户量增长对 ACowork 云端压力为零。
+某企业开发"销售助手 Agent"，manifest 声明 `[[tools]] type = "rag"`，指向企业内部的 Qdrant RAG 服务（含产品知识库、销售话术库、合规文档）。用户安装后在 Desktop App 与 Agent 对话，Agent 同时查询本地记忆层（记住该用户的偏好、历史提问）和企业 RAG（检索产品参数、竞品对比、合规要点），拼接后给出回答。RAG 服务由企业自己运维，ACowork 平台不接触任何企业数据，用户量增长对 ACowork 云端压力为零。
 
 ### 5.6 Agent 打包分享场景
 
-用户将自己调教好的"私人助手 Agent"分享给朋友。打包时，PrivacyLevel 过滤自动剥离 Personal/Sensitive 节点（朋友无法看到原用户的偏好、历史对话、私密信息）。打包后的 Agent 保留了：Agent 自学的 SkillIteration 和调教经验（Agent 能力）、ProceduralNode（通用行为模式）、行事风格和擅长领域（AutobiographicalNode 中关于 Agent 自身的部分）。朋友安装后，Agent 在新的 Grafeo 上运行，记忆为空，从头开始积累。
+用户将自己调教好的"私人助手 Agent"分享给朋友。打包时，PrivacyLevel 过滤自动剥离 Personal/Sensitive 节点（朋友无法看到原用户的偏好、历史对话、私密信息）。打包后的 Agent 保留了：Agent 自学的 SkillIteration 和调教经验（Agent 能力）、ProceduralNode（通用行为模式）、行事风格和擅长领域（AutobiographicalNode 中关于 Agent 自身的部分）。朋友安装后，Agent 在新的 SQLite 记忆层 上运行，记忆为空，从头开始积累。
 
 ---
 
@@ -554,17 +554,17 @@ RUN-04~06, RUN-10~12, RUN-13a, MEM-04~06, MEM-08, MEM-10~12, TOL-06, TOL-10, GTW
 | .agent 包 | 声明式压缩包，含配置、Prompt、Skill、工具声明，不含可执行文件 |
 | Agent Runtime | 平台唯一二进制，加载并执行 .agent 包 |
 | Gateway | 常驻系统进程，管理 Agent 生命周期和跨 Agent 协调 |
-| Grafeo | Agent 私有的图数据库，存储分层记忆 |
+| SQLite 记忆层 | Agent 私有的图数据库，存储分层记忆 |
 | Intent | 跨 Agent 消息，类似 Android Intent |
-| Skill | Agent 行为模式的扩展，分静态定义层（SKILL.md）和动态经验层（Grafeo） |
+| Skill | Agent 行为模式的扩展，分静态定义层（SKILL.md）和动态经验层（SQLite `SkillExperience` 行） |
 | 系统 Agent | com.acowork.system，平台内置 Agent，提供身份管理等系统级服务 |
 | Vault | Gateway 内的加密 API Key 存储服务 |
 | ContentProvider | 系统 Agent 提供的只读数据服务，其他 Agent 通过 Intent 查询 |
 | identity_deps | Agent 声明的身份依赖字段，启动时由 Gateway 注入 |
 | Platform Key | 平台签发密钥，用于系统 Agent 签名 |
 | 企业 RAG | 企业自建的 RAG 知识库服务，Agent 通过标准 rag 工具接入，不经 ACowork 云端中转 |
-| 双通道检索 | Agent 同时查询本地 Grafeo 和企业 RAG 两条通道的检索模式 |
-| work Zone | Grafeo 沉淀层中与个人工作相关的记忆分区（原 enterprise Zone），与 ACowork 企业 RAG 无关 |
+| 双通道检索 | Agent 同时查询本地记忆层 和企业 RAG 两条通道的检索模式 |
+| work Zone | SQLite 记忆层 沉淀层中与个人工作相关的记忆分区（原 enterprise Zone），与 ACowork 企业 RAG 无关 |
 | PrivacyLevel | 节点级隐私标记（Public/Personal/Sensitive），控制 Agent 打包分享时是否包含该节点，与云端同步策略解耦 |
 
 ---
@@ -593,7 +593,7 @@ RUN-04~06, RUN-10~12, RUN-13a, MEM-04~06, MEM-08, MEM-10~12, TOL-06, TOL-10, GTW
 | 编号 | 优先级 | 当前状态 | 计划阶段 | 说明 |
 |------|--------|---------|---------|------|
 | PKG-08 | P2 | ❌ 未实现 | Phase 6 | 远程仓库（多 HTTP 源、定期更新）尚未实现。当前 Agent 仅支持本地 .agent 包安装 |
-| PKG-08a | P2 | ❌ 未实现 | Phase 6 | 仓库上架安全扫描（Manifest/Prompt/Skill/WASM/Grafeo/结构六维度） |
+| PKG-08a | P2 | ❌ 未实现 | Phase 6 | 仓库上架安全扫描（Manifest/Prompt/Skill/WASM/Memory/结构六维度） |
 | PKG-09 | P3 | ❌ 未实现 | Phase 6+ | 双密钥模型（Upload Key + Distribution Key） |
 | PKG-10 | P3 | ❌ 未实现 | Phase 6+ | 密钥轮换（Proof-of-Rotation） |
 | PKG-11 | P3 | ❌ 未实现 | Phase 6+ | 证书吊销列表（CRL） |
@@ -613,7 +613,7 @@ RUN-04~06, RUN-10~12, RUN-13a, MEM-04~06, MEM-08, MEM-10~12, TOL-06, TOL-10, GTW
 | 编号 | 优先级 | 当前状态 | 计划阶段 | 说明 |
 |------|--------|---------|---------|------|
 | SKL-02 | P2 | ⚠️ 部分 | Phase 3 | SKILL.md YAML frontmatter + Markdown body 已解析（`core/acowork-runtime/src/skills/parser.rs`），但**完整 agentskills.io 标准兼容**延期至 Phase 3 |
-| SKL-03 | P2 | ❌ 未实现 | Phase 6 | Skill 调试流程（Grafeo 草稿 → Debug 模式 → SKILL.md 提交）。Debug Panel 已交付，但闭环未接通 |
+| SKL-03 | P2 | ❌ 未实现 | Phase 6 | Skill 调试流程（SQLite 记忆层 草稿 → Debug 模式 → SKILL.md 提交）。Debug Panel 已交付，但闭环未接通 |
 | SKL-04 | P2 | ❌ 未实现 | Phase 6+ | 自学习闭环（SkillExperience 阈值 → 提示更新 SKILL.md） |
 | SKL-05 | P2 | ❌ 未实现 | Phase 6+ | SkillExecution 模型兼容性（按模型聚合经验、自动注入适配指令） |
 
@@ -657,8 +657,8 @@ RUN-04~06, RUN-10~12, RUN-13a, MEM-04~06, MEM-08, MEM-10~12, TOL-06, TOL-10, GTW
 
 | 编号 | 优先级 | 当前状态 | 计划阶段 | 说明 |
 |------|--------|---------|---------|------|
-| MEM-09 | P3 | ⚠️ 部分 | Phase 3+ | 离线巩固骨架已就绪（`acowork-grafeo/src/consolidation/` + Runtime `consolidation_bg.rs`），**完整 LLM 驱动的离线巩固**未激活 |
-| MEM-10 | P1 | ❌ 未实现 | Phase 6 | Grafeo Cloud Sync。当前 MemoryStore 仅本地（Grafeo 文件位于 `{agent_home}/data/grafeo/`），无云端同步。Phase 6 与 RemoteMemoryStore（企业级记忆升级）一起实现 |
+| MEM-09 | P3 | ⚠️ 部分 | Phase 3+ | 离线巩固骨架已就绪（`acowork-sqlite/src/consolidation/` + Runtime `consolidation_bg.rs`），**完整 LLM 驱动的离线巩固**未激活 |
+| MEM-10 | P1 | ❌ 未实现 | Phase 6 | SQLite 记忆层 Cloud Sync。当前 MemoryStore 仅本地（`memory/private.sqlite`），无云端同步。Phase 6 与 RemoteMemoryStore（企业级记忆升级）一起实现 |
 
 ### A.10 开发者体验（§2.6）
 

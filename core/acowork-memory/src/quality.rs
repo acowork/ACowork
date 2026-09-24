@@ -14,59 +14,11 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Graph-expansion quality parameters (ADR-062 §4.1).
-///
-/// Mirrors `GraphExpandConfig` in `acowork-grafeo/src/spreading.rs` plus the
-/// previously hardcoded per-hop decay factor (`DECAY_PER_HOP`, was 0.7).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct GraphExpandQuality {
-    /// Early-stop thresholds per hop (1-hop / 2-hop / 3-hop). Default `[0.1, 0.15, 0.2]`.
-    pub early_stop_thresholds: Vec<f32>,
-    /// Minimum edge weight to traverse. Default `0.1`.
-    pub min_edge_weight: f32,
-    /// Decay factor applied per hop during expansion. Default `0.7`.
-    pub decay_per_hop: f64,
-}
-
-impl Default for GraphExpandQuality {
-    fn default() -> Self {
-        Self {
-            // G11 (design §6.3): early_stop_thresholds per hop = [0.1, 0.15, 0.2].
-            early_stop_thresholds: vec![0.1, 0.15, 0.2],
-            min_edge_weight: 0.1,
-            decay_per_hop: 0.7,
-        }
-    }
-}
-
-/// Edge-weight formula parameters (ADR-062 §4.1).
-///
-/// The edge strength formula is `min(cap, confidence_avg × exp(-lambda × days_since))`
-/// (see `acowork-grafeo/src/semantic/graph.rs`).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct EdgeWeightQuality {
-    /// Recency decay constant (half-life ≈ ln2/lambda days). Default `0.01`.
-    pub lambda: f64,
-    /// Upper cap preventing a single high-confidence edge from dominating.
-    /// Default `0.8`.
-    pub cap: f32,
-}
-
-impl Default for EdgeWeightQuality {
-    fn default() -> Self {
-        Self {
-            lambda: 0.01,
-            cap: 0.8,
-        }
-    }
-}
 
 /// Dedup thresholds (ADR-062 §4.1).
 ///
 /// Cosine-similarity above which two nodes are considered duplicates
-/// (see `acowork-grafeo/src/consolidation/instant.rs`).
+/// (see the dedup path in `acowork-sqlite`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DedupQuality {
@@ -158,13 +110,6 @@ pub struct MemoryQualityConfig {
     /// query against a corpus-mean baseline (centered cosine / per-query
     /// z-score) instead of an absolute cut.
     pub min_cosine: f32,
-    /// Graph-expansion quality parameters.
-    pub graph_expand: GraphExpandQuality,
-    /// Edge-weight formula parameters.
-    pub edge_weight: EdgeWeightQuality,
-    /// PageRank topology boost weight. Default `0.1` (replaces
-    /// `MemoryManagerConfig::pagerank_weight`, ADR-062 §4.2).
-    pub pagerank_weight: f64,
     /// Dedup thresholds.
     pub dedup: DedupQuality,
     /// Consolidation confidence gates.
@@ -182,9 +127,6 @@ impl Default for MemoryQualityConfig {
         Self {
             exclude_dormant: true,
             min_cosine: 0.3,
-            graph_expand: GraphExpandQuality::default(),
-            edge_weight: EdgeWeightQuality::default(),
-            pagerank_weight: 0.1,
             dedup: DedupQuality::default(),
             consolidation: ConsolidationQuality::default(),
             keyword_index: false,
@@ -206,30 +148,8 @@ impl From<acowork_core::manifest::ManifestMemoryQuality> for MemoryQualityConfig
         if let Some(v) = m.min_cosine {
             c.min_cosine = v;
         }
-        if let Some(v) = m.pagerank_weight {
-            c.pagerank_weight = v;
-        }
         if let Some(v) = m.keyword_index {
             c.keyword_index = v;
-        }
-        if let Some(g) = m.graph_expand {
-            if let Some(v) = g.early_stop_thresholds {
-                c.graph_expand.early_stop_thresholds = v;
-            }
-            if let Some(v) = g.min_edge_weight {
-                c.graph_expand.min_edge_weight = v;
-            }
-            if let Some(v) = g.decay_per_hop {
-                c.graph_expand.decay_per_hop = v;
-            }
-        }
-        if let Some(e) = m.edge_weight {
-            if let Some(v) = e.lambda {
-                c.edge_weight.lambda = v;
-            }
-            if let Some(v) = e.cap {
-                c.edge_weight.cap = v;
-            }
         }
         if let Some(d) = m.dedup {
             if let Some(v) = d.knowledge_threshold {
@@ -264,8 +184,7 @@ impl From<acowork_core::manifest::ManifestMemoryQuality> for MemoryQualityConfig
 mod tests {
     use super::*;
     use acowork_core::manifest::{
-        ManifestConsolidationQuality, ManifestDedupQuality, ManifestEdgeWeightQuality,
-        ManifestGraphExpandQuality, ManifestMemoryQuality,
+        ManifestConsolidationQuality, ManifestDedupQuality, ManifestMemoryQuality,
     };
 
     #[test]
@@ -278,10 +197,6 @@ mod tests {
     fn from_manifest_merges_present_fields_only() {
         let m = ManifestMemoryQuality {
             exclude_dormant: Some(false),
-            graph_expand: Some(ManifestGraphExpandQuality {
-                decay_per_hop: Some(0.5),
-                ..Default::default()
-            }),
             dedup: Some(ManifestDedupQuality {
                 knowledge_threshold: Some(0.9),
                 ..Default::default()
@@ -290,23 +205,15 @@ mod tests {
                 dormant_confidence: Some(0.2),
                 ..Default::default()
             }),
-            edge_weight: Some(ManifestEdgeWeightQuality {
-                lambda: Some(0.02),
-                ..Default::default()
-            }),
             ..Default::default()
         };
         let q = MemoryQualityConfig::from(m);
         assert!(!q.exclude_dormant);
         assert_eq!(q.min_cosine, 0.3, "unspecified field keeps default");
-        assert_eq!(q.graph_expand.decay_per_hop, 0.5);
-        assert_eq!(q.graph_expand.min_edge_weight, 0.1, "unspecified nested keeps default");
         assert_eq!(q.dedup.knowledge_threshold, 0.9);
         assert_eq!(q.dedup.procedure_threshold, 0.90, "unspecified nested keeps default");
         assert_eq!(q.consolidation.dormant_confidence, 0.2);
         assert_eq!(q.consolidation.pending_upgrade_threshold, 0.7);
-        assert_eq!(q.edge_weight.lambda, 0.02);
-        assert_eq!(q.edge_weight.cap, 0.8);
     }
 
     #[test]
@@ -316,12 +223,6 @@ mod tests {
         let q = MemoryQualityConfig::default();
         assert!(q.exclude_dormant, "D1 default on");
         assert_eq!(q.min_cosine, 0.3);
-        assert_eq!(q.graph_expand.early_stop_thresholds, vec![0.1, 0.15, 0.2]);
-        assert_eq!(q.graph_expand.min_edge_weight, 0.1);
-        assert_eq!(q.graph_expand.decay_per_hop, 0.7);
-        assert_eq!(q.edge_weight.lambda, 0.01);
-        assert_eq!(q.edge_weight.cap, 0.8);
-        assert_eq!(q.pagerank_weight, 0.1);
         assert_eq!(q.dedup.knowledge_threshold, 0.95);
         assert_eq!(q.dedup.procedure_threshold, 0.90);
         assert_eq!(q.consolidation.direct_active_threshold, 0.85);
@@ -347,13 +248,12 @@ mod tests {
 
         // Partial nested section also merges with defaults.
         let json = serde_json::json!({
-            "graph_expand": { "decay_per_hop": 0.5 }
+            "dedup": { "knowledge_threshold": 0.5 }
         });
         let q: MemoryQualityConfig = serde_json::from_value(json).unwrap();
-        assert_eq!(q.graph_expand.decay_per_hop, 0.5);
+        assert_eq!(q.dedup.knowledge_threshold, 0.5);
         assert_eq!(
-            q.graph_expand.early_stop_thresholds,
-            vec![0.1, 0.15, 0.2],
+            q.dedup.procedure_threshold, 0.90,
             "unspecified nested field keeps default"
         );
     }

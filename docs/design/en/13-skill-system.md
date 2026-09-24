@@ -1,4 +1,4 @@
-# Skill System
+﻿# Skill System
 
 > Version: v3.2 | Last Updated: 2026-04-14
 
@@ -6,7 +6,7 @@
 
 Skill is the mechanism for extending Agent behavior patterns. Through Skill Instructions, LLM acquires domain-specific knowledge and operation procedures, gaining specialized behaviors beyond its base capabilities.
 
-The Skill system uses a **two-layer model**: SKILL.md as the static definition layer (publishing state), Grafeo as the dynamic experience layer (runtime state). Skills in debugging phase iterate within Grafeo; once mature, they are committed to SKILL.md.
+The Skill system uses a **two-layer model**: SKILL.md as the static definition layer (publishing state), SQLite memory layer as the dynamic experience layer (runtime state). Skills in debugging phase iterate within SQLite; once mature, they are committed to SKILL.md.
 
 ## 1. Architecture Overview
 
@@ -16,14 +16,14 @@ Skill System
 │   ├── YAML frontmatter        Metadata (name, triggers, tool deps, model compatibility snapshot)
 │   └── Markdown body           Instruction body (execution steps, notes, output format)
 │
-├── Experience Layer (dynamic)   ← Grafeo graph nodes, Agent-private
+├── Experience Layer (dynamic)   ← SQLite memory nodes, Agent-private
 │   ├── SkillDraft              Draft Skill (debugging phase)
 │   ├── SkillIteration          Iteration version (snapshot per modification)
 │   ├── SkillExecution          Execution record (result of each trial run)
 │   └── SkillExperience         Runtime experience of published Skills
 │
 └── Runtime Integration
-    ├── Skill Loader            Load SKILL.md + query Grafeo experience
+    ├── Skill Loader            Load SKILL.md + query SQLite memory layer experience
     ├── Prompt Builder          Merge static definition + dynamic experience + model adaptation
     └── Debug Controller        Debug mode (create/trial run/iterate/publish)
 ```
@@ -33,9 +33,9 @@ Skill System
 | Layer | Storage Location | Lifecycle | Distributable | Auditable | Version-controllable |
 |-------|-----------------|-----------|---------------|-----------|----------------------|
 | Definition Layer | SKILL.md | Versioned with .agent package | Yes | Yes (open and read) | Yes |
-| Experience Layer | Grafeo | Persisted in Agent workspace | No (private data) | No (graph DB) | No |
+| Experience Layer | SQLite memory layer | Persisted in Agent workspace | No (private data) | No (graph DB) | No |
 
-Analogy: SKILL.md is the **textbook** (public, standard, shareable), Grafeo experience layer is the **personal notes** (private, practice-based, individual). Only their combination forms complete Skill behavior.
+Analogy: SKILL.md is the **textbook** (public, standard, shareable), SQLite memory layer experience layer is the **personal notes** (private, practice-based, individual). Only their combination forms complete Skill behavior.
 
 ## 2. SKILL.md Format (Static Definition Layer)
 
@@ -80,7 +80,7 @@ platforms:
   desktop: required              # Desktop required
   mobile: optional               # Mobile optional (behavior may degrade)
 
-# === Model compatibility (publishing snapshot, runtime uses Grafeo as authoritative) ===
+# === Model compatibility (publishing snapshot, runtime uses SQLite memory layer as authoritative) ===
 tested_models:
   - provider: openai
     model: gpt-4o
@@ -148,14 +148,14 @@ platforms:
 
 **Degradation Scenario Example**: A "DevOps Deploy" Skill depending on the `shell` tool declares `desktop: required` because `shell` is unavailable on mobile. A "News Digest" Skill depending on `web_fetch` is all-platform by default because `web_fetch` is all-platform.
 
-## 3. Grafeo Experience Layer (Dynamic Runtime State)
+## 3. SQLite memory layer Experience Layer (Dynamic Runtime State)
 
-The experience data the Agent accumulates while using Skills is stored in Grafeo as an enhancement layer over the SKILL.md static definition.
+The experience data the Agent accumulates while using Skills is stored in SQLite memory layer as an enhancement layer over the SKILL.md static definition.
 
 ### 3.1 Node Type Overview
 
 ```
-Grafeo Semantic Memory Layer
+SQLite Memory Layer (`nodes` table)
 │
 ├─ SkillDraft            Draft Skill (debugging phase, unpublished)
 ├─ SkillIteration        Iteration version (snapshot per draft modification)
@@ -342,13 +342,13 @@ SkillDraft (current draft)
 
 The complete Skill lifecycle is divided into three phases: creation and debugging, publication, and runtime evolution.
 
-### 4.1 Phase 1: Creation and Debugging (Pure Grafeo)
+### 4.1 Phase 1: Creation and Debugging (Pure SQLite memory layer)
 
 ```
 User: learn how to help me summarize weekly reports
        │
        ▼
-① Agent creates SkillDraft in Grafeo
+① Agent creates SkillDraft in SQLite memory layer
    status = Draft
        │
        ▼
@@ -356,7 +356,7 @@ User: learn how to help me summarize weekly reports
        │
        ├─ Run 1 → SkillExecution (Failure)
        │   → Agent modifies draft → SkillIteration #2
-       │   → Grafeo records failure_case + change_summary
+       │   → SQLite memory records failure_case + change_summary
        │
        ├─ Run 2 → SkillExecution (Partial)
        │   → User feedback: "Output too long"
@@ -387,12 +387,12 @@ User: learn how to help me summarize weekly reports
 | Draft persistence | Save on interruption, continue next time; draft state fully preserved |
 | Model switching | Trial run on different models, verify cross-model compatibility |
 
-### 4.2 Phase 2: Publication (Grafeo → SKILL.md)
+### 4.2 Phase 2: Publication (SQLite memory → SKILL.md)
 
 After user confirms Skill debugging is complete, Runtime performs the publication operation:
 
 ```
-① Read SkillDraft final state from Grafeo
+① Read SkillDraft final state from SQLite memory
    (latest SkillIteration's instructions + metadata)
        │
        ▼
@@ -408,7 +408,7 @@ After user confirms Skill debugging is complete, Runtime performs the publicatio
 ④ Write to skills/<skill_name>/SKILL.md
        │
        ▼
-⑤ Update Grafeo
+⑤ Update SQLite memory
    ├─ SkillDraft.status = Published
    ├─ Create SkillExperience node
    │   (migrate learned_patterns / model_compatibility from debugging period)
@@ -449,7 +449,7 @@ tested_models:
 (Markdown body from final iteration version's instructions)
 ```
 
-### 4.3 Phase 3: Runtime and Evolution (SKILL.md + Grafeo Experience)
+### 4.3 Phase 3: Runtime and Evolution (SKILL.md + SQLite memory layer Experience)
 
 When a published Skill executes each time, Runtime assembles the complete context:
 
@@ -457,7 +457,7 @@ When a published Skill executes each time, Runtime assembles the complete contex
 Skill Loader loads SKILL.md (static definition)
        │
        ▼
-Grafeo queries SkillExperience node (dynamic experience)
+SQLite queries SkillExperience node (dynamic experience)
        │
        ├─ No experience node (first use after publication)
        │   → Use SKILL.md original instructions directly
@@ -471,7 +471,7 @@ Grafeo queries SkillExperience node (dynamic experience)
             └─ Inject current model's adaptations (if any)
        │
        ▼
-Execution result written to Grafeo
+Execution result written to SQLite memory layer
        │
        ├─ Success → episodic memory + update SkillExperience.success_count
        ├─ Failure → update SkillExperience.failure_cases
@@ -551,17 +551,17 @@ Publish update → SKILL.md tested_models adds two records
 
 ### 6.1 Skill Loader
 
-Skill Loader is responsible for loading SKILL.md and querying Grafeo experience:
+Skill Loader is responsible for loading SKILL.md and querying SQLite memory layer experience:
 
 ```rust
 struct SkillLoader {
-    grafeo: Grafeo,
+    memory_store: Arc<SqliteStore>,
 }
 
 struct LoadedSkill {
     name: String,
     definition: SkillDefinition,      // From SKILL.md
-    experience: Option<SkillExperience>, // From Grafeo (may be empty)
+    experience: Option<SkillExperience>, // From SQLite memory layer (may be empty)
     model_adaptations: Vec<String>,   // Current model's adaptation instructions
 }
 
@@ -573,8 +573,8 @@ impl SkillLoader {
         // 1. Read skills/<skill_name>/SKILL.md
         let definition = self.parse_skill_md(skill_name)?;
 
-        // 2. Query Grafeo's SkillExperience
-        let experience = self.grafeo.get_skill_experience(skill_name)?;
+        // 2. Query SQLite's SkillExperience
+        let experience = self.memory_store.get_skill_experience(skill_name)?;
 
         // 3. Extract current model's adaptation instructions
         let model_adaptations = experience
@@ -635,14 +635,14 @@ When Token budget is insufficient, Skill content trimming order (see `03-agent-r
 
 | Decision | Choice | Reason |
 |----------|--------|--------|
-| Two-layer model | SKILL.md (static) + Grafeo (dynamic) | SKILL.md ensures distributability, auditability, version control; Grafeo supports self-learning and experience accumulation |
-| Debug in Grafeo | Don't directly modify SKILL.md | Debugging is an exploratory process needing iteration history, rollback, A/B testing; graph database naturally supports this |
-| One-way commit | Grafeo → SKILL.md | Like git workflow: iterate in workspace → commit to repo |
+| Two-layer model | SKILL.md (static) + SQLite memory (dynamic) | SKILL.md ensures distributability, auditability, version control; SQLite memory layer supports self-learning and experience accumulation |
+| Debug in SQLite memory layer | Don't directly modify SKILL.md | Debugging is an exploratory process needing iteration history, rollback, A/B testing; graph database naturally supports this |
+| One-way commit | SQLite memory → SKILL.md | Like git workflow: iterate in workspace → commit to repo |
 | Model compatibility recording | SkillExecution + SkillExperience | Skill effectiveness is strongly related to LLM; different models need different adaptations; must record |
 | SKILL.md format | YAML frontmatter + Markdown | Compatible with Agent Skills open standard (agentskills.io), the de facto standard across six major platforms |
 | Experience injection not replacement | Merge at runtime, don't modify SKILL.md | Ensure SKILL.md as stable baseline; experience as dynamic enhancement layer overlay |
 | Context trimming | Experience layer trimmed first | Base instructions are Skill's core logic; experience is icing on the cake |
-| Drafts not in package | SkillDraft only in Grafeo | Unpublished drafts should not be distributed as part of package |
+| Drafts not in package | SkillDraft only in SQLite memory layer | Unpublished drafts should not be distributed as part of package |
 
 ## 8. Future Extensions
 

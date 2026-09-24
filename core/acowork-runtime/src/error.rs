@@ -46,6 +46,16 @@ pub enum RuntimeError {
     #[error("Context compaction failed: {0}")]
     CompactionFailed(String),
 
+    /// ADR-083: compaction ended WITHOUT a summary because the user
+    /// cancelled it or the end-to-end deadline expired. History is left
+    /// untouched and the session returns to Idle (non-retryable, same as
+    /// [`RuntimeError::CompactionFailed`]) so the user can switch model
+    /// and retry. Distinct from `CompactionFailed` so callers can suppress
+    /// the generic error bubble — the `CompactionCancelled` chunk event
+    /// already told the frontend what happened.
+    #[error("Context compaction cancelled: {0}")]
+    CompactionCancelled(String),
+
     #[error("Unsupported model: {0}")]
     UnsupportedModel(String),
 
@@ -83,15 +93,6 @@ pub enum RuntimeError {
 }
 
 pub type Result<T> = std::result::Result<T, RuntimeError>;
-
-/// ADR-051 P4: GrafeoError conversion is feature-gated because
-/// `acowork-grafeo` is an optional dependency.
-#[cfg(feature = "grafeo-backend")]
-impl From<acowork_grafeo::GrafeoError> for RuntimeError {
-    fn from(e: acowork_grafeo::GrafeoError) -> Self {
-        RuntimeError::Memory(e.to_string())
-    }
-}
 
 impl RuntimeError {
     /// Whether this error is a transient, retryable failure (network /
@@ -169,6 +170,13 @@ impl RuntimeError {
                         .to_string(),
                     msg.clone(),
                     "ContextOverflow".to_string(),
+                )
+            }
+            RuntimeError::CompactionCancelled(msg) => {
+                (
+                    "Context compaction was cancelled.".to_string(),
+                    msg.clone(),
+                    "CompactionCancelled".to_string(),
                 )
             }
             RuntimeError::BudgetExceeded(msg) => {

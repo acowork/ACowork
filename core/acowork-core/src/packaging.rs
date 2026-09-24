@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 /// These contain runtime data that should never be shipped inside a
 /// distributable `.agent` file.
 pub const PACKAGE_ALWAYS_EXCLUDE_DIRS: &[&str] = &[
-    "memory",    // Grafeo raw DB (exported via node-type filter instead)
+    "memory",    // Agent-private SQLite store (ADR-082)
     "workspace", // User workspace state
     "runtime",   // Runtime temporary files
 ];
@@ -197,7 +197,7 @@ mod tests {
     #[test]
     fn test_should_exclude_always_exclude_dirs() {
         let opts = PackageOptions::default();
-        assert!(should_exclude_path("memory/private.grafeo", &opts));
+        assert!(should_exclude_path("memory/private.sqlite", &opts));
         assert!(should_exclude_path("workspace/state.json", &opts));
         assert!(should_exclude_path("runtime/lock.pid", &opts));
     }

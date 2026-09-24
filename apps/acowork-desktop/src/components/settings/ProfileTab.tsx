@@ -443,7 +443,7 @@ export function ProfileTab() {
               }
             }}
             placeholder={t("settings.displayNamePlaceholder")}
-            className="rounded border-zinc-300 bg-modal-surface py-2 text-text placeholder:text-text-tertiary dark:border-zinc-600 dark:placeholder:text-text-tertiary"
+            className="rounded py-2 text-text placeholder:text-text-tertiary"
           />
         </div>
         </ExpandableRow>
@@ -520,7 +520,7 @@ export function ProfileTab() {
                   }
                 }}
                 placeholder={t("settings.cityPlaceholder")}
-                className="rounded border-zinc-300 bg-modal-surface py-2 text-text placeholder:text-text-tertiary dark:border-zinc-600 dark:placeholder:text-text-tertiary"
+                className="rounded py-2 text-text placeholder:text-text-tertiary"
               />
             </div>
 
@@ -539,7 +539,7 @@ export function ProfileTab() {
                   }
                 }}
                 placeholder={t("settings.occupationPlaceholder")}
-                className="rounded border-zinc-300 bg-modal-surface py-2 text-text placeholder:text-text-tertiary dark:border-zinc-600 dark:placeholder:text-text-tertiary"
+                className="rounded py-2 text-text placeholder:text-text-tertiary"
               />
             </div>
           </div>

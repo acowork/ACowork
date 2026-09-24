@@ -119,6 +119,10 @@ pub struct MemoryStatsResponse {
     /// The desktop uses (stored_dim vs model_dim) to detect a dimension
     /// mismatch and offer a one-click "Rebuild Index" action.
     pub model_dim: u64,
+    /// On-disk schema version of the underlying store (`PRAGMA user_version`
+    /// for SQLite; 0 when the engine has no equivalent knob). Mirrored from
+    /// `acowork-runtime::usecases::memory_query::MemoryStats`.
+    pub schema_version: u64,
 }
 
 /// Response for deleting a memory node
@@ -205,6 +209,7 @@ mod tests {
             stored_dim: 512,
             nodes_with_embedding: 100,
             model_dim: 512,
+            schema_version: 7,
         };
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("\"total_nodes\":100"));
@@ -214,5 +219,6 @@ mod tests {
         assert!(json.contains("\"stored_dim\":512"));
         assert!(json.contains("\"nodes_with_embedding\":100"));
         assert!(json.contains("\"model_dim\":512"));
+        assert!(json.contains("\"schema_version\":7"));
     }
 }

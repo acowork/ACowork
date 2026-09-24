@@ -2571,7 +2571,7 @@ export function ChatPanel() {
         )}
 
         {/* Unified input container with toolbar */}
-        <div className="mx-6 mb-3 rounded-xl border border-chat-input-border bg-right-panel shadow-[0_1px_3px_rgba(0,0,0,0.04)] dark:shadow-[0_1px_3px_rgba(0,0,0,0.4)]">
+        <div className="mx-6 mb-3 rounded-xl border border-chat-input-border bg-chat-input-bg shadow-[0_1px_3px_rgba(0,0,0,0.04)] dark:shadow-[0_1px_3px_rgba(0,0,0,0.4)]">
           {/* Active skill badge */}
           {activeSkill && (
             <div className="flex items-center gap-1 px-3 pt-2">
@@ -3242,7 +3242,7 @@ function ModelMenu({
           {/* Filter — only worth showing once the list is long */}
           {showSearch && (
             <div className="px-3 pb-1.5">
-              <div className="flex items-center gap-1.5 rounded-md border border-border-divider px-2 py-1">
+              <div className="flex items-center gap-1.5 rounded-md border border-input-border bg-input-bg px-2 py-1">
                 <Search size={11} className="shrink-0 text-text-tertiary" />
                 <input
                   autoFocus
@@ -3392,7 +3392,7 @@ function ModelMenu({
                           <span
                             title={t("chatPanel.modelMenuLastUsed")}
                             aria-label={t("chatPanel.modelMenuLastUsed")}
-                            className="inline-flex shrink-0 items-center text-text-tertiary"
+                            className="inline-flex shrink-0 items-center text-[var(--color-accent)]"
                           >
                             <Clock size={10} />
                           </span>

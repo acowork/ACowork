@@ -1,4 +1,4 @@
-# acowork-gateway — Gateway
+﻿# acowork-gateway — Gateway
 
 **定位**：常驻系统级进程，管理 Agent 生命周期、Intent 路由、密钥分发、预算协调。**不代理 Agent 业务逻辑**。
 
@@ -14,7 +14,7 @@ crates/acowork-gateway/
     ├── package_manager/
     │   ├── mod.rs
     │   ├── install.rs             # .agent 包安装（解压 + 签名验证 + manifest 校验）
-    │   ├── uninstall.rs           # 卸载（可选备份 Grafeo）
+    │   ├── uninstall.rs           # 卸载（可选备份 SQLite 记忆层）
     │   ├── upgrade.rs             # 升级（保留 data/ + config/，校验签名一致）
     │   └── repository.rs          # 远程仓库源（HTTP，Phase 5）
     ├── lifecycle/
@@ -76,7 +76,7 @@ impl LifecycleManager {
     /// 启动 Agent：spawn 进程 + 注入身份 + 分发 Key
     async fn start_agent(&mut self, agent_id: &str) -> Result<()>;
     
-    /// 杀死 Agent：直接杀进程（状态由 Grafeo 持久化）
+    /// 杀死 Agent：直接杀进程（状态由 SQLite 持久化）
     async fn stop_agent(&mut self, agent_id: &str) -> Result<()>;
     
     /// 空闲超时检查

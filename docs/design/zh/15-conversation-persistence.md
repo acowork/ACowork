@@ -1,8 +1,8 @@
-# 对话持久化与 Session 机制设计
+﻿# 对话持久化与 Session 机制设计
 
 > 版本：v3.13 | 更新日期：2026-05-28
 
-> 本文档定义 ACowork Agent 的对话持久化架构，采用"原始文件 + 提炼记忆"双层设计。原始对话以 JSONL 格式按 session 存储，用于界面渲染和历史回放；Grafeo Episode 存储从对话提炼的情景记忆摘要，服务于检索和关联扩散。主要变更（v3.13）：**上下文压缩策略简化**（§1.8）：放弃程序化折叠策略，压缩简化为三阶段（70% 告警 → 80% LLM 摘要 → 95% emergency_trim），移除 BudgetGuard per-session 配额机制——见 [ADR-010](../adr/ADR-010-context-compression-simplification.md)。主要变更（v3.12）：**Token 预算分配策略**（§1.8）：per-session 隔离 + 全局上限；**JSONL 安全性保证**（§1.9）：轮转事务性、并发读写保护、Episode offset 原子更新；IPC 消息格式见通信协议文档（§06-communication.md §1.5）。主要变更（v3.11）：Session Actor 多会话并发模型（§1.7）、selectedSession 前端模型（§1.7）、配置作用域矩阵（§1.8）。主要变更（v3.10）：Grafeo private.grafeo、Session 选择器、打包数据隔离、异步扫描、Episode consolidated 状态、巩固产出三类节点。
+> 本文档定义 ACowork Agent 的对话持久化架构，采用"原始文件 + 提炼记忆"双层设计。原始对话以 JSONL 格式按 session 存储，用于界面渲染和历史回放；Episode 存储从对话提炼的情景记忆摘要，服务于检索和关联扩散。主要变更（v3.13）：**上下文压缩策略简化**（§1.8）：放弃程序化折叠策略，压缩简化为三阶段（70% 告警 → 80% LLM 摘要 → 95% emergency_trim），移除 BudgetGuard per-session 配额机制——见 [ADR-010](../adr/ADR-010-context-compression-simplification.md)。主要变更（v3.12）：**Token 预算分配策略**（§1.8）：per-session 隔离 + 全局上限；**JSONL 安全性保证**（§1.9）：轮转事务性、并发读写保护、Episode offset 原子更新；IPC 消息格式见通信协议文档（§06-communication.md §1.5）。主要变更（v3.11）：Session Actor 多会话并发模型（§1.7）、selectedSession 前端模型（§1.7）、配置作用域矩阵（§1.8）。主要变更（v3.10）：SQLite 记忆层 private.sqlite、Session 选择器、打包数据隔离、异步扫描、Episode consolidated 状态、巩固产出三类节点。
 
 **交叉引用**：
 - Session Actor 架构：本文档 §1.7
@@ -23,8 +23,8 @@
 当前 ACowork Agent 的对话存在以下问题：
 
 1. **切换 Agent 后聊天记录丢失**：对话历史仅存在于 Runtime 进程内存（`Vec<Message>`），进程退出即消失
-2. **记忆链条断裂**：MemoryManager.record() 将 user_message 和 assistant_response 合并为一个 Episode，content 存储原始对话全文，导致 Grafeo 体积膨胀、检索噪声大
-3. **对话恢复不一致**：Gateway conversations/latest API 从 Grafeo Episode 读取，但 Episode 经过压缩/提炼，用户看到的"历史消息"与实际对话内容不一致
+2. **记忆链条断裂**：MemoryManager.record() 将 user_message 和 assistant_response 合并为一个 Episode，content 存储原始对话全文，导致 记忆层 SQLite 膨胀、检索噪声大
+3. **对话恢复不一致**：Gateway conversations/latest API 从 Episode 读取，但 Episode 经过压缩/提炼，用户看到的"历史消息"与实际对话内容不一致
 4. **缺乏 Session 管理**：Runtime 启动时无 session_id 生成逻辑，无法区分不同时间段的对话
 
 ### 0.2 双层架构总览
@@ -39,11 +39,11 @@
 │  消费者：Desktop App 加载历史、用户导出、审计回放                 │
 │  生命周期：与 session 同生命周期，App 卸载后可选保留              │
 ├─────────────────────────────────────────────────────────────────┤
-│  提炼记忆层（Grafeo Episode）                                    │
+│  提炼记忆层（Episode）                                    │
 │  ─────────────────────────                                       │
 │  职责：存储从对话提炼的情景记忆摘要，服务于检索和关联扩散         │
-│  格式：Grafeo Episodic 节点（LPG Label）                         │
-│  存储：<agent_workspace>/memory/private.grafeo                   │
+│  格式：SQLite `episodes` 行（LPG Label）                         │
+│  存储：<agent_workspace>/memory/private.sqlite                   │
 │  消费者：Runtime 记忆检索、巩固管道（Episode → 沉淀层节点）    │
 │  生命周期：天→周，巩固后晋升至沉淀层                              │
 └─────────────────────────────────────────────────────────────────┘
@@ -63,7 +63,7 @@
 | ------------ | ------------------------------------------------------------------------ |
 | 对话不丢失   | 切换 Agent 后回来，聊天记录完整恢复                                      |
 | 所见即所存   | 历史消息与当时对话内容完全一致（含 tool_call、think）                    |
-| 记忆可检索   | Grafeo 检索返回语义相关的情景摘要，而非原始对话噪声                      |
+| 记忆可检索   | 记忆检索返回语义相关的情景摘要，而非原始对话噪声                      |
 | 数据隔离安全 | Agent 打包分享时默认排除用户私有数据，用户可通过 checklist 自选包含      |
 | 实现低成本   | Phase 1 使用 LLM 提取 Episode 摘要，自动选择 cost 最低的可用模型控制成本 |
 
@@ -533,7 +533,7 @@ loop {
 | 当前使用模型         | Session                               | 聊天面板模型选择器               | 仅 selectedSession    |
 | Provider API Key     | Agent                                 | 设置页                           | 所有 Session 共享     |
 | Workspace 目录       | Agent                                 | 不可运行时变更                   | 所有 Session 共享     |
-| Workspace 上下文焦点 | Session（隐式）                       | 由对话历史和 Grafeo 检索自然决定 | 每个 Session 不同     |
+| Workspace 上下文焦点 | Session（隐式）                       | 由对话历史和 记忆检索自然决定 | 每个 Session 不同     |
 | 工具权限             | Agent                                 | manifest 声明                    | 所有 Session 共享     |
 | Token 预算           | **两层：Agent 总预算 + Session 配额** | 设置页（Agent 级）               | 见下方详细策略        |
 | 对话历史             | Session                               | —                                | 独立                  |
@@ -623,7 +623,7 @@ async fn switch_session(
 
 **问题**：崩溃后可能重复提炼同一段对话。
 
-**解决方案**：在 Grafeo 中维护 `DistillOffset` 记录。
+**解决方案**：在 SQLite `Episode.metadata.source_offset` 记录。
 
 ```
 Episode 节点 metadata 包含：
@@ -633,7 +633,7 @@ Episode 节点 metadata 包含：
 ```
 
 - 每次提炼前读取 `source_offset` 作为起始位置
-- 提炼完成后更新 `source_offset`（Grafeo 写入事务保证）
+- 提炼完成后更新 `source_offset`（SQLite 事务保证）
 - Session 结束时做全局摘要，设置 `source_offset = EOF`，防止重复提炼
 
 ---
@@ -737,8 +737,8 @@ pub struct ConversationLine {
 {"id":"550e8400-e29b-41d4-a716-446655440000","ts":"2026-05-02T14:30:52.123Z","role":"user","content":"帮我分析这个 Rust 项目的模块依赖关系","metadata":{}}
 {"id":"550e8400-e29b-41d4-a716-446655440001","ts":"2026-05-02T14:30:55.456Z","role":"think","content":"我需要先查看 Cargo.toml 来了解 workspace 结构，然后分析各 crate 之间的依赖。","metadata":{"model":"qwen-plus"}}
 {"id":"550e8400-e29b-41d4-a716-446655440002","ts":"2026-05-02T14:30:56.789Z","role":"tool_call","content":"{\"path\":\"Cargo.toml\"}","metadata":{"tool_name":"file_read","tool_call_id":"call_abc123"}}
-{"id":"550e8400-e29b-41d4-a716-446655440003","ts":"2026-05-02T14:30:57.012Z","role":"tool_result","content":"[workspace]\nmembers = [\"acowork-core\",\"acowork-runtime\",\"acowork-gateway\",\"acowork-grafeo\",\"acowork-memory\",\"acowork-vault\",\"acowork-sign\"]","metadata":{"tool_name":"file_read","tool_call_id":"call_abc123","success":true,"duration_ms":45}}
-{"id":"550e8400-e29b-41d4-a716-446655440004","ts":"2026-05-02T14:31:02.345Z","role":"assistant","content":"这个项目采用 Cargo workspace 结构，包含 7 个 crate：\n\n| crate | 职责 |\n|-------|------|\n| acowork-core | 共享类型、错误、配置 |\n| acowork-runtime | Agent 运行时 |\n| acowork-gateway | Gateway 服务 |\n| acowork-grafeo | 记忆引擎 |\n| acowork-memory | 记忆管理器 |\n| acowork-vault | 加密存储 |\n| acowork-sign | 包签名 |\n\n依赖关系：runtime → core, memory, grafeo; gateway → core, grafeo; ...","metadata":{"model":"qwen-plus","provider":"dashscope","token_count":{"prompt_tokens":1234,"completion_tokens":567,"total_tokens":1801},"duration_ms":4200}}
+{"id":"550e8400-e29b-41d4-a716-446655440003","ts":"2026-05-02T14:30:57.012Z","role":"tool_result","content":"[workspace]\nmembers = [\"acowork-core\",\"acowork-runtime\",\"acowork-gateway\",\"acowork-sqlite\",\"acowork-memory\",\"acowork-vault\",\"acowork-sign\"]","metadata":{"tool_name":"file_read","tool_call_id":"call_abc123","success":true,"duration_ms":45}}
+{"id":"550e8400-e29b-41d4-a716-446655440004","ts":"2026-05-02T14:31:02.345Z","role":"assistant","content":"这个项目采用 Cargo workspace 结构，包含 7 个 crate：\n\n| crate | 职责 |\n|-------|------|\n| acowork-core | 共享类型、错误、配置 |\n| acowork-runtime | Agent 运行时 |\n| acowork-gateway | Gateway 服务 |\n| acowork-sqlite | 记忆引擎 |\n| acowork-memory | 记忆管理器 |\n| acowork-vault | 加密存储 |\n| acowork-sign | 包签名 |\n\n依赖关系：runtime → core, memory, sqlite; gateway → core, sqlite; ...","metadata":{"model":"qwen-plus","provider":"dashscope","token_count":{"prompt_tokens":1234,"completion_tokens":567,"total_tokens":1801},"duration_ms":4200}}
 ```
 
 ### 2.4 特殊内容处理
@@ -979,7 +979,7 @@ pub fn read_jsonl(path: &Path) -> Vec<ConversationLine> {
 
 | 旧行为                                          | 问题                                          | 新行为                                          |
 | ----------------------------------------------- | --------------------------------------------- | ----------------------------------------------- |
-| 存储原始对话全文                                | Grafeo 体积膨胀，检索噪声大                   | 仅存提炼摘要（见 §3.2）                         |
+| 存储原始对话全文                                | 记忆层 SQLite 膨胀，检索噪声大                   | 仅存提炼摘要（见 §3.2）                         |
 | 作为"对话历史恢复"的数据源                      | 压缩/提炼后的内容与用户看到的实际对话不一致   | 对话恢复由 JSONL 文件负责                       |
 | role 设为 "conversation"（混合 user+assistant） | 语义模糊，检索时无法区分用户意图和 Agent 响应 | role 保持 "user"/"assistant"，但 content 为摘要 |
 | 包含完整 tool_call 参数和输出                   | 工具输出可能包含敏感信息或极长内容            | 仅存工具使用摘要                                |
@@ -992,16 +992,16 @@ Episode 是对一轮或多轮对话的**语义压缩摘要**，服务于记忆�
 
 | #   | 提炼项            | 说明                                 | 示例                                               |
 | --- | ----------------- | ------------------------------------ | -------------------------------------------------- |
-| 1   | **对话摘要**      | 这轮对话的核心主题和结论（1-3 句话） | "讨论了 Grafeo Episode 存储策略，决定采用双层架构" |
+| 1   | **对话摘要**      | 这轮对话的核心主题和结论（1-3 句话） | "讨论了 Episode 存储策略，决定采用双层架构" |
 | 2   | **用户意图标注**  | 用户在这轮对话中的意图分类           | 意图 = 指令（让 Agent 做某事）                     |
 | 3   | **关键决策记录**  | 对话中产生的技术选型或架构决策       | 决策 = "JSONL 追加写入，而非 SQLite"               |
 | 4   | **情感/态度信号** | 用户满意度（Phase 3 可选）           | （Phase 3 实现）                                   |
 | 5   | **工具使用摘要**  | 调用了哪些工具、成功/失败、核心结果  | "file_read(成功), shell_exec(失败:超时)"           |
-| 6   | **关联线索**      | 与其他记忆节点的潜在关联关键词       | keywords = ["Grafeo", "Episode", "JSONL"]          |
+| 6   | **关联线索**      | 与其他记忆节点的潜在关联关键词       | keywords = ["SQLite 记忆层", "Episode", "JSONL"]          |
 
 ### 3.3 提炼时机（事件触发，非每轮）
 
-**不在每轮对话结束时提炼 Episode**，而是采用事件触发机制。理由：每轮提炼产生大量低价值 Episode（如简单问答），造成 Grafeo 膨胀和噪声。
+**不在每轮对话结束时提炼 Episode**，而是采用事件触发机制。理由：每轮提炼产生大量低价值 Episode（如简单问答），造成 记忆层膨胀和噪声。
 
 #### 触发时机一：上下文压缩时（Phase 1 实现）
 
@@ -1017,7 +1017,7 @@ FIFO 裁剪：移除最旧的消息
 在移除前，对被裁剪的消息段执行 Episode 提炼
        │
        ▼
-提炼结果写入 Grafeo（Episode 节点）
+提炼结果写入 SQLite 记忆层（Episode 节点）
 ```
 
 **设计理由：** 被裁剪的消息即将从上下文窗口消失，提炼为 Episode 确保其语义信息不丢失；仍在上下文窗口内的消息不需要提炼，因为 LLM 可以直接看到。
@@ -1063,7 +1063,7 @@ Prompt 应包含被裁剪消息的完整内容（JSONL 片段或结构化文本�
 }
 ```
 
-提炼完成后，Runtime 将 LLM 返回的 JSON 映射为 `DistilledEpisode` 结构体，写入 Grafeo。
+提炼完成后，Runtime 将 LLM 返回的 JSON 映射为 `DistilledEpisode` 结构体，写入 SQLite 记忆层。
 
 #### 触发时机二：Session 结束时（Phase 1 实现）
 
@@ -1082,7 +1082,7 @@ Session 转为 Ended 状态
   - 工具使用统计
        │
        ▼
-写入 Grafeo（Episode 节点）
+写入 SQLite 记忆层（Episode 节点）
 ```
 
 **Session 级 Episode vs 裁剪级 Episode：**
@@ -1202,7 +1202,7 @@ LLM 辅助提炼（Prompt 要求分类产出）：
 | **示例**        | “用户的项目使用 React 18 + TypeScript” | “部署时先跑 lint，再跑 test，最后 build” | “经过多次 code review，我学会了更关注边界条件” |
 | **衰减策略**    | 低衰减（事实长期有效）                 | 中衰减（流程可能过时）                   | 低衰减（认知能力持续有效）                     |
 | **更新方式**    | 事实变更时替换                         | 发现更优流程时替换                       | 累积追加，不替换                               |
-| **Grafeo 标签** | `Knowledge`                            | `Procedural`                             | `Autobiographical`                             |
+| **nodes.label**        | `Knowledge`                            | `Procedural`                             | `Autobiographical`                             |
 | **隐私属性**    | Public / Private                       | 无（默认可分享）                         | 无（默认可分享）                               |
 
 **深度提炼由巩固管道触发（见 05-memory.md §4），不在本设计文档范围内。**
@@ -1216,12 +1216,12 @@ Conversation（实时写入）
   ↓
 Episode（事件触发提炼）
   ↓ 触发时机：上下文压缩时 / Session 结束时
-  ↓ 存储格式：Grafeo Episodic 节点
+  ↓ 存储格式：SQLite `episodes` 行
   ↓ 去重机制：提炼 offset（防止重复提炼）
   ↓
 KnowledgeNode / ProceduralNode / AutobiographicalNode（长周期离线巩固）
   ↓ 触发时机：Agent 空闲时（做梦机制）
-  ↓ 存储格式：Grafeo Semantic 节点
+  ↓ 存储格式：SQLite `nodes` 行（`label` ∈ {Knowledge, Procedural, Autobiographical}）
   ↓ 去重机制：consolidated 标记（防止重复巩固）+ 内容哈希（防止重复节点）
 
 Phase 1 实现范围：前两个触发时机
@@ -1235,7 +1235,7 @@ Phase 3 实现范围：做梦机制（离线巩固）
 | `content`       | 原始对话全文               | 提炼摘要文本                 | 长度从数百~数千字符降至 100~300 字符           |
 | `content_type`  | 内容分类                   | 保持不变                     | Informational 现在表示"摘要文本"而非"原始对话" |
 | `role`          | "user"/"assistant"/"tool"  | 保持不变                     | 不再使用 "conversation" 混合角色               |
-| `session_id`    | 关联到 Grafeo Session 节点 | 保持不变                     | 同时指向原始 JSONL 文件（同名）                |
+| `session_id`    | 关联到 SQLite sessions 表行        | 保持不变                     | 同时指向原始 JSONL 文件（同名）                |
 | `metadata`      | 通用元数据                 | **新增 `source_session_id`** | 指向原始 JSONL 文件的 session_id               |
 | `metadata`      | —                          | **新增 `intent_type`**       | 用户意图分类                                   |
 | `metadata`      | —                          | **新增 `tool_summary`**      | 工具使用摘要                                   |
@@ -1255,7 +1255,7 @@ Episode {
         ("intent_type", json!("指令")),
         ("tool_summary", json!("file_read(成功), shell_exec(失败:超时)")),
         ("decision", json!("采用 JSONL 追加写入格式")),
-        ("keywords", json!(["Grafeo", "Episode", "JSONL"])),
+        ("keywords", json!(["SQLite 记忆层", "Episode", "JSONL"])),
     ]),
 }
 ```
@@ -1354,9 +1354,9 @@ Episode（会话级记忆）
      │                           │                       │ (FIFO裁剪 / Session结束)
      │                           │                       ▼
      │                           │              ┌────────────────────┐
-     │                           │              │ Grafeo Episode     │
+     │                           │              │ Episode     │
      │  GET /memory/search       │              │ (提炼摘要)          │
-     │  (从 Grafeo 检索)         │              │ 检索 + 关联扩散     │
+     │  (从 记忆检索)         │              │ 检索 + 关联扩散     │
      │                           │              └────────┬───────────┘
      │                           │                       │
      │                           │                       │ 离线巩固
@@ -1371,7 +1371,7 @@ Episode（会话级记忆）
      │                           │
      │ ←─────────────────────────┘
      │   JSONL 完整历史（通过 IPC） → 渲染对话界面
-     │   Grafeo 检索结果 → 记忆面板
+     │   记忆检索结果 → 记忆面板
 ```
 
 **数据流详细说明：**
@@ -1380,10 +1380,10 @@ Episode（会话级记忆）
 | ---------------------- | ------------------------------------------------ | --------------------------------------------------------- | ----------------------------- |
 | 用户消息 → Runtime     | Desktop App → Gateway → Runtime IPC              | GatewayRequest                                            | 用户发送消息                  |
 | Runtime → JSONL 写入   | Runtime → 本地文件系统                           | JSONL 行                                                  | 每条消息产生时                |
-| Runtime → Episode 写入 | Runtime → Grafeo                                 | Episode 节点                                              | 上下文压缩时 / Session 结束时 |
+| Runtime → Episode 写入 | Runtime → SQLite 记忆层                                 | Episode 节点                                              | 上下文压缩时 / Session 结束时 |
 | Runtime → WS 推送      | Runtime → Gateway → Desktop App                  | WS chunk/tool_call/done                                   | LLM streaming                 |
 | Desktop App → 加载历史 | Desktop App → Gateway IPC → Runtime → 读取 JSONL | JSONL 分页数据                                            | 切换 Agent / 重启             |
-| Desktop App → 记忆检索 | Desktop App → Gateway → Grafeo                   | Episode/KnowledgeNode/ProceduralNode/AutobiographicalNode | 记忆面板搜索                  |
+| Desktop App → 记忆检索 | Desktop App → Gateway → SQLite 记忆层                   | Episode/KnowledgeNode/ProceduralNode/AutobiographicalNode | 记忆面板搜索                  |
 | Episode → 沉淀层节点   | 巩固管道（离线）                                 | 节点属性转换（分类产出三类节点）                          | Agent 空闲时（做梦机制）      |
 
 ---
@@ -1412,7 +1412,7 @@ ACowork 的核心设计理念是 Agent 可以打包为 `.agent` 文件进行分�
 | **默认排除（用户可勾选包含）** | `conversations/`         | JSONL 对话文件                     | ❌ 默认不勾选 · ⚠️ 包含用户对话内容  |
 |                                | Episode                  | 对话情景记忆（含用户信息）         | ❌ 默认不勾选 · ⚠️ 包含用户对话摘要  |
 |                                | KnowledgeNode（Private） | 用户相关知识                       | ❌ 默认不勾选 · ⚠️ 包含用户私有知识  |
-| **始终排除（不可勾选）**       | `memory/`                | Grafeo 数据库原始文件              | ❌ 始终排除（通过节点类型过滤导出） |
+| **始终排除（不可勾选）**       | `memory/`                | SQLite 记忆层 数据库原始文件              | ❌ 始终排除（通过节点类型过滤导出） |
 |                                | `workspace/` 配置        | 用户工作区状态                     | ❌ 始终排除                         |
 |                                | `runtime/`               | 运行时临时文件                     | ❌ 始终排除                         |
 |                                | `*.log`, `*.tmp`         | 日志和临时文件                     | ❌ 始终排除                         |
@@ -1424,7 +1424,7 @@ PackageManager 在构建 `.agent` 包时，始终自动跳过以下路径：
 
 ```
 # Agent 运行时数据排除清单（始终排除，不可覆盖）
-memory/                # Grafeo 数据库原始文件（通过节点类型过滤导出）
+memory/                # SQLite 记忆层 数据库原始文件（通过节点类型过滤导出）
 workspace/             # 工作区状态
 runtime/               # 运行时临时文件
 *.log                  # 日志文件
@@ -1439,9 +1439,9 @@ runtime/               # 运行时临时文件
 | Episode                  | 默认排除 | ⚠️ 包含用户对话摘要，可能泄露隐私 |
 | KnowledgeNode（Private） | 默认排除 | ⚠️ 包含用户私有知识，分享前请确认 |
 
-### 5.3 Grafeo 记忆数据的打包策略
+### 5.3 SQLite 记忆层 记忆数据的打包策略
 
-Grafeo 中的记忆节点按类型和隐私属性决定打包策略：
+SQLite `nodes` 表中的记忆节点按类型和隐私属性决定打包策略：
 
 **打包规则：**
 
@@ -1467,10 +1467,10 @@ AutobiographicalNode 是 Agent 对自身的认知记录，例如：
 - Public：Agent 通用知识（如“ACowork 使用 JSONL 格式存储对话”）— 与特定用户无关
 - Private：与特定用户/项目相关的知识（如“用户的项目使用 React 框架”）— 不可分享
 
-**PackageManager 打包 Grafeo 数据时的处理：**
+**PackageManager 打包 SQLite 记忆层 数据时的处理：**
 
 ```
-打包时遍历 Grafeo 图：
+打包时遍历 SQLite 记忆层 图：
   1. KnowledgeNode(Public): 默认打包
   2. KnowledgeNode(Private): 默认排除，用户勾选时打包
   3. ProceduralNode: 默认打包
@@ -1516,7 +1516,7 @@ AutobiographicalNode 是 Agent 对自身的认知记录，例如：
 | ------------ | -------------------------------------------------------------------------------------- |
 | 默认勾选项   | manifest、prompts、skills、KnowledgeNode(Public)、ProceduralNode、AutobiographicalNode |
 | 默认不勾选项 | conversations/、Episode、KnowledgeNode(Private)、config/                               |
-| 不可勾选项   | memory/（Grafeo 原始文件）、workspace/、runtime/、*.log、*.tmp                         |
+| 不可勾选项   | memory/（SQLite 记忆层 原始文件）、workspace/、runtime/、*.log、*.tmp                         |
 | 隐私提示     | 默认不勾选项旁显示 ⚠️ 提示，点击显示详细说明                                            |
 | 数据大小     | 每项旁边显示数据大小，勾选后实时更新预估打包大小                                       |
 | 确认提示     | 勾选含隐私数据的项后，打包前弹出二次确认                                               |
@@ -1526,7 +1526,7 @@ AutobiographicalNode 是 Agent 对自身的认知记录，例如：
 ```rust
 /// Directories that are always excluded when building an .agent package.
 const PACKAGE_ALWAYS_EXCLUDE_DIRS: &[&str] = &[
-    "memory",     // Grafeo raw DB (exported via node-type filter)
+    "memory",     // SQLite raw DB (exported via node-type filter)
     "workspace",
     "runtime",
 ];
@@ -1577,8 +1577,8 @@ pub fn build_agent_package(
         // ... add to archive ...
     }
 
-    // Export Grafeo nodes based on packaging rules (not raw memory/ directory)
-    export_grafeo_nodes(agent_dir, &mut archive, options)?;
+    // Export SQLite 记忆层 nodes based on packaging rules (not raw memory/ directory)
+    export_sqlite_nodes(agent_dir, &mut archive, options)?;
 
     archive.finish()?;
     Ok(())
@@ -1665,7 +1665,7 @@ pub fn init_agent_directories(workspace: &Path) -> Result<()> {
 
 | 项目     | 旧行为                    | 新行为                                                    |
 | -------- | ------------------------- | --------------------------------------------------------- |
-| 数据源   | 从 Grafeo Episode 读取    | 从 JSONL 文件读取                                         |
+| 数据源   | 从 Episode 读取    | 从 JSONL 文件读取                                         |
 | 访问路径 | Gateway 直接读文件        | Gateway → IPC → Runtime → 读取 JSONL → 返回               |
 | 返回内容 | 压缩/提炼后的内容         | 完整原始对话（含 tool_call、think）                       |
 | 消息角色 | role 仅 user/assistant    | role 含 user/assistant/think/tool_call/tool_result/system |
@@ -1816,7 +1816,7 @@ Desktop App 聊天框底部的 **Memory 按钮改为 Session 按钮**，点击�
 ┌─────────────────────────────────────────────────────┐
 │  Session 列表面板                                    │
 │  ┌────────────────────────────────────────────────┐  │
-│  │  🧠 Memory 入口              [→ 进入 Grafeo]  │  │  ← 最上方，二级入口
+│  │  🧠 Memory 入口              [→ 进入 SQLite 记忆层]  │  │  ← 最上方，二级入口
 │  ├────────────────────────────────────────────────┤  │
 │  │  20260502_a1b2c3d4                            │  │
 │  │  帮我分析这个 Rust 项目的模块依赖关系            │  │
@@ -1839,7 +1839,7 @@ Desktop App 聊天框底部的 **Memory 按钮改为 Session 按钮**，点击�
 | 操作              | 行为                                                              |
 | ----------------- | ----------------------------------------------------------------- |
 | 点击 Session 按钮 | 打开 Session 列表面板                                             |
-| 点击 Memory 入口  | 进入 Grafeo 记忆面板（检索/浏览记忆节点）                         |
+| 点击 Memory 入口  | 进入 SQLite 记忆层 记忆面板（检索/浏览记忆节点）                         |
 | 点击某个 Session  | 刷新聊天记录，分页加载该 session 的 JSONL（见 §6.2 分页加载 API） |
 | 点击 [恢复]       | 结束当前 session，恢复目标 session（见 §1.5 多 Session 管理）     |
 
@@ -2062,7 +2062,7 @@ if !trimmed_messages.is_empty() {
 **chat.rs 变更示意（IPC 转发模式）：**
 
 ```rust
-// 旧实现：从 Grafeo Episode 读取
+// 旧实现：从 Episode 读取
 pub async fn get_latest_conversation(...) {
     let memory_store = gw.memory_store.clone();
     let episodes = store.get_episodes(None, 10000)?;
@@ -2087,7 +2087,7 @@ pub async fn get_messages(...) {
 }
 ```
 
-### 7.3 Grafeo 需要改什么
+### 7.3 SQLite 记忆层 需要改什么
 
 | 文件                          | 变更                                                    | 优先级 | 说明                                  |
 | ----------------------------- | ------------------------------------------------------- | ------ | ------------------------------------- |
@@ -2184,10 +2184,10 @@ async function loadMore(cursor: string) {
 | S3   | 主循环集成 JSONL 写入（Channel 架构）                    | 集成测试：一次完整对话后 JSONL 文件包含首行元数据和所有角色行                                                  | acowork-runtime                   |
 | S4   | FIFO 裁剪时 Episode 提炼（LLM 语义压缩）                 | 单元测试：裁剪消息后触发提炼，输出格式正确，metadata 字段完整                                                  | acowork-runtime, acowork-memory  |
 | S5   | Session 结束时 Episode 提炼                              | 单元测试：结束 session 后生成全局摘要 Episode                                                                  | acowork-runtime, acowork-memory  |
-| S6   | MemoryManager.record → record_distilled                  | 单元测试：Episode 不再包含原始对话全文                                                                         | acowork-memory, acowork-grafeo   |
+| S6   | MemoryManager.record → record_distilled                  | 单元测试：Episode 不再包含原始对话全文                                                                         | acowork-memory, acowork-sqlite   |
 | S7   | Gateway conversation API 改为 IPC 转发                   | 集成测试：API 通过 IPC 返回完整原始对话，含分页                                                                | acowork-gateway, acowork-runtime |
 | S8   | Desktop App 适配新消息格式和分页加载                     | 手动测试：切换 Agent 后历史完整显示，向上滚动加载更多                                                          | acowork-desktop                   |
-| S9   | PackageManager 打包 checklist UI + Grafeo 节点类型过滤   | 集成测试：默认排除 conversations/ 和 Episode/Private KnowledgeNode；勾选后包含；始终排除 memory/ 和 workspace/ | acowork-gateway                   |
+| S9   | PackageManager 打包 checklist UI + 记忆节点类型过滤   | 集成测试：默认排除 conversations/ 和 Episode/Private KnowledgeNode；勾选后包含；始终排除 memory/ 和 workspace/ | acowork-gateway                   |
 
 ### Phase 3 — Session 管理 & 离线巩固
 

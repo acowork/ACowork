@@ -30,7 +30,7 @@ use crate::agent::session_state::{
 use crate::agent_config::AgentConfig;
 use crate::cancellation::CancelHandle;
 use crate::config::DEFAULT_TEMPERATURE;
-use crate::conversation::{ConversationSession, read_session_meta, session_exists};
+use crate::conversation::{ConversationSession, read_session_meta};
 use crate::debug::controller::DebugController;
 use crate::error::{Result, RuntimeError};
 use crate::tools::mcp_manager::McpConnectionFailure;
@@ -474,6 +474,18 @@ pub struct SessionManager {
     /// Storing a plain clone here would freeze the generation to whatever
     /// was in the slot at registration time — the exact bug §4.5 fixes.
     cancel_handles: HashMap<String, Arc<parking_lot::Mutex<CancelHandle>>>,
+    /// ADR-083: per-session compaction-cancel slots, keyed by `session_id`.
+    ///
+    /// A compaction cancel (`compress_type = 3`) must reach the compaction
+    /// that is currently running — but the session task is *blocked* inside
+    /// `compact_history_if_needed().await` while it runs, so an inbox message
+    /// cannot deliver it. The MQTT dispatcher therefore fires this handle
+    /// directly (same pattern as `cancel_handles` for Stop), and the
+    /// compaction's `tokio::select!` observes the cancellation.
+    ///
+    /// Kept separate from `cancel_handles` so cancelling a compaction never
+    /// crosses semantics with cancelling the whole request.
+    compaction_cancel_handles: HashMap<String, Arc<parking_lot::Mutex<CancelHandle>>>,
     /// Per-session committed_lines counter, shared between the writer thread
     /// (ConversationWriter) and the session's SessionCore. Each session gets its
     /// own independent counter; `committed_lines_for(session_id)` returns the
@@ -541,6 +553,7 @@ impl SessionManager {
             debug_service: None,
             urgent_stops: HashMap::new(),
             cancel_handles: HashMap::new(),
+            compaction_cancel_handles: HashMap::new(),
             session_committed_lines: HashMap::new(),
             session_delivery_cursors: std::sync::RwLock::new(HashMap::new()),
             streaming_lines: Arc::new(std::sync::RwLock::new(HashMap::new())),
@@ -752,6 +765,12 @@ impl SessionManager {
         // needed here.
         self.cancel_handles
             .insert(session_id.clone(), task.cancel_handle_arc());
+
+        // ADR-083: register the compaction-cancel slot so the MQTT
+        // `compress_type = 3` dispatcher can fire it while the session task
+        // is blocked inside `compact_history_if_needed().await`.
+        self.compaction_cancel_handles
+            .insert(session_id.clone(), task.compaction_cancel_handle_arc());
 
         // Spawn the session task with panic isolation.
         // catch_unwind ensures that if SessionTask::run() panics, we log the
@@ -1243,6 +1262,7 @@ impl SessionManager {
         self.pending_workspaces.remove(session_id);
         self.urgent_stops.remove(session_id);
         self.cancel_handles.remove(session_id);
+        self.compaction_cancel_handles.remove(session_id);
         self.session_committed_lines.remove(session_id);
         self.session_delivery_cursors
             .write()
@@ -1280,6 +1300,18 @@ impl SessionManager {
         Some(slot.lock().clone())
     }
 
+    /// ADR-083: read the **current** compaction-cancel handle for a session.
+    ///
+    /// Used by the `compress_type = 3` dispatcher in
+    /// `startup/gateway_loop.rs`. Same slot semantics as
+    /// [`Self::cancel_handle`] — always the latest generation — and `None`
+    /// when the session is unknown (evicted / never created), in which case
+    /// the caller treats it as a no-op.
+    pub fn compaction_cancel_handle(&self, session_id: &str) -> Option<CancelHandle> {
+        let slot = self.compaction_cancel_handles.get(session_id)?;
+        Some(slot.lock().clone())
+    }
+
     /// Return the `agent_id` of the owning runtime, for use as the
     /// `StopSource::ChatPanel { agent_id, ... }` payload.
     ///
@@ -1292,24 +1324,23 @@ impl SessionManager {
         &self.core.config.agent_id
     }
 
-    /// Delete a session: close the task, remove index entry, and delete JSONL file.
+    /// Delete a session: close the task, drop the meta row, and delete the JSONL file.
     ///
     /// This is an atomic operation from the caller's perspective — after this
     /// returns, the session no longer exists in memory or on disk (unless the
-    /// join times out, in which case the task continues but its index entry and
+    /// join times out, in which case the task continues but its meta row and
     /// JSONL file are still cleaned up).
     ///
     /// Works for sessions both in memory and already evicted from memory
     /// (e.g., idle eviction, reaped handles, or previous Runtime restarts).
     /// When the session is not in `self.sessions`, the Close/join steps are
-    /// skipped and only the on-disk resources are cleaned up.
+    /// skipped and only the persisted resources are cleaned up.
     ///
     /// A 30-second timeout is applied to the session task join.  If the task
     /// does not finish within this window (e.g. distillation hangs), resources
-    /// are still cleaned up and the method returns successfully — the background
-    /// task's eventual `Drop` may briefly re-write the index entry, but the end
-    /// result is a tombstone-free index after the next call to
-    /// [`remove_session_from_index`] on a subsequent delete or prune.
+    /// are still cleaned up and the method returns successfully — the
+    /// background task's eventual `Drop` cannot re-create the row because
+    /// `ConversationSession::write_meta` returns early once the JSONL is gone.
     pub async fn delete_session(&mut self, session_id: &str) {
         // 1. If in memory, close the task cleanly (with timeout)
         if let Some(handle) = self.sessions.remove(session_id) {
@@ -1326,6 +1357,7 @@ impl SessionManager {
             self.pending_workspaces.remove(session_id);
             self.urgent_stops.remove(session_id);
             self.cancel_handles.remove(session_id);
+            self.compaction_cancel_handles.remove(session_id);
             self.session_committed_lines.remove(session_id);
             self.session_delivery_cursors
                 .write()
@@ -1366,12 +1398,19 @@ impl SessionManager {
             tracing::info!(session_id = %session_id, "Session already evicted, skipping task close");
         }
 
-        // 2. ADR-024: remove the per-session meta file (replaces index.json
-        //    update). Funnelled through `remove_session_meta` so the cached
-        //    session listing cannot keep a row whose file is gone.
+        // 2. ADR-082 §4 step 3: drop the session-meta row from the store
+        // (SQLite). The legacy JSON sidecar no longer exists — leaving the
+        // row behind is what would keep a deleted session in `/sessions`
+        // and in `find_latest_session`.
         let conversations_dir =
             std::path::Path::new(&self.core.config.work_dir).join("conversations");
-        crate::conversation::remove_session_meta(&conversations_dir, session_id);
+        if let Err(e) = crate::conversation::delete_session_meta(&conversations_dir, session_id) {
+            tracing::warn!(
+                session_id = %session_id,
+                error = %e,
+                "Failed to delete session meta row"
+            );
+        }
 
         // 3. Delete the JSONL file.
         let file_path = conversations_dir.join(format!("{}.jsonl", session_id));
@@ -1393,14 +1432,14 @@ impl SessionManager {
         }
 
         // 4. If the deleted session was the "latest", recompute the latest
-        //    from the remaining sessions on disk (or clear it if none remain).
+        //    from the remaining sessions (or clear it if none remain).
         //    Without this, `/sessions/latest` keeps returning the deleted
         //    session_id and the frontend tries to resume a session whose
         //    JSONL is gone — the exact "deleted session reloaded as latest"
-        //    failure. `find_latest_session` scans the meta files, which are
-        //    guaranteed to be consistent here because `write_meta` refuses to
-        //    re-create a meta file once its JSONL is gone (see
-        //    `ConversationSession::write_meta`).
+        //    failure. `find_latest_session` reads the session-meta store
+        //    (SQLite), which is already consistent here because step 2 above
+        //    dropped this session's row, and `write_meta` refuses to re-create
+        //    a row once the JSONL is gone (see `ConversationSession::write_meta`).
         if let Some((latest_id, _)) = self.latest_session()
             && latest_id == session_id
         {
@@ -1508,7 +1547,7 @@ impl SessionManager {
     /// ADR-038: Observe the lifecycle state of a session.
     ///
     /// - `Active` if a session handle exists in the in-memory map.
-    /// - `Closed` if a meta file exists on disk but no handle is loaded.
+    /// - `Closed` if the session-meta store holds a row but no handle is loaded.
     /// - `NotFound` if neither exists.
     ///
     /// Lifecycle is now explicit (ADR-038 §3): there is no lazy-resume
@@ -1520,8 +1559,13 @@ impl SessionManager {
         if self.sessions.contains_key(session_id) {
             return SessionLifecycleState::Active;
         }
+        // ADR-082 §4 step 3: the session-meta store (SQLite) is the sole
+        // source of truth post-migration. The legacy
+        // `conversations/meta/{sid}.json` sidecar is bootstrap-only and no
+        // longer written by the runtime — probing it here is what made a
+        // valid SQLite-backed session report `NotFound`.
         let conversations_dir = work_dir.join("conversations");
-        if session_exists(&conversations_dir, session_id) {
+        if crate::conversation::session_meta_exists(&conversations_dir, session_id) {
             return SessionLifecycleState::Closed;
         }
         SessionLifecycleState::NotFound
@@ -1592,10 +1636,12 @@ impl SessionManager {
             return Ok(SessionOpenOutcome::AlreadyActive);
         }
 
-        // Validate disk presence up-front so callers get a clear error
-        // instead of a generic "Session not found on disk" buried inside the
-        // resume path. ADR-024: meta file is the canonical "session exists" marker.
-        if !session_exists(&work_dir.join("conversations"), session_id) {
+        // Validate existence up-front so callers get a clear error instead of
+        // a generic failure buried inside the resume path. ADR-082 §4 step 3:
+        // the session-meta store (SQLite) is the canonical "session exists"
+        // marker — the JSON sidecar is bootstrap-only and no longer written.
+        let conversations_dir = work_dir.join("conversations");
+        if !crate::conversation::session_meta_exists(&conversations_dir, session_id) {
             return Err(RuntimeError::Config(format!(
                 "Session not found on disk: {}",
                 session_id
@@ -4713,11 +4759,11 @@ mod tests {
         ));
         let mut manager = SessionManager::new(core, SessionManagerConfig::default());
 
-        // Seed a surviving session on disk (meta + jsonl) so the recompute
-        // has something to find.
+        // Seed a surviving session (meta row + jsonl) so the recompute has
+        // something to find.
         let survivor_id = "20260101_000000_survivor";
         let conversations_dir = dir.path().join("conversations");
-        std::fs::create_dir_all(conversations_dir.join("meta")).unwrap();
+        std::fs::create_dir_all(&conversations_dir).unwrap();
         std::fs::write(conversations_dir.join(format!("{}.jsonl", survivor_id)), "").unwrap();
         write_session_meta(
             &conversations_dir,

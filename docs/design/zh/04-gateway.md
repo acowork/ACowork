@@ -1,4 +1,4 @@
-# Gateway 组件详细设计
+﻿# Gateway 组件详细设计
 
 > 版本：v3.2 | 更新日期：2026-07-12
 > 本版本主要修订：§9 IPC 部分全面对齐 [ADR-033](./docs/design/zh/../adr/zh/ADR-033-mqtt-replace-grpc-websocket.md) —— Gateway ↔ Runtime 通道由 gRPC 双向流替换为 **MQTT pub/sub + HTTP 反向代理**。HTTP API 仍保留 REST 接口，流式事件从 WebSocket 改为 MQTT 主题订阅。
@@ -38,7 +38,7 @@ Gateway 同时为两类消费者提供服务：
 ## 1. Package Manager
 
 - **安装**：解压 `.agent` 到 `~/.local/share/agent-gateway/agents/<agent_id>/`，校验 manifest 完整性，记录版本。安装前必须验证包签名（详见 [02-agent-package.md](./02-agent-package.md)），签名无效或与已安装版本签名不一致则拒绝安装。
-- **卸载**：删除对应目录，可选备份用户数据（含私有 Grafeo）。
+- **卸载**：删除对应目录，可选备份用户数据（含私有 SQLite 记忆层）。
 - **升级**：保留 `data/` 和用户修改的 `config/`，替换其他文件。若 runtime_version 不兼容则提示用户。升级时校验新包签名证书指纹必须与已安装版本一致。
 - **仓库支持**：可配置多个 HTTP 仓库源（类似 apt），定期检查更新。仓库提供的 .agent 包必须经过签名。
 
@@ -57,7 +57,7 @@ Gateway 同时为两类消费者提供服务：
 
 **休眠与唤醒：**
 - 采用杀死重启策略：空闲超时后直接杀死 Agent Runtime 进程，下次需要时重新 spawn。
-- Agent 的状态通过私有 Grafeo 持久化，启动时从 Memory 恢复上下文。
+- Agent 的状态通过私有 SQLite 持久化，启动时从 Memory 恢复上下文。
 - 不使用 SIGSTOP/SIGCONT（Windows 不支持、进程仍占内存、状态序列化困难）。
 - Agent 可在 manifest 中声明 `startup_timeout_ms`，Gateway 据此判断是否需要预热（提前拉起）。
 
@@ -152,7 +152,7 @@ bwrap \
 - **每个 Agent 的工作区**：`~/.local/share/agent-gateway/agents/<agent_id>/workspace/`：
   - `data/`：从包中复制，可读写。
   - `config/`：用户可修改的配置（初始来自包内 config）。
-  - `memory/`：私有 Grafeo 数据库文件（`private.grafeo`）。
+  - `memory/`：私有 SQLite 记忆数据库文件（`private.SQLite`）。
   - `runtime/`：临时文件（pid、HTTP 端口）。
 - **日志**：Gateway 收集所有 Agent 的 stdout/stderr，写入 `~/.local/share/agent-gateway/logs/`，支持按 Agent 过滤。
 

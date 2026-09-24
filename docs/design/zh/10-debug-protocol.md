@@ -1,4 +1,4 @@
-# Debug Protocol（调试协议）
+﻿# Debug Protocol（调试协议）
 
 > 版本：v3.1 | 更新日期：2026-04-14
 
@@ -268,7 +268,7 @@ DevMode 下，Agent Runtime 在每轮迭代的 `BuildContext` 阶段完成后，
 | `system_prompt` | 系统级指令（base prompt，**不再合并** workspace_prompt_file） | 调试 prompt 工程 |
 | `identity_context` | 用户身份字段 | 检查身份注入 |
 | `workspace_context` | Workspace 自格式化上下文 | 验证 workspace 注入 |
-| `retrieved_memory` | Grafeo 检索的记忆节点 | 验证记忆检索质量 |
+| `retrieved_memory` | SQLite 记忆层 检索的记忆节点 | 验证记忆检索质量 |
 | `ambiguous_confirmation_hint` | P3-4 冲突确认提示（≥3 个 pending ambiguous conflict 时注入） | 排查"Agent 为何突然问消歧问题" |
 | `skill_instructions` | 加载的 SKILL.md 内容 | 调试 Skill 行为 |
 | `todo_context` | Agent 内部 active task list | 排查"在错误 todo 上循环" |
@@ -668,7 +668,7 @@ Gateway:
   │       skills/ (完整复制)
   │       data/ (完整复制)
   │       conversations/ (当前 session JSONL 快照)
-  │       memory/private.grafeo (复制快照)
+  │       memory/private.SQLite 记忆层 (复制快照)
   │
   ├─ 写入新 Agent 工作区:
   │   ~/.local/share/agent-gateway/agents/<new_id>/
@@ -682,7 +682,7 @@ Gateway:
 
 - 系统 Agent（`com.acowork.system`）不可克隆——无 Platform 签名，无法获得系统特权
 - 克隆体与源 Agent 独立，后续源 Agent 更新不会同步
-- 完整克隆的 Grafeo 快照是克隆时刻的副本，之后双方各自演化
+- 完整克隆的 SQLite 记忆层 快照是克隆时刻的副本，之后双方各自演化
 
 ## 8. 发布流程
 
@@ -702,7 +702,7 @@ Step 2: 清理
   ├─ 移除 dev 标记（manifest 中 dev: false 或删除该字段）
   ├─ 清空 recordings/ 目录（不打包进发布包）
   ├─ 清空或保留 data/（用户选择）
-  ├─ 清空私有 Grafeo（发布包不含个人记忆）
+  ├─ 清空私有 SQLite 记忆层（发布包不含个人记忆）
   └─ 重置 config/ 为默认值（可选）
 
 Step 3: 打包

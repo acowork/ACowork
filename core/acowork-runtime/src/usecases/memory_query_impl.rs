@@ -1,10 +1,10 @@
-//! GrafeoMemoryAdapter - implements MemoryQueryService via MemoryAdminService.
+//! MemoryAdminAdapter - implements MemoryQueryService via MemoryAdminService.
 //!
 //! ADR-040: delegates to the shared `memory_query` module which provides
 //! thin wrappers over `dyn MemoryAdminService`.
 //!
-//! ADR-051 P4: `SharedMemoryStore` is now `Arc<dyn MemoryAdminService>`
-//! instead of concrete `Arc<GrafeoStore>`.
+//! ADR-051 P4: `SharedMemoryStore` is `Arc<dyn MemoryAdminService>`, never a
+//! concrete store type.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -18,12 +18,12 @@ use crate::usecases::memory_query::{
     MemoryStats, RebuildReport, SemanticMemoryQuery,
 };
 
-pub struct GrafeoMemoryAdapter {
+pub struct MemoryAdminAdapter {
     memory_store: SharedMemoryStore,
     embed_dim: SharedEmbedDimension,
 }
 
-impl GrafeoMemoryAdapter {
+impl MemoryAdminAdapter {
     pub fn new(memory_store: SharedMemoryStore, embed_dim: SharedEmbedDimension) -> Self {
         Self {
             memory_store,
@@ -33,7 +33,7 @@ impl GrafeoMemoryAdapter {
 }
 
 #[async_trait]
-impl MemoryQueryService for GrafeoMemoryAdapter {
+impl MemoryQueryService for MemoryAdminAdapter {
     async fn list_nodes(&self, query: &MemoryNodeQuery) -> Result<MemoryNodeListResponse> {
         let store = self.memory_store.read().ok().and_then(|g| g.clone());
         let params = memory_query::ListNodesParams {
@@ -244,43 +244,59 @@ impl MemoryQueryService for GrafeoMemoryAdapter {
 mod tests {
     use std::sync::RwLock;
 
-    use acowork_grafeo::grafeo::GrafeoStore;
-    use acowork_grafeo::types::labels;
     use acowork_memory::admin::MemoryAdminService;
-    use grafeo_common::types::Value;
+    use acowork_memory::types::{
+        DEFAULT_EMBEDDING_DIM, Episode, KnowledgeNode, KnowledgeSubType, NodeStatus, PrivacyLevel,
+    };
 
     use super::*;
 
-    /// Build an adapter backed by an in-memory GrafeoStore seeded with one
-    /// Episodic node (importance only) and one Knowledge node (both fields).
-    fn seeded_adapter() -> GrafeoMemoryAdapter {
-        let store = GrafeoStore::new_in_memory().expect("in-memory store");
+    /// Build an adapter backed by an in-memory store seeded with one Episodic
+    /// node (importance only) and one Knowledge node (both fields).
+    fn seeded_adapter() -> MemoryAdminAdapter {
+        let store = Arc::new(
+            acowork_sqlite::SqliteStore::open_in_memory(DEFAULT_EMBEDDING_DIM)
+                .expect("in-memory store"),
+        );
+        let now = chrono::Utc::now();
         store
-            .store_node(
-                labels::EPISODIC,
-                [
-                    ("role", Value::from("user")),
-                    ("content", Value::from("episodic event")),
-                    ("importance", Value::from(0.7f64)),
-                ],
-            )
+            .store_episode(&Episode {
+                session_id: "adapter-test".to_string(),
+                turn_index: 0,
+                role: "user".to_string(),
+                content: "episodic event".to_string(),
+                embedding: None,
+                timestamp: now,
+                consolidated: false,
+                metadata: Default::default(),
+                importance: 0.7,
+                knowledge_subtype: None,
+            })
             .unwrap();
         store
-            .store_node(
-                labels::KNOWLEDGE,
-                [
-                    ("subject", Value::from("Rust")),
-                    ("content", Value::from("Rust is a systems language")),
-                    ("confidence", Value::from(0.7f64)),
-                    ("importance", Value::from(0.5f64)),
-                ],
-            )
+            .store_knowledge(&KnowledgeNode {
+                subject: "Rust".to_string(),
+                predicate: "is".to_string(),
+                object: "a systems language".to_string(),
+                sub_type: KnowledgeSubType::Fact,
+                confidence: 0.7,
+                source_episode_id: None,
+                source_episode_ids: Vec::new(),
+                promotion_metadata: None,
+                embedding: None,
+                status: NodeStatus::Active,
+                created_at: now,
+                updated_at: now,
+                metadata: Default::default(),
+                privacy: PrivacyLevel::Personal,
+                importance: 0.5,
+            })
             .unwrap();
 
-        let admin: Arc<dyn MemoryAdminService> = Arc::new(store);
+        let admin: Arc<dyn MemoryAdminService> = store;
         let memory_store: SharedMemoryStore = Arc::new(RwLock::new(Some(admin)));
         let embed_dim: SharedEmbedDimension = Arc::new(RwLock::new(0));
-        GrafeoMemoryAdapter::new(memory_store, embed_dim)
+        MemoryAdminAdapter::new(memory_store, embed_dim)
     }
 
     #[tokio::test]
@@ -305,14 +321,20 @@ mod tests {
             .collect();
 
         // Episodic: importance present, confidence absent → 0.0 is the truth.
+        // `importance` is f32 on the node and f64 on the DTO, so compare with
+        // the tolerance the widening implies rather than bit equality.
         let ep = by_type.get("Episodic").expect("episodic node");
-        assert_eq!(ep.importance, 0.7, "Episodic importance must pass through");
+        assert!(
+            (ep.importance - 0.7).abs() < 1e-6,
+            "Episodic importance must pass through, got {}",
+            ep.importance
+        );
         assert_eq!(ep.confidence, 0.0, "Episodic has no confidence property");
 
         // Knowledge: both fields present.
         let kn = by_type.get("Knowledge").expect("knowledge node");
-        assert_eq!(kn.confidence, 0.7);
-        assert_eq!(kn.importance, 0.5);
+        assert!((kn.confidence - 0.7).abs() < 1e-6, "got {}", kn.confidence);
+        assert!((kn.importance - 0.5).abs() < 1e-6, "got {}", kn.importance);
     }
 
     #[tokio::test]

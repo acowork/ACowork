@@ -409,7 +409,9 @@ impl super::observer::DebugObserver for DebugObserverImpl {
         // so the controller's `store_messages` (post-loop) can reuse the
         // exact Arc without re-cloning. Hash is computed once.
         let messages_snapshot: Arc<Vec<ChatMessage>> = req.history.messages_arc();
-        let messages_json = serde_json::to_string(&messages_snapshot).unwrap_or_default();
+        // `&*` rather than `&`: serialising the `Arc` itself would need
+        // serde's `rc` feature, and the JSON is identical either way.
+        let messages_json = serde_json::to_string(&*messages_snapshot).unwrap_or_default();
         let messages_hash = {
             use sha2::{Digest, Sha256};
             let mut hasher = Sha256::new();

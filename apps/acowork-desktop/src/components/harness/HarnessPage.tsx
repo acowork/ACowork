@@ -9,7 +9,7 @@ import { ProviderLogo } from "../common/ProviderLogo";
 import { isLocalProvider } from "../../lib/providers";
 import { fetchProviderModels } from "../../lib/gateway-api";
 import { getGatewayUrl } from "../../lib/config";
-import { Monitor, MousePointer, Package, Search, Globe, BookOpen, FileText, PenTool, Star, Plus, CheckCircle2, Download, XCircle, Loader2, Minus } from "lucide-react";
+import { Monitor, MousePointer, Package, Search, Globe, BookOpen, FileText, PenTool, Star, Plus, CheckCircle2, Download, XCircle, Loader2, Minus, Pencil } from "lucide-react";
 import { useMcpStore, type McpInstallRunResponse } from "../../stores/mcpStore";
 import { MCP_PRESETS, presetToServerConfig } from "../../lib/mcp-presets";
 import { SearchTab } from "./SearchTab";
@@ -505,11 +505,21 @@ function ProvidersTab() {
 
       {/* Edit key dialog */}
       {showEditDialog && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-modal-overlay">
-          <div className="w-[440px] max-h-[85vh] overflow-y-auto rounded-md bg-modal-surface p-6 shadow-xl">
-            <h3 className="mb-3 text-sm font-semibold">{t("harness.editProvider")} {showEditDialog}</h3>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-modal-overlay" onClick={() => setShowEditDialog(null)}>
+          <div
+            className="flex w-[440px] max-h-[85vh] flex-col overflow-hidden rounded-md border border-border-outer bg-modal-surface shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Header */}
+            <div className="flex items-center gap-2 border-b border-border-divider px-5 py-3 min-h-[var(--ui-dialog-zone-h)]">
+              <Pencil className="h-5 w-5 text-text-tertiary " />
+              <h2 className="text-sm font-semibold text-text ">
+                {t("harness.editProvider")} {showEditDialog}
+              </h2>
+            </div>
 
-            <div className="space-y-2">
+            {/* Body */}
+            <div className="flex-1 space-y-2 overflow-y-auto px-5 py-4">
               {!isLocalProvider(showEditDialog) && (
                 <div>
                   <div className="mb-1 flex items-baseline justify-between">
@@ -654,17 +664,17 @@ function ProvidersTab() {
               })()}
             </div>
 
-            <div className="mt-4 flex items-center justify-end gap-2">
-              {/* Buttons with equal width */}
+            {/* Footer */}
+            <div className="flex items-center justify-end gap-2 border-t border-border-divider px-5 min-h-[var(--ui-dialog-zone-h)]">
               <button
                 onClick={() => setShowEditDialog(null)}
-                className="w-20 rounded-md px-3 py-1.5 text-xs font-medium text-center text-text-secondary hover:bg-zinc-100  dark:hover:bg-zinc-700"
+                className="rounded-md px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-zinc-100  dark:hover:bg-zinc-700"
               >
                 {t("common.cancel")}
               </button>
               <button
                 onClick={handleEditSave}
-                className="w-20 rounded-md bg-zinc-200 px-3 py-1.5 text-xs font-medium text-center text-text hover:bg-zinc-300 disabled:opacity-50 dark:bg-zinc-700 dark:hover:bg-zinc-600"
+                className="rounded btn-accent px-3 py-1.5 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {t("harness.save")}
               </button>

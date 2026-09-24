@@ -62,7 +62,7 @@ pub use agent_tools_impl::RuntimeAgentToolsService;
 pub use attachment_impl::RuntimeAttachmentService;
 pub use debug_service_impl::RuntimeDebugService;
 pub use git_query_impl::RuntimeGitQueryService;
-pub use memory_query_impl::GrafeoMemoryAdapter;
+pub use memory_query_impl::MemoryAdminAdapter;
 pub use session_config_impl::{RuntimeSessionConfigService, SharedSessionConfigs};
 pub use session_metadata_impl::RuntimeSessionMetadataService;
 pub use workspace_mutation_impl::RuntimeWorkspaceMutationService;

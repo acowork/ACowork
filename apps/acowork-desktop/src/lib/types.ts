@@ -1020,6 +1020,14 @@ export interface MemoryStatsResponse {
    * `stored_dim` to detect a dimension mismatch.
    */
   model_dim: number;
+  /**
+   * On-disk schema version of the underlying memory store
+   * (`PRAGMA user_version` for the SQLite backend). The Memory panel's
+   * overview strip surfaces this so an operator can spot schema drift
+   * across machines. 0 means the store has not been initialised / the
+   * engine has no equivalent knob.
+   */
+  schema_version: number;
 }
 
 /** Response for deleting a memory node */

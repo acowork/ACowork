@@ -419,7 +419,7 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
         };
     }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-    const handleRetry = async () => {
+    const handleRetry = async (overrideUrl?: string) => {
         setRetrying(true);
         setTimedOut(false);
         setBootError(null);
@@ -427,8 +427,17 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
         // Remote mode: the timeout view lets the user edit the Gateway
         // address. Persist + push to Rust before probing so this retry
         // (and every later command) targets the new URL.
+        //
+        // `overrideUrl` is used by the candidate-pick path: when the
+        // user clicks a candidate chip, the chip passes the picked URL
+        // explicitly because the React `gatewayUrlInput` state is still
+        // showing the mount-time (dead) URL — React's setState is async,
+        // so reading it on the same tick would see the stale value and
+        // roll the store back to the dead host. When no override is
+        // passed (the user clicked the "Retry" button on the timeout
+        // view), fall back to the current input value.
         const currentUrl = useSettingsStore.getState().gatewayUrl;
-        const nextUrl = gatewayUrlInput.trim();
+        const nextUrl = (overrideUrl ?? gatewayUrlInput).trim();
         if (nextUrl && nextUrl !== currentUrl) {
             useSettingsStore.getState().setGatewayUrl(nextUrl);
         }
@@ -540,7 +549,7 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
                                 />
                             </div>
                             <button
-                                onClick={handleRetry}
+                                onClick={() => { void handleRetry(); }}
                                 disabled={retrying}
                                 className="mt-2 rounded-md bg-zinc-200 px-5 py-2 text-sm font-medium text-text-secondary transition-colors hover:bg-zinc-300 disabled:opacity-40 dark:bg-zinc-700  dark:hover:bg-zinc-600"
                             >
@@ -563,9 +572,22 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
                                             // the picked URL back into history
                                             // so it stays at the top next boot.
                                             useSettingsStore.getState().setGatewayUrl(url);
+                                            // Pass the picked URL explicitly so
+                                            // handleRetry() doesn't read a stale
+                                            // `gatewayUrlInput`. The input field
+                                            // is frozen at the mount-time store
+                                            // URL and React's setState is async,
+                                            // so reading it on the same tick
+                                            // would see the old, dead address
+                                            // and roll the store back to it.
+                                            // Sync the input field too so the
+                                            // timeout view (when it appears)
+                                            // shows the address we're actually
+                                            // trying, not the dead one.
+                                            setGatewayUrlInput(url);
                                             // Reuse the existing retry path so
                                             // we don't fork the boot flow.
-                                            handleRetry();
+                                            handleRetry(url);
                                         }}
                                         onDismiss={() => clearCandidates()}
                                 />

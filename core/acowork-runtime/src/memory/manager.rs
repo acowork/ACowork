@@ -1,10 +1,11 @@
-//! Memory manager tests (GrafeoStore integration).
+//! Memory manager integration tests against a real store.
 //!
-//! ADR-051 P2: MemoryManager implementation moved to acowork-memory.
-//! This file retains GrafeoStore-dependent integration tests that
-//! cannot live in acowork-memory (which doesn't depend on acowork-grafeo).
+//! ADR-051 P2: the MemoryManager implementation lives in acowork-memory, and
+//! its pure-logic tests (config, inject formatting) live there too. What stays
+//! here needs a concrete backend, which is why it drives `acowork-sqlite`
+//! rather than an in-crate fake.
 //!
-//! Pure-logic tests (config, inject formatting) live in acowork-memory.
+//! ADR-082 §4: the backend is SQLite; the grafeo store is gone.
 
 // Re-export for backward compatibility.
 pub use acowork_memory::{
@@ -14,14 +15,13 @@ pub use acowork_memory::{
 #[cfg(test)]
 mod tests {
     use super::*;
-    use acowork_grafeo::grafeo::GrafeoStore as TestStore;
-    use acowork_grafeo::types::DEFAULT_EMBEDDING_DIM;
+    use acowork_memory::types::DEFAULT_EMBEDDING_DIM;
     use acowork_memory::{HintType, MemoryProvider, MemoryQuery, labels};
-    use grafeo_common::types::{NodeId, Value};
+    use acowork_sqlite::SqliteStore as TestStore;
 
-    /// Helper: create an in-memory TestStore for testing.
+    /// Helper: create an in-memory store.
     fn test_store() -> TestStore {
-        TestStore::new_in_memory().unwrap()
+        TestStore::open_in_memory(DEFAULT_EMBEDDING_DIM).unwrap()
     }
 
     /// Helper: generate a test embedding vector.
@@ -37,37 +37,45 @@ mod tests {
             .collect()
     }
 
-    /// Helper: store an Episodic node with content and embedding.
+    /// Helper: store an Episode with content and embedding.
     fn store_episode(store: &TestStore, content: &str, embedding: &[f32]) -> u64 {
-        let id = store
-            .store_node(labels::EPISODIC, [("content", Value::from(content))])
-            .unwrap();
-        store.db().set_node_property(
-            id,
-            "embedding",
-            Value::Vector(std::sync::Arc::from(embedding.to_vec().into_boxed_slice())),
-        );
-        id.as_u64()
+        store_episode_at(store, content, embedding, chrono::Utc::now())
     }
 
-    /// Helper: store an Episodic node with a specific `created_at` age.
+    /// Helper: store an Episode with a specific `timestamp`.
     /// Used by the forgetting time-decay test (ADR-057 §5.3 redesign).
+    fn store_episode_at(
+        store: &TestStore,
+        content: &str,
+        embedding: &[f32],
+        timestamp: chrono::DateTime<chrono::Utc>,
+    ) -> u64 {
+        let provider: &dyn MemoryProvider = store;
+        provider
+            .store_episode(&acowork_memory::types::Episode {
+                session_id: "test-session".to_string(),
+                turn_index: 0,
+                role: "user".to_string(),
+                content: content.to_string(),
+                embedding: Some(embedding.to_vec()),
+                timestamp,
+                consolidated: false,
+                metadata: Default::default(),
+                importance: 0.5,
+                knowledge_subtype: None,
+            })
+            .unwrap()
+    }
+
+    /// Helper: store an Episode aged `age_days` in the past.
     fn store_episode_with_age(
         store: &TestStore,
         content: &str,
         embedding: &[f32],
         age_days: i64,
     ) -> u64 {
-        let id = store_episode(store, content, embedding);
         let created = chrono::Utc::now() - chrono::Duration::days(age_days);
-        store.db().set_node_property(
-            NodeId::from(id),
-            "created_at",
-            Value::from(grafeo_common::types::Timestamp::from_micros(
-                created.timestamp_micros(),
-            )),
-        );
-        id
+        store_episode_at(store, content, embedding, created)
     }
 
     /// Helper: store a Knowledge node with embedding.
@@ -78,55 +86,55 @@ mod tests {
         object: &str,
         embedding: &[f32],
     ) -> u64 {
-        // Mirror `KnowledgeNode::to_properties` (types.rs): the text index
-        // searches the `content` property, which is derived from the triple.
-        // Without it, a Knowledge node is only reachable via vector search,
-        // whose score is negative (distance), so `min_score=0.0` would filter
-        // it out — same failure mode as the real path without content.
-        let content = format!("{} {} {}", subject, predicate, object);
-        let id = store
-            .store_node(
-                labels::KNOWLEDGE,
-                [
-                    ("content", Value::from(content.as_str())),
-                    ("subject", Value::from(subject)),
-                    ("predicate", Value::from(predicate)),
-                    ("object", Value::from(object)),
-                    ("sub_type", Value::from("Fact")),
-                    ("confidence", Value::from(0.9f64)),
-                    ("status", Value::from("Active")),
-                ],
-            )
-            .unwrap();
-        store.db().set_node_property(
-            id,
-            "embedding",
-            Value::Vector(std::sync::Arc::from(embedding.to_vec().into_boxed_slice())),
-        );
-        id.as_u64()
+        // `content` is derived from the triple by the backend, so text search
+        // reaches the node; without it only vector search would, and its
+        // distance-based score would not clear a `min_cosine` floor.
+        let provider: &dyn MemoryProvider = store;
+        let now = chrono::Utc::now();
+        provider
+            .store_knowledge(&acowork_memory::types::KnowledgeNode {
+                subject: subject.to_string(),
+                predicate: predicate.to_string(),
+                object: object.to_string(),
+                sub_type: acowork_memory::types::KnowledgeSubType::Fact,
+                confidence: 0.9,
+                source_episode_id: None,
+                source_episode_ids: Vec::new(),
+                promotion_metadata: None,
+                embedding: Some(embedding.to_vec()),
+                status: acowork_memory::types::NodeStatus::Active,
+                created_at: now,
+                updated_at: now,
+                metadata: Default::default(),
+                privacy: acowork_memory::types::PrivacyLevel::Personal,
+                importance: 0.5,
+            })
+            .unwrap()
     }
 
     /// Helper: store an Autobiographical node.
     #[allow(dead_code)]
     fn store_autobiographical(store: &TestStore, key: &str, value: &str, embedding: &[f32]) -> u64 {
-        let id = store
-            .store_node(
-                labels::AUTOBIOGRAPHICAL,
-                [
-                    ("category", Value::from("Identity")),
-                    ("key", Value::from(key)),
-                    ("value", Value::from(value)),
-                    ("confidence", Value::from(1.0f64)),
-                    ("status", Value::from("Active")),
-                ],
-            )
-            .unwrap();
-        store.db().set_node_property(
-            id,
-            "embedding",
-            Value::Vector(std::sync::Arc::from(embedding.to_vec().into_boxed_slice())),
-        );
-        id.as_u64()
+        let provider: &dyn MemoryProvider = store;
+        let now = chrono::Utc::now();
+        provider
+            .store_autobiographical(&acowork_memory::types::AutobiographicalNode {
+                id: None,
+                category: acowork_memory::types::AutobioCategory::Identity,
+                key: key.to_string(),
+                value: value.to_string(),
+                confidence: 1.0,
+                source_episode_id: None,
+                source: "user_statement".to_string(),
+                source_episode_ids: Vec::new(),
+                promotion_metadata: None,
+                embedding: Some(embedding.to_vec()),
+                status: acowork_memory::types::NodeStatus::Active,
+                created_at: now,
+                updated_at: now,
+                metadata: Default::default(),
+            })
+            .unwrap()
     }
 
     #[tokio::test]
@@ -273,19 +281,25 @@ mod tests {
     #[tokio::test]
     async fn test_retrieve_abstention() {
         let store = test_store();
-        let emb = test_embedding();
-        store_episode(&store, "test content", &emb);
-
+        // Episode content is lexically disjoint from the query ("test
+        // content" vs "unrelated query"), so the BM25 text source cannot
+        // match. The query embedding is orthogonal to the stored one, so the
+        // vector source contributes a far hit but no longer has an absolute
+        // cosine floor to keep it out. Recall quality now rests on `k` and
+        // the eventual z-score gate (commit 2 follow-up); this test
+        // exercises the simplest no-hit case — an empty store.
         let manager = MemoryManager::new(MemoryManagerConfig::default());
-        // Cosine-orthogonal to the stored vector (≈ 0.0), so the cosine floor
-        // rejects it. Reusing `emb` would score cosine 1.0 — a perfect match —
-        // and legitimately survive the floor.
         let mut query = MemoryQuery {
             query_text: "unrelated query".to_string(),
             embedding: Some(orthogonal_embedding()),
             filters: Default::default(),
             limit: 5,
             expand_hops: 0,
+            // `min_cosine` is now ignored by `MemoryManager::retrieve` — the
+            // absolute cosine floor is unreliable as a relevance signal
+            // (anisotropic embeddings cluster most pairs at cos 0.5–0.9);
+            // recall quality is controlled by `k` instead. The field is kept
+            // for backwards compatibility with callers that still set it.
             min_cosine: Some(0.99),
             abstention_enabled: true,
             hint_type: HintType::Semantic,
@@ -358,9 +372,10 @@ mod tests {
     #[tokio::test]
     async fn test_process_turn_abstention() {
         let store = test_store();
-        let emb = test_embedding();
-        store_episode(&store, "some content", &emb);
-
+        // Empty store: the new `manager.retrieve` no longer applies an
+        // absolute cosine floor (see `test_retrieve_abstention` for the
+        // rationale). With no episodes at all, no source can return a hit
+        // and abstention must trigger.
         let manager = MemoryManager::new(MemoryManagerConfig::default());
         let mut query = MemoryQuery {
             query_text: "completely unrelated".to_string(),
@@ -381,88 +396,6 @@ mod tests {
         assert!(metrics.abstention_triggered);
         assert_eq!(injected.memory_count, 0);
         assert!(injected.formatted_text.is_empty());
-    }
-
-    #[tokio::test]
-    #[allow(clippy::field_reassign_with_default)]
-    async fn test_retrieve_with_pagerank_boost() {
-        let store = test_store();
-        let emb = test_embedding();
-
-        // Create three Episode nodes with the same embedding and similar content
-        // so hybrid_search returns all three.
-        let a_id = store_episode(&store, "Rust is a systems programming language", &emb);
-        let b_id = store_episode(&store, "Rust powers web services and APIs", &emb);
-        let c_id = store_episode(&store, "Rust has excellent tooling", &emb);
-
-        // Create edges: A → B and C → B, making B the hub with 2 incoming edges.
-        store
-            .create_memory_edge(NodeId::new(a_id), NodeId::new(b_id), "RELATES_TO", vec![])
-            .unwrap();
-        store
-            .create_memory_edge(NodeId::new(c_id), NodeId::new(b_id), "RELATES_TO", vec![])
-            .unwrap();
-
-        // Retrieve with PageRank enabled (default config, strong boost).
-        let mut config = MemoryManagerConfig::default();
-        config.enable_graph_expand = true;
-        config.quality.pagerank_weight = 0.3; // Strong boost to make topology effect visible.
-        let manager = MemoryManager::new(config);
-
-        let mut query = MemoryQuery {
-            query_text: "Rust".to_string(),
-            embedding: Some(emb),
-            filters: Default::default(),
-            limit: 5,
-            expand_hops: 0,
-            min_cosine: None,
-            abstention_enabled: false,
-            hint_type: HintType::Semantic,
-        };
-
-        let result = manager
-            .retrieve(&store as &dyn MemoryProvider, &mut query, None)
-            .await
-            .unwrap();
-        assert!(
-            !result.memories.is_empty(),
-            "should retrieve Rust-related nodes"
-        );
-    }
-
-    #[tokio::test]
-    #[allow(clippy::field_reassign_with_default)]
-    async fn test_retrieve_pagerank_disabled() {
-        let store = test_store();
-        let emb = test_embedding();
-
-        let a_id = store_episode(&store, "Python is a scripting language", &emb);
-        let b_id = store_episode(&store, "Python excels at data science", &emb);
-        store
-            .create_memory_edge(NodeId::new(a_id), NodeId::new(b_id), "RELATES_TO", vec![])
-            .unwrap();
-
-        // PageRank disabled.
-        let mut config = MemoryManagerConfig::default();
-        config.quality.pagerank_weight = 0.0;
-        let manager = MemoryManager::new(config);
-
-        let mut query = MemoryQuery {
-            query_text: "Python".to_string(),
-            embedding: Some(emb),
-            filters: Default::default(),
-            limit: 5,
-            expand_hops: 0,
-            min_cosine: None,
-            abstention_enabled: false,
-            hint_type: HintType::Semantic,
-        };
-
-        let result = manager
-            .retrieve(&store as &dyn MemoryProvider, &mut query, None)
-            .await
-            .unwrap();
-        assert!(!result.memories.is_empty());
     }
 
     #[tokio::test]
@@ -509,8 +442,7 @@ mod tests {
         let store = test_store();
 
         // Store a procedural node.
-        use acowork_grafeo::types::{NodeStatus, ProceduralNode};
-        let node = ProceduralNode {
+        let node = acowork_memory::types::ProceduralNode {
             id: None,
             name: "concise_summary".to_string(),
             trigger_condition: "user asks for summary".to_string(),
@@ -523,20 +455,17 @@ mod tests {
             learned_from: "user_feedback".to_string(),
             source_episode_ids: Vec::new(),
             promotion_metadata: None,
-            embedding: None,
-            status: NodeStatus::Active,
+            embedding: test_embedding(),
+            status: acowork_memory::types::NodeStatus::Active,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             metadata: std::collections::HashMap::new(),
         };
-        let id = store.store_procedural(&node).unwrap();
+        let provider: &dyn MemoryProvider = &store;
+        let id = provider.store_procedural(&node).unwrap();
 
         // extract_node_content should format it as "当 X 时，优先 Y".
-        let content = store
-            .get_node_content(id.as_u64())
-            .ok()
-            .flatten()
-            .unwrap_or_default();
+        let content = provider.get_node_content(id).unwrap().unwrap_or_default();
         assert!(
             content.starts_with("当"),
             "Procedural content should start with '当', got: {}",
@@ -555,148 +484,5 @@ mod tests {
             content.contains("reply in 3 sentences max"),
             "Should contain action_pattern"
         );
-    }
-
-    #[test]
-    fn test_auto_generate_relationship_span_over_30_days() {
-        use acowork_grafeo::types::{AutobioCategory, AutobiographicalNode, Episode, NodeStatus};
-
-        let store = test_store();
-
-        // Create an old episode (45 days ago).
-        let old_time = chrono::Utc::now() - chrono::TimeDelta::days(45);
-        let episode = Episode {
-            id: None,
-            session_id: "test-session".to_string(),
-            turn_index: 0,
-            role: "user".to_string(),
-            content: "Hello".to_string(),
-            embedding: None,
-            timestamp: old_time,
-            consolidated: false,
-            metadata: std::collections::HashMap::new(),
-            importance: 0.5,
-            knowledge_subtype: None,
-        };
-        store.store_episode(&episode).unwrap();
-
-        // Simulate the Relationship generation logic.
-        let db = store.db();
-        let graph = db.graph_store();
-        let episodic_ids = graph.nodes_by_label(acowork_grafeo::types::labels::EPISODIC);
-
-        let mut earliest_time: Option<chrono::DateTime<chrono::Utc>> = None;
-        let mut episode_count: u32 = 0;
-
-        for id in episodic_ids {
-            if let Some(n) = db.get_node(id) {
-                episode_count += 1;
-                if let Some(ts) = n
-                    .get_property("created_at")
-                    .and_then(grafeo_common::types::Value::as_timestamp)
-                    && let Some(dt) = chrono::DateTime::from_timestamp_micros(ts.as_micros())
-                {
-                    match earliest_time {
-                        None => earliest_time = Some(dt),
-                        Some(earliest) if dt < earliest => earliest_time = Some(dt),
-                        _ => {}
-                    }
-                }
-            }
-        }
-
-        let earliest = earliest_time.unwrap();
-        let span_days = (chrono::Utc::now() - earliest).num_days();
-        assert!(
-            span_days >= 30,
-            "span should be >= 30 days, got {}",
-            span_days
-        );
-
-        // Create the Relationship node.
-        let key = "collaboration_span".to_string();
-        let value = format!("已合作 {} 天（{} 次对话记录）", span_days, episode_count);
-        let node = AutobiographicalNode {
-            id: None,
-            category: AutobioCategory::Relationship,
-            key: key.clone(),
-            value,
-            confidence: 0.9,
-            source_episode_id: None,
-            source: "user_statement".to_string(),
-            source_episode_ids: Vec::new(),
-            promotion_metadata: None,
-            embedding: None,
-            status: NodeStatus::Active,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-            metadata: std::collections::HashMap::new(),
-        };
-        store.store_autobiographical(&node).unwrap();
-
-        // Verify the Relationship node was stored.
-        let found = store.find_autobiographical_by_key(&key).unwrap();
-        assert!(found.is_some());
-        let found = found.unwrap();
-        assert_eq!(found.category, AutobioCategory::Relationship);
-        assert!(found.value.contains("天"));
-    }
-
-    #[test]
-    fn test_auto_generate_relationship_span_under_30_days() {
-        use acowork_grafeo::types::Episode;
-
-        let store = test_store();
-
-        // Create a recent episode (5 days ago).
-        let recent_time = chrono::Utc::now() - chrono::TimeDelta::days(5);
-        let episode = Episode {
-            id: None,
-            session_id: "test-session".to_string(),
-            turn_index: 0,
-            role: "user".to_string(),
-            content: "Hello".to_string(),
-            embedding: None,
-            timestamp: recent_time,
-            consolidated: false,
-            metadata: std::collections::HashMap::new(),
-            importance: 0.5,
-            knowledge_subtype: None,
-        };
-        store.store_episode(&episode).unwrap();
-
-        // Compute span — should be < 30 days.
-        let db = store.db();
-        let graph = db.graph_store();
-        let episodic_ids = graph.nodes_by_label(acowork_grafeo::types::labels::EPISODIC);
-
-        let mut earliest_time: Option<chrono::DateTime<chrono::Utc>> = None;
-        for id in episodic_ids {
-            if let Some(n) = db.get_node(id)
-                && let Some(ts) = n
-                    .get_property("created_at")
-                    .and_then(grafeo_common::types::Value::as_timestamp)
-                && let Some(dt) = chrono::DateTime::from_timestamp_micros(ts.as_micros())
-            {
-                match earliest_time {
-                    None => earliest_time = Some(dt),
-                    Some(earliest) if dt < earliest => earliest_time = Some(dt),
-                    _ => {}
-                }
-            }
-        }
-
-        let span_days = (chrono::Utc::now() - earliest_time.unwrap()).num_days();
-        assert!(
-            span_days < 30,
-            "span should be < 30 days, got {}",
-            span_days
-        );
-
-        // No Relationship node should exist.
-        let found = store
-            .find_autobiographical_by_key("collaboration_span")
-            .unwrap();
-        assert!(found.is_none());
     }
 }

@@ -1575,3 +1575,40 @@ describe("watchdog: updateConnectingSince (connecting-episode clock)", () => {
     expect(second!).toBeGreaterThan(first);
   });
 });
+
+// ── ADR-083: context compaction cancellation ─────────────────────────────
+
+describe("ADR-083: compaction cancellation", () => {
+  beforeEach(() => clearTestState());
+  afterEach(() => clearTestState());
+
+  it("compaction_cancelled resets isCompacting and does not need compacting_ended", () => {
+    seedSessionState([]);
+    useChatStore.setState((s) => ({
+      ...s,
+      agentStates: {
+        ...s.agentStates,
+        [AGENT]: {
+          ...s.agentStates[AGENT]!,
+          sessionStates: {
+            ...s.agentStates[AGENT]!.sessionStates,
+            [SESSION]: {
+              ...s.agentStates[AGENT]!.sessionStates[SESSION]!,
+              isCompacting: true,
+            },
+          },
+        },
+      },
+    }));
+
+    handleMessageEvent(
+      { type: "compaction_cancelled", session_id: SESSION, reason: "user" },
+      useChatStore.setState,
+      useChatStore.getState,
+      AGENT,
+    );
+
+    const ss = useChatStore.getState().agentStates[AGENT]!.sessionStates[SESSION]!;
+    expect(ss.isCompacting).toBe(false);
+  });
+});

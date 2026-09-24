@@ -177,7 +177,7 @@ export function SkillBrowser() {
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 placeholder={t("skillsPanel.searchPlaceholder")}
-                className="bg-modal-surface"
+                className=""
               />
             </div>
 

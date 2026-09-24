@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import { Pencil, X } from "lucide-react";
+import { Minimize2, Pencil, Square, X } from "lucide-react";
 import { useChatStore } from "../../stores/chatStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { useTranslation } from "../../i18n/useTranslation";
@@ -101,6 +101,7 @@ export function ContextUsageIcon({ agentId, sessionId }: { agentId: string; sess
     (s) => s.agents[agentId]?.meta?.debug_state === "enabled" && !!s.agents[agentId]?.meta?.alive,
   );
   const sendCompressAction = useChatStore((s) => s.sendCompressAction);
+  const cancelCompressAction = useChatStore((s) => s.cancelCompressAction);
   // ADR-067: section byte sizes are emitted by the runtime's always-on
   // `process_llm_response_usage` path and live on `contextUsage.sections`
   // alongside the billed totals — no longer dependent on `useDebugStore`
@@ -170,13 +171,26 @@ export function ContextUsageIcon({ agentId, sessionId }: { agentId: string; sess
   // string literals. The compiler checks exhaustiveness — adding a new
   // non-idle phase will not silently bypass this check.
   const isIdle = getProcessingPhase(sessionStatus) === "idle";
-  const canAct = isIdle && !isCompacting && contextUsage != null;
+  // ADR-083: the compress button is dual-state, mirroring the ChatPanel
+  // send→stop button. `canStart` gates idle→compress; `canCancel` is true
+  // only while a compaction is in flight (the session is otherwise busy).
+  const canStart = isIdle && !isCompacting && contextUsage != null;
+  const canCancel = isCompacting;
+  const canAct = canStart || canCancel;
 
 const handleCompressSummary = () => {
-    if (!canAct) return;
+    if (!canStart) return;
     // ADR-076 §决策 4: over HTTP now; COMPRESS_SUMMARY is the
     // `CompressType::SUMMARY` wire value.
     sendCompressAction(agentId, sessionId, COMPRESS_SUMMARY);
+    setOpen(false);
+  };
+
+  const handleCancelCompact = () => {
+    if (!canCancel) return;
+    // 3 = CompressType::CANCEL (ADR-083). The Runtime aborts the
+    // distillation call and leaves history untouched.
+    cancelCompressAction(agentId, sessionId);
     setOpen(false);
   };
 
@@ -345,7 +359,7 @@ const handleCompressSummary = () => {
 
             {/* ADR-074: per-session window editor (inline, same popover). */}
             {editingWindow && (
-              <div className="mt-2.5 rounded-md border border-border-outer bg-zinc-50/80 p-2  dark:bg-zinc-800/50">
+              <div className="mt-2.5 rounded-md border border-border-outer p-2">
                 <div className="flex items-center gap-1.5">
                   <input
                     type="number"
@@ -362,7 +376,7 @@ const handleCompressSummary = () => {
                     }}
                     placeholder={formatTokens(contextUsage?.context_window ?? 0)}
                     aria-label={t("contextUsage.editWindow")}
-                    className="w-full min-w-0 rounded border border-zinc-300 bg-white px-1.5 py-1 text-xs tabular-nums text-text-secondary outline-none focus:border-indigo-400 dark:border-zinc-600 dark:bg-zinc-900 "
+                    className="w-full min-w-0 rounded border border-input-border bg-input-bg px-1.5 py-1 text-xs tabular-nums text-text-secondary outline-none focus:border-indigo-400 "
                   />
                   <span className="shrink-0 text-[10px] text-text-tertiary">{t("contextUsage.windowUnitK")}</span>
                 </div>
@@ -397,7 +411,7 @@ const handleCompressSummary = () => {
                   <button
                     type="button"
                     onClick={saveWindow}
-                    className="rounded bg-indigo-600 px-2 py-1 text-[11px] font-medium text-white transition-colors hover:bg-indigo-500"
+                    className="rounded bg-[var(--color-accent)] px-2 py-1 text-[11px] font-medium text-white transition-[filter] hover:brightness-90"
                   >
                     {t("contextUsage.save")}
                   </button>
@@ -511,19 +525,34 @@ const handleCompressSummary = () => {
           ) : null}
 
           <div className="border-t border-border-divider" />
+          {/* ADR-083: dual-state button — idle → "compress summary";
+              compacting → a clickable "cancel compaction" (accent colour +
+              Square icon), same shape as the ChatPanel send→stop button. */}
           <button
-            onClick={handleCompressSummary}
+            onClick={isCompacting ? handleCancelCompact : handleCompressSummary}
             disabled={!canAct}
+            aria-label={isCompacting
+              ? t("contextUsage.cancelCompact")
+              : t("contextUsage.compressSummary")}
             className={cn(
               "mx-3 mb-2.5 mt-2 flex w-[calc(100%-1.5rem)] items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors",
-              "bg-zinc-100 text-text-secondary hover:bg-zinc-200 hover:text-zinc-900",
-              "dark:bg-white/10  dark:hover:bg-white/15 dark:hover:text-zinc-100",
+              isCompacting
+                ? "bg-[var(--color-accent)]/10 text-[var(--color-accent)] hover:bg-[var(--color-accent)]/20"
+                : "bg-zinc-100 text-text-secondary hover:bg-zinc-200 hover:text-zinc-900 dark:bg-white/10 dark:hover:bg-white/15 dark:hover:text-zinc-100",
               "disabled:cursor-not-allowed disabled:opacity-40",
             )}
           >
-            {isCompacting
-              ? t("contextUsage.compressing")
-              : t("contextUsage.compressSummary")}
+            {isCompacting ? (
+              <>
+                <Square size={14} fill="currentColor" />
+                {t("contextUsage.cancelCompact")}
+              </>
+            ) : (
+              <>
+                <Minimize2 size={14} />
+                {t("contextUsage.compressSummary")}
+              </>
+            )}
           </button>
         </div>
       )}

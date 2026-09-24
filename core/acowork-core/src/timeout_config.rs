@@ -63,6 +63,15 @@ pub struct Timeouts {
     #[serde(default = "default_tool_timeout_ms")]
     pub tool_timeout_ms: u64,
 
+    /// ADR-083: end-to-end deadline for ONE context compaction, in
+    /// milliseconds. Covers the whole distill target fallback chain —
+    /// the three tiers share this single budget rather than each getting
+    /// its own (`provider_request_timeout_ms` is per-HTTP-call and is a
+    /// different layer). On expiry the compaction fails fast instead of
+    /// letting the UI spin for up to `timeout × retries × tiers`.
+    #[serde(default = "default_compaction_deadline_ms")]
+    pub compaction_deadline_ms: u64,
+
     // ── Session lifecycle layer ──
     /// Session in-memory eviction threshold in seconds (Runtime side).
     #[serde(default = "default_session_idle_timeout_secs")]
@@ -105,6 +114,10 @@ impl Timeouts {
     /// Single tool execution timeout as a [`Duration`].
     pub fn tool_exec(&self) -> Duration {
         Duration::from_millis(self.tool_timeout_ms)
+    }
+    /// ADR-083: end-to-end context compaction deadline as a [`Duration`].
+    pub fn compaction(&self) -> Duration {
+        Duration::from_millis(self.compaction_deadline_ms)
     }
     /// Session in-memory eviction threshold as a [`Duration`].
     pub fn session_idle(&self) -> Duration {
@@ -170,6 +183,7 @@ impl Default for Timeouts {
             tool_http_timeout_ms: default_tool_http_timeout_ms(),
             iteration_timeout_ms: default_iteration_timeout_ms(),
             tool_timeout_ms: default_tool_timeout_ms(),
+            compaction_deadline_ms: default_compaction_deadline_ms(),
             session_idle_timeout_secs: default_session_idle_timeout_secs(),
             idle_timeout_secs: default_idle_timeout_secs(),
             retry: RetryConfig::default(),
@@ -196,6 +210,9 @@ fn default_iteration_timeout_ms() -> u64 {
 }
 fn default_tool_timeout_ms() -> u64 {
     600_000 // 10 min
+}
+fn default_compaction_deadline_ms() -> u64 {
+    300_000 // ADR-083: 5 min — bounded end-to-end compaction (was unbounded)
 }
 fn default_session_idle_timeout_secs() -> u64 {
     300 // 5 min
@@ -298,6 +315,7 @@ pub fn validate(t: &Timeouts) -> Result<(), String> {
         ("tool_http_timeout_ms", t.tool_http_timeout_ms),
         ("iteration_timeout_ms", t.iteration_timeout_ms),
         ("tool_timeout_ms", t.tool_timeout_ms),
+        ("compaction_deadline_ms", t.compaction_deadline_ms),
     ];
     for (name, ms) in ms_fields {
         if *ms < one_sec_ms {
@@ -415,10 +433,27 @@ mod tests {
         assert_eq!(t.provider_stream_read(), Duration::from_millis(45_000));
         assert_eq!(t.tool_http(), Duration::from_millis(30_000));
         assert_eq!(t.tool_exec(), Duration::from_millis(600_000));
+        assert_eq!(t.compaction(), Duration::from_millis(300_000));
         assert_eq!(t.session_idle(), Duration::from_secs(300));
         assert_eq!(t.idle_agent(), Duration::from_secs(1800));
         assert_eq!(t.retry.backoff_base(), Duration::from_millis(1_000));
         assert_eq!(t.retry.backoff_cap(), Duration::from_millis(10_000));
+    }
+
+    #[test]
+    fn default_compaction_deadline_is_five_minutes() {
+        // ADR-083: the whole compaction (all distill tiers) is bounded to 5 min.
+        assert_eq!(Timeouts::default().compaction_deadline_ms, 300_000);
+        assert_eq!(Timeouts::default().compaction(), Duration::from_secs(300));
+    }
+
+    #[test]
+    fn sub_second_compaction_deadline_is_rejected() {
+        let t = Timeouts {
+            compaction_deadline_ms: 500,
+            ..Default::default()
+        };
+        assert!(validate(&t).is_err());
     }
 
     #[test]
@@ -434,6 +469,7 @@ mod tests {
             "tool_http_timeout_ms",
             "iteration_timeout_ms",
             "tool_timeout_ms",
+            "compaction_deadline_ms",
             "session_idle_timeout_secs",
             "idle_timeout_secs",
         ] {

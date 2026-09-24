@@ -340,7 +340,7 @@ mod tests {
             home.path(),
         );
         assert!(body.contains("<string>gpu-server</string>"));
-        assert!(body.contains("<string>192.168.1.10</string>"));
+        assert!(body.contains("<string>192.168.1.10:19875</string>"));
         assert!(body.contains("<key>KeepAlive</key>"));
         assert!(body.contains("<key>RunAtLoad</key>"));
     }

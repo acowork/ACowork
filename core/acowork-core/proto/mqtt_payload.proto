@@ -612,6 +612,17 @@ message SessionMessage {
     // WITHOUT downloading JSONL. Published every 5 s while a tool runs.
     // Short tools (5s) never trigger this event.
     ToolProgressPayload         tool_progress           = 24;
+    // ADR-083: context compaction ended WITHOUT producing a summary —
+    // user cancelled, the 5-minute deadline expired, or every distill
+    // tier failed. Carries the reason so the frontend can reset the
+    // dual-state button and show the right toast. The success path keeps
+    // `compacting_ended`.
+    //
+    // ADR-076 §决策 4: kept at develop's 33 rather than renumbered into the
+    // 25..32 gap. The gap is what the *deleted* command payloads used to
+    // occupy; an event does not care about contiguity, and 33 keeps
+    // ADR-083's doc/references valid.
+    CompactionCancelledPayload  compaction_cancelled    = 33;
   }
 }
 
@@ -661,6 +672,20 @@ message ReasoningPayload {
 
 message CompactingPayload {
   string session_id = 1;
+}
+
+// ADR-083: reason a compaction ended without a summary. Mirrors the
+// runtime-side `CompactionCancelReason`.
+enum CompactionCancelReason {
+  COMPACTION_CANCEL_REASON_UNSPECIFIED = 0;
+  COMPACTION_CANCEL_REASON_USER        = 1;  // user pressed "cancel compaction"
+  COMPACTION_CANCEL_REASON_TIMEOUT     = 2;  // compaction_deadline_ms expired
+  COMPACTION_CANCEL_REASON_FAILED      = 3;  // every distill tier failed
+}
+
+message CompactionCancelledPayload {
+  string session_id = 1;
+  CompactionCancelReason reason = 2;
 }
 
 // ADR-033: ContextUsagePayload is delivered to the frontend on every

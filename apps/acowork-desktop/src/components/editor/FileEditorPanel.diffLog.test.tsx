@@ -188,6 +188,9 @@ function diffFile(overrides: Record<string, unknown> = {}) {
     mode: "edit",
     kind: "diff",
     gitDiffKind: "modified",
+    // Mirrors openVirtualFile's default seed — new diff tabs open
+    // inline. Tests can override via `diffFile({ diffInlineMode: false })`.
+    diffInlineMode: true,
     ...overrides,
   };
 }
@@ -219,7 +222,7 @@ beforeEach(() => {
 });
 
 describe("FileEditorPanel virtual git tabs (ADR-078 decision 7)", () => {
-  it("renders a read-only side-by-side DiffEditor for a diff tab", async () => {
+  it("renders a read-only inline DiffEditor for a diff tab by default", async () => {
     const file = diffFile();
     h.editorState.openFiles = [file];
     h.editorState.activeFileId = file.id;
@@ -239,10 +242,30 @@ describe("FileEditorPanel virtual git tabs (ADR-078 decision 7)", () => {
     expect(props.modified).toBe("working-tree body");
     expect(props.language).toBe("typescript");
     expect(props.options?.readOnly).toBe(true);
-    expect(props.options?.renderSideBySide).toBe(true);
+    // Default is INLINE (single pane +/- colour blocks). User can flip
+    // to side-by-side via the GitVirtualNav toggle — see the toggle
+    // test in GitVirtualNav.test.tsx.
+    expect(props.options?.renderSideBySide).toBe(false);
     // The plain (single-pane) editor must NOT be used for diffs.
     expect(h.MockEditor).not.toHaveBeenCalled();
     await act(async () => {}); // flush the async initMonaco state update
+  });
+
+  it("renders side-by-side when diffInlineMode is explicitly false", async () => {
+    const file = diffFile({ diffInlineMode: false });
+    h.editorState.openFiles = [file];
+    h.editorState.activeFileId = file.id;
+
+    render(<FileEditorPanel width={800} />);
+
+    await vi.waitFor(() => {
+      expect(h.MockDiffEditor).toHaveBeenCalled();
+    });
+    const props = h.MockDiffEditor.mock.calls.at(-1)![0] as {
+      options?: { renderSideBySide?: boolean };
+    };
+    expect(props.options?.renderSideBySide).toBe(true);
+    await act(async => {});
   });
 
   it("renders a read-only single-pane Editor for a log tab", async () => {

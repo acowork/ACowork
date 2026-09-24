@@ -27,7 +27,7 @@ use crate::error::Result;
 ///
 /// | Path pattern        | Behavior                                |
 /// |---------------------|-----------------------------------------|
-/// | `memory/`           | Always excluded (Grafeo raw DB)         |
+/// | `memory/`           | Always excluded (agent-private DB)      |
 /// | `workspace/`        | Always excluded                         |
 /// | `runtime/`          | Always excluded                         |
 /// | `*.log`, `*.tmp`    | Always excluded                         |
@@ -35,13 +35,10 @@ use crate::error::Result;
 /// | `config/`           | Excluded unless `include_config`        |
 /// | Everything else     | Included                                |
 ///
-/// # Grafeo data
+/// # Agent-private data
 ///
-/// Instead of copying the raw `memory/` directory, Grafeo nodes are
-/// exported via `GrafeoStore::export_nodes_filtered` and serialized
-/// into `memory/export.json` inside the package. This filtering is
-/// handled separately by the caller (e.g., the Gateway) since
-/// acowork-sign does not depend on acowork-grafeo directly.
+/// `memory/` holds the agent-private SQLite store (ADR-082) and is always
+/// excluded: a distributable package carries no agent state.
 pub fn build_agent_package(
     agent_dir: &Path,
     output_path: &Path,
@@ -109,24 +106,6 @@ fn walk_and_add(
     Ok(())
 }
 
-/// Add exported Grafeo nodes as `memory/export.json` inside the ZIP archive.
-///
-/// This function takes a pre-serialized JSON string of filtered Grafeo nodes
-/// and embeds it into the archive. The caller is responsible for calling
-/// `GrafeoStore::export_nodes_filtered` and serializing the result, since
-/// acowork-sign does not depend on acowork-grafeo directly.
-pub fn add_grafeo_export_to_archive(
-    archive: &mut zip::ZipWriter<fs::File>,
-    export_json: &str,
-) -> Result<()> {
-    let zip_options = zip::write::SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Deflated);
-
-    archive.start_file("memory/export.json", zip_options)?;
-    archive.write_all(export_json.as_bytes())?;
-    Ok(())
-}
-
 /// Check if a conversations directory exists and has JSONL files.
 ///
 /// Useful for UI to show data sizes before packaging.
@@ -174,7 +153,7 @@ mod tests {
             b"{\"_type\":\"session_meta\",\"session_id\":\"20260501_abc\"}\n{\"role\":\"user\",\"content\":\"Hello\"}\n",
         )
         .unwrap();
-        fs::write(dir.join("memory/private.grafeo"), b"<binary data>").unwrap();
+        fs::write(dir.join("memory/private.sqlite"), b"<binary data>").unwrap();
         fs::write(dir.join("workspace/state.json"), b"{}").unwrap();
         fs::write(dir.join("runtime/lock.pid"), b"12345").unwrap();
         fs::write(dir.join("config/settings.toml"), b"key = \"value\"").unwrap();
@@ -368,45 +347,6 @@ mod tests {
 
         // Normal files should be included
         assert!(entries.contains(&"manifest.toml".to_string()));
-
-        let _ = fs::remove_dir_all(&tmp_dir);
-    }
-
-    #[test]
-    fn test_add_grafeo_export_to_archive() {
-        let tmp_dir = std::env::temp_dir().join("acowork-test-grafeo-export");
-        let _ = fs::remove_dir_all(&tmp_dir);
-        fs::create_dir_all(&tmp_dir).unwrap();
-
-        let output_path = tmp_dir.join("grafeo_export.agent");
-        let output_file = fs::File::create(&output_path).unwrap();
-        let mut archive = zip::ZipWriter::new(output_file);
-        let zip_options = zip::write::SimpleFileOptions::default();
-
-        archive.start_file("manifest.toml", zip_options).unwrap();
-        archive.write_all(b"agent_id = \"com.test\"").unwrap();
-
-        let export_json = r#"[{"label":"Knowledge","data":{"subject":"agent","predicate":"framework","object":"ACowork"}}]"#;
-        add_grafeo_export_to_archive(&mut archive, export_json).unwrap();
-
-        archive.finish().unwrap();
-
-        // Verify the archive contains the Grafeo export
-        let file = fs::File::open(&output_path).unwrap();
-        let mut archive = zip::ZipArchive::new(file).unwrap();
-
-        let mut export_file = archive.by_name("memory/export.json").unwrap();
-        let mut content = String::new();
-        export_file.read_to_string(&mut content).unwrap();
-
-        assert!(
-            content.contains("Knowledge"),
-            "Export should contain Knowledge label"
-        );
-        assert!(
-            content.contains("ACowork"),
-            "Export should contain node data"
-        );
 
         let _ = fs::remove_dir_all(&tmp_dir);
     }

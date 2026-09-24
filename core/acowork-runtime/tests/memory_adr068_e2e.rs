@@ -4,11 +4,9 @@ use std::sync::{Arc, Mutex};
 use acowork_core::EmbeddingProvider;
 use acowork_core::tools::traits::Tool;
 
-use acowork_grafeo::consolidation::{DefaultEpisodicDistiller, EpisodicDistiller};
-use acowork_grafeo::grafeo::GrafeoStore;
-
 use acowork_memory::consolidation::{
-    DistillerConfig, LlmMessage, LlmResponse, PromotionDecision, PromotionKind, TripleExtractorLlm,
+    DefaultEpisodicDistiller, DistillerConfig, EpisodicDistiller, LlmMessage, LlmResponse,
+    PromotionDecision, PromotionKind, TripleExtractorLlm,
 };
 use acowork_memory::types::{AutobioCategory, Episode, KnowledgeSubType};
 use acowork_memory::{MemoryManager, MemoryManagerConfig, MemoryProvider, MemoryQuery, labels};
@@ -120,13 +118,16 @@ fn judge_response(decision: &str, confidence: f32, content: &str) -> String {
 // ============================================================================
 
 struct Adr068E2e {
-    store: Arc<GrafeoStore>,
+    store: Arc<acowork_sqlite::SqliteStore>,
     handle: Arc<MemorySessionHandle>,
 }
 
 impl Adr068E2e {
     fn new() -> Self {
-        let store = Arc::new(GrafeoStore::new_in_memory().expect("in-memory store"));
+        let store = Arc::new(
+            acowork_sqlite::SqliteStore::open_in_memory(acowork_memory::types::DEFAULT_EMBEDDING_DIM)
+                .expect("in-memory store"),
+        );
         let handle = Arc::new(MemorySessionHandle::new(Some(Arc::new(
             DeterministicEmbedding,
         ))));
@@ -344,7 +345,7 @@ async fn distiller_promotes_autobio_limitation_and_audits() {
     // node (rollback requires the mapping to exist in the data).
     assert_eq!(
         eval.promoted_node_id,
-        node.id.map(|n| n.0),
+        node.id,
         "promoted_node_id must equal the stored node id"
     );
     assert!(eval.promoted_node_id.is_some());
@@ -404,7 +405,7 @@ async fn distiller_promotes_fact_with_two_evidence_episodes() {
     assert_eq!(eval.promoted_kind, PromotionKind::Fact);
     assert!(matches!(eval.decision, PromotionDecision::Promoted));
 
-    let node = e2e
+    let (node_id, node) = e2e
         .store
         .find_knowledge_by_subject("user", "lives_in")
         .expect("lookup ok")
@@ -416,7 +417,7 @@ async fn distiller_promotes_fact_with_two_evidence_episodes() {
     // A4: the audit entry maps to the REAL storage id of the promoted node.
     assert_eq!(
         eval.promoted_node_id,
-        node.id.map(|n| n.0),
+        Some(node_id),
         "promoted_node_id must equal the stored node id"
     );
     assert!(eval.promoted_node_id.is_some());

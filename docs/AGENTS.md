@@ -1,4 +1,4 @@
-# AGENTS.md — docs/
+﻿# AGENTS.md — docs/
 
 Public architecture & design docs for ACowork.AI (v3.x).
 
@@ -15,7 +15,7 @@ docs/
 ├── AGENTS.md                # This file (index)
 ├── design/{zh,en}/          # 架构设计（zh: 19 篇；en: 待翻译占位）
 ├── module-design/{zh,en}/   # Rust crate 规格（zh: 8 篇；en: AGENTS.md 占位）
-├── adr/{zh,en}/             # 架构决策记录（zh: 54；en: 1）
+├── adr/{zh,en}/             # 架构决策记录（zh: 76；en: 2）
 ├── prd/{zh,en}/             # 平台 PRD + Desktop UI/UX（zh: 2；en: 占位）
 ├── protocols/{zh,en}/       # API 协议参考（zh: HTTP / MQTT / RAG 集成；en: 占位）
 ├── mcp-server-research/{zh,en}/   # MCP Server 集成调研（en: 1；zh: 占位）
@@ -33,7 +33,7 @@ docs/
 | Rust crate 结构 | [`module-design/zh/00-overview.md`](./module-design/zh/00-overview.md) |
 | Security / 隔离 | [`design/zh/08-security.md`](./design/zh/08-security.md) |
 | Gateway 组件 | [`module-design/zh/03-gateway.md`](./module-design/zh/03-gateway.md) |
-| 记忆（Grafeo） | [`module-design/zh/04-grafeo.md`](./module-design/zh/04-grafeo.md) |
+| 记忆（SQLite） | [`module-design/zh/04-memory-sqlite.md`](./module-design/zh/04-memory-sqlite.md) |
 | 平台 PRD | [`prd/zh/prd.md`](./prd/zh/prd.md) |
 | Desktop UI/UX | [`prd/zh/prd-ui-ux.md`](./prd/zh/prd-ui-ux.md) |
 | HTTP API 协议 | [`protocols/zh/http.md`](./protocols/zh/http.md) |

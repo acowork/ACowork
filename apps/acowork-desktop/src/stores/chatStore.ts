@@ -953,6 +953,10 @@ interface ChatStore {
    *  `compressType` is the proto `CompressType` enum value:
    *    1 = SUMMARY, 2 = TOOL_RESULTS. */
   sendCompressAction: (agentId: string, sessionId: string, compressType: number) => void;
+  /** ADR-083: Cancel the in-flight context compaction (`compress_type = 3`).
+   *  The Runtime aborts the distillation LLM call within ~500ms and leaves
+   *  history untouched, so the user can switch model and retry. */
+  cancelCompressAction: (agentId: string, sessionId: string) => void;
   /** ADR-045: Cancel an in-flight tool execution by tool_call_id.
    *  Publishes a `cancel_tool` control message to the Runtime.
    *  The Runtime maps toolCallId → pending tokio task and aborts it. */
@@ -1584,6 +1588,20 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     sessionControl
       .compressSession(agentId, sessionId, compressType)
       .catch((err: unknown) => log.warn("[ChatStore] compress action failed:", err));
+  },
+
+  /** ADR-083: Ask the Runtime to cancel the in-flight context compaction.
+   *  Same endpoint as compression, with `compress_type = 3`
+   *  (CompressType::CANCEL) — the Runtime fires the running compaction's
+   *  cancel handle immediately and publishes `compaction_cancelled`.
+   *
+   *  ADR-076 §决策 4: over the Gateway's authenticated HTTP API, like every
+   *  other session action. Publishing straight to the broker (as this first
+   *  did) would skip the owner check the HTTP path performs. */
+  cancelCompressAction: (agentId: string, sessionId: string) => {
+    sessionControl
+      .compressSession(agentId, sessionId, sessionControl.COMPRESS_CANCEL)
+      .catch((err: unknown) => log.warn("[ChatStore] cancel compaction failed:", err));
   },
 
   /**
@@ -3039,7 +3057,8 @@ function mergeDocumentUploads(entries: ConversationEntry[], agentId: string): Ch
 const CONTENT_EVENT_TYPES = new Set([
   "done", "error", "tool_approval_needed", "ask_question",
   "context_usage", "session_state", "stopped", "todo_list_updated",
-  "compacting_started", "compacting_ended", "model_confirmed", "reasoning_effort_confirmed",
+  "compacting_started", "compacting_ended", "compaction_cancelled",
+  "model_confirmed", "reasoning_effort_confirmed",
   "reasoning_started", "reasoning_ended",
   "memory_updated", "skill_executed",
   "session_config", "session_state",
@@ -3443,6 +3462,24 @@ export function handleMessageEvent(
         get().loadSessionMessages(agentId, sid);  // ADR-035 Phase 3: no incremental
       }
       break;
+
+    // ADR-083: the compaction ended without a summary (user cancel, deadline
+    // expiry, or every distill tier failed). Reset the dual-state button —
+    // `compacting_ended` is NOT sent on this path — and surface why.
+    case "compaction_cancelled": {
+      if (sid) {
+        set((state) => updateSessionState(state, agentId, sid, { isCompacting: false }));
+      }
+      const reason = data.reason as string | undefined;
+      const message =
+        reason === "timeout"
+          ? i18n.t("contextUsage.compactionTimeout")
+          : reason === "failed"
+            ? i18n.t("contextUsage.compactionFailed")
+            : i18n.t("contextUsage.compactionCancelled");
+      showToast({ type: reason === "failed" ? "error" : "info", message });
+      break;
+    }
 
     case "embedding_migration_progress": {
       // Forward migration progress from WebSocket to gatewayStore.

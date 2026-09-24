@@ -23,7 +23,7 @@
 //!     in top-5).
 //!
 //! ADR-068 note: `MemoryStoreTool` only writes Episodes now, so the corpus is
-//! seeded directly into the Knowledge (sediment) layer via `GrafeoStore`'s
+//! seeded directly into the Knowledge (sediment) layer through the provider's
 //! native store path — the same path the EpisodicDistiller uses on promotion.
 //! The before/after fold states are produced by passing `fold_into_object` to
 //! the seed helper (the runtime write-time fold no longer exists on the LLM
@@ -31,12 +31,13 @@
 //! intentionally independent of the LLM write chain.
 //!
 //! Determinism:
-//!   - `enable_graph_expand = false` to disable PageRank boost (random
-//!     HashMap iteration), keeping MRR reproducible across processes.
+//!   - a single deterministic retrieval pipeline: the PageRank-style boost was
+//!     removed with the graph layer (ADR-082 D4), and its HashMap iteration
+//!     order was the only source of run-to-run MRR drift.
 //!   - `DeterministicEmbedding` (same-text-same-vector) keeps vector scores
 //!     stable.
 //!
-//! IMPORTANT: uses in-memory `GrafeoStore`, never touches the running
+//! IMPORTANT: uses an in-memory SQLite store, never touches the running
 //! Gateway / Runtime / Desktop processes or their ports.
 
 use std::collections::HashMap;
@@ -46,16 +47,12 @@ use chrono::Utc;
 
 use acowork_core::EmbeddingProvider;
 
-use acowork_grafeo::grafeo::GrafeoStore;
-use acowork_grafeo::retrieval_metrics::{EvalQuery, evaluate_retrieval_quality};
-use acowork_grafeo::types::KnowledgeNode as GrafeoKnowledgeNode;
+use acowork_memory::retrieval_metrics::{EvalQuery, evaluate_retrieval_quality};
 
 use acowork_memory::{
     KnowledgeSubType, MemoryManager, MemoryManagerConfig, MemoryQuery, NodeStatus, PrivacyLevel,
-    labels,
 };
 
-use grafeo_common::types::NodeId;
 
 // ============================================================================
 // Deterministic embedding (mirrors M4 harness)
@@ -98,12 +95,17 @@ impl EmbeddingProvider for DeterministicEmbedding {
 // ============================================================================
 
 struct BenchE2e {
-    store: Arc<GrafeoStore>,
+    store: Arc<acowork_sqlite::SqliteStore>,
 }
 
 impl BenchE2e {
     fn new() -> Self {
-        let store = Arc::new(GrafeoStore::new_in_memory().expect("in-memory store"));
+        let store = Arc::new(
+            acowork_sqlite::SqliteStore::open_in_memory(
+                acowork_memory::types::DEFAULT_EMBEDDING_DIM,
+            )
+            .expect("in-memory store"),
+        );
         Self { store }
     }
 
@@ -111,7 +113,7 @@ impl BenchE2e {
     ///
     /// ADR-068 — see file header: the benchmark measures sediment-layer
     /// retrieval quality, so the corpus is seeded directly into the Knowledge
-    /// layer via `GrafeoStore`'s native store path (the same path the
+    /// layer through the provider's store path (the same path the
     /// EpisodicDistiller uses on promotion) instead of the LLM `memory_store`
     /// tool, which now only writes Episodes.
     async fn store_knowledge(&self, content: &str, confidence: f32, importance: f32) -> u64 {
@@ -170,8 +172,7 @@ impl BenchE2e {
             }
         }
 
-        let node = GrafeoKnowledgeNode {
-            id: None,
+        let node = acowork_memory::KnowledgeNode {
             subject: "user".to_string(),
             predicate: String::new(),
             object,
@@ -188,15 +189,8 @@ impl BenchE2e {
             privacy: PrivacyLevel::Personal,
             importance,
         };
-        self.store
-            .store_node(
-                labels::KNOWLEDGE,
-                node.to_properties()
-                    .iter()
-                    .map(|(k, v)| (k.as_str(), v.clone())),
-            )
-            .expect("store_node ok")
-            .0
+        acowork_memory::MemoryProvider::store_knowledge(self.store.as_ref(), &node)
+            .expect("store_knowledge ok")
     }
 }
 
@@ -323,7 +317,6 @@ async fn run_state(
     let mut cfg = MemoryManagerConfig::default();
     cfg.quality.exclude_dormant = true; // M5 ships D1 on by default
     cfg.quality.keyword_index = keyword_index;
-    cfg.enable_graph_expand = false; // determinism — see M4 report §5.2
     let manager = MemoryManager::new(cfg);
 
     let mut per_query: Vec<Vec<u64>> = Vec::with_capacity(relevant.len());
@@ -413,7 +406,7 @@ async fn m5_keyword_index_before_after() {
     for key in ["D1", "D2", "D3"] {
         let id = ids_by_key[key];
         e2e.store
-            .transition_to_dormant(NodeId::new(id))
+            .transition_to_dormant(id)
             .expect("transition ok");
     }
 
@@ -471,7 +464,7 @@ async fn m5_keyword_index_before_after() {
         let id = m5_ids[key];
         m5_store
             .store
-            .transition_to_dormant(NodeId::new(id))
+            .transition_to_dormant(id)
             .expect("transition ok");
     }
     let mut m5_relevant: Vec<EvalQuery> = Vec::new();

@@ -147,7 +147,7 @@ export function AskQuestionCard({ event, agentId, sessionId, onAnswer }: AskQues
         {/* Other textarea */}
         {isOtherSelected && !submitted && (
           <StyledTextarea
-            className="mt-1 ml-4 border-zinc-300 bg-modal-surface dark:border-zinc-600"
+            className="mt-1 ml-4 "
             rows={1}
             placeholder={t("askQuestionCard.placeholder")}
             value={otherText}

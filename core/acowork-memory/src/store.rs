@@ -1,7 +1,7 @@
 //! MemoryStore trait for storage backend abstraction.
 //!
 //! This trait defines the original interface for memory storage backends.
-//! Grafeo (acowork-grafeo) is the primary implementation.
+//! SQLite (`acowork-sqlite`) is the only implementation.
 //!
 //! The extended `MemoryProvider` trait (ADR-051) supersedes this trait.
 //! During the migration period, both traits coexist. Once all callers
@@ -18,7 +18,7 @@ use crate::types::{
 
 /// MemoryStore trait - standardized interface for memory storage backends.
 ///
-/// Implementations can be: grafeo-engine (current), Sled, LMDB, remote service,
+/// Implementations can be: SQLite (current), Sled, LMDB, remote service,
 /// or in-memory mock for testing.
 ///
 /// Design ref: docs/05-memory.md §10.3
@@ -67,13 +67,6 @@ pub trait MemoryStore: Send + Sync {
     ///
     /// Searches across all labels (Episodic/Knowledge/Procedural/Autobiographical).
     fn hybrid_search(&self, query: &MemoryQuery) -> Result<Vec<SearchResult>>;
-
-    /// Graph expansion: diffuse from seed nodes along edges.
-    ///
-    /// # Arguments
-    /// * `seeds` - Seed nodes from hybrid_search
-    /// * `hops` - Maximum expansion depth (capped at 3)
-    fn graph_expand(&self, seeds: &[SearchResult], hops: u8) -> Result<Vec<SearchResult>>;
 
     // ── Forgetting ───────────────────────────────────────────────────────
 

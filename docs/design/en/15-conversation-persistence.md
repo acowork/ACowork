@@ -1,4 +1,4 @@
-# Conversation Persistence (Session Actor Architecture)
+﻿# Conversation Persistence (Session Actor Architecture)
 
 > Version: v3.1 | Last Updated: 2026-04-15
 
@@ -126,7 +126,7 @@ Although each Session has independent state, certain resources must be shared:
 
 - **LLM Provider** (AgentCore.Provider): All sessions share one Provider instance (maintains connection pool, rate limit, etc.)
 - **Tool Registry** (AgentCore.Tools): Tools are stateless; multiple sessions can concurrently invoke same tool
-- **Grafeo**: Each session's History/Coversation writes to same Grafeo, distinguished by session_id
+- **SQLite Memory Layer**: Each session's History/Conversation writes to same SQLite, distinguished by session_id
 - **Vault Keys**: Shared, distributed by Gateway once, all sessions use same Key
 
 **Concurrency model**: `Arc<AgentCore>` shared via `Arc::clone`, no locking needed (AgentCore itself is immutable after initialization). Session state uses `Arc<RwLock<SessionState>>`, with reads more than writes.
@@ -296,7 +296,7 @@ Reconstruct History from events:
 ```
 Episode extraction trigger:
 ├─ Compaction triggered (80% context usage) → Compact Model outputs summary
-│   ├─ Summary writes to Grafeo distilled Episode
+│   ├─ Summary writes to SQLite memory layer distilled Episode
 │   ├─ Summary includes entities and triples (auto-extracted by Compact Model)
 │   └─ is_compacted = true; reset on new user message
 │
@@ -304,7 +304,7 @@ Episode extraction trigger:
     ├─ If is_compacted = true: skip (already distilled by Compaction)
     └─ If is_compacted = false: trigger final distillation
         ├─ Compact Model outputs summary
-        └─ Write to Grafeo distilled Episode
+        └─ Write to SQLite memory layer distilled Episode
 ```
 
 ### 3.2 Distillation vs Original Episode
@@ -368,7 +368,7 @@ Parse output, construct Distilled Episode
 Generate embedding via EmbeddingProvider
        │
        ▼
-Write Episode to Grafeo (experiential layer)
+Write Episode to SQLite memory layer (experiential layer)
        │
        ▼
 Set is_compacted = true
@@ -381,11 +381,11 @@ Per ADR-011, Compaction and Distillation are unified as single Compact Model cal
 | Operation | Purpose | Output |
 |-----------|---------|--------|
 | Compaction | Replace memory middle section, free up context window | Summary text replaces Conversation middle section |
-| Distillation | Write to experiential layer, persistent storage | Summary text writes to Grafeo Episode |
+| Distillation | Write to experiential layer, persistent storage | Summary text writes to SQLite memory layer Episode |
 
 Unified call's output simultaneously serves two needs:
 - Compaction: `replace_middle_with_summary` (preserve system prompt + last 3 rounds, replace middle with summary)
-- Distillation: write to Grafeo
+- Distillation: write to SQLite memory layer
 
 This avoids "Compaction call + Distillation call" duplicate LLM invocation, halves cost.
 
@@ -411,7 +411,7 @@ Agent Runtime startup
    └─ Don't auto-resume, wait for explicit activation
        │
        ▼
-4. Load Grafeo (SkillExperience, KnowledgeNode, ProceduralNode, AutobiographicalNode etc.)
+4. Load SQLite memory layer (SkillExperience, KnowledgeNode, ProceduralNode, AutobiographicalNode etc.)
        │
        ▼
 5. Agent Runtime ready

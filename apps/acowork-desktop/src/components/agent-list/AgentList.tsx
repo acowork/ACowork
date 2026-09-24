@@ -651,7 +651,7 @@ export function AgentList({ width }: AgentListProps) {
             placeholder={isCollapsed ? "" : t("agentList.searchPlaceholder")}
             aria-label={t("agentList.searchPlaceholder")}
             className={cn(
-              "rounded-md bg-nav-control pl-7 py-1.5",
+              "rounded-md bg-input-bg pl-7 py-1.5",
               isCollapsed ? "min-w-0 pr-0" : "pr-2",
             )}
           />

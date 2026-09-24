@@ -1,8 +1,10 @@
 /**
  * GitStatusBar — ADR-078 decision 6. Collapsible version-control strip at
  * the bottom of the FileEditorPanel. Visual spec follows NodeGroupHeader
- * (AgentList.tsx): h-6, 10px uppercase tracking-wide, zinc-400/500,
- * border-y, hover tint, ChevronRight rotation.
+ * (AgentList.tsx): min-h-[2.5rem] (40px, matches the workspace-selector
+ * toolbar row and the file-search row above), 10px uppercase
+ * tracking-wide, zinc-400/500, border-y, hover tint, ChevronRight
+ * rotation.
  *
  * Right-side controls: `History` (clock icon) opens a CommitPicker
  * dropdown letting the user view files from any commit on the
@@ -127,10 +129,12 @@ export function GitStatusBar({ agentId, workspaceId }: GitStatusBarProps) {
         title={title}
         data-testid="git-status-bar"
         className={cn(
-          // h-6 — mirrors NodeGroupHeader (AgentList.tsx L847).
-          // Text color aligned with WorkspaceSelector's toolbarButton (lib/ui-styles.ts L29)
-          // so the bottom-of-panel strip reads as part of the same toolbar family.
-          "flex h-6 w-full shrink-0 items-center gap-1.5 px-3 text-left",
+          // min-h-[2.5rem] — matches the workspace-selector row (toolbarButton
+          // py-1.5 + text-xs ≈ 40px) and the file-search row (WorkspaceExplorer
+          // L833, `min-h-[2.5rem]`) above, so the three right-panel banners
+          // read as a single height family. Was `h-6` (24px) — visually
+          // ~16px shorter than the other two banners.
+          "flex min-h-[2.5rem] w-full shrink-0 items-center gap-1.5 px-3 text-left",
           "text-[10px] font-medium uppercase tracking-wide",
           "text-text-tertiary hover:text-zinc-700 dark:hover:text-zinc-200",
           "transition-colors duration-150",

@@ -1,7 +1,9 @@
 //! acowork-memory - MemoryProvider trait and shared memory types
 //!
-//! This crate defines the MemoryProvider trait abstraction and shared types.
-//! Grafeo (acowork-grafeo) is the primary implementation.
+//! This crate defines the MemoryProvider trait abstraction, the shared memory
+//! types, and the storage-agnostic logic built on top of them (the episodic
+//! distiller, retrieval-quality metrics). Storage backends live elsewhere
+//! (`acowork-sqlite`).
 //!
 //! The `MemoryProvider` trait (ADR-051) extends the original `MemoryStore`
 //! trait with additional methods for consolidation, CRUD, and lifecycle
@@ -18,6 +20,8 @@ pub mod keyword;
 pub mod manager;
 pub mod provider;
 pub mod quality;
+pub mod retrieval_metrics;
+pub mod session_meta;
 pub mod store;
 pub mod types;
 
@@ -41,6 +45,7 @@ pub use manager::{
 
 // Re-exports: consolidation types
 pub use consolidation::{
+    DefaultEpisodicDistiller, EpisodicDistiller,
     AutobioAspect, AutobioCandidate, BehaviorPattern, ConflictAction, ConflictResolutionDetail,
     DistillerConfig, DistillerResult, EmbeddingFn, ExtractedKind, ExtractedStructure,
     GeneralizationConfig, GeneralizationResult, LlmMessage, LlmResponse, MemoryStoreInput,
@@ -56,10 +61,7 @@ pub use consolidation::MemoryStoreResult as ProcessResult;
 pub use judge::{JudgeConfig, JudgeResult, should_sample};
 
 // Re-exports: memory quality config (ADR-062 D2)
-pub use quality::{
-    ConsolidationQuality, DedupQuality, EdgeWeightQuality, GraphExpandQuality,
-    MemoryQualityConfig,
-};
+pub use quality::{ConsolidationQuality, DedupQuality, MemoryQualityConfig};
 
 // Re-exports: core memory types
 pub use types::{
@@ -69,8 +71,11 @@ pub use types::{
     NodeStatus, PrivacyLevel, ProceduralNode, PurgeResult, ResultSource, RetrievalMetrics,
     SearchResult, StoreHealth, StoreStats,
 };
+pub use session_meta::{
+    SessionMeta, SessionMetaStore, SessionScope, SessionTokens, SessionVisibility, TodoItem,
+    TodoStatus,
+};
 
-// Label and edge type constants
-pub use types::edge_types;
+// Label constants
 pub use types::labels;
 pub use types::{HintType, MemoryFilters, NodeTypeFilter};

@@ -19,7 +19,7 @@
 //! GET    /sessions/{sid}/messages                // retained
 //! POST   /sessions/{sid}/files                   // ADR-046: upload file/image
 //! GET    /files/{document_id}                    // ADR-046: download blob
-//! GET    /memory/graph                           // FIXED: now uses Grafeo
+//! GET    /memory/graph                           // reads the memory store
 //! GET    /memory/nodes                           // retained
 //! GET    /memory/nodes/{nid}                     // NEW: memory_query::get_node
 //! DELETE /memory/nodes/{nid}                     // retained
@@ -144,8 +144,8 @@ pub type SharedMemoryStore =
 
 /// Shared slot for the conversation vector index (ADR-081 §4.2, P1-2).
 ///
-/// Late-bind from Phase B: `ConversationIndex` is opened at
-/// `{work_dir}/conversation_index.grafeo` once the memory store is up, and a
+/// Late-bind from Phase B: `ConversationIndex` is built on the memory
+/// backend's SQLite store once the memory store is up, and a
 /// [`crate::conversation_index::ConversationIndexer`] task tails the
 /// JSONL conversation logs. `None` until then — the `/search`
 /// conversation scope reports `not_indexed` and search degrades to the
@@ -992,9 +992,10 @@ struct ListSessionsQuery {
 
 /// `GET /sessions` — full session list.
 ///
-/// Reads per-session meta files under `workspace/conversations/meta/`
-/// (the authoritative source per ADR-024). Supports `page` / `size`
-/// pagination; results are returned sorted by `last_active_at` descending.
+/// Reads the session-meta store (ADR-082 §4 step 3: SQLite; the legacy
+/// per-session meta files under `workspace/conversations/meta/` are gone).
+/// Supports `page` / `size` pagination; results are returned sorted by
+/// `last_active_at` descending.
 ///
 /// ADR-028 / ADR-066 (regression t-83afab47): the response top level
 /// NO LONGER carries `agent_total_*` fields — those live exclusively
@@ -1230,7 +1231,7 @@ async fn get_messages(
 
 /// `GET /memory/graph` — full memory graph (ADR-034 §11.2 #10).
 ///
-/// Phase 3 (ADR-034): now reads from the Grafeo memory store via
+/// Phase 3 (ADR-034): reads from the memory store via
 /// [`memory_query::list_nodes`] (with no pagination), instead of the
 /// legacy `.jsonl` file fallback. Returns all four user-visible memory
 /// labels (`Episodic`/`Knowledge`/`Procedural`/`Autobiographical`) so
@@ -4196,7 +4197,7 @@ mod tests {
         memory_store: SharedMemoryStore,
         embed_dim: SharedEmbedDimension,
     ) -> Arc<dyn crate::usecases::MemoryQueryService> {
-        Arc::new(crate::usecases::GrafeoMemoryAdapter::new(
+        Arc::new(crate::usecases::MemoryAdminAdapter::new(
             memory_store,
             embed_dim,
         ))
@@ -4377,10 +4378,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&temp_dir);
         std::fs::create_dir_all(&temp_dir).unwrap();
 
-        // ADR-024: New session storage format:
-        //   - conversations/meta/{sid}.json — SessionMeta (one file per session)
-        //   - conversations/{sid}.jsonl     — pure ConversationEntry lines, no header
+        // ADR-082 §4 step 3: session storage format:
+        //   - session-meta store (SQLite) — SessionMeta (one row per session)
+        //   - conversations/{sid}.jsonl   — pure ConversationEntry lines, no header
         let conversations_dir = temp_dir.join("conversations");
+        std::fs::create_dir_all(&conversations_dir).unwrap();
         let session_id = "20260101_120000_abc";
 
         // Persist SessionMeta via the conversation module API so the
@@ -4527,184 +4529,6 @@ mod tests {
         std::fs::remove_dir_all(&temp_dir).ok();
     }
 
-    /// ADR-028 regression test: `list_sessions` must aggregate
-    /// `agent_total_input_tokens` / `agent_total_output_tokens` across
-    /// all sessions on disk and include them in the top-level response.
-    #[tokio::test]
-    async fn test_list_sessions_includes_agent_total_tokens() {
-        let temp_dir = std::env::temp_dir().join("acowork-test-runtime-http-agent-totals");
-        let _ = std::fs::remove_dir_all(&temp_dir);
-        std::fs::create_dir_all(&temp_dir).unwrap();
-
-        let conversations_dir = temp_dir.join("conversations");
-
-        // Session 1: 100 input / 200 output tokens.
-        let meta1 = crate::conversation::SessionMeta {
-            version: 3,
-            session_id: "20260101_100000_aaa".to_string(),
-            agent_id: "com.test.agent".to_string(),
-            created_at: "2026-01-01T10:00:00Z".to_string(),
-            user_id: None,
-            visibility: None,
-            title: Some("Session 1".to_string()),
-            workspace_id: None,
-            model: None,
-            provider: None,
-            account_id: None,
-            reasoning_effort: None,
-            temperature: None,
-            context_window: None,
-            todos: None,
-            message_count: 2,
-            last_active_at: "2026-01-01T10:00:01Z".to_string(),
-            tokens: Some(crate::conversation::SessionTokens {
-                last_input: 100,
-                last_output: 200,
-                total_input: 100,
-                total_output: 200,
-                // ADR-066: cache fields default to 0 (this test
-                // focuses on the agent-total-in/out list aggregation
-                // path).
-                ..Default::default()
-            }),
-            llm_call_counter: None,
-            model_ratio: None,
-            last_compaction_offset: None,
-            corrupted: false,
-        };
-        crate::conversation::write_session_meta(&conversations_dir, &meta1).unwrap();
-
-        // Session 2: 300 input / 400 output tokens.
-        let meta2 = crate::conversation::SessionMeta {
-            version: 3,
-            session_id: "20260101_120000_bbb".to_string(),
-            agent_id: "com.test.agent".to_string(),
-            created_at: "2026-01-01T12:00:00Z".to_string(),
-            user_id: None,
-            visibility: None,
-            title: Some("Session 2".to_string()),
-            workspace_id: None,
-            model: None,
-            provider: None,
-            account_id: None,
-            reasoning_effort: None,
-            temperature: None,
-            context_window: None,
-            todos: None,
-            message_count: 1,
-            last_active_at: "2026-01-01T12:00:01Z".to_string(),
-            tokens: Some(crate::conversation::SessionTokens {
-                last_input: 300,
-                last_output: 400,
-                total_input: 300,
-                total_output: 400,
-                // ADR-066: cache fields default to 0 (this test
-                // focuses on the agent-total-in/out list aggregation
-                // path).
-                ..Default::default()
-            }),
-            llm_call_counter: None,
-            model_ratio: None,
-            last_compaction_offset: None,
-            corrupted: false,
-        };
-        crate::conversation::write_session_meta(&conversations_dir, &meta2).unwrap();
-
-        // Empty JSONL files so the sessions are discoverable.
-        for sid in &["20260101_100000_aaa", "20260101_120000_bbb"] {
-            std::fs::write(conversations_dir.join(format!("{}.jsonl", sid)), "").unwrap();
-        }
-
-        let snapshots: SharedSessionSnapshots =
-            std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
-        let latest: SharedLatestSession = std::sync::Arc::new(std::sync::RwLock::new(None));
-        let dispatch_tx: SharedDispatchSender = std::sync::Arc::new(tokio::sync::Mutex::new(None));
-        let embed_dim: SharedEmbedDimension = std::sync::Arc::new(std::sync::RwLock::new(0));
-        let degraded_reasons: SharedDegradation =
-            std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
-        let mqtt_client: SharedMqttClientSlot = std::sync::Arc::new(tokio::sync::Mutex::new(None));
-
-        // Use in-memory token service so the ADR-028 merge semantics work.
-        let token_svc =
-            Arc::new(crate::usecases::agent_token_impl::InMemoryAgentTokenService::new());
-        let session_metadata: Arc<dyn crate::usecases::SessionMetadataService> =
-            Arc::new(crate::usecases::RuntimeSessionMetadataService::new(
-                temp_dir.to_path_buf(),
-                token_svc,
-                snapshots.clone(),
-                latest.clone(),
-            ));
-        let memory_store: SharedMemoryStore = std::sync::Arc::new(std::sync::RwLock::new(None));
-
-        let session_manager_slot: crate::http::server::SharedSessionManagerSlot =
-            std::sync::Arc::new(tokio::sync::RwLock::new(None));
-
-        let server = RuntimeHttpServer::start(
-            temp_dir.clone(),
-            temp_dir.clone(),
-            "com.test.agent".to_string(),
-            TEST_INSTANCE_ID.to_string(), // ADR-073: URL paths address the runtime's UUID instance, not the package name
-            snapshots,
-            latest,
-            dispatch_tx,
-            embed_dim.clone(),
-            degraded_reasons,
-            mqtt_client,
-            Arc::new(tokio::sync::Mutex::new(Some(session_metadata))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(
-                memory_store,
-                embed_dim.clone(),
-            )))),
-            std::sync::Arc::new(std::sync::RwLock::new(None)),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(
-                temp_dir.clone(),
-            )))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(
-                temp_dir.clone(),
-            )))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_git_query(
-                temp_dir.clone(),
-            )))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(
-                temp_dir.clone(),
-            )))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(
-                temp_dir.clone(),
-            )))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(
-                temp_dir.clone(),
-            )))),
-            Arc::new(tokio::sync::Mutex::new(None)),
-            std::sync::Arc::new(std::sync::RwLock::new(None)),
-            std::sync::Arc::new(std::sync::RwLock::new(None)),
-            std::sync::Arc::new(tokio::sync::Mutex::new(None)),
-            new_test_workspace_resolver(),
-            session_manager_slot,
-            std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
-        )
-        .await
-        .expect("server should start");
-
-        // GET /sessions — should aggregate tokens across both sessions.
-        let url = format!("http://127.0.0.1:{}/sessions", server.port);
-        let response = reqwest::get(&url).await.unwrap();
-        assert!(response.status().is_success());
-        let body: serde_json::Value = response.json().await.unwrap();
-
-        // ADR-028: agent totals = sum across all sessions on disk.
-        assert_eq!(body["agent_total_input_tokens"], 400); // 100 + 300
-        assert_eq!(body["agent_total_output_tokens"], 600); // 200 + 400
-        assert_eq!(body["total_count"], 2);
-
-        let sessions = body["sessions"].as_array().unwrap();
-        assert_eq!(sessions.len(), 2);
-        // Sorted by last_active_at desc: Session 2 first.
-        assert_eq!(sessions[0]["session_id"], "20260101_120000_bbb");
-        assert_eq!(sessions[1]["session_id"], "20260101_100000_aaa");
-
-        std::fs::remove_dir_all(&temp_dir).ok();
-    }
-
     #[tokio::test]
     async fn test_http_server_memory_endpoints_without_store() {
         let temp_dir = std::env::temp_dir().join("acowork-test-runtime-http-memory");
@@ -4800,6 +4624,7 @@ mod tests {
         assert_eq!(body["by_status"], serde_json::json!({}));
         assert_eq!(body["stored_dim"], 0);
         assert_eq!(body["nodes_with_embedding"], 0);
+        assert_eq!(body["schema_version"], 0);
 
         // DELETE /memory/nodes/{nid} — store is None, adapter returns Ok(()) trivially.
         let url = format!("http://127.0.0.1:{}/memory/nodes/12345", server.port);
@@ -6713,18 +6538,20 @@ mod tests {
     /// End-to-end smoke test for the four memory-write endpoints
     /// (POST /memory/nodes, GET /memory/nodes/{nid}, PUT
     /// /memory/nodes/{nid}, DELETE /memory/nodes/{nid}) backed by a real
-    /// GrafeoStore.
+    /// store.
     #[tokio::test]
     async fn test_http_server_memory_crud_endpoints() {
         let temp_dir = std::env::temp_dir().join("acowork-test-runtime-http-mem-crud");
         let _ = std::fs::remove_dir_all(&temp_dir);
         std::fs::create_dir_all(&temp_dir).unwrap();
 
-        // Build a real GrafeoStore — `new_in_memory` keeps the test
-        // hermetic and lets the adapter report `index_health = healthy`.
+        // Build a real store — `open_in_memory` keeps the test hermetic and
+        // lets the adapter report `index_health = healthy`.
         let store = std::sync::Arc::new(
-            acowork_grafeo::grafeo::GrafeoStore::new_in_memory()
-                .expect("in-memory store should open"),
+            acowork_sqlite::SqliteStore::open_in_memory(
+                acowork_memory::types::DEFAULT_EMBEDDING_DIM,
+            )
+            .expect("in-memory store should open"),
         );
         let memory_store: SharedMemoryStore =
             std::sync::Arc::new(std::sync::RwLock::new(Some(store)));
@@ -6867,8 +6694,10 @@ mod tests {
         std::fs::create_dir_all(&temp_dir).unwrap();
 
         let store = std::sync::Arc::new(
-            acowork_grafeo::grafeo::GrafeoStore::new_in_memory()
-                .expect("in-memory store should open"),
+            acowork_sqlite::SqliteStore::open_in_memory(
+                acowork_memory::types::DEFAULT_EMBEDDING_DIM,
+            )
+            .expect("in-memory store should open"),
         );
 
         let memory_store: SharedMemoryStore =
@@ -7785,21 +7614,31 @@ mod tests {
         // ADR-076 §决策 4: the upload path authorizes against the session,
         // so the session has to exist. (Unauthorized uploads are covered by
         // `session_control`'s own tests.)
-        let meta_dir = temp_dir.join("conversations").join("meta");
-        std::fs::create_dir_all(&meta_dir).unwrap();
-        std::fs::write(
-            meta_dir.join(format!("{session_id}.json")),
-            serde_json::json!({
-                "version": 1,
-                "session_id": session_id,
-                "agent_id": "com.test.agent",
-                "created_at": "2026-01-01T00:00:00Z",
-                "message_count": 0,
-                "last_active_at": "2026-01-01T00:00:00Z",
-            })
-            .to_string(),
-        )
-        .unwrap();
+        let meta = crate::conversation::SessionMeta {
+            version: 1,
+            session_id: session_id.to_string(),
+            agent_id: "com.test.agent".to_string(),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            user_id: None,
+            visibility: None,
+            title: None,
+            workspace_id: None,
+            model: None,
+            provider: None,
+            account_id: None,
+            reasoning_effort: None,
+            temperature: None,
+            context_window: None,
+            todos: None,
+            message_count: 0,
+            last_active_at: "2026-01-01T00:00:00Z".to_string(),
+            tokens: None,
+            llm_call_counter: None,
+            model_ratio: None,
+            last_compaction_offset: None,
+            corrupted: false,
+        };
+        crate::conversation::write_session_meta(&temp_dir.join("conversations"), &meta).unwrap();
 
         // Step 1: Upload a docx blob. The multipart body mirrors what
         // `apps/acowork-desktop/src-tauri/src/gateway_client.rs` sends:
@@ -8045,17 +7884,15 @@ mod tests {
         assert_eq!(body["provider"], "openai");
         assert!((body["temperature"].as_f64().unwrap() - 0.7).abs() < 0.01);
 
-        // 6. Verify meta.json on disk has all persisted values
-        let meta_path = temp_dir
-            .join("conversations")
-            .join("meta")
-            .join(format!("{}.json", session_id));
-        assert!(meta_path.exists(), "meta.json must exist after PUT");
-        let meta: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&meta_path).unwrap()).unwrap();
-        assert_eq!(meta["model"], "gpt-4o");
-        assert_eq!(meta["provider"], "openai");
-        assert!((meta["temperature"].as_f64().unwrap() - 0.7).abs() < 0.01);
+        // 6. Verify the persisted meta row has all values
+        let meta = crate::conversation::read_session_meta(
+            &temp_dir.join("conversations"),
+            session_id,
+        )
+        .expect("meta row must exist after PUT");
+        assert_eq!(meta.model.as_deref(), Some("gpt-4o"));
+        assert_eq!(meta.provider.as_deref(), Some("openai"));
+        assert!((meta.temperature.unwrap() - 0.7).abs() < 0.01);
 
         std::fs::remove_dir_all(&temp_dir).ok();
     }
@@ -8505,8 +8342,6 @@ mod tests {
 
         // Create a session with model set in meta
         use crate::conversation::{SessionMeta, write_session_meta};
-        let meta_dir = temp_dir.join("conversations").join("meta");
-        std::fs::create_dir_all(&meta_dir).unwrap();
         let meta = SessionMeta {
             version: 3, // CONVERSATION_FORMAT_VERSION
             session_id: session_id.to_string(),

@@ -8,6 +8,6 @@
 | [01-core.md](../module-design/zh/01-core.md) | acowork-core — 共享类型层 |
 | [02-runtime.md](../module-design/zh/02-runtime.md) | acowork-runtime — Agent Runtime（工具系统、主循环、Provider） |
 | [03-gateway.md](../module-design/zh/03-gateway.md) | acowork-gateway — Gateway 守护进程 |
-| [04-grafeo.md](../module-design/zh/04-grafeo.md) | acowork-grafeo — Grafeo 图数据库引擎 |
+| [04-memory-sqlite.md](../module-design/zh/04-memory-sqlite.md) | acowork-memory + acowork-sqlite — 记忆引擎（trait + SQLite 后端） |
 | [05-vault-sign.md](../module-design/zh/05-vault-sign.md) | acowork-vault + acowork-sign — 密钥存储 + 签名工具链 |
 | [06-architecture.md](../module-design/zh/06-architecture.md) | 依赖关系 + 数据流 + 路线图 + 编译产物 + 测试策略 |

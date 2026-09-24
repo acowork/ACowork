@@ -1,4 +1,4 @@
-# acowork-gateway — Gateway
+﻿# acowork-gateway — Gateway
 
 **Position**: persistent system-level process, manages Agent lifecycle, Intent routing, key distribution, budget coordination. **Does not proxy Agent business logic**.
 
@@ -14,7 +14,7 @@ crates/acowork-gateway/
     ├── package_manager/
     │   ├── mod.rs
     │   ├── install.rs             # .agent package install (extract + signature verify + manifest check)
-    │   ├── uninstall.rs           # uninstall (optional backup Grafeo)
+    │   ├── uninstall.rs           # uninstall (optional backup SQLite memory)
     │   ├── upgrade.rs             # upgrade (preserve data/ + config/, verify signature consistency)
     │   └── repository.rs          # remote repository source (HTTP, Phase 5)
     ├── lifecycle/
@@ -76,7 +76,7 @@ impl LifecycleManager {
     /// Start Agent: spawn process + inject identity + distribute Key
     async fn start_agent(&mut self, agent_id: &str) -> Result<()>;
     
-    /// Kill Agent: directly kill process (state persisted via Grafeo)
+    /// Kill Agent: directly kill process (state persisted via SqliteStore)
     async fn stop_agent(&mut self, agent_id: &str) -> Result<()>;
     
     /// Idle timeout check

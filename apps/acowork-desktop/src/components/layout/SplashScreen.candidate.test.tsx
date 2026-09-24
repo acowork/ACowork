@@ -16,8 +16,9 @@ import { SplashScreen } from "./SplashScreen";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useGatewayStore } from "../../stores/gatewayStore";
 
+const invokeMock = vi.fn(async (..._args: unknown[]) => ({}));
 vi.mock("@tauri-apps/api/core", () => ({
-    invoke: vi.fn(async () => ({})),
+    invoke: (...args: unknown[]) => (invokeMock as unknown as (...a: unknown[]) => unknown)(...args),
 }));
 
 const OLD_URL = "http://192.168.1.10:19876";
@@ -32,10 +33,30 @@ async function flushMicrotasks() {
     }
 }
 
+/** Extract the URL the gateway config was last pushed with. */
+function lastPushedGatewayUrl(): string | undefined {
+    const calls = invokeMock.mock.calls.filter((c) => c[0] === "set_gateway_config");
+    if (calls.length === 0) return undefined;
+    const payload = calls[calls.length - 1][1] as { config?: { url?: string } } | undefined;
+    return payload?.config?.url;
+}
+
+/** Collect every URL passed to set_gateway_config, in order. */
+function allPushedGatewayUrls(): string[] {
+    return invokeMock.mock.calls
+        .filter((c) => c[0] === "set_gateway_config")
+        .map((c) => {
+            const payload = c[1] as { config?: { url?: string } } | undefined;
+            return payload?.config?.url ?? "";
+        });
+}
+
 describe("SplashScreen 5s candidate chooser", () => {
     beforeEach(() => {
         vi.useFakeTimers();
         vi.stubGlobal("requestAnimationFrame", () => 0);
+        invokeMock.mockClear();
+        invokeMock.mockImplementation(async (..._args: unknown[]) => ({}));
         // `OLD_URL` (192.168.1.x) is unreachable. `CANDIDATE_URL`
         // (192.168.3.x) is reachable. Probe URLs are `${url}/health` so
         // match on host substring, not "candidate".
@@ -150,5 +171,57 @@ describe("SplashScreen 5s candidate chooser", () => {
         await flushMicrotasks();
         expect(useGatewayStore.getState().candidates).toHaveLength(0);
         expect(screen.queryByText(CANDIDATE_URL)).toBeNull();
+    });
+
+    /**
+     * Regression: picking a candidate must leave the store at the picked
+     * URL, not roll it back to the mount-time (stale) value.
+     *
+     * Pre-fix bug: `gatewayUrlInput` was frozen at the mount-time store
+     * URL (the old, dead address) and only refreshed when the user
+     * edited the input. `handleRetry` then compared
+     * `gatewayUrlInput (old) !== store (new)`, rewrote the store back to
+     * the dead address, and the subsequent `bootGateway` call landed
+     * there too — three back-to-back set_gateway_config calls in the
+     * order (new, old, old), the reconnect stranded on the dead host.
+     */
+    it("picking a candidate does NOT roll the store back to the dead URL", async () => {
+        render(<SplashScreen onReady={vi.fn()} />);
+        await flushMicrotasks();
+
+        // Advance to the 5s fallback so the candidate chooser appears.
+        await act(async () => {
+            vi.advanceTimersByTime(CANDIDATE_FALLBACK_MS + 100);
+        });
+        await flushMicrotasks();
+
+        const candidates = useGatewayStore.getState().candidates;
+        expect(candidates.length).toBeGreaterThan(0);
+        expect(candidates[0].url).toBe(CANDIDATE_URL);
+
+        // Reset the call log so we only inspect what happens from the
+        // click onward (the boot path emits its own config push before
+        // the user is involved).
+        invokeMock.mockClear();
+
+        // Click the candidate. The chooser renders <button> elements
+        // keyed by URL; fireEvent.click on the candidate <button> drives
+        // onPick synchronously.
+        const pickBtn = screen.getByRole("button", { name: new RegExp(CANDIDATE_URL) });
+        fireEvent.click(pickBtn);
+        await flushMicrotasks();
+
+        // Store must reflect the picked URL, NOT be rolled back to OLD_URL.
+        expect(useSettingsStore.getState().gatewayUrl).toBe(CANDIDATE_URL);
+
+        // No `set_gateway_config` push may carry the dead URL after the
+        // pick. We tolerate the first push being the picked URL (from
+        // `setGatewayUrl` inside `onPick`) plus the `bootGateway` push;
+        // any push with the old URL would mean `handleRetry` reverted.
+        const pushedUrls = allPushedGatewayUrls();
+        expect(pushedUrls.length).toBeGreaterThan(0);
+        expect(pushedUrls).not.toContain(OLD_URL);
+        // And the final config push lands on the picked host.
+        expect(lastPushedGatewayUrl()).toBe(CANDIDATE_URL);
     });
 });

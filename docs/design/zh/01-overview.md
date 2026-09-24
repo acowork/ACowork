@@ -1,4 +1,4 @@
-# Agent as APP：平台设计总纲
+﻿# Agent as APP：平台设计总纲
 
 > 版本：v3.4 | 更新日期：2026-04-16
 
@@ -25,9 +25,9 @@
 
 - **标准化打包**：Agent 以压缩包（.agent）分发，内含配置、Prompt、Skill、工具声明，**不含可执行文件**。所有包必须经过签名，Gateway 安装时强制验证签名完整性和来源。
 - **统一执行引擎**：Agent Runtime 是平台提供的唯一二进制，负责加载 .agent 包并执行 Agent 逻辑（LLM 交互、工具调度、记忆读写）。
-- **进程级隔离**：每个 Agent 由 Gateway 启动为独立 Agent Runtime 进程，拥有独立工作区、私有 Grafeo 数据库、文件系统隔离、可选资源限制（cgroups/容器）。
+- **进程级隔离**：每个 Agent 由 Gateway 启动为独立 Agent Runtime 进程，拥有独立工作区、私有 SQLite 记忆数据库、文件系统隔离、可选资源限制（cgroups/容器）。
 - **Agent 自治**：Agent 进程内直连 LLM API、自主执行工具、自主管理权限校验，不依赖 Gateway 代理业务逻辑。
-- **仿生 Memory 系统**：每个 Agent 内嵌私有 Grafeo，采用三层五类仿生分层（瞬态层/经历层/沉淀层），包含遗忘机制（三因子衰减）、隐私分级（PrivacyLevel）、关联扩散检索、记忆生命周期（Retrieve/Inject/Record/Consolidate/Decay/Compact）和内容分类压缩。Gateway 通过 UserProfile 直接管理用户身份与偏好等系统级数据，通过握手协议差量同步到 Agent。云端同步全部 Zone 明文同步，平台托管（PrivacyLevel 仅控制打包分享时是否剥离，与同步策略解耦）。
+- **仿生 Memory 系统**：每个 Agent 内嵌私有 SQLite 记忆层（`memory/private.sqlite`），采用三层五类仿生分层（瞬态层/经历层/沉淀层），包含遗忘机制（三因子衰减）、隐私分级（PrivacyLevel）、关联扩散检索、记忆生命周期（Retrieve/Inject/Record/Consolidate/Decay/Compact）和内容分类压缩。Gateway 通过 UserProfile 直接管理用户身份与偏好等系统级数据，通过握手协议差量同步到 Agent。云端同步全部 Zone 明文同步，平台托管（PrivacyLevel 仅控制打包分享时是否剥离，与同步策略解耦）。
 - **权限声明与授权**：Agent 在清单中声明所需权限（网络、文件、调用其他 Agent 等），Gateway 在启动时配置沙箱，Agent 在运行时自主校验。
 - **跨平台支持**：.agent 包格式和 Gateway Service API 合同跨平台统一，各平台运行时机制（进程模型、传输层、沙箱）可按平台特性适配。
 
@@ -64,7 +64,7 @@
 │ │  tem)       ││ │ │  skills)    ││ │ │  skills)    ││
 │ └─────────────┘│ │ └─────────────┘│ │ └─────────────┘│
 │                 │ │                 │ │                 │
-│ ✅ 私有 Grafeo │ │ ✅ 私有 Grafeo │ │ ✅ 私有 Grafeo │
+│ ✅ 私有 SQLite 记忆层 │ │ ✅ 私有 SQLite 记忆层 │ │ ✅ 私有 SQLite 记忆层 │
 │ ✅ LLM 直连    │ │ ✅ LLM 直连    │ │ ✅ LLM 直连    │
 │ ✅ Tools 执行  │ │ ✅ Tools 执行  │ │ ✅ Tools 执行  │
 │ ✅ 本地预算    │ │ ✅ 本地预算    │ │ ✅ 本地预算    │
@@ -92,7 +92,7 @@
 | ---------------- | ------------------------- | ------------------------------------- |
 | LLM 调用         | Agent 进程                | 直连无 RPC 开销，流式自然，Agent 自治 |
 | Tool 执行        | Agent 进程                | 自治权限校验，低延迟                  |
-| 私有 Memory 读写 | Agent 进程（内嵌 Grafeo） | 零延迟，数据隔离                      |
+| 私有 Memory 读写 | Agent 进程（内嵌 SqliteStore） | 零延迟，数据隔离                      |
 | API Key 存储     | Gateway Vault             | 安全集中管理                          |
 | API Key 分发     | 启动时一次性给 Agent      | Agent 直连 LLM 需要                   |
 | 预算追踪         | Gateway（接收上报）       | 跨 Agent 统计                         |
@@ -135,7 +135,7 @@
 > - [09-roadmap-and-scenarios.md](./09-roadmap-and-scenarios.md) — 实现路线图与使用场景
 > - [10-debug-protocol.md](./10-debug-protocol.md) — 调试协议（DevMode、断点、录制回放）
 > - [12-tool-system.md](./12-tool-system.md) — 工具系统（Built-in / WASM / Gateway）
-> - [13-skill-system.md](./13-skill-system.md) — 技能系统（SKILL.md + Grafeo 经验层）
+> - [13-skill-system.md](./13-skill-system.md) — 技能系统（SKILL.md + SQLite 经验层）
 > - [14-desktop-app.md](./14-desktop-app.md) — 桌面应用（Tauri、布局、系统托盘）
 
 ---

@@ -1,4 +1,4 @@
-# acowork-runtime — Agent Runtime
+﻿# acowork-runtime — Agent Runtime
 
 **定位**：加载 .agent 包并执行 Agent 逻辑的统一二进制。每个 Agent 是一个独立进程。
 
@@ -52,7 +52,7 @@ crates/acowork-runtime/
     │   │   ├── image_gen.rs       # 文生图（fal.ai）
     │   │   ├── llm_task.rs        # LLM 子调用（无工具，纯文本/JSON）
     │   │   └── identity_query.rs  # 向系统 Agent 查询身份（ACowork 独有）
-    │   ├── memory/                # === Memory 工具（Grafeo 后端） ===
+    │   ├── memory/                # === Memory 工具（SQLite 记忆层 后端） ===
     │   │   ├── mod.rs
     │   │   ├── memory_store.rs    # 存储记忆
     │   │   ├── memory_recall.rs   # 检索记忆
@@ -139,7 +139,7 @@ crates/acowork-runtime/
     │   └── node.rs                # Node 设备能力工具
     ├── memory/
     │   ├── mod.rs                 # Memory 门面
-    │   ├── grafeo_client.rs       # Grafeo 读写封装
+    │   ├── sqlite_store.rs       # SQLite 记忆层 读写封装
     │   ├── embedding/              # Embedding 提供者（Ollama + Remote 降级链）
     │   ├── session_handle.rs       # MemorySessionHandle 共享状态
     ├── skills/
@@ -266,7 +266,7 @@ fn build_tool_registry(manifest: &AgentManifest, all_tools: Vec<Arc<dyn Tool>>) 
 | 分类 | ACowork 目录 | 工具数 | Phase 1 实现 |
 |------|-------------|--------|------------|
 | 核心 Builtin | `builtin/` | 17 | ✅ 13 个（weather/git/pdf/screenshot/image 系移到 WASM 或 Agent 内置） |
-| Memory | `memory/` | 5 | ✅ 已实现（Grafeo 后端） |
+| Memory | `memory/` | 5 | ✅ 已实现（SQLite 记忆层 后端） |
 | 定时任务 | `schedule/` | 7 | ❌ Phase 2 |
 | 第三方集成 | `integration/` | 8 | ❌ 由独立 Agent 提供 |
 | Agent 协作 | `agent/` | 6 | ✅ intent_send/receive 已实现，其余 Phase 2 |
@@ -328,7 +328,7 @@ impl DevModeController {
 ## 依赖
 
 - `acowork-core` — 共享类型
-- `acowork-grafeo` — 私有 Memory（维度由 `GrafeoConfig.embedding_dim` 动态注入）
+- `acowork-sqlite` — 私有 Memory（维度由 `SqliteStore::from_connection` 写入库内 `meta.embedding_dim`）
 - `acowork-vault` — 不直接依赖，Key 通过 IPC 从 Gateway 获取
 - `tokio`, `reqwest`, `clap`, `serde_json`
 - `wasmtime` (feature-gated: `wasm-tools`)

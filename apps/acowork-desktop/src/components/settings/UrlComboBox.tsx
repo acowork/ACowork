@@ -77,7 +77,7 @@ export function UrlComboBox({
           if (e.key === "Enter") onCommit?.();
           if (e.key === "Escape") setOpen(false);
         }}
-        className={cn("w-full rounded-md border border-border-outer px-3 py-[var(--ui-input-py)] pr-8 text-xs outline-none transition-colors focus:border-[var(--color-accent)] dark:bg-zinc-900", inputClassName)}
+        className={cn("w-full rounded-md border border-input-border bg-input-bg px-3 py-[var(--ui-input-py)] pr-8 text-xs outline-none transition-colors focus:border-[var(--color-accent)]", inputClassName)}
       />
       <button
         type="button"

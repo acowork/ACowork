@@ -1,4 +1,4 @@
-# MQTT 协议
+﻿# MQTT 协议
 
 > Gateway 内嵌 MQTT Broker（[`rumqttd`](https://github.com/bytebeamio/rumqtt)），承担 **实时事件总线 + 轻量级状态同步** 职责。Topic 树遵循 **"按数据源 pub/sub"** 原则：每个主题代表一份数据资源，发布者 = 数据源权威，订阅者按需订阅。
 
@@ -317,11 +317,13 @@ acowork/agents/{agent_id}/
             ├── reasoning_started     # 推理阶段开始
             ├── reasoning_ended       # 推理阶段结束
             ├── compacting_started    # 上下文压缩开始
-            ├── compacting_ended      # 上下文压缩结束
+            ├── compacting_ended      # 上下文压缩结束（成功路径）
+            ├── compaction_cancelled  # ADR-083 压缩未产出摘要：取消 / 超时 / 全部 tier 失败
+            │                         #   payload = { session_id, reason: "user"|"timeout"|"failed" }
             ├── context_usage         # 上下文用量
             ├── memory_updated        # session 内 Memory 发生变更（通知性事件）
             └── skill_executed        # 技能执行完毕
-└── memory/                           # Agent 记忆图（Grafeo）数据源
+└── memory/                           # Agent 记忆（SQLite `memory/private.sqlite`）数据源
     └── nodes/                        # node 级别增量事件
         └── {nid}/update              # 【增量事件】Memory node 增删/整合
                                       #   payload = 最新完整 node
@@ -1065,6 +1067,7 @@ Desktop fetch POST /api/agents/{id}/sessions/{sid}/{action} (Bearer token)
 | 取消单工具（ADR-045） | HTTP `POST .../sessions/{sid}/cancel-tool` | tool_result 在 ~ms 内到达，error=`Cancelled by user` |
 | 工具审批 / 问答回答 | HTTP `POST .../sessions/{sid}/approval` / `answer` | **关闭审批伪造漏洞**：MQTT 时代任何 broker 客户端可伪造 `approved:true` |
 | 上下文压缩 | HTTP `POST .../sessions/{sid}/compress` | `compact_context` 是 `compress_action` 的重复命令，一并删除 |
+| 取消压缩（ADR-083） | HTTP `POST .../sessions/{sid}/compress`（`compress_type=3`） | 与压缩同一条端点；下行 `messages/compaction_cancelled` 带 `reason` 反馈。**不**在 MQTT 上开新命令：MQTT 控制消息不携带身份，开了就绕开 owner 校验 |
 | 切换模型 / 推理强度 / 标题 | HTTP `PUT .../sessions/{sid}/config` | — |
 | 切换工作区 | HTTP `PUT .../sessions/{sid}/workspace` | — |
 | 会话生命周期（create / open / close / delete / visibility） | HTTP | — |

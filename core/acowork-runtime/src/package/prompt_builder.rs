@@ -84,7 +84,7 @@ pub const OVERRIDABLE_PROMPTS: &[(&str, &str)] = &[
     ("abstention.md", "DEFAULT_ABSTENTION_PROMPT (memory)"),
     // ADR-071 D7/D9 — per-agent EpisodicDistiller prompt overrides.
     // These two files are consumed by the offline distiller pipeline
-    // (`acowork-grafeo::consolidation::distiller`), NOT by the main
+    // (`acowork_memory::consolidation::distiller`), NOT by the main
     // dialog / compaction call sites: `extraction_prompt_override`
     // replaces the built-in `EXTRACTION_SYSTEM_PROMPT` (Step 2a) and
     // `judge_prompt_override` replaces `JUDGE_SYSTEM_PROMPT` (Step 4).

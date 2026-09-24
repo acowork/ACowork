@@ -913,7 +913,7 @@ export function AgentSetupTab() {
                 );
               }}
               placeholder={t("agentSetup.defaultIterations")}
-              className="rounded-md bg-panel-block"
+              className="rounded-md"
             />
           </div>
 
@@ -935,7 +935,7 @@ export function AgentSetupTab() {
                 );
               }}
               placeholder="2000 (default)"
-              className="rounded-md bg-panel-block"
+              className="rounded-md"
             />
             <p className="text-[9px] text-text-tertiary ">
               {t("agentSetup.maxSessionsDesc")}
@@ -961,7 +961,7 @@ export function AgentSetupTab() {
                 );
               }}
               placeholder="300 (5 min)"
-              className="rounded-md bg-panel-block"
+              className="rounded-md"
             />
             <p className="text-[9px] text-text-tertiary ">
               {t("agentSetup.approvalTimeoutDesc")}
@@ -1123,7 +1123,7 @@ export function AgentSetupTab() {
                 );
               }}
               placeholder={`${profile.globalMaxTokens ?? 32768} ${t("agentSetup.defaultModelLimit")}`}
-              className="rounded-md bg-panel-block"
+              className="rounded-md"
             />
             <p className="text-[9px] text-text-tertiary ">
               {t("agentSetup.leaveEmptyDefault")}
@@ -1155,7 +1155,7 @@ export function AgentSetupTab() {
                     }
                   }
                 }}
-                className="w-32 rounded-md bg-panel-block"
+                className="w-32 rounded-md"
               />
               <span className="text-[10px] text-text-tertiary ">
                 {t("agentSetup.tokens")}

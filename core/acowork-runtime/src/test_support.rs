@@ -330,10 +330,6 @@ impl MemoryProvider for InMemoryProvider {
         Ok(results)
     }
 
-    fn graph_expand(&self, _seeds: &[SearchResult], _hops: u8) -> Result<Vec<SearchResult>> {
-        Ok(Vec::new())
-    }
-
     // ── Forgetting ──────────────────────────────────────────────────────
 
     fn run_episodic_decay_scan(&self, _config: &EpisodicDecayConfig) -> Result<DecayScanResult> {
@@ -479,29 +475,7 @@ impl MemoryProvider for InMemoryProvider {
         Ok(())
     }
 
-    fn create_memory_edge(
-        &self,
-        from: u64,
-        to: u64,
-        edge_type: &str,
-        _properties: Vec<(&str, String)>,
-    ) -> Result<()> {
-        self.edges
-            .write()
-            .unwrap()
-            .push((from, to, edge_type.to_string()));
-        Ok(())
-    }
-
     // ── Phase 1 C4: Retrieval pipeline support ─────────────────────────
-
-    fn graph_expand_seeded(
-        &self,
-        _seeds: &[(u64, f64)],
-        _hint_type: &str,
-    ) -> Result<Vec<(u64, f64, String)>> {
-        Ok(Vec::new())
-    }
 
     fn get_node_content(&self, node_id: u64) -> Result<Option<String>> {
         Ok(self
@@ -537,11 +511,6 @@ impl MemoryProvider for InMemoryProvider {
             .unwrap()
             .get(&node_id)
             .map(|n| n.created_at))
-    }
-
-    fn apply_pagerank_boost(&self, _scores: &mut [(u64, f64)], _weight: f64) -> Result<()> {
-        // No graph topology in InMemoryProvider - no-op.
-        Ok(())
     }
 
     fn apply_quality_config(&self, _config: &MemoryQualityConfig) -> Result<()> {

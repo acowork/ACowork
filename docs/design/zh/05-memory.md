@@ -1,4 +1,4 @@
-# Memory 仿生分层架构
+﻿# Memory 仿生分层架构
 
 > 版本：v3.7 | 更新日期：2026-04-22
 
@@ -6,11 +6,13 @@
 
 > **v3.8 变更（2026-05-28）**：上下文压缩策略大幅简化，程序化折叠策略全部放弃——见 [ADR-010](../../adr/zh/ADR-010-context-compression-simplification.md)。核心变更：移除内容折叠（Phase 1）、三阶段渐进裁剪、检索结果 8 级优先级、弹性预算分区。瞬态层压缩简化为：70% 告警 → 80% LLM 摘要（完整上下文） → 95% emergency_trim 安全网。
 
-> **v3.9 变更（2026-05-28）**：经历层写入来源简化——见 [ADR-011](../../adr/zh/ADR-011-compaction-as-distillation.md)。核心变更：移除每轮对话实时写入 Grafeo，经历层仅通过 Compaction 摘要和 Session 关闭蒸馏写入。Compaction 与 Distillation 统一为单次 Compact Model 调用（"摘要即蒸馏"）。
+> **v3.9 变更（2026-05-28）**：经历层写入来源简化——见 [ADR-011](../../adr/zh/ADR-011-compaction-as-distillation.md)。核心变更：移除每轮对话实时写入记忆层，经历层仅通过 Compaction 摘要和 Session 关闭蒸馏写入。Compaction 与 Distillation 统一为单次 Compact Model 调用（"摘要即蒸馏"）。
+
+> **v4.0 变更**：记忆层切到 SQLite（单库 + WAL + FTS5 + sqlite-vss 向量；沉淀层图关系由应用层 `MemoryNode.edges` 边表承担，不再依赖存储引擎原生 LPG/GQL；详见 [ADR-082](../../adr/zh/ADR-082-sqlite-memory-cutover.md)）。`acowork-grafeo` crate 已删除，记忆引擎代码（`EpisodicDistiller` / `RetrievalMetrics`）迁移至 `core/acowork-memory/`。
 
 ---
 
-Memory 采用**仿生分层**设计，以人类认知科学为参照，以 Grafeo 图数据库为存储引擎。每个 Agent 拥有完全独立的私有 Memory，不存在 Gateway 维护的公共数据库。跨 Agent 的数据共享通过 Intent 查询和系统 Agent 服务实现，而非共享存储。
+Memory 采用**仿生分层**设计，以人类认知科学为参照。每个 Agent 拥有完全独立的私有 Memory（单文件 SQLite 数据库 `memory/private.sqlite`，应用层隔离；详见 [ADR-009](../../adr/zh/ADR-009-gateway-workspace-isolation.md)），不存在 Gateway 维护的公共数据库。跨 Agent 的数据共享通过 Intent 查询和系统 Agent 服务实现，而非共享存储。
 
 **设计哲学**：记忆不是存储，是认知。一个没有遗忘的记忆系统是垃圾场，一个没有巩固的记忆系统是碎片堆，一个没有自我认知的记忆系统是数据库。Memory 模块要回答的不是"怎么存"，而是"怎么记、怎么忘、怎么想"。
 
@@ -25,9 +27,9 @@ Memory 采用**仿生分层**设计，以人类认知科学为参照，以 Grafe
 ├─────────────────────────────────────────────────────────┤
 │  经历层（Experiential）                                  │
 │  ───                                                    │
-│  情景记忆 — Grafeo episodic                              │
+│  情景记忆 — episodes 表（`category` / `consolidated` 字段）│
 │  交互片段、对话快照、感知原始记录                         │
-│  Grafeo 原生 HNSW 向量索引 + BM25 全文检索                │
+│  sqlite-vss HNSW 向量索引 + SQLite FTS5 全文检索          │
 │  生命周期：天→周，巩固后晋升至沉淀层                      │
 │  仿生对应：海马体临时编码                                 │
 ├─────────────────────────────────────────────────────────┤
@@ -66,7 +68,7 @@ Memory 采用**仿生分层**设计，以人类认知科学为参照，以 Grafe
 
 | 流动方向            | 机制     | 触发条件                                                                                                     |
 | ------------------- | -------- | ------------------------------------------------------------------------------------------------------------ |
-| 瞬态层 → 经历层     | 摘要写入 | Compaction 触发（80% token 使用）或 Session 关闭时，LLM 摘要异步写入 Grafeo。不再每轮写入，避免与 JSONL 冗余 |
+| 瞬态层 → 经历层     | 摘要写入 | Compaction 触发（80% token 使用）或 Session 关闭时，LLM 摘要异步写入经历层 SQLite `episodes` 表。不再每轮写入，避免与 JSONL 冗余 |
 | 经历层 → 沉淀层     | 巩固管道 | 唯一管道 = 离线 `EpisodicDistiller`（ADR-068,per-agent opt-in:`[memory.distiller].enabled = true`）。**已下线**:即时提取直写沉淀层、PendingKnowledgeNode、rule-based generalization、offline compress_history_nodes、Relationship 自动生成(2026-09 revision) |
 | 沉淀层 → 瞬态层     | 检索注入 | 用户输入到达时，检索相关记忆注入上下文。**默认关闭（per-agent opt-in）**：`MemoryManagerConfig::auto_inject_enabled = false`，开启后每 session 首轮触发一次（ADR-060 §6.3）；开启方式：manifest `[memory.quality].auto_inject_enabled = true`。历史：2026-09-12 因召回质量不足默认关闭（Dormant 垃圾进上下文等）；ADR-062 M5 曾默认开启（Dormant 排除 + min_score 修复 + keyword 质量门），后因与 LLM 自主 `memory_recall` 双路径召回重复（两条路径同以 user 消息为 query，核心节点必然重叠）回退为 per-agent opt-in，`memory_recall` 工具描述已加防重复召回提示。显式 `memory_recall` 工具不受影响 |
 | 沉淀层/经历层内流动 | 关联扩散 | 检索时沿图边 1-2 跳扩展                                                                                      |
@@ -74,15 +76,15 @@ Memory 采用**仿生分层**设计，以人类认知科学为参照，以 Grafe
 
 **不可逆的单向门：** 经历层 → 沉淀层是信息精炼过程（原始片段 → 结构化知识），天然单向。但沉淀层 → 经历层可以通过"回忆"机制实现——用户或 Agent 主动触发时，从沉淀层提取关联知识，作为新的情景上下文注入瞬态层。
 
-**分层与 Grafeo 存储的映射：**
+**分层与 SQLite 存储的映射：**
 
-| 认知层 | 内容                        | Grafeo 存储                                                  | 说明                               |
-| ------ | --------------------------- | ------------------------------------------------------------ | ---------------------------------- |
-| 瞬态层 | 工作记忆                    | 不在 Grafeo 中                                               | LLM 上下文窗口，纯进程内存         |
-| 经历层 | 情景记忆                    | `Episodic` Label                                             | Grafeo 原生 HNSW + BM25 + metadata |
-| 沉淀层 | 语义/程序/自传体/Skill 经验 | `Knowledge` / `Procedural` / `Autobiographical` Label + Edge | LPG 知识图谱                       |
+| 认知层 | 内容                        | SQLite 表                                                  | 说明                                              |
+| ------ | --------------------------- | ----------------------------------------------------------- | ------------------------------------------------------------ |
+| 瞬态层 | 工作记忆                    | 无（进程内）                                               | LLM 上下文窗口，纯进程内存                                |
+| 经历层 | 情景记忆                    | `episodes`（+ `episodes_vec` 虚拟表 + `episodes_fts` 虚表） | sqlite-vss HNSW + FTS5 + 元数据；详见 [§2](#2-经历层情景记忆) |
+| 沉淀层 | 语义/程序/自传体/Skill 经验 | `nodes`（`kind` ∈ {Knowledge, Procedure, Self}）+ `edges`  | 应用层知识图谱，关联扩散由应用层多跳实现 |
 
-不存在"经历层节点存在 Grafeo semantic 中"的歧义——认知分层和 LPG Label 是一一映射的，存储格式为 `.grafeo` 单文件。
+不存在"经历层节点存在沉淀层 `nodes` 中"的歧义——认知分层和 `kind` 列是一一映射的，存储格式为单文件 `memory/private.sqlite`（含 WAL/SHM 兄弟文件）。
 
 ## 0.1 LLM 优先原则
 
@@ -166,7 +168,7 @@ Compaction 不再生成 `entities` / `triples` 块——LLM 在压缩场景下�
 情景记忆存储 Agent 与用户的交互片段，是记忆的"原始素材"。
 
 ```
-Grafeo Episodic Store
+SQLite `episodes` 行
 ├── episode_id: String              // 唯一 ID
 ├── timestamp: DateTime             // 发生时间
 ├── role: Role                      // user / agent / tool
@@ -185,21 +187,21 @@ Grafeo Episodic Store
 **关键设计决策：Episode 内容存储策略**
 
 - **v3.10**：Episode 内容不再做分类压缩。对话原文直接完整存储，摘要由 Compaction 阶段的 Compact Model 生成。
-- **Compaction**：当上下文使用率达 80% 时，Compact Model 对完整上下文做自然语言摘要（含实体和三元组提取），摘要写入 Grafeo 蒸馏 Episode。
+- **Compaction**：当上下文使用率达 80% 时，Compact Model 对完整上下文做自然语言摘要（含实体和三元组提取），摘要写入经历层蒸馏 Episode。
 - 理由详见 [ADR-011](../../adr/zh/ADR-011-compaction-as-distillation.md)：Compaction = Distillation，摘要即蒸馏。
 
-**检索能力（基于 grafeo-engine 原生 API）：**
+**检索能力（基于 `SqliteStore` provider trait）：**
 
-- **语义检索**：`db.vector_search()` — Grafeo 原生 HNSW 向量索引，支持余弦/欧几里得/点积距离，SIMD 加速
-- **关键词检索**：`db.text_search()` — Grafeo 原生 BM25 全文索引，内置 Unicode 分词器
-- **混合检索**：`db.hybrid_search()` — Grafeo 原生 RRF 融合排序，支持 `topology_boost` 图连通性重排序
-- **MMR 去重**：`db.mmr_search()` — Maximal Marginal Relevance，保证结果多样性，避免重复语义
+- **语义检索**：`MemoryStore::vector_search` — sqlite-vss HNSW 向量索引，支持余弦距离
+- **关键词检索**：`MemoryStore::text_search` — SQLite FTS5 全文索引，`unicode61` 分词器
+- **混合检索**：`MemoryStore::hybrid_search` — 应用层 RRF 融合排序（vector + text 分数按 `1/(k+rank)` 加权求和）
+- **MMR 去重**：`MemoryStore::mmr_search` — Maximal Marginal Relevance，保证结果多样性，避免重复语义
 - **时间过滤**：按时间范围缩小检索空间
-- **跨层关联扩散**（§6）：检索到的 episode 通过沉淀层 KnowledgeNode 的 `source_episode` 字段反向查询关联节点，沿 GQL 原生图遍历扩展到沉淀层知识和其他经历层 episode。例如：用户问"上次去上海住的酒店"，episodic 检索到出差记录 → 反向查到沉淀层"用户常住锦江之星" → 通过 `MATCH (m)-[r*1..3]-(other)` 图遍历扩展到同一酒店的另一次出差 episode。
+- **跨层关联扩散**（§6）：检索到的 episode 通过沉淀层 `nodes.source_episode` 字段反向查询关联节点，应用层多跳（默认 1–3 跳，按 `MemoryQuery.expand_hops` 上限）扩展到沉淀层知识和其他经历层 episode。例如：用户问"上次去上海住的酒店"，经历层检索到出差记录 → 反向查到沉淀层"用户常住锦江之星" → 沿 `edges` 表多跳扩展到同一酒店的另一次出差 episode。
 
 **Embedding 生成策略：**
 
-Embedding 由 Runtime 层通过 `EmbeddingProvider` trait 生成（而非 GrafeoStore 内部），以 `Vec<f32>` 形式传入 `Episode` / `MemoryQuery`。
+Embedding 由 Runtime 层通过 `EmbeddingProvider` trait 生成（而非 `SqliteStore` 内部），以 `Vec<f32>` 形式传入 `Episode` / `MemoryQuery`。
 
 **Provider 降级链**：Ollama local（primary，`nomic-embed-text`，768d）→ Remote API（fallback，OpenAI-compatible `/embeddings`，512-1536d）。`FallbackEmbeddingProvider` 自动管理 primary→fallback 切换（2 次连续失败 + 200ms 超时）。
 
@@ -207,7 +209,7 @@ Embedding 由 Runtime 层通过 `EmbeddingProvider` trait 生成（而非 Grafeo
 - 检索时：`MemoryManager.retrieve()` 方法头部自动生成 embedding（200ms 超时），超时/失败则 `query.embedding = None`，退回 `text_search` 纯文本检索
 - 写入时：episode 蒸馏写入时同步生成 embedding，同样 200ms 超时降级
 
-GrafeoStore 仅负责存储和索引，不持有 `EmbeddingProvider`。
+`SqliteStore` 仅负责存储和索引，不持有 `EmbeddingProvider`。
 
 **经历层的遗忘：**
 
@@ -220,11 +222,11 @@ GrafeoStore 仅负责存储和索引，不持有 `EmbeddingProvider`。
   - 未巩固 + 超过 14 天 + importance < 0.3 → 清理（低价值且未被提取的碎片）
   - 未巩固 + 超过 14 天 + importance >= 0.3 → 保留并尝试离线巩固
 
-> **实现状态（v3.12，P2 G13）**：差异化清理策略已落地于 `acowork-grafeo/src/consolidation/offline.rs` 的 `run_episodic_cleanup()`，由生产路径 `run_offline_consolidation` 调度。单阈值删除接口 `cleanup_episodes` / `cleanup_old_episodes` 无生产调用方（仅 trait 定义 + 测试 stub），按 Rule of three 不再重复实现。
+> **实现状态（v3.12，P2 G13）**：差异化清理策略已落地于 `core/acowork-memory/src/consolidation/offline.rs` 的 `run_episodic_cleanup()`，由生产路径 `run_offline_consolidation` 调度。单阈值删除接口 `cleanup_episodes` / `cleanup_old_episodes` 无生产调用方（仅 trait 定义 + 测试 stub），按 Rule of three 不再重复实现。
 
 ## 3. 沉淀层：长期记忆
 
-沉淀层是 Agent 的"知识根基"，包含三种记忆类型，全部存储在 Grafeo 的语义记忆图谱中。
+沉淀层是 Agent 的"知识根基"，包含三种记忆类型，全部存储在 `nodes` 表（按 `kind` 列区分），图关系由 `edges` 表承载。
 
 ### 3.1 语义记忆（KnowledgeNode）
 
@@ -304,7 +306,7 @@ edge_strength = min(0.8, confidence_avg × recency_factor)
 
 ```
 Skill 系统的程序记忆：SkillExperience（Skill 级别，特定技能的执行经验）
-Grafeo 的程序记忆：ProceduralNode（跨 Skill 的通用行为模式）
+沉淀层的程序记忆：ProceduralNode（跨 Skill 的通用行为模式）
 ```
 
 ```rust
@@ -556,7 +558,7 @@ LLM 生成回复（含 tool call 判断）
 
 ### 4.2 离线蒸馏（ADR-068，EpisodicDistiller）
 
-> **实现状态（ADR-068 M1-M8 落地；ADR-071 触发/配置接线 2026-09 已实现 W1–W5）**：离线巩固由 `EpisodicDistiller`（`core/acowork-grafeo/src/consolidation/distiller.rs`）承载。后台调度与运行时配置按 [ADR-071](../../adr/zh/ADR-071-distiller-runtime-config-and-trigger.md)：触发口径与 legacy Pending 解耦（基于 unconsolidated episode 积压/空闲）、配置分层（manifest 初值 → `agent_config.json` 运行时层）、手动蒸馏端点、模型选择复用摘要模型 UI、蒸馏 prompt 纳入 ADR-063 per-agent 覆盖、记忆面板"记忆蒸馏"卡片与"立即蒸馏"按钮已上线。旧 Phase 3 规划中的 PendingKnowledgeNode 升级制、rule-based generalization、自动自我评估、History 压缩均已下线。
+> **实现状态（ADR-068 M1-M8 落地；ADR-071 触发/配置接线 2026-09 已实现 W1–W5）**：离线巩固由 `EpisodicDistiller`（`core/acowork-memory/src/consolidation/distiller.rs`）承载。后台调度与运行时配置按 [ADR-071](../../adr/zh/ADR-071-distiller-runtime-config-and-trigger.md)：触发口径与 legacy Pending 解耦（基于 unconsolidated episode 积压/空闲）、配置分层（manifest 初值 → `agent_config.json` 运行时层）、手动蒸馏端点、模型选择复用摘要模型 UI、蒸馏 prompt 纳入 ADR-063 per-agent 覆盖、记忆面板"记忆蒸馏"卡片与"立即蒸馏"按钮已上线。旧 Phase 3 规划中的 PendingKnowledgeNode 升级制、rule-based generalization、自动自我评估、History 压缩均已下线。
 
 **蒸馏输入/输出**：
 
@@ -578,7 +580,7 @@ LLM 生成回复（含 tool call 判断）
 ```
 
 **可信沉淀方式原则（2026-09 revision）**：沉淀层节点只允许两类语义生产者——
-1. **图/统计归纳**：图数据库统计节点/边关系（Grafeo 原生能力）
+1. **图/统计归纳**：基于 `nodes`/`edges` 表统计节点/边关系（应用层实现）
 2. **LLM 分析归纳**：`EpisodicDistiller`（服务端 LLM 提取 + LLM Judge）
 规则式替代（字符串全等计数、文本特征 grep、30 天/10 条等启发式）一律不得用于"经历→沉淀"语义归纳；规则只保留在幂等/去重门槛、生命周期、权威数据源导入（manifest bootstrap）、事件触发判定四类位置。
 
@@ -588,7 +590,7 @@ LLM 生成回复（含 tool call 判断）
 - **后台触发（与 legacy Pending 计数解耦）**：周期到点（`distiller_interval_minutes`，默认 60）∧（unconsolidated episode 积压 ≥ `distiller_accumulation_threshold`(默认 50) ∨ 空闲 ≥ `distiller_idle_minutes`(默认 30)）→ 跑 `run_episodic_distiller_step`；受 `distiller_enabled` 门控（默认 false，opt-in 保持）
 - **手动触发**：`POST /memory/distill` 立即跑一次（绕过周期，与后台共用同一实现；仍守 opt-in，关闭时返回 409）；`consolidation/status` 返回蒸馏配置与上次运行结果。记忆面板底部"合并节点"按钮已退役，替换为"立即蒸馏"（legacy consolidate action 删除，episodic cleanup 随周期 consolidation 自动执行）
 - **蒸馏模型**：独立字段 `distiller_model`（provider_id/model_id），UI 复用摘要模型下拉逻辑（vault keys + provider 名，与 Harness compact-model 卡片同源）；解析链 agent_config → manifest → `default_compact_model` → provider 第一模型（现状保底）
-- **prompt per-agent**：`distiller-extraction.md` / `distiller-judge.md` 进 ADR-063 覆盖白名单，Debug 界面 PromptList 可见可编辑，reload 生效；`DistillerConfig.extraction_prompt_override`/`judge_prompt_override` 在 `distiller_scheduler_config()` 组装时注入；grafeo 内置常量保留为默认
+- **prompt per-agent**：`distiller-extraction.md` / `distiller-judge.md` 进 ADR-063 覆盖白名单，Debug 界面 PromptList 可见可编辑，reload 生效；`DistillerConfig.extraction_prompt_override`/`judge_prompt_override` 在 `distiller_scheduler_config()` 组装时注入；`acowork-memory` 内置常量保留为默认
 - **配置热更新**：`ConsolidationTimer` 持有 `RwLock<SchedulerConfig>`，PUT agent config 后 `update_config()` 换值、后台 loop 每 tick 重读（≤60s 生效），不重建后台任务
 - 失败/证据不足的 episode 原样保留，下轮重试；不存在降级到规则路径的 fallback
 
@@ -683,7 +685,7 @@ retention = exp(-ln2 × age_days / half_life_days)
 
 | 能力 | 代码位置 |
 | --- | --- |
-| 衰减引擎（扫描 + 归档） | `core/acowork-grafeo/src/forgetting/episodic_decay.rs` |
+| 衰减引擎（扫描 + 归档） | `core/acowork-memory/src/forgetting/episodic_decay.rs` |
 | 配置定义 | `core/acowork-memory/src/types.rs::EpisodicDecayConfig` |
 | 调度（后台任务） | `core/acowork-runtime/src/memory/consolidation_bg.rs` |
 | 检索渐进降权 | `core/acowork-memory/src/manager.rs`（`RetrievalForgettingConfig`） |
@@ -691,31 +693,33 @@ retention = exp(-ln2 × age_days / half_life_days)
 
 ## 6. 关联扩散检索
 
-传统检索是"查到什么就是什么"，关联扩散是"查到一个，带出一串"——模拟海马体的模式完成和激活扩散。关联扩散基于 Grafeo 原生 GQL 图遍历实现（`MATCH (m)-[r*1..3]-(other) WHERE ...`），无需 SQL 模拟图查询，有查询优化器支持谓词下推和早期终止。
+传统检索是"查到什么就是什么"，关联扩散是"查到一个，带出一串"——模拟海马体的模式完成和激活扩散。沉淀层节点间关系存于 `edges` 表（应用层图遍历），跨层扩展通过 SQL JOIN + 早停实现，最多 3 跳。
 
-### 6.1 检索流程（Phase 2 更新）
+> **v4.0 变更**：原 `MemoryProvider::graph_expand_*` / `create_memory_edge` / `apply_pagerank_boost` 等图原生 trait 方法随 ADR-082 D4 删除。本节描述的功能由应用层多跳查询实现，不再依赖存储引擎 LPG/GQL。`PageRank` / `topology_boost` / `MATCH (m)-[r*1..3]-(other)` / `CALL grafeo.pagerank()` / `CALL grafeo.louvain()` 等 API 全部下线。
 
-检索同时查询经历层和沉淀层，并支持跨层关联扩散。MemoryManager 根据 Grafeo 的就绪状态和检索耗时决定降级：
+### 6.1 检索流程（v4.0）
+
+检索同时查询经历层和沉淀层，并支持跨层关联扩散。`MemoryManager` 根据 SQLite 检索耗时决定降级：
 
 ```
 Level 0（正常模式）
-  前提：Grafeo 完全就绪
-  策略：hybrid_search（Grafeo 原生 RRF + topology_boost）+ graph_expand（GQL 原生图遍历）
+  前提：vector_search 与 text_search 双通路均可用
+  策略：hybrid_search（应用层 RRF 融合）+ 多跳跨层扩展（应用层 edges JOIN）
   SLA：P99 < 200ms
 
-  ↓ 向量索引未就绪或 embedding 生成超时
+  ↓ 向量索引不可用或 embedding 生成超时
 
 Level 1（无向量模式）
-  策略：text_search only（Grafeo 原生 BM25）+ graph_expand
+  策略：text_search only（FTS5 trigram）+ 多跳跨层扩展
   SLA：P99 < 100ms
 
-  ↓ Grafeo 查询超时（>300ms）或索引异常
+  ↓ SQLite 查询超时（>300ms）或索引异常
 
 Level 2（缓存模式）
   策略：返回 Autobiographical 文本缓存 + 最近 5 条 Episode
   SLA：P99 < 10ms
 
-  ↓ Grafeo 完全不可用
+  ↓ SQLite 完全不可用
 
 Level 3（内存模式）
   策略：仅返回当前会话工作记忆，无持久化检索
@@ -726,8 +730,8 @@ Level 3（内存模式）
 
 ```
 ① embedding 生成：≤200ms（超时→跳过向量，text_search only）
-② hybrid_search：≤150ms（grafeo-engine 原生 RRF 融合 + topology_boost，向量和 BM25 并行）
-③ graph_expand：≤100ms（GQL 原生图遍历，早期终止，超时返回已扩展节点）
+② hybrid_search：≤150ms（应用层 RRF 融合，向量与 BM25 并行）
+③ 多跳扩展：≤100ms（应用层 edges JOIN，早期终止，超时返回已扩展节点）
 ④ 排序+格式化：≤50ms
 任一环节超时，使用已有部分结果继续后续步骤。
 ```
@@ -739,24 +743,23 @@ Level 3（内存模式）
    │
    ▼
 ① 并行检索两层数据
-   ├─ 经历层 hybrid_search（Episodic Label）：Grafeo 原生向量 + 全文 + RRF
+   ├─ 经历层 hybrid_search（label=Episodic）：sqlite-vss HNSW + FTS5 + RRF
    │   返回 Top-K 相似情景
-   └─ 沉淀层 hybrid_search（Knowledge/Procedural/Autobiographical Label）：Grafeo 原生向量 + 全文 + RRF
-       返回 Top-K 匹配知识（Knowledge / Procedural / Autobiographical）
+   └─ 沉淀层 hybrid_search（label=Knowledge/Procedural/Autobiographical）：同上
+       返回 Top-K 匹配知识
    │
    ▼
-② graph_expand：从所有匹配节点出发，沿 GQL 原生图遍历做跨层扩展
+② 多跳跨层扩展（应用层 edges JOIN）：
    - 经历层 episode → 通过 KnowledgeNode.source_episode 反向查询关联的沉淀层节点
-   - 沉淀层 node → 通过 GQL `MATCH (m)-[r*1..3]-(other)` 扩展到其他沉淀层节点
+   - 沉淀层 node → 通过 edges 表 JOIN 扩展到其他沉淀层节点
    - 1 跳：直接关联（边权重 > 0.3）
    - 2 跳：间接关联（累积路径权重 > 0.1）
    - 3 跳：复杂推理（累积路径权重 > 0.05），通过早期终止实际大多在 1-2 跳停止
    │
    ▼
 ③ 去重 + 评分
-   - 直接匹配节点分数 = RRF 分数（含 topology_boost 权重加成）
+   - 直接匹配节点分数 = RRF 分数
    - 扩展节点分数 = 路径权重 × 源节点 RRF 分数
-   - 多路径节点获得 Grafeo PageRank 额外权重加成
    - 同一节点可能同时被经历层和沉淀层命中，取最高分
    │
    ▼
@@ -775,7 +778,7 @@ Level 3（内存模式）
    沉淀层 → KnowledgeNode: "用户住在北京"（"上海"关键词匹配）
             KnowledgeNode: "用户经常去上海出差"（"上海"关键词匹配）
 
-② graph_expand 跨层扩散：
+② 多跳跨层扩展（应用层 edges JOIN）：
    "上周出差提到" episode → 反向查 source_episode → KnowledgeNode: "出差时关心天气"（经历→沉淀）
    "经常去上海出差" KnowledgeNode ──[PREFERS]→ ProceduralNode: "出差时查天气"（沉淀内）
    "用户住北京" KnowledgeNode ──[PREFERS]→ "简洁的回复风格"（沉淀内）
@@ -783,40 +786,24 @@ Level 3（内存模式）
 
 ③ 最终注入上下文：
    - 核心事实：用户住北京、经常去上海出差
-   - 跨层扩展：出差时关心天气、上次上海出差淋了雨
+   - 跨层扩展：出差时关心天气、上次上海出差淋过雨
    - 关联扩散：偏好简洁回复
    → Agent 回答："上海明天小雨，15-20°C。需要带伞——上次你上海出差淋过雨。"
 ```
 
 没有关联扩散，Agent 只知道用户"住北京"或"去上海出差"，但不知道这两者之间的关联，也不知道用户出差时关心天气、上次淋过雨。跨层关联扩散让检索从"关键词匹配"升级到"语义推理"。
 
-Grafeo GQL 原生图遍历相比旧版 SQL 模拟的优势：
-- 邻接索引 O(degree) 遍历，替代 SQL JOIN 模拟
-- CBO/DPccp 查询优化器支持谓词下推、基数估计、早期终止
-- `topology_boost` 利用图连通性重排序检索结果，高连通性节点优先召回
-
-### 6.3 性能保障（Phase 2 更新）
+### 6.3 性能保障
 
 - 扩展深度硬限制 **3 跳**（通过早期终止实际大多在 1-2 跳停止）
-- early_stop_threshold 随跳数递增（1跳: 0.1, 2跳: 0.15, 3跳: 0.2），越远越严格
+- `early_stop_threshold` 随跳数递增（1 跳: 0.1, 2 跳: 0.15, 3 跳: 0.2），越远越严格
 - 每跳最多扩展 5 条边（按权重 Top-5）
 - 扩展节点总数上限 20（防止 Token 膨胀）
 - 只对 Active 节点做扩展，Dormant 节点不参与
 - 经历层和沉淀层并行检索，扩展阶段串行（避免并发复杂度）
-- 扩散阈值可配置（默认 0.2），在首次运行时可根据实际效果调整
-- 多路径节点获得 Grafeo PageRank 额外权重加成
+- 扩散阈值与 `MemoryQuery.expand_hops`/`expand_threshold` 字段联动；超出上限的请求按上限截断
 
 详见 `docs/_internal/archive/review/zh/04-p2-s2-design-review.md` §6.2、§6.3
-
-**Grafeo 图算法增强（基于 grafeo-engine 原生 API）：**
-
-Grafeo 内置图算法过程（`algos` feature），可直接调用以提升记忆质量：
-
-- **PageRank 重要性评估**：`CALL grafeo.pagerank()` 自动评估记忆节点的图连通性重要性——被更多边引用的节点 PageRank 更高，作为手调 `importance` 的补充或替代。使用场景：检索排序（topology_boost 权重输入）、遗忘保护（PageRank 高于阈值的节点跳过衰减扫描）、重要性校准
-- **MMR 多样性搜索**：`db.mmr_search()` — Maximal Marginal Relevance，在检索结果中保证语义多样性，避免返回大量重复语义的节点
-- **社区检测**（Louvain）：`CALL grafeo.louvain()` 自动发现记忆间的隐性群组，增强 graph_expand 的语义质量——社区内节点优先扩展，社区间延迟扩展
-
-详见 docs/module-design/04-grafeo.md §图算法增强
 
 ### 6.4 冲突处理（ADR-068 2026-09 revision — 仲裁收敛到蒸馏器 Judge）
 
@@ -892,7 +879,7 @@ Abstention 判断 → 结果为空则触发拒答
 Agent 回复（有依据 / 明确拒答）
 ```
 
-- Level 0-3 解决的是"Grafeo 可用性"问题（硬件/软件故障）
+- Level 0-3 解决的是"SQLite 可用性"问题（硬件/软件故障）
 - Abstention 解决的是"检索质量"问题（返回结果不可靠）
 - 两者正交，互不替代
 
@@ -958,7 +945,7 @@ Agent A 需要某项知识，直接向拥有该知识的 Agent B 发送 Intent �
 }
 ```
 
-天气 Agent 从自己的私有 Grafeo 查到结果并返回。这是最小权限方式——日历 Agent 只拿到了需要的那个事实。
+天气 Agent 从自己的私有 SQLite `memory/private.sqlite` 查到结果并返回。这是最小权限方式——日历 Agent 只拿到了需要的那个事实。
 
 **路径 2：Gateway UserProfile（身份与偏好）**
 
@@ -973,7 +960,7 @@ Agent A 需要某项知识，直接向拥有该知识的 Agent B 发送 Intent �
 
 **路径 3：云端 Memory Sync 同步**
 
-云端作为知识同步层，Agent 写入的知识可按规则广播给订阅了该信息的其他 Agent，各 Agent 的本地 Grafeo 各自更新。
+云端作为知识同步层，Agent 写入的知识可按规则广播给订阅了该信息的其他 Agent，各 Agent 的本地 SQLite 各自更新。
 
 ### 7.1 隐私与同步
 
@@ -991,7 +978,7 @@ Agent A 需要某项知识，直接向拥有该知识的 Agent B 发送 Intent �
 
 ### 8.1 节点类型（NodeType）— 认知功能分类
 
-节点类型通过 **Grafeo LPG Label** 实现，区分记忆的**认知功能分层**：
+节点类型通过 `nodes.label` 字段实现，区分记忆的**认知功能分层**：
 
 | Label              | 用途                           | 遗忘                            | 隐私                      | 详见                                            |
 | ------------------ | ------------------------------ | ------------------------------- | ------------------------- | ----------------------------------------------- |
@@ -1005,9 +992,9 @@ Agent A 需要某项知识，直接向拥有该知识的 Agent B 发送 Intent �
 | `SkillExperience`  | 已发布 Skill 的运行经验        | 专用衰减                        | Personal                  | [13-skill-system.md](./13-skill-system.md) §3.5 |
 
 **NodeType 的设计原则：**
-- 通过 **Grafeo Label** 实现（而非枚举字段），利用 Label 隔离实现类型区分
-- 每种 Label 有独立的 properties schema 和检索索引
-- 认知分层与 LPG Label 一一映射（见 §0 分层原则）
+- 通过 `nodes.label` 列实现（而非枚举字段），利用 label 索引隔离类型
+- 每种 label 有独立的 FTS5 虚表和检索路径
+- 认知分层与 label 一一映射（见 §0 分层原则）
 
 ### 8.1.1 子分类（sub_type / category）— v3.11 新增
 
@@ -1055,13 +1042,13 @@ Zone 用于区分记忆的**业务场景分区**，与 NodeType 正交：
 ```
 
 **实现方式（Phase 4+）：**
-- Zone 将作为 **Grafeo Node Property** 存储（而非独立 Label）
+- Zone 将作为 **节点属性** 存储于 `nodes.props` JSON
 - 在 `KnowledgeNode`、`ProceduralNode` 等结构体中增加 `zone: String` 字段
 - 检索时可通过 zone 过滤（如 `filters.zone = Some("work")`）
 
 **⚠️ 当前状态（Phase 1-3）：**
 - `MemoryNode.zone` 字段存在于 `acowork-core/src/memory/traits.rs` 中，但**暂未使用**
-- `MemoryStore::list_by_zone()` 方法已定义，但 **GrafeoStore 未实现**
+- `MemoryStore::list_by_zone()` 方法已定义，但 **当前 SqliteStore 未实现**
 - Zone 功能推迟到 Phase 4+，当前所有节点默认属于 `default` zone
 
 **设计理由：**
@@ -1079,17 +1066,17 @@ Zone 用于区分记忆的**业务场景分区**，与 NodeType 正交：
 
 **交付内容：**
 
-三层架构落地（瞬态层 / 经历层 / 沉淀层），Grafeo 支持 Episodic + Knowledge + Procedural + Autobiographical 四个 LPG Label 及对应 Edge Type，存储为 `.grafeo` 单文件格式。经历层存储对话原始记录（episode），沉淀层存储精炼知识（KnowledgeNode / AutobiographicalNode）。
+三层架构落地（瞬态层 / 经历层 / 沉淀层），SQLite `nodes` 表通过 `label` 列支持 Episodic + Knowledge + Procedural + Autobiographical 四类节点，`edges` 表存节点间关系。存储为单文件 `memory/private.sqlite`（含 WAL/SHM）。经历层存储对话原始记录（episode），沉淀层存储精炼知识（KnowledgeNode / AutobiographicalNode）。
 
 即时提取通过 Tool Call 机制实现：`memory_store` 工具加入 Agent 内置工具列表，System Prompt 加入提取指引，LLM 在生成回复时自主判断是否调用。即时阶段仅做 embedding 相似度粗筛（相似度 > 0.85 → 标记候选冲突），不做三元组提取。三元组提取和精确去重发生在**离线巩固阶段**（Phase 3），详见 §4.1 和 §6.4。
 
 基础遗忘机制落地：乘法衰减模型 decay_score = importance × activity_signal，activity_signal = clamp(recency_boost + access_boost, 0.05, 1.0)。Dormant 态区分：Fact/Relation 永不清除，Preference/ProceduralNode Dormant 超过 90 天可 Purge。dormant_since 字段计时，reactivate_node 时归零。
 
-关联扩散检索落地：hybrid_search 基础上加 graph_expand，经历层 episode 通过 KnowledgeNode.source_episode 反向查询建立跨层关联，边权重 = min(0.8, confidence_avg × recency_factor)，扩散阈值 0.2（可配置），硬限制 **3 跳**（通过早期终止实际大多在 1-2 跳停止）。
+关联扩散检索落地：hybrid_search 基础上加 `edges` 表多跳 JOIN 扩展，经历层 episode 通过 KnowledgeNode.source_episode 反向查询建立跨层关联，边权重 = min(0.8, confidence_avg × recency_factor)，扩散阈值 0.2（可配置），硬限制 **3 跳**（通过早期终止实际大多在 1-2 跳停止）。
 
 AutobiographicalNode 从 manifest.toml 自动派生（Identity / Capability），History 节点超过 10 条时摘要压缩，注入上限 200 token。PrivacyLevel（Public / Personal / Sensitive）用于打包分享时的节点过滤。
 
-Episode 内容分类压缩落地：信息性内容原样存储，工件性内容（代码/文件/命令输出）压缩为摘要 + ArtifactRef 引用。代码不住在 Grafeo 里——Grafeo 存"关于代码的描述"，需要实际代码时通过 artifact_refs 的 path + hash 在文件系统/版本控制中查找。
+Episode 内容分类压缩落地：信息性内容原样存储，工件性内容（代码/文件/命令输出）压缩为摘要 + ArtifactRef 引用。代码不住在 SQLite `nodes` 里——`nodes.props` 存"关于代码的描述"，需要实际代码时通过 artifact_refs 的 path + hash 在文件系统/版本控制中查找。
 
 **Phase 1 不做的事：** 离线巩固、ProceduralNode 联动、分页换出、云端同步。这些是 Phase 2/3 的事。
 
@@ -1127,7 +1114,7 @@ Phase 2 需要补上"困境三"（记忆泛化与抽象）的设计缺口。Proc
 
 当同一 trigger_condition 下有 >= 3 个 action_pattern 变体时（如"用户要求简洁"的表达方式有"太长了"、"少说废话"、"简短点"三种），Agent 应主动提出假设："这三种表达是否指向同一个偏好？" 并在后续交互中验证。验证通过后合并为单一 ProceduralNode，验证失败则保留多个变体。
 
-具体实现：在 grafeo crate 新增 `procedural_abstract` 模块，提供 `detect_merge_candidates()` 方法，扫描同类 trigger_condition 下的多个 action_pattern，由 LLM 判断是否应合并。
+具体实现：在 `acowork-memory` 的 `consolidation/distiller.rs` 内实现 `detect_merge_candidates()`，扫描同类 trigger_condition 下的多个 action_pattern，由 LLM 判断是否应合并。
 
 **~~核心组件三：自我评估驱动的 AutobiographicalNode 更新~~** **（已移除，v3.12）**
 
@@ -1136,7 +1123,7 @@ Phase 2 需要补上"困境三"（记忆泛化与抽象）的设计缺口。Proc
 - 触发时机：每次 SkillExecution 完成后，根据 success/failure 和模型信息更新 `SkillExperience.model_compatibility`；某模型某类任务成功率低于 60% 时生成/更新 Limitation 节点。
 - 注入时机：Limitation 节点在每次对话的 System Prompt 注入时必须包含（与 Identity / Capability 同级）。
 
-> **移除原因**：该自动路径（含 runtime `MemoryManager::run_self_evaluation` 与 grafeo `offline.rs` 内的重复实现）已删除——`success_count` 从未在任何代码路径被递增，据此派生的"成功率"必然把 ≥5 次失败的 Skill 误判为 0% 成功率，产生 false-positive Limitation 节点。ADR-068 2026-09 revision 进一步收敛：自传体记忆来源为 §3.3 的两条生产者（Manifest 权威导入 + EpisodicDistiller 离线识别晋升），Limitation 节点的产生依赖蒸馏器从用户/LLM 显式陈述中识别，不再自动生成。
+> **移除原因**：该自动路径（含 runtime `MemoryManager::run_self_evaluation` 与 `acowork-memory` consolidation 内的重复实现）已删除——`success_count` 从未在任何代码路径被递增，据此派生的"成功率"必然把 ≥5 次失败的 Skill 误判为 0% 成功率，产生 false-positive Limitation 节点。ADR-068 2026-09 revision 进一步收敛：自传体记忆来源为 §3.3 的两条生产者（Manifest 权威导入 + EpisodicDistiller 离线识别晋升），Limitation 节点的产生依赖蒸馏器从用户/LLM 显式陈述中识别，不再自动生成。
 
 同时原设计新增 Relationship 节点的自动维护（用户与 Agent 合作超过 30 天自动生成）——该自动触发逻辑（manager.rs `run_relationship_generation`）已整体删除（2026-09 revision,回归测试 `post_compaction_tasks_do_not_write_relationship_nodes` 锁定）；当前 Relationship 节点由 `EpisodicDistiller` 从 `knowledge_subtype=Relation` 的 episode 晋升，无第二生产者。
 
@@ -1262,7 +1249,7 @@ Phase 3 增强后：
 
 | 阶段       | 触发点                             | 输入                                           | 输出                 | 说明                                                                                                                                                              |
 | ---------- | ---------------------------------- | ---------------------------------------------- | -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Retrieve` | 步骤 ② 构建上下文                  | 用户消息 + 当前上下文摘要                      | `Vec<MemoryContext>` | 记忆检索：Grafeo 通道（hybrid_search + graph_expand，始终执行）；若 manifest 声明 RAG，并行查询 RAG 通道（RagClient.query，超时 5s 降级）。详见 00-prd.md §1.13.1 |
+| `Retrieve` | 步骤 ② 构建上下文                  | 用户消息 + 当前上下文摘要                      | `Vec<MemoryContext>` | 记忆检索：SQLite 通道（hybrid_search + 多跳扩展，始终执行）；若 manifest 声明 RAG，并行查询 RAG 通道（RagClient.query，超时 5s 降级）。详见 00-prd.md §1.13.1 |
 | `Inject`   | 步骤 ② 构建上下文（Retrieve 之后） | `Vec<MemoryContext>` + Token 预算              | 格式化字符串         | 决定如何将记忆注入 LLM 上下文                                                                                                                                     |
 | `Record`   | 步骤 ⑥ 结果追加历史（异步）        | 本轮 user_msg + assistant_reply + tool_results | `()`                 | 记录本轮交互到经历层                                                                                                                                              |
 
@@ -1272,11 +1259,11 @@ Phase 3 增强后：
 | ------------- | ----------------------------------------------------- | ------------------- | ------------------------- | ------------------------------------------------ |
 | `Consolidate` | 即时提取（每轮 Record 后检查）+ 离线巩固（空闲/阈值） | 未巩固 episode 列表 | 新建/更新的 KnowledgeNode | 巩固管道（§4）                                   |
 | `Decay`       | 定时扫描（每小时，可配置）                            | 当前时间            | `DecayScanResult`         | 遗忘衰减（§5）                                   |
-| `Compact`     | 存储维护（启动时 + 空闲时）                           | 存储统计            | 清理数量                  | 索引优化、旧 episode 清理、Grafeo WAL Checkpoint |
+| `Compact`     | 存储维护（启动时 + 空闲时）                           | 存储统计            | 清理数量                  | 索引优化、旧 episode 清理、SQLite WAL Checkpoint |
 
 ### 10.3 MemoryStore trait（存储后端抽象）
 
-Runtime 和上层记忆逻辑不直接依赖任何具体存储引擎（grafeo-engine / Sled / LMDB / 远程服务），而是通过 `MemoryStore` trait 交互。这确保存储方案可替换——Phase 1 用 GrafeoStore（grafeo-engine），未来可无缝切换。
+Runtime 和上层记忆逻辑不直接依赖任何具体存储引擎（SQLite / Sled / LMDB / 远程服务），而是通过 `MemoryStore` trait 交互。这确保存储方案可替换——Phase 1 用 `SqliteStore`（基于 `rusqlite`），未来可无缝切换。
 
 ```rust
 /// 记忆查询参数（替代裸 &str，支持扩展）
@@ -1323,7 +1310,7 @@ pub enum ContextSource {
 }
 
 /// 记忆存储后端的标准化接口
-/// 实现者可以是 grafeo-engine / Sled / LMDB / 远程服务 / 内存 mock
+/// 实现者可以是 SqliteStore（当前唯一生产实现）/ Sled / LMDB / 远程服务 / 内存 mock
 pub trait MemoryStore: Send + Sync {
     // ── 经历层 ──
 
@@ -1377,7 +1364,7 @@ pub trait MemoryStore: Send + Sync {
     /// 存储统计信息（节点数、存储大小、索引状态等）
     fn stats(&self) -> Result<StoreStats>;
 
-    /// 关闭存储（释放资源、Grafeo WAL 自动刷写）
+    /// 关闭存储（释放资源、SQLite WAL 自动刷写）
     fn close(&self) -> Result<()>;
 }
 
@@ -1418,7 +1405,7 @@ pub struct DecayConfig {
 - `MemoryContext` 带 `priority` 和 `estimated_tokens`：Inject 阶段可以直接按优先级和 token 预算裁剪，无需 Runtime 了解记忆内部结构
 - `DecayConfig` 参数化：不同 Agent 可以有不同的遗忘策略（"学习型 Agent"遗忘慢，"工具型 Agent"遗忘快），通过 manifest 配置注入
 - `health_check` + `stats`：为 Desktop App 的记忆管理面板和运维监控提供标准数据接口
-- trait 中不包含任何 grafeo-engine 或其他存储后端的类型，实现完全隔离
+- trait 中不包含任何 SQLite 或其他存储后端的类型，实现完全隔离
 
 ### 10.4 MemoryManager（中间层）
 
@@ -1461,11 +1448,11 @@ Runtime 不直接调用 `MemoryStore`，而是通过 `MemoryManager` 这个中�
                           ▼
 ┌──────────────────────────────────────────────────────────────┐
 │  MemoryStore trait
-│  └─ GrafeoStore (grafeo-engine v0.5.39，Phase 1 唯一实现)       │
-│     └─ GrafeoDB → Episodic/Semantic/Forgetting/Retrieval modules   │
-│     └─ 存储格式：.grafeo 单文件（LPG + HNSW + BM25 + WAL）        │
+│  └─ SqliteStore (rusqlite + FTS5 + sqlite-vss，唯一生产实现)       │
+│     └─ storage/schema.rs + provider.rs + retrieval.rs modules        │
+│     └─ 存储格式：memory/private.sqlite（WAL + FTS5 + vectors + edges）  │
 │  └─ (未来) RemoteMemoryStore (云端分布式存储)                │
-│  └─ (未来) InMemoryStore (GrafeoDB::new_in_memory() 测试用 mock) │
+│  └─ InMemoryStore (SqliteStore::open_in_memory() 测试用 mock) │
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -1474,7 +1461,7 @@ Runtime 不直接调用 `MemoryStore`，而是通过 `MemoryManager` 这个中�
 ```rust
 pub struct MemoryManager {
     store: Box<dyn MemoryStore>,
-    rag_client: Option<Arc<RagClient>>,  // RAG 检索客户端（仅 manifest 声明 rag 时注入，None 则仅查 Grafeo）
+    rag_client: Option<Arc<RagClient>>,  // RAG 检索客户端（仅 manifest 声明 rag 时注入，None 则仅查 SQLite 记忆层）
     middlewares: Vec<Box<dyn MemoryMiddleware>>,
     config: MemoryConfig,
     event_bus: MemoryEventBus,
@@ -1482,9 +1469,9 @@ pub struct MemoryManager {
 
 impl MemoryManager {
     /// 检索记忆（Retrieve 阶段）
-    /// 内部调用 store.hybrid_search + store.graph_expand 检索 Grafeo 通道
+    /// 内部调用 store.hybrid_search + 应用层 edges 多跳扩展 检索 SQLite 通道
     /// 若 rag_client 为 Some，并行查询 RAG 通道（RagClient.query，超时 5s 降级）
-    /// 两条通道结果合并，按来源标注（Grafeo / RAG），转换为 MemoryContext
+    /// 两条通道结果合并，按来源标注（Memory / RAG），转换为 MemoryContext
     pub async fn retrieve(&self, query: &str, context: &RetrieveContext) -> Result<Vec<MemoryContext>>;
 
     /// 注入记忆到上下文（Inject 阶段）
@@ -1515,7 +1502,7 @@ impl MemoryManager {
 
 ### 10.5 MemoryMiddleware trait（中间件接口）
 
-中间件可以在记忆管线的 Record/Retrieve 阶段前后插入自定义逻辑，无需修改 Runtime 或 Grafeo 代码。
+中间件可以在记忆管线的 Record/Retrieve 阶段前后插入自定义逻辑，无需修改 Runtime 或 SQLite 后端代码。
 
 ```rust
 pub trait MemoryMiddleware: Send + Sync {
@@ -1558,11 +1545,11 @@ custom_filter = { type = "wasm", path = "filters/content_filter.wasm", priority 
 
 | 阶段    | 内容                                                                                                                              | 说明                                                                  |
 | ------- | --------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
-| Phase 1 | `MemoryStore` trait 定义 + `MemoryQuery` / `SearchResult` / `MemoryContext` 等数据类型 + `GrafeoStore` 实现（基于 grafeo-engine） | trait 定义先行，GrafeoStore 作为唯一实现，Runtime 改为通过 trait 调用 |
-| Phase 1 | `MemoryManager` 基础结构 + 生命周期阶段触发                                                                                       | Manager 直接转发给 GrafeoStore，不引入中间件机制                      |
+| Phase 1 | `MemoryStore` trait 定义 + `MemoryQuery` / `SearchResult` / `MemoryContext` 等数据类型 + `SqliteStore` 实现（基于 rusqlite） | trait 定义先行，SqliteStore 作为唯一实现，Runtime 改为通过 trait 调用 |
+| Phase 1 | `MemoryManager` 基础结构 + 生命周期阶段触发                                                                                       | Manager 直接转发给 SqliteStore，不引入中间件机制                      |
 | Phase 1 | `DecayConfig` 参数化                                                                                                              | 遗忘参数从硬编码改为可配置，通过 manifest 注入                        |
 | Phase 2 | `MemoryMiddleware` trait + 注册机制 + 内置中间件（emotion_tag / audit_log）                                                       | 打开中间件扩展能力                                                    |
-| Phase 3 | `InMemoryStore` mock 实现（基于 `GrafeoDB::new_in_memory()`，用于测试）                                                           | 替代当前的集成测试方案                                                |
+| Phase 3 | `InMemoryStore` mock 实现（基于 `SqliteStore::open_in_memory()`，用于测试）                                                       | 替代当前的集成测试方案                                                |
 | Phase 3 | `RemoteMemoryStore` 探索（云端分布式存储）                                                                                        | 如果跨设备实时同步需求明确                                            |
 
 ### 10.7 设计决策
@@ -1575,9 +1562,9 @@ custom_filter = { type = "wasm", path = "filters/content_filter.wasm", priority 
 | 事件通知                       | Event Bus（发布/订阅）         | Desktop App 和日志系统可订阅 MemoryEvent，不影响核心管线性能                                                                                                                 |
 | Retrieve/Inject 拆分为两个阶段 | 是                             | Retrieve 关注"查什么"，Inject 关注"怎么放"，职责分离有利于未来 Inject 策略的独立演化（如 RAG 结果和本地记忆的混合排序）                                                      |
 | RAG 双通道检索                 | 配置驱动 Opt-In                | RAG 通道仅当 manifest 声明 `type=rag` 时使能；MemoryManager 通过 `rag_client: Option<Arc<RagClient>>` 条件分支控制；无 RAG 声明的 Agent 行为零侵入（详见 00-prd.md §1.13.1） |
-| 存储后端                       | grafeo-engine v0.5.39          | 纯 Rust 图数据库，原生支持 LPG + GQL + HNSW + BM25 + WAL + MVCC                                                                                                              |
+| 存储后端                       | rusqlite (SQLite 3 + FTS5 + sqlite-vss) | 嵌入式关系数据库，应用层 `nodes`/`edges`/`vectors` 表 + FTS5 虚表 + 应用层 RRF 融合 |
 | 数据模型                       | LPG（Label + Property + Edge） | 替代关系型表结构，认知分层与 LPG Label 一一映射                                                                                                                              |
-| 存储格式                       | `.grafeo` 单文件               | 替代 SQLite `.db`，内含 WAL + 向量/全文索引                                                                                                                                  |
+| 存储格式                       | `memory/private.sqlite`         | 单文件数据库，内含 WAL + 向量表 + FTS5 虚表                                                                                                                                    |
 
 ## 11. 质量评估框架（v3.7 新增）
 
@@ -1605,7 +1592,7 @@ pub struct RetrievalMetrics {
 
 - **result_count + avg_score + max_score**：基础检索质量指标，连续低 avg_score 暗示 min_cosine 阈值需调整
 - **abstention_triggered**：拒答率过高（>30%）可能说明 min_cosine 过严；拒答率过低（<5%）可能说明 min_cosine 过松
-- **retrieval_level**：降级频率反映 Grafeo 健康状况
+- **retrieval_level**：降级频率反映 SQLite 检索健康状况
 
 **轻量 LLM Judge（Phase 3+，可选）**：
 
@@ -1693,7 +1680,7 @@ lambda 值 vs 用户反馈的"记忆过期率"：
 | NRR                | 每次检索     | < 0.5 持续 10 次    | 检查 embedding 模型 + 索引状态 |
 | Abstention 率      | 每次检索     | > 30% 或 < 5%       | 调整 min_cosine 阈值           |
 | 冲突自动判定准确率 | 每次离线巩固 | < 80%               | 回退为 LLM 仲裁                |
-| 降级频率           | 每次检索     | Level 2+ 占比 > 20% | 检查 Grafeo 健康状态           |
+| 降级频率           | 每次检索     | Level 2+ 占比 > 20% | 检查 SQLite 检索健康状态           |
 
 ### 11.4 质量门禁
 
@@ -1704,7 +1691,7 @@ Phase 2 交付前必须通过以下验证：
 - 使用 LongMemEval-S 标准子集（约 115K tokens 上下文长度）运行完整 5 维评测
 - 综合分数 >= 65%，各维度不低于 50%
 - Abs 维度 >= 60%（拒答是最关键的差异化能力）
-- 测试环境：单 Agent，Grafeo 存储后端，embedding 模型 Ollama/Remote API（取决于 provider 配置）
+- 测试环境：单 Agent，SqliteStore 存储后端，embedding 模型 Ollama/Remote API（取决于 provider 配置）
 
 **功能验证清单**：
 

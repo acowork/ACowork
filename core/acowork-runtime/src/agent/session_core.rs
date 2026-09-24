@@ -147,6 +147,21 @@ pub(crate) struct SessionCore {
     /// The slot design makes that bug structurally impossible.
     pub(crate) current_cancel_handle: Arc<parking_lot::Mutex<CancelHandle>>,
 
+    /// ADR-083: **per-compaction cancellation slot**. Independent of
+    /// [`Self::current_cancel_handle`] so cancelling a compaction never
+    /// crosses semantics with the session Stop signal (a Stop still stops
+    /// the whole request; a compaction cancel only aborts the distillation
+    /// call). Swapped for a fresh `Active` handle at the start of every
+    /// compaction via [`Self::begin_compaction`].
+    ///
+    /// Same `Arc<Mutex<..>>` slot shape as `current_cancel_handle`, for the
+    /// same reason: `SessionManager` (on another task) must target the
+    /// *current* compaction's handle, and a plain clone would go stale
+    /// after the swap. `CancelHandle` is one-shot, so "reset" means
+    /// replacing the instance — which is exactly what makes a cancel from
+    /// a *previous* compaction harmless to the next one.
+    pub(crate) compaction_cancel_handle: Arc<parking_lot::Mutex<CancelHandle>>,
+
     /// Watch sender for session status (ADR-014).
     /// None for CLI-only sessions.
     pub(crate) status_tx: Option<tokio::sync::watch::Sender<SessionStatus>>,
@@ -223,6 +238,9 @@ impl SessionCore {
             // calls `begin_new_request()` at every entry so the handle
             // is always generation-fresh — see field docs above.
             current_cancel_handle: Arc::new(parking_lot::Mutex::new(CancelHandle::new())),
+            // ADR-083: compaction cancel slot starts fresh; swapped at the
+            // start of every compaction by `begin_compaction`.
+            compaction_cancel_handle: Arc::new(parking_lot::Mutex::new(CancelHandle::new())),
             status_tx: None,
             retry_session_status: Some(Arc::new(std::sync::RwLock::new(
                 SessionStatus::LlmAwaitingFirstChunk,
@@ -311,6 +329,30 @@ impl SessionCore {
     /// swaps happened since registration.
     pub(crate) fn cancel_handle_arc(&self) -> Arc<parking_lot::Mutex<CancelHandle>> {
         self.current_cancel_handle.clone()
+    }
+
+    /// ADR-083: start a new compaction — swap a fresh `Active`
+    /// [`CancelHandle`] into the compaction slot and return a clone.
+    ///
+    /// Call this once at the top of every compaction (auto or manual),
+    /// *before* awaiting the distillation LLM. `CancelHandle` is one-shot,
+    /// so swapping instances is what makes a cancel from a previous
+    /// compaction a no-op for this one: a `cancel()` that lands before
+    /// this call targets the retired handle and is discarded.
+    pub(crate) fn begin_compaction(&self) -> CancelHandle {
+        let new_handle = CancelHandle::new();
+        *self.compaction_cancel_handle.lock() = new_handle.clone();
+        new_handle
+    }
+
+    /// Return the `Arc` handle to the compaction-cancel slot itself.
+    ///
+    /// Mirrors [`Self::cancel_handle_arc`] for the compaction signal:
+    /// [`crate::agent::session::session_manager::SessionManager`] registers
+    /// it so the `compress_type = 3` dispatcher can target the *current*
+    /// compaction's handle without holding a stale clone.
+    pub(crate) fn compaction_cancel_handle_arc(&self) -> Arc<parking_lot::Mutex<CancelHandle>> {
+        self.compaction_cancel_handle.clone()
     }
 
     // ── Chunk event helpers ──────────────────────────────────────────

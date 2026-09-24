@@ -247,8 +247,8 @@ export function MemoryPanel() {
           <StatCard label={t("memoryPanel.active")} value={stats.by_status?.["Active"] ?? 0} />
           <StatCard label={t("memoryPanel.dormant")} value={stats.by_status?.["Dormant"] ?? 0} />
           <StatCard
-            label={t("memoryPanel.health")}
-            value={stats.index_health}
+            label={t("memoryPanel.version")}
+            value={stats.schema_version}
           />
         </div>
       )}
@@ -394,7 +394,7 @@ export function MemoryPanel() {
                   value={filters.keyword}
                   onChange={(e) => setFilters({ keyword: e.target.value })}
                   placeholder={t("memoryPanel.searchNodes")}
-                  className="rounded-md bg-panel-block py-1.5 pl-7 pr-2.5"
+                  className="rounded-md py-1.5 pl-7 pr-2.5"
                 />
               </div>
               <div className="flex gap-2">

@@ -1,4 +1,4 @@
-# RAG Standard Query Protocol — Enterprise Integration Guide
+﻿# RAG Standard Query Protocol — Enterprise Integration Guide
 
 > Version: 1.0 | Protocol Version: 1.0 | Updated: 2026-04-27  
 > Module: acowork-runtime (Phase 4 S4)
@@ -405,10 +405,10 @@ Automatically triggered every iteration, using the current user message as query
 
 ```
 Step ② MemoryManager.retrieve()
-  ├─ Grafeo channel: hybrid_search + graph_expand  ← always executed
+  ├─ SQLite 记忆层 channel: hybrid_search + graph_expand  ← always executed
   └─ RAG channel: RagClient.query(user_message, top_k=3)  ← only if manifest declares RAG
-     ├─ Success → results annotated by source [Grafeo] / [RAG:enterprise_knowledge]
-     ├─ Timeout (5s) → skip RAG channel, use only Grafeo results
+     ├─ Success → results annotated by source [Memory] / [RAG:enterprise_knowledge]
+     ├─ Timeout (5s) → skip RAG channel, use only SQLite 记忆层 results
      └─ Unreachable → same, does not block Agent
 ```
 

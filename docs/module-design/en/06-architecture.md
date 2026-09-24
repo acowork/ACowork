@@ -1,4 +1,4 @@
-# Architecture: Dependencies, Data Flow, Roadmap, Build Artifacts, Testing
+﻿# Architecture: Dependencies, Data Flow, Roadmap, Build Artifacts, Testing
 
 ## 1. Inter-Module Dependencies
 
@@ -14,13 +14,13 @@
     │                │ │gateway    │ │sign          │
     │    deps:       │ │           │ │              │
     │  · core        │ │ deps:     │ │ deps:        │
-    │  · grafeo      │ │ · core    │ │ · core       │
+    │  · sqlite     │ │ · core    │ │ · core       │
     │  · sign(verify)│ │ · sign    │ │ (no runtime  │
     │                │ │ · vault   │ │  deps)        │
     └────────┬───────┘ └───┬───────┘ └──────────────┘
              │             │
     ┌────────▼──────┐ ┌───▼──────────┐
-    │acowork-grafeo│ │acowork-vault│
+    │acowork-sqlite│ │acowork-vault│
     │               │ │              │
     │ deps:         │ │ deps:        │
     │ · core(Memory │ │ · core       │
@@ -30,7 +30,7 @@
 
 **Key constraints**:
 - `acowork-core` doesn't depend on any other internal crate
-- `acowork-grafeo` only depends on `acowork-core`'s Memory trait
+- `acowork-sqlite` only depends on `acowork-core`'s Memory trait
 - `acowork-runtime` and `acowork-gateway` have **no direct dependency**, they communicate via IPC
 - `acowork-sign` is an independent tool crate, doesn't depend on runtime crates
 
@@ -67,7 +67,7 @@ Agent Runtime process startup
     │
     ├─3→ IPC Client: KeyRelease → SecretString (stored in process memory)
     │
-    ├─4→ Grafeo::open(workspace/memory/private.grafeo)
+    ├─4→ SqliteStore::open(workspace/memory/private.sqlite, embedding_dim)
     │
     └─5→ Main loop:
          Each iteration:
@@ -102,7 +102,7 @@ Calendar Agent ← GatewayResponse::IntentReceived
 | Phase | Crates to Implement | Core Modules |
 |-------|---------------------|--------------|
 | **Phase 1: MVP** | core, runtime, gateway, sign, vault | `core`: manifest + protocol + traits<br>`runtime`: agent/loop + package/loader + providers/openai + tools/builtin(core 17) + tools/memory(5) + tools/agent(intent_send, ask_user) + ipc/client<br>`gateway`: package_manager + lifecycle + ipc/server + vault<br>`sign`: keygen + sign + verify<br>`vault`: encrypted storage |
-| **Phase 2: Memory** | + grafeo | `grafeo`: all modules (episodic + semantic + fulltext + hybrid + embedding)<br>`runtime`: memory/ module<br>`gateway`: system_agent/identity_injector |
+| **Phase 2: Memory** | + sqlite | `acowork-sqlite`: all modules (schema + provider + retrieval + session_meta + conversation)<br>`runtime`: memory/ module<br>`gateway`: system_agent/identity_injector |
 | **Phase 2.5: DevFramework** | + runtime/debug | `runtime`: debug/ all modules<br>`gateway`: lifecycle extension (clone API) |
 | **Phase 3: Security Sandbox** | + gateway/sandbox | `gateway`: sandbox/ per-platform implementation<br>`runtime`: tools/wasm<br>`core`: permission enhancement |
 | **Phase 4: Communication Coordination** | gateway extension | `gateway`: intent/ + budget/ + rate/<br>`runtime`: tools/gateway enhancement |

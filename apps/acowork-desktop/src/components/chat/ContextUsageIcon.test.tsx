@@ -33,6 +33,7 @@ const mocks = vi.hoisted(() => ({
       },
     },
     sendCompressAction: vi.fn(),
+    cancelCompressAction: vi.fn(),
   },
   agentState: {
     agents: {
@@ -60,6 +61,7 @@ const mocks = vi.hoisted(() => ({
       "contextUsage.categories.skills": "技能",
       "contextUsage.compressing": "压缩中...",
       "contextUsage.compressSummary": "压缩整个上下文",
+      "contextUsage.cancelCompact": "取消压缩",
       "contextUsage.cacheHitLabel": "缓存命中率（累计）",
       "contextUsage.cacheHitPerTurnLabel": "缓存命中率（实时）",
     };
@@ -82,6 +84,10 @@ vi.mock("../../i18n/useTranslation", () => ({
 describe("ContextUsageIcon", () => {
   beforeEach(() => {
     mocks.chatState.sendCompressAction.mockReset();
+    mocks.chatState.cancelCompressAction.mockReset();
+    mocks.chatState.agentStates["agent-1"].sessionStates["session-1"].isCompacting = false;
+    mocks.chatState.agentStates["agent-1"].sessionStates["session-1"].sessionStatus =
+      { status: "idle" } as const;
   });
 
   it("renders categorized usage from the latest debug snapshot and can be closed", () => {
@@ -232,6 +238,26 @@ describe("ContextUsageIcon", () => {
     // Restore so other tests aren't affected.
     mocks.chatState.agentStates["agent-1"].sessionStates["session-1"].sessionStatus =
       { status: "idle" } as const;
+  });
+
+  it("ADR-083: turns into a clickable cancel button while compacting", () => {
+    mocks.chatState.agentStates["agent-1"].sessionStates["session-1"].isCompacting = true;
+    const { container } = render(
+      <ContextUsageIcon agentId="agent-1" sessionId="session-1" />,
+    );
+    fireEvent.mouseEnter(container.firstElementChild!);
+
+    const btn = screen.getByRole("button", { name: "取消压缩" });
+    // Enabled — this is the whole point of ADR-083 (it used to be disabled).
+    expect((btn as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(btn);
+    expect(mocks.chatState.cancelCompressAction).toHaveBeenCalledWith(
+      "agent-1",
+      "session-1",
+    );
+    expect(mocks.chatState.sendCompressAction).not.toHaveBeenCalled();
+
+    mocks.chatState.agentStates["agent-1"].sessionStates["session-1"].isCompacting = false;
   });
 
   it("popover breakdown is populated from chatStore (ADR-067) without needing DevMode", () => {

@@ -1,6 +1,6 @@
-# Hardcoded LLM Prompts in the Runtime — Inventory
+﻿# Hardcoded LLM Prompts in the Runtime — Inventory
 
-> **Scope**: Every LLM prompt and instructional string that is hardcoded (i.e. not loaded from a `.agent` package's `prompts/*.md`) inside `core/acowork-runtime/` and its direct dependencies `core/acowork-memory/` and `core/acowork-grafeo/`.
+> **Scope**: Every LLM prompt and instructional string that is hardcoded (i.e. not loaded from a `.agent` package's `prompts/*.md`) inside `core/acowork-runtime/` and its direct dependencies `core/acowork-memory/` and `core/acowork-sqlite/`.
 > **Purpose**: Help answer "why is the model seeing this text?", "what do I touch when I need to localize or version a prompt?", and "where are the leftover PII / safety risks?".
 > **Out of scope**: `.agent` package `prompts/*.md` templates (loaded at runtime by `package/prompt_builder.rs`); test fixtures (e.g. the `"You are a helpful..."` string used inside `mock_provider`); log/error strings the LLM never sees.
 
@@ -46,16 +46,16 @@ The only entry point explicitly tagged as "every production prompt should live h
 | `episode_distill.rs` | Indirect references to `COMPACTION_SYSTEM_PROMPT` / `COMPACT_PROMPT` / `TITLE_PROMPT` | Distillation + title LLM calls: `compact_full_context`, `compact_messages`, `distill_on_session_end`, `compact_session_title_with_llm` |
 | `episode_distill.rs::format_messages` | Runtime `format!()` assembly | Emits `[System]: ... / [User]: ... / [Tool(name=…): ... / [CompactionSummary]: ...` row template — a half-hardcoded "dialog serialization" format |
 
-## 3. Memory / knowledge consolidation (`acowork-grafeo` + `acowork-memory`)
+## 3. Memory / knowledge consolidation (`acowork-sqlite` + `acowork-memory`)
 
 | File | Identifier | Summary |
 | --- | --- | --- |
-| `core/acowork-grafeo/src/consolidation/triple_extraction.rs` | `EXTRACTION_SYSTEM_PROMPT` | "You are a knowledge extraction assistant..." — triple extraction (subject / predicate / object + confidence + sub_type), JSON output |
-| `core/acowork-grafeo/src/consolidation/conflict_llm.rs` | `CONFLICT_CLASSIFICATION_PROMPT` | "You are a knowledge conflict resolver..." — conflict classification (Evolution / Correction / Ambiguous), JSON output |
-| `core/acowork-grafeo/src/consolidation/generalization.rs` | `GENERALIZATION_PROMPT` | "You are a behavior pattern discovery assistant..." — behavior pattern extraction, JSON output |
-| `core/acowork-grafeo/src/abstention.rs` | `AbstentionConfig::default().abstention_prompt` | `"When you are not confident about the information from memory, respond with 'I'm not sure about this'..."` |
-| `core/acowork-memory/src/manager.rs` | `DEFAULT_ABSTENTION_PROMPT` | Mirror copy of the grafeo value above; serves as a single-source-of-truth fallback (its doc comment explicitly points back to grafeo) |
-| `core/acowork-grafeo/src/consolidation/ambiguous.rs` | `generate_confirmation_hint()` — runtime `format!()` | `"There are N ambiguous memory conflicts that need your confirmation:\n- \"x\" vs \"y\""` |
+| `core/acowork-sqlite/src/consolidation/triple_extraction.rs` | `EXTRACTION_SYSTEM_PROMPT` | "You are a knowledge extraction assistant..." — triple extraction (subject / predicate / object + confidence + sub_type), JSON output |
+| `core/acowork-sqlite/src/consolidation/conflict_llm.rs` | `CONFLICT_CLASSIFICATION_PROMPT` | "You are a knowledge conflict resolver..." — conflict classification (Evolution / Correction / Ambiguous), JSON output |
+| `core/acowork-sqlite/src/consolidation/generalization.rs` | `GENERALIZATION_PROMPT` | "You are a behavior pattern discovery assistant..." — behavior pattern extraction, JSON output |
+| `core/acowork-sqlite/src/abstention.rs` | `AbstentionConfig::default().abstention_prompt` | `"When you are not confident about the information from memory, respond with 'I'm not sure about this'..."` |
+| `core/acowork-memory/src/manager.rs` | `DEFAULT_ABSTENTION_PROMPT` | Mirror copy of the SQLite 记忆层 value above; serves as a single-source-of-truth fallback (its doc comment explicitly points back to SQLite 记忆层) |
+| `core/acowork-sqlite/src/consolidation/ambiguous.rs` | `generate_confirmation_hint()` — runtime `format!()` | `"There are N ambiguous memory conflicts that need your confirmation:\n- \"x\" vs \"y\""` |
 | `core/acowork-memory/src/judge.rs` | `JudgeConfig::default()` (binds the judge prompt) | Default judge model `"qwen3:1.7b"`, `sample_rate=0.1`, `top_k=3` |
 | `core/acowork-runtime/src/memory/judge_llm.rs` | Inline `format!()` | "You are a retrieval quality judge. Rate how relevant the following search results..." — 1–5 scoring |
 
@@ -113,7 +113,7 @@ Every LLM call carries tool schemas, whose `description` field is read by the mo
 
 ## Summary
 
-- **Real system / user prompt constants**: 5 in `prompt.rs` + 4 in downstream grafeo / memory (`const PROMPT: &str`).
+- **Real system / user prompt constants**: 5 in `prompt.rs` + 4 in downstream SQLite 记忆层 / memory (`const PROMPT: &str`).
 - **Runtime-assembled instructional fragments**: 7 `## Section` injection block templates in `context.rs` + `[Role]: ...` row template in `episode_distill.rs`.
 - **Model-visible "instructional text"**: 22 built-in tools' `ToolSpec.description`.
 - **Not strictly prompts, but the model sees them**: the 2 truncation markers in `output.rs`.

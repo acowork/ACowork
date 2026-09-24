@@ -92,7 +92,7 @@ export function ProjectSidebar({ width }: { width?: number }) {
             onChange={(e) => setSearchQuery(e.target.value)}
             placeholder={t("pm.searchPlaceholder")}
             aria-label={t("pm.searchPlaceholder")}
-            className="rounded-md bg-nav-control pl-7 py-1.5 pr-2"
+            className="rounded-md bg-input-bg pl-7 py-1.5 pr-2"
           />
         </div>
       </div>

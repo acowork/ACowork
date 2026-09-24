@@ -456,15 +456,6 @@ pub struct ManifestMemoryQuality {
     /// Minimum cosine similarity for retrieval results (default: 0.3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_cosine: Option<f32>,
-    /// Graph-expansion parameters.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub graph_expand: Option<ManifestGraphExpandQuality>,
-    /// Edge-weight formula parameters.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub edge_weight: Option<ManifestEdgeWeightQuality>,
-    /// PageRank boost weight (default: 0.1).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pagerank_weight: Option<f64>,
     /// Dedup similarity thresholds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dedup: Option<ManifestDedupQuality>,
@@ -475,31 +466,6 @@ pub struct ManifestMemoryQuality {
     /// gated per ADR-062 D3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keyword_index: Option<bool>,
-}
-
-/// Manifest mirror of `acowork_memory::quality::GraphExpandQuality`.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ManifestGraphExpandQuality {
-    /// Early-stop score thresholds per hop (default: [0.1, 0.15, 0.2]).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub early_stop_thresholds: Option<Vec<f32>>,
-    /// Minimum edge weight for graph expansion (default: 0.1).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub min_edge_weight: Option<f32>,
-    /// Decay factor applied per hop (default: 0.7).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub decay_per_hop: Option<f64>,
-}
-
-/// Manifest mirror of `acowork_memory::quality::EdgeWeightQuality`.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ManifestEdgeWeightQuality {
-    /// Recency decay constant per day (default: 0.01).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lambda: Option<f64>,
-    /// Maximum edge strength (default: 0.8).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cap: Option<f32>,
 }
 
 /// Manifest mirror of `acowork_memory::quality::DedupQuality`.

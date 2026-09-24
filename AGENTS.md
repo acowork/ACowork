@@ -42,18 +42,20 @@ npm run tauri dev
 ## Project Structure
 
 ```
-core/                  # Rust workspace (13 crates; source of truth: core/Cargo.toml [workspace] members)
+core/                  # Rust workspace (15 crates; source of truth: core/Cargo.toml [workspace] members)
   acowork-core/        # Shared types, errors, config, MQTT proto
   acowork-embed/       # ONNX-Runtime embedding model runner
   acowork-gateway/     # HTTP API, embedded MQTT broker, reverse proxy, lifecycle, package mgr
-  acowork-grafeo/      # Graph-based layered memory engine
   acowork-lsp-relay/   # LSP protocol relay (Desktop <-> external language servers)
   acowork-mcp/         # MCP (Model Context Protocol) wrapper
   acowork-memory/      # Memory manager (trait, middleware)
   acowork-mqtt-session/# MQTT session / event multiplexing (Gateway <-> Runtime)
+  acowork-pm/          # Project & task management service (REST API + MCP tools)
   acowork-node/        # Node Agent (ADR-055) — per-machine daemon hosting Runtime processes
+  acowork-doc/         # Online document library service (REST API + MCP tools)
   acowork-runtime/     # Agent runtime (main loop, tools, providers, sessions)
   acowork-sign/        # Package signing & verification
+  acowork-sqlite/      # SQLite storage backend — memory + session meta + conversation index (ADR-082)
   acowork-tool-sdk/    # WASM custom tool SDK (Wasmtime host)
   acowork-vault/       # Encrypted key/value store
 
@@ -64,7 +66,7 @@ apps/
 docs/                  # Public architecture docs
   design/{zh,en}/      # 17 design docs (zh only; en TBD)
   module-design/{zh,en}/ # Rust crate specs (8 zh + en placeholder)
-  adr/{zh,en}/         # 51 ADRs (en: 1, zh: 50)
+  adr/{zh,en}/         # 78 ADRs (en: 2, zh: 76)
   prd/{zh,en}/         # Platform + Desktop UI/UX PRD
   protocols/{zh,en}/   # HTTP + MQTT + RAG protocol reference
   mcp-server-research/{zh,en}/

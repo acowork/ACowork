@@ -1,6 +1,6 @@
-# Runtime 内硬编码 LLM 提示词清单
+﻿# Runtime 内硬编码 LLM 提示词清单
 
-> **范围**：`core/acowork-runtime/` 及其直接依赖 `core/acowork-memory/`、`core/acowork-grafeo/` 中所有硬编码（即非来自 `.agent` 包 `prompts/*.md`）的 LLM 提示词与指令性文本。
+> **范围**：`core/acowork-runtime/` 及其直接依赖 `core/acowork-memory/`、`core/acowork-sqlite/` 中所有硬编码（即非来自 `.agent` 包 `prompts/*.md`）的 LLM 提示词与指令性文本。
 > **目的**：便于排查"为什么模型看到了这段话"、"做 i18n/版本替换时哪里要改"、"做安全审计时哪里有遗留 PII 风险"。
 > **不在范围**：`.agent` 包的 `prompts/*.md` 模板（运行时由 `package/prompt_builder.rs` 加载）；测试 fixture（如 `mock_provider` 中的 `"You are a helpful..."`）；LLM 看不到的日志/错误信息字符串。
 
@@ -46,16 +46,16 @@ graph LR
 | `episode_distill.rs` | 间接引用 `COMPACTION_SYSTEM_PROMPT` / `COMPACT_PROMPT` / `TITLE_PROMPT` | 蒸馏 + 标题 LLM 调用，见 `compact_full_context`、`compact_messages`、`distill_on_session_end`、`compact_session_title_with_llm` |
 | `episode_distill.rs::format_messages` | 运行时 `format!()` 拼装 | 输出 `[System]: ... / [User]: ... / [Tool(name=…): ... / [CompactionSummary]: ...` 行模板，半硬编码的"对话可读化"格式 |
 
-## 3. 记忆 / 知识巩固（`acowork-grafeo` + `acowork-memory`）
+## 3. 记忆 / 知识巩固（`acowork-sqlite` + `acowork-memory`）
 
 | 文件 | 标识 | 内容概要 | 支持覆盖（ADR-063） |
 | --- | --- | --- | --- |
-| `core/acowork-grafeo/src/consolidation/triple_extraction.rs` | `EXTRACTION_SYSTEM_PROMPT` | "You are a knowledge extraction assistant..." 三元组抽取（subject/predicate/object + confidence + sub_type），JSON 输出 | ✅ `prompts/extraction.md` |
-| `core/acowork-grafeo/src/consolidation/conflict_llm.rs` | `CONFLICT_CLASSIFICATION_PROMPT` | "You are a knowledge conflict resolver..." 冲突三分类（Evolution / Correction / Ambiguous），JSON 输出 | ✅ `prompts/conflict-classification.md` |
-| `core/acowork-grafeo/src/consolidation/generalization.rs` | `GENERALIZATION_PROMPT` | "You are a behavior pattern discovery assistant..." 行为模式抽取，JSON 输出 | ✅ `prompts/generalization.md` |
-| `core/acowork-grafeo/src/abstention.rs` | `AbstentionConfig::default().abstention_prompt` | `"When you are not confident about the information from memory, respond with 'I'm not sure about this'..."` | ✅ `prompts/abstention.md` |
-| `core/acowork-memory/src/manager.rs` | `DEFAULT_ABSTENTION_PROMPT` | 同上 grafeo 值的镜像拷贝，作为 single-source-of-truth 的备援（注释明确指向 grafeo） | —（跟随 grafeo 同覆盖） |
-| `core/acowork-grafeo/src/consolidation/ambiguous.rs` | `generate_confirmation_hint()` 运行时 `format!()` | `"There are N ambiguous memory conflicts that need your confirmation:\n- \"x\" vs \"y\""` | —（运行时拼装的确认提示，非指令性 prompt，详见 §7） |
+| `core/acowork-sqlite/src/consolidation/triple_extraction.rs` | `EXTRACTION_SYSTEM_PROMPT` | "You are a knowledge extraction assistant..." 三元组抽取（subject/predicate/object + confidence + sub_type），JSON 输出 | ✅ `prompts/extraction.md` |
+| `core/acowork-sqlite/src/consolidation/conflict_llm.rs` | `CONFLICT_CLASSIFICATION_PROMPT` | "You are a knowledge conflict resolver..." 冲突三分类（Evolution / Correction / Ambiguous），JSON 输出 | ✅ `prompts/conflict-classification.md` |
+| `core/acowork-sqlite/src/consolidation/generalization.rs` | `GENERALIZATION_PROMPT` | "You are a behavior pattern discovery assistant..." 行为模式抽取，JSON 输出 | ✅ `prompts/generalization.md` |
+| `core/acowork-sqlite/src/abstention.rs` | `AbstentionConfig::default().abstention_prompt` | `"When you are not confident about the information from memory, respond with 'I'm not sure about this'..."` | ✅ `prompts/abstention.md` |
+| `core/acowork-memory/src/manager.rs` | `DEFAULT_ABSTENTION_PROMPT` | 同上 SQLite 记忆层 值的镜像拷贝，作为 single-source-of-truth 的备援（注释指向 SQLite 存储） | —（跟随 SQLite 记忆层 同覆盖） |
+| `core/acowork-sqlite/src/consolidation/ambiguous.rs` | `generate_confirmation_hint()` 运行时 `format!()` | `"There are N ambiguous memory conflicts that need your confirmation:\n- \"x\" vs \"y\""` | —（运行时拼装的确认提示，非指令性 prompt，详见 §7） |
 | `core/acowork-memory/src/judge.rs` | `JudgeConfig::default()`（绑定 judge prompt） | 默认判定模型 `"qwen3:1.7b"`、`sample_rate=0.1`、`top_k=3` | —（模型配置，非 prompt 内容，详见 §7） |
 | `core/acowork-runtime/src/memory/judge_llm.rs` | `format!()` 内联 | "You are a retrieval quality judge. Rate how relevant the following search results..." 1–5 打分 | —（运行时格式化的内联 prompt，详见 §7） |
 
@@ -134,17 +134,17 @@ ADR-063 把"包级文件名覆盖"推广到全部指令性 prompt，但**以下�
 | `episode_distill.rs::format_messages` 的 `[Role]: ...` 行模板 | 压缩 LLM 反向解析这些标记作为摘要重构依据，灵活化破坏协议。 |
 | `output.rs` 的 `TRUNCATED_LINE_MARKER` / `TRUNCATED_OUTPUT_MARKER` | 同上：协议级 marker。 |
 
-### 7.4 grafeo / memory 其他 4 处 LLM 相关代码
+### 7.4 SQLite 记忆层 / memory 其他 4 处 LLM 相关代码
 
 | 位置 | 为什么不覆盖 |
 | --- | --- |
-| `acowork-grafeo/src/consolidation/ambiguous.rs::generate_confirmation_hint()` | 运行时 `format!()` 拼装的**确认提示文本**（告诉用户有 N 条冲突需确认），不是给 LLM 看的指令 prompt，不在本 ADR 范围。 |
+| `acowork-sqlite/src/consolidation/ambiguous.rs::generate_confirmation_hint()` | 运行时 `format!()` 拼装的**确认提示文本**（告诉用户有 N 条冲突需确认），不是给 LLM 看的指令 prompt，不在本 ADR 范围。 |
 | `acowork-memory/src/judge.rs::JudgeConfig::default()` | 是**判定模型配置**（模型名 + sample_rate + top_k），不是 prompt 内容。 |
 | `acowork-runtime/src/memory/judge_llm.rs` 内联 `format!()` | 检索质量评分 prompt；属于"运行时内联格式化的短 prompt"，未集中在 `prompt.rs`，改写风险（typo / 占位符错位）大于收益。若未来高频出现"agent 自定义评分规则"诉求，单独 ADR 评估。 |
 
 ## 小结
 
-- **真正的 system / user prompt 常量**：集中在 `prompt.rs`（5 个） + 4 处下游 grafeo / memory 的 `const PROMPT: &str`；其中 **5+4=9 条按 ADR-063 接入包级 `prompts/<file>.md` 覆盖**，1 条（`build_compaction_system_prompt` 拼接块）按协议边界明确不覆盖。
+- **真正的 system / user prompt 常量**：集中在 `prompt.rs`（5 个） + 4 处下游 SQLite 记忆层 / memory 的 `const PROMPT: &str`；其中 **5+4=9 条按 ADR-063 接入包级 `prompts/<file>.md` 覆盖**，1 条（`build_compaction_system_prompt` 拼接块）按协议边界明确不覆盖。
 - **运行时拼装的指令片段**：`context.rs` 7 个 `## Section` 注入块模板 + `episode_distill.rs` 的 `[Role]: ...` 行模板；明确不覆盖（§7.1 / §7.3）。
 - **LLM 视角的"指令文本"**：22 个内置工具的 `ToolSpec.description`；明确不覆盖（§7.2）。
 - **不归 prompt 管但 LLM 看得到**：`output.rs` 的两个截断 marker；明确不覆盖（§7.3）。
@@ -155,4 +155,4 @@ ADR-063 把"包级文件名覆盖"推广到全部指令性 prompt，但**以下�
 - **新增 prompt 时必须同步回答**：是否接入 ADR-063 包级覆盖？若是，在 `prompt.rs` 顶部 `//!` 注释的"包级覆盖文件名约定"段落登记对应文件名；若否，在本文件对应章节标注"明确不覆盖 + 理由"并指向 ADR-063 §3.4 / §7 对应小节。
 - 工具 description 改动视同 prompt 改动：会改变模型调用行为，需走与 system prompt 同等的评审。
 - 模板占位符（`{messages_text}` / `{language}` / `{user_message}` / `{identity}` / `{memory}` 等）改动必须验证所有调用点；新增占位符需要在该文件 `prompt.rs` 的注释里登记。
-- **grafeo / memory 单例限制**：4 个被覆盖的常量当前在 grafeo / memory 进程级单例中使用，ADR-063 §3.6 / §6 已标注后续需评估是否升级为 `MemoryProvider` trait 注入（沿 ADR-051 解耦路径），避免多 AgentCore 共享时覆盖失效。
+- **SQLite 记忆层 / memory 单例限制**：4 个被覆盖的常量当前在 SQLite 记忆层 / memory 进程级单例中使用，ADR-063 §3.6 / §6 已标注后续需评估是否升级为 `MemoryProvider` trait 注入（沿 ADR-051 解耦路径），避免多 AgentCore 共享时覆盖失效。

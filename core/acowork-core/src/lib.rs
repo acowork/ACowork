@@ -42,15 +42,15 @@ pub mod shutdown;
 pub mod supervisor;
 pub mod timeout_config;
 pub mod tools;
+pub mod workspace;
 
 // Re-exports for convenience
 pub use agent_instance_id::{AgentInstanceId, InstanceIdError};
 pub use agent_overrides::{AgentOverrides, overrides_path};
 pub use manifest::{
     AgentManifest, CapabilityDef, LlmBudget, LlmConfig, ManifestConsolidationQuality,
-    ManifestDedupQuality, ManifestEdgeWeightQuality, ManifestGraphExpandQuality,
-    ManifestMemoryQuality, ProviderConfig, RagToolConfig, RoutingConfig, SkillMode, SkillsConfig,
-    ToolDeclaration,
+    ManifestDedupQuality, ManifestMemoryQuality, ProviderConfig, RagToolConfig, RoutingConfig,
+    SkillMode, SkillsConfig, ToolDeclaration,
 };
 pub use protocol::{
     ConversationEntryDto, GatewayRequest, GatewayResponse, ModelCapabilitiesInfo, ModelCostInfo,

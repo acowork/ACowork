@@ -19,7 +19,6 @@ use crate::config::RuntimeConfig;
 use crate::error::Result;
 use crate::startup::context::{AgentBootContext, SessionBootContext, build_session_manager_config};
 use acowork_core::timeout_config::constants;
-use acowork_memory::types::DEFAULT_EMBEDDING_DIM;
 
 /// Cached result of the background scan that finds the most recently active
 /// session — `(session_id, title)`. Held in an `Arc<RwLock<…>>` so the
@@ -531,11 +530,11 @@ pub(crate) async fn phase_b_init_session(
             );
         }
 
-        // ADR-040: Publish GrafeoMemoryAdapter to the HTTP server's
+        // ADR-040: Publish MemoryAdminAdapter to the HTTP server's
         // late-bind slot so memory handlers can use the trait path.
         {
             let adapter: Arc<dyn crate::usecases::MemoryQueryService> = Arc::new(
-                crate::usecases::memory_query_impl::GrafeoMemoryAdapter::new(
+                crate::usecases::memory_query_impl::MemoryAdminAdapter::new(
                     ctx.memory_store_shared.clone(),
                     ctx.embed_dim_shared.clone(),
                 ),
@@ -548,21 +547,24 @@ pub(crate) async fn phase_b_init_session(
         // publish it to the late-bind slot, then spawn the tailer. The
         // tailer reads the live embedding provider from `agent_core_shared`
         // each sweep, so it picks up the provider whenever it binds. The
-        // index store is physically isolated
-        // (`{work_dir}/conversation_index.grafeo`) and rebuildable from the
-        // JSONL history — delete + restart rebuilds. Open is cheap: the
-        // store's HNSW topology is restored from the container, not rebuilt.
+        // index is rebuildable from the JSONL history — delete + restart
+        // rebuilds it.
         {
-            // Size the index to the live provider's dimension. Hardcoding
-            // the default (384) made every write mismatch a 512-dim provider
-            // and the indexer deferred every sweep forever (ADR-081 P1-2).
-            let embed_dim = ctx
-                .emb_provider
-                .as_ref()
-                .map(|p| p.dimension())
-                .unwrap_or(DEFAULT_EMBEDDING_DIM);
-            match crate::conversation_index::ConversationIndex::open(work_dir_path, embed_dim) {
-                Ok(index) => {
+            // ADR-082 §4 step 3: the index lives in the memory backend's
+            // SQLite store, so there is no separate `conversation_index.sqlite`
+            // to open and no dimension to pass — the store remembers its own.
+            // No store means memory init failed (already logged there):
+            // conversation search stays off rather than silently writing to a
+            // second, orphan file.
+            let opened = match c.sqlite_store() {
+                Some(store) => {
+                    crate::conversation_index::ConversationIndex::from_store(store, work_dir_path)
+                        .map(Some)
+                }
+                None => Ok(None),
+            };
+            match opened {
+                Ok(Some(index)) => {
                     let index = Arc::new(index);
                     if let Ok(mut slot) = ctx.conversation_index_slot.write() {
                         *slot = Some(index.clone());
@@ -577,9 +579,14 @@ pub(crate) async fn phase_b_init_session(
                         ctx.agent_core_shared.clone(),
                     ));
                     tokio::spawn(async move { indexer.run().await });
-                    tracing::info!(
-                        dir = %work_dir_path.join(crate::conversation_index::STORE_FILE).display(),
-                        "conversation index: opened, tailer spawned"
+                    // No store path here: it is already reported — with the
+                    // real path — by `ConversationIndex::from_store` just
+                    // above.
+                    tracing::info!("conversation index: opened, tailer spawned");
+                }
+                Ok(None) => {
+                    tracing::error!(
+                        "conversation index: no memory store — conversation search disabled"
                     );
                 }
                 Err(e) => {

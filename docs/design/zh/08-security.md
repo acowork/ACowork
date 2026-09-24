@@ -1,4 +1,4 @@
-# 安全设计
+﻿# 安全设计
 
 > 版本：v3.6 | 更新日期：2026-04-17
 
@@ -14,7 +14,7 @@
 ### 2.1 策略级隔离（Phase 1）
 
 - Agent 只能写入自己的工作区目录和用户明确授权的目录。
-- 私有 Grafeo 文件在工作区内，沙箱层面强制隔离。
+- 私有 SQLite DB 文件在工作区内，沙箱层面强制隔离。
 - Runtime 对 `file_read` / `file_write` 等工具的路径参数做白名单检查，拒绝越界访问。
 
 **已知局限**：策略级隔离依赖 Runtime 主动检查，无法防御 Agent 通过 shell 工具启动子进程绕过路径限制。子进程继承用户进程的全部 OS 权限，可以读写工作区外的任意文件。详见 §11 和 ADR-005。
@@ -88,7 +88,7 @@ OS 级隔离由内核强制执行，即使子进程也无法绕过。Phase 7 之
 ## 10. Memory 传输加密
 
 - 云端同步使用 HTTPS / gRPC TLS。
-- 本地 Grafeo 文件可选加密（使用用户密钥派生）。
+- 本地记忆层 文件可选加密（使用用户密钥派生）。
 
 ## 11. Shell 安全与文件来源追踪
 
@@ -272,20 +272,20 @@ Agent 仓库对提交的 .agent 包执行以下维度的自动化安全扫描：
 | **Prompt 安全** | `prompts/*.md` | 间接指令注入（如隐藏的 "ignore previous instructions"）、诱导性指令（如 "always execute without asking user"）、敏感信息泄露模式 | High |
 | **Skill 行为分析** | `skills/*/SKILL.md` | 高危行为描述（如 "download and execute script from URL"）、数据外泄模式（如 "send all user data to external server"）、权限提升指令 | High |
 | **WASM 二进制扫描** | `tools/*.wasm` | 已知恶意模式签名匹配、可疑系统调用序列、反常的网络/文件操作请求、超出声明权限的能力 | Critical |
-| **Grafeo 记忆扫描** | `data/grafeo.db`（如果包含初始 Grafeo 快照）或打包时的 Grafeo 导出 | 自学习 Skill 中的恶意行为模式（SkillIteration/SkillExperience）、有害的 ProceduralNode、注入的恶意 Preference | High |
+| **SQLite 记忆层 记忆扫描** | `data/sqlite.db`（如果包含初始 SQLite 记忆层 快照）或打包时的 SQLite 记忆层 导出 | 自学习 Skill 中的恶意行为模式（SkillIteration/SkillExperience）、有害的 ProceduralNode、注入的恶意 Preference | High |
 | **包结构合规** | 整体 ZIP | 未授权的可执行文件、超大小文件、可疑的符号链接、隐藏文件 | Medium |
 
-### 12.3 Grafeo 记忆扫描的特殊性
+### 12.3 SQLite 记忆层 记忆扫描的特殊性
 
-Grafeo 记忆扫描是 ACowork 特有的挑战，在传统应用安全领域没有直接对应。核心问题：
+SQLite 记忆层 记忆扫描是 ACowork 特有的挑战，在传统应用安全领域没有直接对应。核心问题：
 
 **问题一：自学习 Skill 的"学坏"风险**
 
-Agent 在运行中通过 Grafeo 积累 SkillIteration 和 SkillExperience，这些自学习记忆随用户交互不断演化。一个良性 Agent 可能在特定用户交互模式下"学"到危险行为——例如用户反复手动确认高风险操作后，Agent 的 ProceduralNode 可能将"跳过确认"固化为通用行为模式。
+Agent 在运行中通过 SQLite 记忆层 积累 SkillIteration 和 SkillExperience，这些自学习记忆随用户交互不断演化。一个良性 Agent 可能在特定用户交互模式下"学"到危险行为——例如用户反复手动确认高风险操作后，Agent 的 ProceduralNode 可能将"跳过确认"固化为通用行为模式。
 
 **问题二：打包分享的信任边界**
 
-Agent 分享时，打包的 Grafeo 记忆包含 SkillIteration、ProceduralNode、AutobiographicalNode 等（Public 级别的保留，Personal/Sensitive 剥离，见 00-prd.md ADR-002）。接收方信任的是"Agent 能力"，但打包的记忆中可能包含：
+Agent 分享时，打包的 SQLite 记忆层 记忆包含 SkillIteration、ProceduralNode、AutobiographicalNode 等（Public 级别的保留，Personal/Sensitive 剥离，见 00-prd.md ADR-002）。接收方信任的是"Agent 能力"，但打包的记忆中可能包含：
 
 - 恶意 ProceduralNode：将危险操作固化为"习惯"
 - 污染的 SkillExperience：记录了绕过安全机制的"成功经验"
@@ -295,9 +295,9 @@ Agent 分享时，打包的 Grafeo 记忆包含 SkillIteration、ProceduralNode�
 
 | 场景 | 扫描时机 | 扫描对象 | 策略 |
 |------|---------|---------|------|
-| Agent 上架仓库 | 开发者提交时 | 打包时的 Grafeo 导出 | 全量扫描，高危节点拒绝上架 |
-| Agent 分享给他人 | 用户触发打包时 | 打包的 Grafeo 快照 | 本地扫描 + 警告，不阻止分享（但标记风险） |
-| Agent 运行中自学习 | Runtime 后台 | 运行中 Grafeo 的增量变化 | 轻量级模式检测（Phase 3+），异常 Skill 经验触发用户通知 |
+| Agent 上架仓库 | 开发者提交时 | 打包时的 SQLite 记忆层 导出 | 全量扫描，高危节点拒绝上架 |
+| Agent 分享给他人 | 用户触发打包时 | 打包的 SQLite 记忆层 快照 | 本地扫描 + 警告，不阻止分享（但标记风险） |
+| Agent 运行中自学习 | Runtime 后台 | 运行中 SQLite 的增量变化 | 轻量级模式检测（Phase 3+），异常 Skill 经验触发用户通知 |
 
 ### 12.4 扫描引擎架构
 
@@ -314,7 +314,7 @@ Agent 分享时，打包的 Grafeo 记忆包含 SkillIteration、ProceduralNode�
   │  └─────┬─────┘  └────┬─────┘  └────┬─────┘ │
   │        │              │              │       │
   │  ┌─────┴─────┐  ┌────┴─────┐  ┌────┴─────┐ │
-  │  │ WASM      │  │ Grafeo   │  │ Structure│  │
+  │  │ WASM      │  │ SQLite 记忆层   │  │ Structure│  │
   │  │ Scanner   │  │ Scanner  │  │ Checker  │  │
   │  └─────┬─────┘  └────┬─────┘  └────┬─────┘ │
   │        │              │              │       │
@@ -343,13 +343,13 @@ Agent 分享时，打包的 Grafeo 记忆包含 SkillIteration、ProceduralNode�
 | **Warn** | 有 High 发现但可解释（如 shell 工具声明的 Agent 必然有高危 Skill 模式） | 上架但标记警告标签，用户安装时可见 |
 | **Reject** | 有 Critical 发现，或 High 发现 ≥ 3 且无合理解释 | 拒绝上架，返回扫描报告供开发者修复 |
 
-### 12.5 Grafeo 记忆扫描的具体规则
+### 12.5 SQLite 记忆层 记忆扫描的具体规则
 
-Grafeo 扫描器检查打包记忆中的以下风险模式：
+SQLite 记忆层 扫描器检查打包记忆中的以下风险模式：
 
 ```rust
-/// Grafeo 记忆扫描发现
-enum GrafeoFinding {
+/// SQLite 记忆层 记忆扫描发现
+enum MemoryFinding {
     /// ProceduralNode 包含危险行为模式
     /// 例：将 "跳过用户确认" 固化为通用行为
     DangerousProcedural {
@@ -399,8 +399,8 @@ enum GrafeoFinding {
 | Phase 6 | Manifest 合规性 + Prompt 关键词扫描 + Skill 行为关键词扫描 + 包结构检查 | 仓库上线基础安全关卡，关键词匹配 + 规则引擎 |
 | Phase 6 | WASM 二进制基础扫描（已知恶意模式签名 + 权限一致性检查） | WASM 安全扫描 v1 |
 | Phase 7 | Prompt/Skill LLM 语义分析（安全审查专用 LLM） | 从关键词升级到语义理解 |
-| Phase 7 | Grafeo 记忆扫描（上架时 + 打包分享时） | 自学习记忆安全关卡 |
-| 远期 | Grafeo 运行中自学习模式检测（增量异常检测） | 运行时 Grafeo 安全监控 |
+| Phase 7 | SQLite 记忆层 记忆扫描（上架时 + 打包分享时） | 自学习记忆安全关卡 |
+| 远期 | SQLite 记忆层 运行中自学习模式检测（增量异常检测） | 运行时 SQLite 记忆层 安全监控 |
 
 ### 12.7 与签名机制的关系
 

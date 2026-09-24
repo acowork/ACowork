@@ -136,6 +136,11 @@ export function setSessionVisibility(
 /** `CompressType::SUMMARY` — the value the context-usage menu sends. */
 export const COMPRESS_SUMMARY = 1;
 
+/** `CompressType::CANCEL` (ADR-083) — abort the in-flight context compaction.
+ *  Same endpoint as `SUMMARY`; the Runtime routes the `compress_type` to the
+ *  running compaction's cancel handle. */
+export const COMPRESS_CANCEL = 3;
+
 /** `POST .../sessions/{sid}/messages` — send a user chat message. */
 export function sendMessage(
   agentId: string,

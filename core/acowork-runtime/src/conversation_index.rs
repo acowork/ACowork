@@ -1,11 +1,11 @@
 //! Conversation vector index (ADR-081 §4.2, P1-2).
 //!
-//! Reuses `grafeo-engine` via [`GrafeoStore`] in a dedicated store file
-//! `{work_dir}/conversation_index.grafeo` — one node per indexed message with
-//! `session_id`, `message_index` (the JSONL line number), `role`,
-//! `content`, `embedding`. Physically isolated from the memory store:
-//! the file can be deleted and rebuilt from the JSONL history at any
-//! time (ADR-081 "索引目录独立，可删重建；降级关键词").
+//! One `ConversationMessage` node per indexed JSONL line, in the workspace's
+//! `memory/private.sqlite` — `session_id`, `message_index` (the JSONL line
+//! number), `role`, `content`, embedding in the shared `vectors` table. The
+//! rows are separable from the memory nodes by label, so the index can be
+//! dropped and rebuilt from the JSONL history at any time (ADR-081
+//! "索引目录独立，可删重建；降级关键词").
 //!
 //! The JSONL conversation log is append-only (compaction appends a
 //! `kind="compaction"` marker — never truncates), so the JSONL line
@@ -15,34 +15,14 @@
 //! Only `user`/`assistant` messages are indexed — tool calls, thoughts,
 //! system nudges and compaction summaries are dialogue noise for search.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
 use std::time::Instant;
 
-use grafeo_common::types::Value;
-
-use acowork_grafeo::grafeo::GrafeoStore;
-use acowork_grafeo::types::GrafeoConfig;
+use acowork_sqlite::conversation::ConversationStore;
 
 use crate::conversation::ConversationEntry;
 use crate::error::Result;
-
-/// Label for every indexed conversation-message node.
-const LABEL: &str = "ConversationMessage";
-/// The store file. The `.grafeo` suffix selects the container's single-file
-/// layout — a paged snapshot plus a WAL that is checkpointed every
-/// `DEFAULT_CHECKPOINT_INTERVAL`. A suffix-less path selects the engine's
-/// legacy `WalDirectory` layout, whose checkpoint timer never runs and whose
-/// WAL therefore grew unbounded (182 MB here) and was replayed on every boot.
-pub const STORE_FILE: &str = "conversation_index.grafeo";
-/// Pre-`STORE_FILE` location — the legacy `WalDirectory` layout.
-const LEGACY_STORE_DIR: &str = "conversation_index";
-/// Content is truncated to this many chars before embedding, bounding
-/// embedding cost for very long messages (the stored snippet is the
-/// truncated form, matching what was embedded).
-const MAX_INDEX_CONTENT: usize = 4_000;
 
 /// One ranked conversation hit.
 #[derive(Debug, Clone)]
@@ -57,130 +37,69 @@ pub struct ConversationHit {
 
 /// The conversation vector index + per-session watermark.
 pub struct ConversationIndex {
-    store: GrafeoStore,
+    store: ConversationStore,
     /// `{work_dir}/conversations` — the JSONL + meta source of truth the
     /// indexer tails and `/search` reads session titles from.
     conversations_dir: PathBuf,
-    /// Embedding dimension the store (and its HNSW index) was opened with.
-    /// Must match the live provider's dimension or vector writes panic —
-    /// the indexer guards against a mismatch using this value.
-    embedding_dim: usize,
-    /// Per-session watermark: next JSONL line index to index.
-    watermark: Mutex<HashMap<String, usize>>,
     /// True while the index is not yet caught up with the JSONL history.
     /// Surfaced by `/search` as the ADR-081 `indexing` flag.
     indexing: AtomicBool,
 }
 
 impl ConversationIndex {
-    /// Open (or create) the conversation index under `work_dir`, sized for
-    /// `embedding_dim` (the live provider's dimension — hardcoding the
-    /// default 384 made every vector write mismatch a 512-dim provider).
+    /// Build the index on an already-open [`acowork_sqlite::SqliteStore`], so
+    /// memory, session meta and the conversation index share one `.sqlite`
+    /// file (ADR-082 §4 step 3). `work_dir` still supplies the JSONL
+    /// `conversations/` source dir the indexer tails.
     ///
-    /// ponytail: if the provider's dimension later changes, the persisted
-    /// HNSW index keeps the old dim and writes will mismatch. The store dir
-    /// is self-healing (delete + restart, or POST /conversation/index/rebuild);
-    /// an in-place dimension migration is not implemented since no store
-    /// pre-dates this change.
-    pub fn open(work_dir: &Path, embedding_dim: usize) -> Result<Self> {
+    /// The vector width comes from the store, which remembers the dimension it
+    /// was created with — see `SqliteStore::open`.
+    pub fn from_store(
+        store: std::sync::Arc<acowork_sqlite::SqliteStore>,
+        work_dir: &Path,
+    ) -> Result<Self> {
         let started = Instant::now();
-        let path = work_dir.join(STORE_FILE);
-        let store = GrafeoStore::open(&GrafeoConfig {
-            db_path: path,
-            embedding_dim,
-        })
-        .map_err(|e| crate::error::RuntimeError::Memory(e.to_string()))?;
-        // The engine's `init_schema` only creates indexes for the four
-        // memory labels — `ConversationMessage` needs its own BM25 +
-        // HNSW indexes or every search comes back empty.
-        //
-        // The vector index is restore-aware: `open` already consumed the
-        // persisted HNSW topology, so this only builds from data when the
-        // container had none (fresh store, changed dimension, corrupt
-        // topology) — dropping a restored index here cost a full O(N log N)
-        // rebuild on every boot (release: 1.44 s for 3.7k messages).
-        //
-        // The BM25 index is NOT restored: the engine writes its postings to
-        // the container but never reads them back either, and unlike the
-        // vector index it is only maintained for writes that happen while it
-        // is registered — so it must be (re)built from the data, on top of
-        // the replayed WAL. Linear in the corpus (~125 ms for 3.7k messages,
-        // ~2 s at 55k).
-        let _ = store.db().create_text_index(LABEL, "content");
-        let _ = store.ensure_vector_index(LABEL, "embedding", embedding_dim);
-        // Both indexes now exist (and are maintained per write), so a legacy
-        // store can be migrated straight into them.
-        migrate_legacy_store(work_dir, &store, embedding_dim);
-        let index = Self {
-            store,
-            conversations_dir: work_dir.join("conversations"),
-            embedding_dim,
-            watermark: Mutex::new(HashMap::new()),
-            indexing: AtomicBool::new(true),
-        };
-        // The node store is persistent but the watermark is in-memory, so a
-        // Runtime restart would otherwise reset every session to line 0 and
-        // re-index the whole JSONL on top of the surviving nodes — duplicate
-        // rows, an index that grows without bound across restarts.
-        // Reconcile from the store: rebuild the watermark from the highest
-        // indexed line per session and drop the duplicates an earlier
-        // restart already wrote.
-        index.recover_watermarks();
-        // The boot-time number users watch: with a restored topology this is
-        // ~60 ms regardless of message count; a rebuild shows up as seconds.
+        let embedding_dim = store.embedding_dim();
+        let store = ConversationStore::from_store(store)
+            .map_err(|e| crate::error::RuntimeError::Memory(e.to_string()))?;
         tracing::info!(
-            path = %work_dir.join(STORE_FILE).display(),
+            work_dir = %work_dir.display(),
             elapsed_ms = started.elapsed().as_millis() as u64,
             dim = embedding_dim,
-            messages = index.store.db().graph_store().nodes_by_label(LABEL).len(),
-            "conversation index store opened"
+            messages = store.message_count().unwrap_or(0),
+            "conversation index store opened on the shared SQLite file"
         );
-        Ok(index)
-    }
-
-    /// Rebuild `watermark` from the persisted nodes and purge duplicate
-    /// per-`(session_id, message_index)` rows. Called once from [`open`].
-    fn recover_watermarks(&self) {
-        let ids = self.store.db().graph_store().nodes_by_label(LABEL);
-        let mut max_line: HashMap<String, usize> = HashMap::new();
-        let mut seen: std::collections::HashSet<(String, i64)> = std::collections::HashSet::new();
-        let mut purged = 0usize;
-        for id in ids {
-            let Some(n) = self.store.get_node(id) else {
-                continue;
-            };
-            let (Some(sid), Some(line)) = (
-                n.get_property("session_id")
-                    .and_then(|v| v.as_str().map(str::to_string)),
-                n.get_property("message_index").and_then(|v| v.as_int64()),
-            ) else {
-                // Node without the identifying props: unsearchable garbage.
-                if self.store.delete_node(id).unwrap_or(false) {
-                    purged += 1;
-                }
-                continue;
-            };
-            // Keep the first occurrence of a line, drop later duplicates.
-            if !seen.insert((sid.clone(), line)) {
-                if self.store.delete_node(id).unwrap_or(false) {
-                    purged += 1;
-                }
-                continue;
-            }
-            let next = line.max(0) as usize + 1;
-            let entry = max_line.entry(sid).or_insert(0);
-            *entry = (*entry).max(next);
-        }
-        let sessions = max_line.len();
-        *self.watermark.lock().unwrap() = max_line;
-        if purged > 0 || sessions > 0 {
-            tracing::info!(sessions, purged, "conversation index: watermarks recovered");
-        }
+        Ok(Self {
+            store,
+            conversations_dir: work_dir.join("conversations"),
+            indexing: AtomicBool::new(true),
+        })
     }
 
     /// Embedding dimension this index was opened with.
     pub fn embedding_dim(&self) -> usize {
-        self.embedding_dim
+        self.store.embedding_dim()
+    }
+
+    /// Adopt a new vector width. Only for an empty index — see
+    /// [`ConversationStore::set_embedding_dim`].
+    pub fn set_embedding_dim(&self, dim: usize) {
+        match self.store.set_embedding_dim(dim) {
+            Ok(()) => tracing::info!(dim, "conversation index: dimension adopted"),
+            Err(e) => {
+                tracing::error!(dim, error = %e, "conversation index: failed to adopt dimension")
+            }
+        }
+    }
+
+    /// Number of indexed messages.
+    pub fn message_count(&self) -> u64 {
+        self.store.message_count().unwrap_or(0)
+    }
+
+    /// Every session present in the index (sweeper reconciliation).
+    pub fn sessions(&self) -> Vec<String> {
+        self.store.sessions()
     }
 
     /// `{work_dir}/conversations` — where session JSONL + `meta/*.json`
@@ -208,199 +127,77 @@ impl ConversationIndex {
         content: &str,
         embedding: &[f32],
     ) -> Result<()> {
-        let truncated: String = content.chars().take(MAX_INDEX_CONTENT).collect();
         self.store
-            .store_node(
-                LABEL,
-                [
-                    ("session_id", Value::from(session_id)),
-                    ("message_index", Value::from(message_index as i64)),
-                    ("role", Value::from(role)),
-                    ("content", Value::from(truncated)),
-                    ("embedding", Value::Vector(std::sync::Arc::from(embedding))),
-                ],
-            )
+            .index_message(session_id, message_index, role, content, embedding)
             .map_err(|e| crate::error::RuntimeError::Memory(e.to_string()))?;
-        self.mark_indexed(session_id, message_index + 1);
         Ok(())
     }
 
     /// Next JSONL line to index for `session_id` (0 = not started).
     pub fn next_line(&self, session_id: &str) -> usize {
-        self.watermark
-            .lock()
-            .unwrap()
-            .get(session_id)
-            .copied()
-            .unwrap_or(0)
+        self.store.next_line(session_id)
     }
 
     /// Record that lines `< next_line` are indexed for `session_id`.
     pub fn mark_indexed(&self, session_id: &str, next_line: usize) {
-        self.watermark
-            .lock()
-            .unwrap()
-            .insert(session_id.to_string(), next_line);
+        self.store.mark_indexed(session_id, next_line);
     }
 
     /// Remove every indexed message of a (deleted) session.
     pub fn remove_session(&self, session_id: &str) {
-        let ids = self.store.db().graph_store().nodes_by_label(LABEL);
-        let mut removed = 0usize;
-        for id in ids {
-            let is_match = self.store.get_node(id).is_some_and(|n| {
-                n.get_property("session_id").and_then(|v| v.as_str()) == Some(session_id)
-            });
-            if is_match && self.store.delete_node(id).unwrap_or(false) {
-                removed += 1;
+        match self.store.remove_session(session_id) {
+            Ok(removed) => {
+                tracing::info!(session_id, removed, "conversation index: purged session")
             }
+            Err(e) => tracing::warn!(session_id, error = %e, "conversation index: purge failed"),
         }
-        self.watermark.lock().unwrap().remove(session_id);
-        tracing::info!(session_id, removed, "conversation index: purged session");
     }
 
-    /// Reset the whole index: purge every message node and clear the
+    /// Reset the whole index: purge every message row and clear the
     /// per-session watermarks, then latch `indexing` so the next indexer
     /// sweep rebuilds from the JSONL history. The store file is
-    /// re-derivable, so this is the self-heal path after
-    /// corruption or an embedding-dimension change (ADR-081 "可删重建").
+    /// re-derivable, so this is the self-heal path after corruption or an
+    /// embedding-dimension change (ADR-081 "可删重建").
     pub fn rebuild(&self) {
-        let ids = self.store.db().graph_store().nodes_by_label(LABEL);
-        let mut purged = 0usize;
-        for id in ids {
-            if self.store.delete_node(id).unwrap_or(false) {
-                purged += 1;
+        match self.store.rebuild() {
+            Ok(purged) => {
+                self.set_indexing(true);
+                tracing::info!(purged, "conversation index: full rebuild scheduled");
             }
+            Err(e) => tracing::warn!(error = %e, "conversation index: rebuild failed"),
         }
-        self.watermark.lock().unwrap().clear();
-        self.set_indexing(true);
-        tracing::info!(purged, "conversation index: full rebuild scheduled");
     }
 
-    /// Hybrid (or BM25-only when `embedding` is `None`) search over
-    /// indexed messages, ranked by descending score.
+    /// Hybrid (or BM25-only when `embedding` is `None`) search over indexed
+    /// messages, ranked by descending score.
+    ///
+    /// Degrades to an empty result instead of propagating: `/search` is a read
+    /// path and a broken index is not worth a 500.
     pub fn search(
         &self,
         query_text: &str,
         embedding: Option<&[f32]>,
         k: usize,
     ) -> Vec<ConversationHit> {
-        let hits = match embedding {
-            Some(emb) => self
-                .store
-                .hybrid_search(LABEL, "content", "embedding", query_text, emb, k),
-            None => self.store.text_search(LABEL, query_text, k),
-        };
-        let hits = match hits {
-            Ok(v) => v,
+        match self.store.search(query_text, embedding, k) {
+            Ok(hits) => hits
+                .into_iter()
+                .map(|h| ConversationHit {
+                    session_id: h.session_id,
+                    message_index: h.message_index,
+                    role: h.role,
+                    content: h.content,
+                    score: h.score,
+                })
+                .collect(),
             Err(e) => {
                 tracing::warn!(error = %e, "conversation index search failed");
-                return vec![];
+                Vec::new()
             }
-        };
-        hits.into_iter()
-            .filter_map(|(id, score)| {
-                let n = self.store.get_node(id)?;
-                Some(ConversationHit {
-                    session_id: n.get_property("session_id")?.as_str()?.to_string(),
-                    message_index: n.get_property("message_index")?.as_int64()? as usize,
-                    role: n.get_property("role")?.as_str()?.to_string(),
-                    content: n.get_property("content")?.as_str()?.to_string(),
-                    score,
-                })
-            })
-            .collect()
+        }
     }
 }
 
-/// Migrate a legacy `conversation_index/` store into the current single-file
-/// store, then drop it.
-///
-/// The legacy layout (suffix-less path → `WalDirectory`) never checkpoints, so
-/// its WAL grows without bound and is fully replayed on every open: 183 MB and
-/// 1.3 s of a bare `open` on this machine. Migrating keeps the embeddings that
-/// are already in that WAL — rebuilding from the JSONL history instead would
-/// re-embed every message, which needs a reachable embedding provider (the
-/// remote one is not always up) and re-encodes thousands of messages.
-///
-/// Runs only when the new store is empty, so a migrated store is never
-/// re-migrated. A legacy store that cannot be opened is left in place.
-fn migrate_legacy_store(work_dir: &Path, target: &GrafeoStore, embedding_dim: usize) {
-    let legacy_dir = work_dir.join(LEGACY_STORE_DIR);
-    if !legacy_dir.is_dir() || !target.db().graph_store().nodes_by_label(LABEL).is_empty() {
-        return;
-    }
-    let legacy = match GrafeoStore::open(&GrafeoConfig {
-        db_path: legacy_dir.clone(),
-        embedding_dim,
-    }) {
-        Ok(store) => store,
-        Err(e) => {
-            tracing::warn!(
-                dir = %legacy_dir.display(),
-                error = %e,
-                "conversation index: legacy store could not be opened; leaving it in place"
-            );
-            return;
-        }
-    };
-
-    let mut migrated = 0usize;
-    let mut skipped = 0usize;
-    for id in legacy.db().graph_store().nodes_by_label(LABEL) {
-        let Some(node) = legacy.get_node(id) else {
-            continue;
-        };
-        let Some(Value::Vector(vector)) = node.get_property("embedding") else {
-            skipped += 1;
-            continue;
-        };
-        let str_of = |key: &str| {
-            node.get_property(key)
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string()
-        };
-        let line = node
-            .get_property("message_index")
-            .and_then(|v| v.as_int64())
-            .unwrap_or(0);
-        if target
-            .store_node(
-                LABEL,
-                [
-                    ("session_id", Value::from(str_of("session_id").as_str())),
-                    ("message_index", Value::from(line)),
-                    ("role", Value::from(str_of("role").as_str())),
-                    ("content", Value::from(str_of("content").as_str())),
-                    ("embedding", Value::Vector(std::sync::Arc::clone(vector))),
-                ],
-            )
-            .is_ok()
-        {
-            migrated += 1;
-        }
-    }
-    let _ = legacy.close();
-    tracing::info!(
-        migrated,
-        skipped,
-        "conversation index: migrated legacy store into the single-file store"
-    );
-
-    // Only drop the old store once its data is safely in the new one.
-    if migrated > 0
-        && let Err(e) = std::fs::remove_dir_all(&legacy_dir)
-    {
-        tracing::warn!(
-            dir = %legacy_dir.display(),
-            error = %e,
-            "conversation index: migrated legacy store could not be removed"
-        );
-    }
-}
-
-/// Whether a JSONL entry should be indexed (user/assistant dialogue only).
 fn is_indexable(entry: &ConversationEntry) -> bool {
     entry.kind.as_deref() != Some(crate::conversation::ENTRY_KIND_COMPACTION)
         && (entry.role == "user" || entry.role == "assistant")
@@ -465,14 +262,7 @@ impl ConversationIndexer {
         }
 
         // Purge index entries whose JSONL file vanished (session deleted).
-        let indexed: Vec<String> = self
-            .index
-            .watermark
-            .lock()
-            .unwrap()
-            .keys()
-            .cloned()
-            .collect();
+        let indexed: Vec<String> = self.index.sessions();
         for sid in &indexed {
             if !sessions.contains(sid) {
                 self.index.remove_session(sid);
@@ -480,19 +270,30 @@ impl ConversationIndexer {
         }
 
         let mut found_pending = false;
-        // Dimension guard: writing a vector whose length differs from the
-        // store's HNSW dimension triggers the engine's dimension-mismatch
-        // panic. Skip the whole sweep (watermarks stay put) until the
-        // provider matches. The indexing flag stays latched `true` — the
-        // `/search` response must keep telling the user results are
-        // incomplete instead of silently going stale.
+        // Dimension guard: the store keeps the dimension it was created with,
+        // and `vector_search` ignores rows of another width, so writing a
+        // provider's vectors into a store of a different width would land them
+        // where nothing will ever look. Defer the sweep (watermarks stay put)
+        // until the two agree.
         if let Some(provider) = provider.as_deref() {
             let dim = provider.dimension();
             let index_dim = self.index.embedding_dim();
-            if dim != index_dim {
-                tracing::warn!(
+            if dim != index_dim && self.index.message_count() == 0 {
+                // An empty index's dimension is not a fact about stored data —
+                // it is whatever the index was created with, often before the
+                // provider had bound. Adopt the provider's width and index, so
+                // a model swap (or a first binding) heals itself.
+                tracing::info!(
                     provider_dim = dim,
                     index_dim,
+                    "conversation index: empty index adopting the provider dimension"
+                );
+                self.index.set_embedding_dim(dim);
+            }
+            if dim != self.index.embedding_dim() {
+                tracing::warn!(
+                    provider_dim = dim,
+                    index_dim = self.index.embedding_dim(),
                     "conversation index: provider dimension mismatch, deferring sweep"
                 );
                 self.index.set_indexing(true);
@@ -579,11 +380,19 @@ mod tests {
     use crate::conversation::ENTRY_KIND_COMPACTION;
     use acowork_memory::types::DEFAULT_EMBEDDING_DIM;
 
+    /// The workspace's shared `memory/private.sqlite` — with ADR-082 §4 step 3
+    /// the only place a conversation index lives.
+    fn open_index(work_dir: &std::path::Path, dim: usize) -> ConversationIndex {
+        let db = work_dir.join("memory").join("private.sqlite");
+        let store = std::sync::Arc::new(
+            acowork_sqlite::SqliteStore::open(&db, dim).expect("open shared sqlite store"),
+        );
+        ConversationIndex::from_store(store, work_dir).expect("index open")
+    }
+
     fn open_tmp() -> (tempfile::TempDir, std::sync::Arc<ConversationIndex>) {
         let dir = tempfile::tempdir().expect("tempdir");
-        let index = std::sync::Arc::new(
-            ConversationIndex::open(dir.path(), DEFAULT_EMBEDDING_DIM).expect("index open"),
-        );
+        let index = std::sync::Arc::new(open_index(dir.path(), DEFAULT_EMBEDDING_DIM));
         (dir, index)
     }
 
@@ -614,7 +423,11 @@ mod tests {
         assert!(!is_indexable(&entry("thought", "internal", None)));
         assert!(!is_indexable(&entry("tool_result", "42", None)));
         // Compaction summaries are skipped even with a system role.
-        assert!(!is_indexable(&entry("system", "summary", Some(ENTRY_KIND_COMPACTION))));
+        assert!(!is_indexable(&entry(
+            "system",
+            "summary",
+            Some(ENTRY_KIND_COMPACTION)
+        )));
         // Empty content is skipped.
         assert!(!is_indexable(&entry("user", "", None)));
     }
@@ -672,14 +485,26 @@ mod tests {
     fn remove_session_purges_nodes_and_watermark() {
         let (_dir, index) = open_tmp();
         let emb = vec_dim(DEFAULT_EMBEDDING_DIM, 1);
-        index.index_message("s1", 0, "user", "alpha beta", &emb).expect("s1");
-        index.index_message("s2", 0, "user", "alpha gamma", &emb).expect("s2");
+        index
+            .index_message("s1", 0, "user", "alpha beta", &emb)
+            .expect("s1");
+        index
+            .index_message("s2", 0, "user", "alpha gamma", &emb)
+            .expect("s2");
 
         index.remove_session("s1");
 
-        assert_eq!(index.next_line("s1"), 0, "watermark reset for purged session");
+        assert_eq!(
+            index.next_line("s1"),
+            0,
+            "watermark reset for purged session"
+        );
         let hits = index.search("alpha", None, 10);
-        assert_eq!(hits.len(), 1, "only the surviving session remains searchable");
+        assert_eq!(
+            hits.len(),
+            1,
+            "only the surviving session remains searchable"
+        );
         assert_eq!(hits[0].session_id, "s2");
     }
 
@@ -687,21 +512,55 @@ mod tests {
     fn content_is_truncated_to_index_cap() {
         let (_dir, index) = open_tmp();
         let emb = vec_dim(DEFAULT_EMBEDDING_DIM, 2);
-        let long: String = "banana ".repeat(MAX_INDEX_CONTENT);
+        let long: String = "banana ".repeat(acowork_sqlite::conversation::MAX_INDEX_CONTENT);
         index
             .index_message("s1", 0, "user", &long, &emb)
             .expect("index");
         let hits = index.search("banana", None, 5);
         assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].content.chars().count(), MAX_INDEX_CONTENT);
+        assert_eq!(
+            hits[0].content.chars().count(),
+            acowork_sqlite::conversation::MAX_INDEX_CONTENT
+        );
+    }
+
+    /// A model swap leaves the index at its old width, where the indexer would
+    /// defer every sweep forever. Emptying it and adopting the new width is the
+    /// way out, and the new width has to survive a reopen — the store hands out
+    /// the dimension it was created with and ignores whatever it is passed.
+    #[test]
+    fn an_emptied_index_adopts_a_new_dimension_and_keeps_it() {
+        let (dir, index) = open_tmp();
+        let emb = vec_dim(DEFAULT_EMBEDDING_DIM, 7);
+        index
+            .index_message("s1", 0, "user", "alpha beta", &emb)
+            .expect("index");
+        assert_eq!(index.embedding_dim(), DEFAULT_EMBEDDING_DIM);
+
+        index.rebuild();
+        index.set_embedding_dim(512);
+        assert_eq!(index.embedding_dim(), 512);
+        drop(index);
+
+        let reopened = open_index(dir.path(), DEFAULT_EMBEDDING_DIM);
+        assert_eq!(
+            reopened.embedding_dim(),
+            512,
+            "the store keeps the width it was given, not the one it is opened with"
+        );
+        assert_eq!(reopened.message_count(), 0);
     }
 
     #[test]
     fn rebuild_purges_nodes_resets_watermarks_and_latches_indexing() {
         let (_dir, index) = open_tmp();
         let emb = vec_dim(DEFAULT_EMBEDDING_DIM, 4);
-        index.index_message("s1", 0, "user", "alpha beta", &emb).expect("s1");
-        index.index_message("s2", 0, "user", "alpha gamma", &emb).expect("s2");
+        index
+            .index_message("s1", 0, "user", "alpha beta", &emb)
+            .expect("s1");
+        index
+            .index_message("s2", 0, "user", "alpha gamma", &emb)
+            .expect("s2");
         index.set_indexing(false);
 
         index.rebuild();
@@ -720,9 +579,10 @@ mod tests {
         // Regression: the index used to open at the hardcoded default (384),
         // so a 512-dim provider (bge-small-zh-v1.5) mismatched every write
         // and the indexer deferred every sweep — search always came back
-        // empty. The store must open at the dimension it is given.
+        // empty. The width now comes from the memory store, which is sized by
+        // the live embedding provider at boot.
         let dir = tempfile::tempdir().expect("tempdir");
-        let index = ConversationIndex::open(dir.path(), 512).expect("index open");
+        let index = open_index(dir.path(), 512);
         assert_eq!(index.embedding_dim(), 512);
         // And a 512-dim vector must be accepted (no dimension-mismatch panic).
         let emb = vec_dim(512, 9);
@@ -741,13 +601,15 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let emb = vec_dim(DEFAULT_EMBEDDING_DIM, 5);
         {
-            let idx = ConversationIndex::open(dir.path(), DEFAULT_EMBEDDING_DIM).expect("open1");
-            idx.index_message("s1", 0, "user", "unique alpha marker", &emb).expect("i0");
-            idx.index_message("s1", 1, "assistant", "unique beta marker", &emb).expect("i1");
+            let idx = open_index(dir.path(), DEFAULT_EMBEDDING_DIM);
+            idx.index_message("s1", 0, "user", "unique alpha marker", &emb)
+                .expect("i0");
+            idx.index_message("s1", 1, "assistant", "unique beta marker", &emb)
+                .expect("i1");
             assert_eq!(idx.next_line("s1"), 2);
         }
 
-        let idx2 = ConversationIndex::open(dir.path(), DEFAULT_EMBEDDING_DIM).expect("open2");
+        let idx2 = open_index(dir.path(), DEFAULT_EMBEDDING_DIM);
         // Watermark restored from the persisted nodes, not reset to 0.
         assert_eq!(idx2.next_line("s1"), 2, "watermark recovered on reopen");
         assert_eq!(
@@ -759,13 +621,26 @@ mod tests {
         // Re-indexing the same lines again must not duplicate (a restart that
         // raced a sweep): overwrite-by-key is not available, so `recover`
         // purges the strays on the NEXT open — verify the dedup path directly.
-        idx2.index_message("s1", 0, "user", "unique alpha marker", &emb).expect("dup write");
-        assert_eq!(idx2.search("alpha", None, 10).len(), 2, "duplicate present before recovery");
-        // A restart drops the old handle before reopening — the single-file
-        // container holds one live handle at a time.
+        idx2.index_message("s1", 0, "user", "unique alpha marker", &emb)
+            .expect("dup write");
+        assert_eq!(
+            idx2.search("alpha", None, 10).len(),
+            2,
+            "duplicate present before recovery"
+        );
+        // A restart drops the old handle before reopening — the shared
+        // `.sqlite` file holds one live handle at a time.
         drop(idx2);
-        let idx3 = ConversationIndex::open(dir.path(), DEFAULT_EMBEDDING_DIM).expect("open3");
-        assert_eq!(idx3.search("alpha", None, 10).len(), 1, "recovery purges duplicates");
-        assert_eq!(idx3.next_line("s1"), 2, "watermark stays correct after purge");
+        let idx3 = open_index(dir.path(), DEFAULT_EMBEDDING_DIM);
+        assert_eq!(
+            idx3.search("alpha", None, 10).len(),
+            1,
+            "recovery purges duplicates"
+        );
+        assert_eq!(
+            idx3.next_line("s1"),
+            2,
+            "watermark stays correct after purge"
+        );
     }
 }

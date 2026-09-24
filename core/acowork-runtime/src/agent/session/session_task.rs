@@ -349,6 +349,54 @@ fn apply_pending_config_effects(
     }
 }
 
+/// ADR-083: surface a manual-compaction error to the frontend as an error
+/// chunk — UNLESS it is a cancellation.
+///
+/// A user cancel or deadline expiry leaves history untouched and is already
+/// reported through [`ChunkEvent::CompactionCancelled`]; emitting the generic
+/// `Error` bubble on top of it would double-report and wrongly read as a
+/// failure. `label` only affects the log line.
+async fn report_manual_compaction_error(
+    chunk_tx: Option<&mpsc::Sender<SessionChunkEvent>>,
+    session_id: &str,
+    label: &str,
+    e: &crate::error::RuntimeError,
+) {
+    if matches!(e, crate::error::RuntimeError::CompactionCancelled(_)) {
+        tracing::warn!(
+            session_id = %session_id,
+            error = %e,
+            "Manual compaction cancelled (no error chunk: CompactionCancelled already emitted)"
+        );
+        return;
+    }
+    tracing::error!(
+        session_id = %session_id,
+        error = %e,
+        label = label,
+        "Manual compaction failed"
+    );
+    if let Some(tx) = chunk_tx {
+        let (user_message, detail, error_type) = e.error_info();
+        let event = SessionChunkEvent {
+            session_id: session_id.to_string(),
+            event: ChunkEvent::Error {
+                user_message,
+                detail,
+                error_type,
+                message_id: String::new(),
+            },
+        };
+        if tx.send(event).await.is_err() {
+            tracing::warn!(
+                session_id = %session_id,
+                label = label,
+                "Failed to send Error chunk event (manual compaction)"
+            );
+        }
+    }
+}
+
 impl SessionTask {
     /// Create a new SessionTask with the given shared core, session state,
     /// message receiver, system prompt, and optional chunk channel.
@@ -521,6 +569,14 @@ impl SessionTask {
     /// `SessionCore::begin_new_request`).
     pub(crate) fn cancel_handle_arc(&self) -> Arc<parking_lot::Mutex<CancelHandle>> {
         self.agent_loop.session_core.cancel_handle_arc()
+    }
+
+    /// ADR-083: return the `Arc` slot to the session's per-compaction
+    /// [`CancelHandle`] so [`crate::agent::session::session_manager::SessionManager`]
+    /// can route the `compress_type = 3` cancel to the *current* compaction
+    /// on every dispatch. See [`SessionCore::compaction_cancel_handle_arc`].
+    pub(crate) fn compaction_cancel_handle_arc(&self) -> Arc<parking_lot::Mutex<CancelHandle>> {
+        self.agent_loop.session_core.compaction_cancel_handle_arc()
     }
 
     /// Run the session task, processing messages until Stop or channel close.
@@ -1293,29 +1349,13 @@ impl SessionTask {
                                 .compact_history_if_needed(&model_name, true)
                                 .await
                             {
-                                tracing::error!(
-                                    session_id = %session_id,
-                                    error = %e,
-                                    "Manual compress action failed"
-                                );
-                                if let Some(ref tx) = chunk_tx {
-                                    let (user_message, detail, error_type) = e.error_info();
-                                    let event = SessionChunkEvent {
-                                        session_id: session_id.clone(),
-                                        event: ChunkEvent::Error {
-                                            user_message,
-                                            detail,
-                                            error_type,
-                                            message_id: String::new(),
-                                        },
-                                    };
-                                    if tx.send(event).await.is_err() {
-                                        tracing::warn!(
-                                            session_id = %session_id,
-                                            "Failed to send Error chunk event (manual compress action)"
-                                        );
-                                    }
-                                }
+                                report_manual_compaction_error(
+                                    chunk_tx.as_ref(),
+                                    &session_id,
+                                    "compress_action",
+                                    &e,
+                                )
+                                .await;
                             }
                         }
                     }

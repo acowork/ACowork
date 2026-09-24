@@ -190,57 +190,6 @@ mod tests {
     // =====================================================================
 
     #[test]
-    fn test_storage_isolation_two_grafeo_stores() {
-        let store_a = acowork_grafeo::GrafeoStore::new_in_memory().unwrap();
-        let store_b = acowork_grafeo::GrafeoStore::new_in_memory().unwrap();
-
-        // Store data in A
-        let node_id_a = store_a
-            .store_node(
-                acowork_grafeo::types::labels::EPISODIC,
-                [("content", grafeo_common::types::Value::from("data in A"))],
-            )
-            .unwrap();
-
-        // Verify B cannot see A's node by ID
-        assert!(
-            store_b.get_node(node_id_a).is_none(),
-            "Store B should not see Store A's data"
-        );
-
-        // Verify A can see its own data
-        assert!(
-            store_a.get_node(node_id_a).is_some(),
-            "Store A should see its own data"
-        );
-
-        // Store data in B
-        let node_id_b = store_b
-            .store_node(
-                acowork_grafeo::types::labels::EPISODIC,
-                [("content", grafeo_common::types::Value::from("data in B"))],
-            )
-            .unwrap();
-
-        // Verify A cannot see B's data (even if NodeId overlaps, content must differ)
-        if let Some(node) = store_a.get_node(node_id_b) {
-            let content = node.get_property("content").and_then(|v| v.as_str());
-            assert_ne!(
-                content,
-                Some("data in B"),
-                "Store A should not see Store B's data"
-            );
-        }
-
-        // Verify node counts are isolated via capacity status
-        let config = acowork_grafeo::CapacityConfig::default();
-        let status_a = store_a.get_capacity_status(&config).unwrap();
-        let status_b = store_b.get_capacity_status(&config).unwrap();
-        assert_eq!(status_a.total_nodes, 1, "Store A should have 1 node");
-        assert_eq!(status_b.total_nodes, 1, "Store B should have 1 node");
-    }
-
-    #[test]
     fn test_intent_filtering_removes_sensitive_nodes() {
         let response = json!({
             "action": "memory_recall",
@@ -283,60 +232,8 @@ mod tests {
         assert!(!ids.contains(&"2".to_string()));
     }
 
-    #[test]
-    fn test_cross_agent_isolation() {
-        let grafeo_a = acowork_grafeo::GrafeoStore::new_in_memory().unwrap();
-        let grafeo_b = acowork_grafeo::GrafeoStore::new_in_memory().unwrap();
+    // Cross-agent storage isolation (ADR-009 S2.11.2 / S2.11.3) is asserted in
+    // `acowork-sqlite/tests/store_isolation.rs`: it is an invariant of the
+    // storage backend, so it lives with the backend instead of here.
 
-        // Agent A stores sensitive data
-        let node_id_a = grafeo_a
-            .store_node(
-                acowork_grafeo::types::labels::KNOWLEDGE,
-                [
-                    ("subject", grafeo_common::types::Value::from("user")),
-                    ("predicate", grafeo_common::types::Value::from("has")),
-                    (
-                        "object",
-                        grafeo_common::types::Value::from("API key: sk-xxx"),
-                    ),
-                ],
-            )
-            .unwrap();
-
-        // Agent B tries to access A's data through direct retrieve by ID
-        // NodeId may overlap across independent in-memory stores, so verify content isolation
-        if let Some(node) = grafeo_b.get_node(node_id_a) {
-            let object = node.get_property("object").and_then(|v| v.as_str());
-            assert_ne!(
-                object,
-                Some("API key: sk-xxx"),
-                "B should not retrieve A's node by ID"
-            );
-        }
-
-        // Agent B stores its own data
-        let node_id_b = grafeo_b
-            .store_node(
-                acowork_grafeo::types::labels::KNOWLEDGE,
-                [
-                    ("subject", grafeo_common::types::Value::from("user")),
-                    ("predicate", grafeo_common::types::Value::from("likes")),
-                    ("object", grafeo_common::types::Value::from("rust")),
-                ],
-            )
-            .unwrap();
-
-        // Verify A cannot see B's data
-        if let Some(node) = grafeo_a.get_node(node_id_b) {
-            let object = node.get_property("object").and_then(|v| v.as_str());
-            assert_ne!(object, Some("rust"), "A should not retrieve B's node by ID");
-        }
-
-        // Verify each agent only sees its own nodes via capacity status
-        let config = acowork_grafeo::CapacityConfig::default();
-        let status_a = grafeo_a.get_capacity_status(&config).unwrap();
-        let status_b = grafeo_b.get_capacity_status(&config).unwrap();
-        assert_eq!(status_a.total_nodes, 1, "A should only have its own node");
-        assert_eq!(status_b.total_nodes, 1, "B should only have its own node");
-    }
 }

@@ -1,5 +1,5 @@
 //! LLM adapter — bridges `acowork_core::providers::traits::Provider` to
-//! `acowork_grafeo::consolidation::triple_extraction::TripleExtractorLlm`.
+//! `acowork_memory::consolidation::triple_extraction::TripleExtractorLlm`.
 //!
 //! The grafeo crate defines a minimal LLM trait (`TripleExtractorLlm`) so it
 //! stays independent of the runtime's provider ecosystem. This adapter wraps

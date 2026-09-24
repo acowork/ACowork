@@ -1,6 +1,6 @@
 //! Runtime-internal retrieval quality metrics aggregator.
 //!
-//! Replaces the previous dependency on `acowork_grafeo::retrieval_metrics::MetricsAggregator`.
+//! Replaces the former dependency on `acowork_grafeo`'s retrieval metrics.
 //! Data sources are `acowork_memory::RetrievalMetrics` and `acowork_memory::HintType`,
 //! eliminating the HintType conversion code that previously coupled Runtime to Grafeo.
 //!
@@ -141,7 +141,7 @@ impl ConflictAccuracyStats {
 /// Runtime-internal retrieval quality metrics aggregator.
 ///
 /// Data source: `acowork_memory::RetrievalMetrics` returned by `MemoryProvider::retrieve()`.
-/// Does NOT depend on `acowork_grafeo::retrieval_metrics` types.
+/// Does NOT depend on the `acowork_memory::retrieval_metrics` evaluation types.
 ///
 /// Tracks:
 /// - NRR (Normalized Retrieval Relevance) sliding window
@@ -210,6 +210,12 @@ impl RetrievalMetricsAggregator {
     /// Compute NRR from a RetrievalMetrics value.
     ///
     /// NRR = avg_score / max_possible_score
+    ///
+    /// `avg_score` and `max_possible_score` are both RRF fused scores
+    /// (`Σ w / (60 + rank + 1)`) — absolute values are not comparable across
+    /// queries, but the ratio is a meaningful relative-quality signal because
+    /// the denominator is dynamically updated to the largest score observed
+    /// this session (see [`Self::set_max_possible_score`]).
     fn nrr(&self, metrics: &RetrievalMetrics) -> f32 {
         if self.max_possible_score <= 0.0 {
             return 0.0;
@@ -407,7 +413,6 @@ mod tests {
             abstention_triggered: abstention,
             filtered_count: 0,
             retrieval_level: level,
-            graph_expand_nodes: 0,
             hint_type: HintType::Semantic,
         }
     }

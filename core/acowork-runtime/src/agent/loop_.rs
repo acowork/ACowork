@@ -39,6 +39,20 @@ pub enum CompressionAction {
     CompressSummary,
 }
 
+/// ADR-083: why a context compaction ended without producing a summary.
+///
+/// Mirrors `mqtt_proto::CompactionCancelReason` (wire enum) so the reason
+/// survives the MQTT hop unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompactionCancelReason {
+    /// User pressed "cancel compaction" (compress_type = 3).
+    UserCancelled,
+    /// The end-to-end `compaction_deadline_ms` budget expired.
+    Timeout,
+    /// Every distill target tier failed (non-timeout).
+    Failed,
+}
+
 /// A ChunkEvent annotated with the session that produced it.
 ///
 /// Every event emitted by a SessionTask carries its `session_id` at the
@@ -71,6 +85,13 @@ pub enum ChunkEvent {
     /// Context compaction finished (emitted after compaction completes or fails),
     /// so the frontend can clear the "compacting..." indicator.
     CompactingEnded,
+    /// ADR-083: context compaction ended WITHOUT a summary (user cancel,
+    /// deadline expiry, or all tiers failed). Replaces `CompactingEnded` on
+    /// every non-success path so the frontend can reset its dual-state
+    /// button and show a reason-specific toast.
+    CompactionCancelled {
+        reason: CompactionCancelReason,
+    },
     /// Iteration limit reached — agent loop paused
     IterationLimitPaused {
         iteration: u32,

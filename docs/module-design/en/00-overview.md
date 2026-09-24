@@ -1,4 +1,4 @@
-# ACowork-AI Module Design — Overview
+﻿# ACowork-AI Module Design — Overview
 
 > Version: v1.2 | Last Updated: 2026-04-16
 
@@ -10,7 +10,7 @@
 
 1. **Binary boundary = Crate boundary**: Gateway and Agent Runtime are different processes, must have independent crates
 2. **Shared types in independent crate**: Protocol messages, manifest structures and other types used by multiple crates, placed in `acowork-core`
-3. **Heavy dependency isolation**: Grafeo (graph DB + ONNX Runtime), WASM runtime and other heavy dependencies, encapsulated in independent crates for conditional compilation and cross-compilation
+3. **Heavy dependency isolation**: WASM runtime (wasmtime), ONNX Runtime and other heavy dependencies, encapsulated in independent crates for conditional compilation and cross-compilation
 4. **Testability**: Each crate can be tested independently, doesn't depend on other crates' runtimes
 
 ---
@@ -25,7 +25,7 @@ acowork-ai/
 │   ├── acowork-memory/          # MemoryStore trait + shared memory types (v3.4 new)
 │   ├── acowork-runtime/         # Agent Runtime binary + library
 │   ├── acowork-gateway/         # Gateway binary + library
-│   ├── acowork-grafeo/          # Grafeo graph DB engine (implements MemoryStore trait)
+│   ├── acowork-sqlite/          # SQLite memory backend (implements MemoryProvider trait)
 │   ├── acowork-vault/           # encrypted key storage
 │   └── acowork-sign/            # .agent package sign/verify tool
 ├── apps/
@@ -46,7 +46,7 @@ members = [
     "crates/acowork-memory",
     "crates/acowork-runtime",
     "crates/acowork-gateway",
-    "crates/acowork-grafeo",
+    "crates/acowork-sqlite",
     "crates/acowork-vault",
     "crates/acowork-sign",
     "apps/acowork-desktop",
@@ -109,7 +109,7 @@ uuid = { version = "1.22", features = ["v4", "std"] }
 
 # internal crate references
 acowork-core = { path = "crates/acowork-core" }
-acowork-grafeo = { path = "crates/acowork-grafeo" }
+acowork-sqlite = { path = "crates/acowork-sqlite" }
 acowork-vault = { path = "crates/acowork-vault" }
 acowork-sign = { path = "crates/acowork-sign" }
 ```
@@ -120,6 +120,6 @@ acowork-sign = { path = "crates/acowork-sign" }
 > - [01-core.md](01-core.md) — acowork-core: shared types and protocols
 > - [02-runtime.md](02-runtime.md) — acowork-runtime: Agent Runtime
 > - [03-gateway.md](03-gateway.md) — acowork-gateway: Gateway
-> - [04-grafeo.md](04-grafeo.md) — acowork-grafeo: Grafeo graph DB engine
+> - [04-sqlite.md](04-sqlite.md) — acowork-sqlite: SQLite graph DB engine
 > - [05-vault-sign.md](05-vault-sign.md) — acowork-vault + acowork-sign
 > - [06-architecture.md](06-architecture.md) — dependencies, data flow, roadmap, build artifacts, testing strategy

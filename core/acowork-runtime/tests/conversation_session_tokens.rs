@@ -3,16 +3,15 @@
 //!
 //! These tests exercise the full lifecycle across the modify points:
 //!   - `ConversationSession::accumulate_llm_usage` → in-memory state
-//!   - `ConversationSession::write_meta`           → meta/{id}.json on disk
-//!   - `ConversationSession::resume`               → reload from disk
+//!   - `ConversationSession::write_meta`           → session-meta store
+//!   - `ConversationSession::resume`               → reload from the store
 //!   - `ConversationSession::tokens()`             → observed by callers
 //!   - `SessionMeta` serde round-trip              → JSON shape correctness
 //!   - `build_context_usage_from_persisted`        → resume → ContextUsage
 //!   - `Clone` after `close`                       → spawn safety
 //!
-//! No mocks. All paths are real `std::fs` calls on a `tempfile::TempDir`.
+//! No mocks. All state is a real SQLite store on a `tempfile::TempDir`.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 
@@ -302,8 +301,11 @@ async fn accumulate_saturates_at_u64_max_without_panic() {
     let resumed =
         ConversationSession::resume(dir.path(), session_id, Arc::new(AtomicUsize::new(0))).unwrap();
     let t2 = resumed.0.tokens().unwrap();
-    assert_eq!(t2.total_input, u64::MAX);
-    assert_eq!(t2.total_output, u64::MAX);
+    // ponytail: the SQLite token columns are i64, so the persisted counter
+    // saturates at i64::MAX rather than u64::MAX (see `token_to_i64`). The
+    // point here is "no wrap to 0", not the exact ceiling.
+    assert_eq!(t2.total_input, i64::MAX as u64);
+    assert_eq!(t2.total_output, i64::MAX as u64);
 }
 
 // ─── Clone-after-close semantics ────────────────────────────────────────
@@ -324,16 +326,6 @@ async fn clone_after_parent_close_still_persists_meta() {
     session.close().await.expect("parent close");
 
     distiller_view.accumulate_llm_usage(&usage(42_000, 7_000));
-
-    let meta_path: PathBuf = dir
-        .path()
-        .join("conversations")
-        .join("meta")
-        .join(format!("{}.json", session_id));
-    assert!(
-        meta_path.exists(),
-        "meta file must exist after clone writes"
-    );
 
     let from_disk = read_session_meta(&dir.path().join("conversations"), session_id)
         .expect("read meta from clone-write");
@@ -392,7 +384,7 @@ async fn consecutive_accumulations_each_reach_disk() {
 async fn legacy_meta_file_loads_with_tokens_none() {
     let dir = TempDir::new().unwrap();
     let conv_dir = dir.path().join("conversations");
-    std::fs::create_dir_all(conv_dir.join("meta")).unwrap();
+    std::fs::create_dir_all(&conv_dir).unwrap();
 
     let session_id = "legacy_session";
     let legacy_meta = SessionMeta {
@@ -552,10 +544,10 @@ async fn resume_hydrates_last_compaction_offset_from_meta() {
     let dir = TempDir::new().unwrap();
     let session_id = "compaction_resume";
 
-    // Phase 1: write a meta file with `last_compaction_offset: Some(1234)`
+    // Phase 1: write a meta row with `last_compaction_offset: Some(1234)`
     // and a JSONL file with at least one entry so resume() doesn't bail.
     let conv_dir = dir.path().join("conversations");
-    std::fs::create_dir_all(conv_dir.join("meta")).unwrap();
+    std::fs::create_dir_all(&conv_dir).unwrap();
     let meta = SessionMeta {
         version: 2,
         session_id: session_id.to_string(),

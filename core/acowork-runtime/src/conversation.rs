@@ -7,15 +7,27 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 
-use crate::agent::session_state::TodoItem;
 use crate::error::Result;
+
+use crate::agent::session_state::TodoItem;
+
+// Re-export session meta types from `acowork_memory::session_meta` so callers
+// using `crate::conversation::SessionMeta` keep compiling while the data model
+// lives where the `SessionMetaStore` trait lives.
+//
+// `TodoItem` / `TodoStatus` are NOT re-exported here: they live in
+// `crate::agent::session_state` (kept as a thin re-export) and the two
+// surfaces use the same type via `pub use` aliasing.
+pub use acowork_memory::{
+    SessionMeta, SessionMetaStore, SessionScope, SessionTokens, SessionVisibility,
+};
 use acowork_core::protocol::ContextUsageSection;
 use acowork_core::providers::traits::UsageInfo;
 
@@ -24,47 +36,6 @@ use acowork_core::providers::traits::UsageInfo;
 /// v3 (current): replaces `last_input_tokens` / `last_output_tokens` with a
 ///   structured `tokens` field on `SessionMeta`. See ADR-027.
 const CONVERSATION_FORMAT_VERSION: u32 = 3;
-
-/// Snapshot + cumulative token counts for a session.
-///
-/// Persisted in `SessionMeta.tokens` so the frontend can restore the
-/// "context usage" indicator after a session resume, and so future rounds
-/// have an authoritative cost record.
-///
-/// All four fields are **raw Provider-reported values** (or
-/// `UsageInfo::default()` zeros when the Provider didn't return usage).
-/// No local-tokenizer estimates are stored here — see ADR-027 for the
-/// "宁可 miss 也不估计" policy.
-///
-/// - `last_input` / `last_output` — usage from the most recent LLM call.
-///   Raw values are recorded verbatim, including zero, so the snapshot
-///   faithfully reflects what the Provider returned (e.g. when
-///   `prompt_tokens_reliable == false`).
-/// - `total_input` / `total_output` — saturated sums across every LLM call
-///   in this session. Only **reliable** calls (where the Provider returned
-///   a positive count) are accumulated; calls with `prompt_tokens == 0`
-///   are skipped on the input side so a Provider fallback does not
-///   silently overwrite an accumulated cost.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(default)]
-pub struct SessionTokens {
-    pub last_input: u64,
-    pub last_output: u64,
-    pub total_input: u64,
-    pub total_output: u64,
-    // ── ADR-066: prompt cache tokens (Provider-reported) ───────────────
-    /// Last-turn prompt tokens served from cache (OpenAI `cached_tokens` /
-    /// Anthropic `cache_read_input_tokens`).  `0` for providers that do
-    /// not report cache hits.
-    pub last_cache_read: u64,
-    /// Last-turn prompt tokens written to cache (Anthropic
-    /// `cache_creation_input_tokens`; OpenAI has no concept → always 0).
-    pub last_cache_write: u64,
-    /// Cumulative cache read tokens across all session LLM calls.
-    pub total_cache_read: u64,
-    /// Cumulative cache write tokens across all session LLM calls.
-    pub total_cache_write: u64,
-}
 
 /// Entry kind discriminator for `ConversationEntry.kind`.
 pub const ENTRY_KIND_COMPACTION: &str = "compaction";
@@ -262,188 +233,6 @@ pub struct AttachedSelectionMeta {
 pub struct AttachedFolderMeta {
     pub abs_path: String,
     pub name: String,
-}
-
-/// Per-session metadata stored in `conversations/meta/{session_id}.json`.
-///
-/// ADR-024: each session writes only its own meta file — no cross-session
-/// contention, no index.json, no JSONL header line.
-///
-/// Field `last_compaction_offset` is an absolute byte offset (there is no
-/// header in the JSONL, so the offset is always absolute).
-/// Who may read a session (ADR-076 §决策 4).
-///
-/// The field exists so a session can be *shared* rather than owned
-/// exclusively: a [`Public`](Self::Public) session is readable by every
-/// authenticated user, a [`Private`](Self::Private) one only by its owner
-/// (or an administrator).
-///
-/// **Absent means public** — but only absent *and* ownerless.
-///
-/// `SessionMeta.visibility` is `Option<SessionVisibility>` with
-/// `skip_serializing_if = "Option::is_none"`, so an unset visibility is
-/// byte-identical on disk to a pre-ADR-076 file. That is the whole point:
-/// upgrading must not retroactively hide every existing session from its
-/// user, and those sessions have no owner to restrict them to anyway
-/// (`is_readable_by` ignores the flag when `user_id` is absent).
-///
-/// A session created by an identified account is **not** left absent: the
-/// creation path stamps `Private` (ADR-076 §决策 4). `None` therefore
-/// means "predates accounts, or local mode" — never "a new session whose
-/// creator nobody bothered to ask" — which is why this value stopped
-/// being the multi-user default.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum SessionVisibility {
-    /// Readable by any authenticated user.
-    ///
-    /// The default only where no owner exists to restrict it to; an owned
-    /// session is created `Private` and must be shared deliberately.
-    Public,
-    /// Readable only by the owning account (and administrators).
-    Private,
-}
-
-impl SessionVisibility {
-    /// Whether a session with this setting is restricted to its owner.
-    pub fn is_private(self) -> bool {
-        matches!(self, Self::Private)
-    }
-}
-
-/// Who is asking for a session (ADR-076 §决策 4).
-///
-/// Produced by the HTTP layer from the Gateway-injected `x-user-id`
-/// header (see `acowork-gateway`'s auth middleware) and consumed by the
-/// session read/write paths. Two variants, because "administrator" and
-/// "`AUTH_MODE=local`, no accounts at all" (ADR-076 §决策 12) have
-/// genuinely identical access — both are unfiltered — and splitting them
-/// would mean two code paths that can never diverge.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SessionScope {
-    /// No restriction: an administrator, or a local-mode Runtime where
-    /// the account system is off.
-    Unfiltered,
-    /// A signed-in account.
-    User(String),
-}
-
-impl SessionScope {
-    /// Parse the `x-user-id` header value.
-    ///
-    /// `None` (header absent) means local mode — the Gateway never strips
-    /// or injects in that mode, so an absent header is the normal local
-    /// case and must NOT be treated as "anonymous, deny everything".
-    /// The all-axes sentinel `*` is the administrator's unfiltered view.
-    pub fn from_header_value(value: Option<&str>) -> Self {
-        match value.map(str::trim) {
-            None | Some("") | Some("*") => Self::Unfiltered,
-            Some(uid) => Self::User(uid.to_string()),
-        }
-    }
-
-    /// The account id, or `None` for an unfiltered scope.
-    pub fn user_id(&self) -> Option<&str> {
-        match self {
-            Self::Unfiltered => None,
-            Self::User(uid) => Some(uid.as_str()),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SessionMeta {
-    // ── Immutable fields ──
-    pub version: u32,
-    pub session_id: String,
-    pub agent_id: String,
-    pub created_at: String,
-    /// ADR-076 §决策 4: the account that owns this session.
-    ///
-    /// `None` = created before the account system existed, or under
-    /// `AUTH_MODE=local` (no accounts at all) — only an unfiltered
-    /// (administrator) reader sees those. Immutable after creation: the
-    /// metadata builder never invents one, and the only writer is the
-    /// creation path (see `ConversationSession::set_user_id`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub user_id: Option<String>,
-    /// ADR-076 §决策 4: who may read this session. **Absent = public**
-    /// (see [`SessionVisibility`]). Mutable — the owner can flip it at
-    /// any time via [`ConversationSession::set_visibility`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub visibility: Option<SessionVisibility>,
-
-    // ── User/API mutable fields ──
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider: Option<String>,
-    /// Multi-account (ADR-012): which of the provider's accounts this session
-    /// uses. `None` = provider's first account. Only the stable `account_id`
-    /// is persisted — the mutable `alias` is resolved for display elsewhere.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub account_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reasoning_effort: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub temperature: Option<f32>,
-    /// Per-session context window override (ADR-074).
-    ///
-    /// Field ABSENT ⟺ session inherits the per-agent resolution chain
-    /// (agent_config → manifest → DEFAULT_CONTEXT_WINDOW). `0` is an
-    /// invalid value (same as missing / null) — the write path normalizes
-    /// it to `None` so the field disappears from disk on clear.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub context_window: Option<u64>,
-
-    // ── ADR-060: todo snapshot (Block C source) ──
-    /// Current task list snapshot, persisted so a session restart restores
-    /// the todo list (ADR-060 §6.1). `None` when no task has been written.
-    /// Written only by [`ConversationSession::set_todos`] — the single
-    /// persistence owner; `SessionState` mirrors it in memory.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub todos: Option<Vec<TodoItem>>,
-
-    // ── Runtime statistics (updated by AgentLoop) ──
-    pub message_count: u64,
-    pub last_active_at: String,
-    /// ADR-027: snapshot + cumulative token counts (raw Provider values).
-    /// `None` until the first LLM call has been recorded.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tokens: Option<SessionTokens>,
-
-    /// Per-session lifetime LLM-call counter — the right-status-panel
-    /// "Iterations" display. 1-based: the first LLM response sets it to 1
-    /// and it only ever increases for the life of the session; it does NOT
-    /// reset when the user clicks Continue after `max_iterations` (that
-    /// per-burst loop counter resets in `loop_.rs`; this one is session
-    /// metadata). Persisted here so a resumed/historical session shows the
-    /// same count and a Continue keeps accumulating. `None` until the
-    /// first LLM call.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub llm_call_counter: Option<u32>,
-
-    // ── Token counting scene ──
-    /// Last calibrated session chars/token ratio (`input_chars / prompt_tokens`).
-    /// Persisted so a resumed session restores the token-estimation scene
-    /// instead of falling back to the default 3.5. `None` until the first
-    /// reliable LLM usage report.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_ratio: Option<f64>,
-
-    // ── Compaction ──
-    /// Absolute byte offset of the most recent compaction marker.
-    /// `None` if no compaction has occurred.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_compaction_offset: Option<u64>,
-
-    // ── Recovery flag ──
-    #[serde(default)]
-    pub corrupted: bool,
 }
 
 /// Commands sent to the background writer thread.
@@ -1035,7 +824,8 @@ impl ConversationSession {
     /// Create a new session with optional initial metadata.
     ///
     /// Creates a pure JSONL file (no metadata header — see ADR-024) and
-    /// writes session metadata to `conversations/meta/{session_id}.json`.
+    /// writes the initial session metadata through the active meta store
+    /// (ADR-082 §4 step 3: SQLite).
     ///
     /// Returns `(session, meta_change_rx)` where `meta_change_rx` is the
     /// receiver side of the meta-change notification channel — the caller
@@ -1124,7 +914,8 @@ impl ConversationSession {
             last_compaction_offset,
         };
 
-        // ADR-024: write per-session meta file (replaces index.json update).
+        // ADR-082 §4 step 3: write the initial meta row through the
+        // active store (SQLite). Replaces the legacy per-session JSON file.
         session.write_meta();
 
         // Enforce max-sessions limit: prune the oldest sessions if the
@@ -1138,9 +929,9 @@ impl ConversationSession {
 
     /// Resume an existing session.
     ///
-    /// Opens the existing JSONL file in append mode, reads metadata from
-    /// `conversations/meta/{session_id}.json`, and starts the background
-    /// writer thread.
+    /// Opens the existing JSONL file in append mode, reads metadata from the
+    /// active meta store (ADR-082 §4 step 3: SQLite), and starts the
+    /// background writer thread.
     ///
     /// Returns `(session, meta_change_rx)` — see [`Self::new`] for the
     /// semantics of the meta-change receiver.
@@ -2299,325 +2090,138 @@ pub struct SessionInfo {
 // ── Session Index (fast O(1) lookup) ───────────────────────────────────────
 //
 // ADR-024: the index.json + SessionIndexEntry + SessionIndex system has
-// been superseded by per-session meta files (`conversations/meta/*.json`).
-// Use `with_meta_index()` for listing and `read_session_meta()` for
+// been superseded by the session-meta store (ADR-082 §4 step 3: SQLite).
+// Use `scan_sessions_from_meta()` for listing and `read_session_meta()` for
 // single-session lookup.
 
-// ── Per-session meta file I/O (ADR-024) ───────────────────────────────────
+// ── Per-session meta I/O (ADR-024, ADR-082 §4 step 3) ─────────────────────
+//
+// Session meta lives in the workspace's `memory/private.sqlite` (`sessions` /
+// `fts_sessions`) — there is no JSON backend. The free functions below are thin
+// wrappers over the SQLite store.
 
-/// Subdirectory where per-session meta files live.
-const META_DIR: &str = "meta";
+/// Session-meta stores keyed by the `.sqlite` file they serve.
+///
+/// [`install_session_meta_backend`] seeds the entry for the running workspace
+/// with the store `AgentCore` already opened, so session meta shares the memory
+/// connection. A directory with no entry — a test, or a call that lands before
+/// the memory backend is up — opens its own, see [`session_meta_store`].
+static SESSION_META_STORES: OnceLock<Mutex<HashMap<PathBuf, Arc<dyn SessionMetaStore>>>> =
+    OnceLock::new();
 
-/// Build the path to `conversations/meta/{session_id}.json`.
-fn meta_path(conversations_dir: &Path, session_id: &str) -> PathBuf {
+fn session_meta_registry() -> &'static Mutex<HashMap<PathBuf, Arc<dyn SessionMetaStore>>> {
+    SESSION_META_STORES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// `private.sqlite` for the workspace owning `conversations_dir`
+/// (`…/conversations` -> `…/memory/private.sqlite`).
+fn session_meta_db_path(conversations_dir: &Path) -> PathBuf {
     conversations_dir
-        .join(META_DIR)
-        .join(format!("{}.json", session_id))
+        .parent()
+        .unwrap_or(conversations_dir)
+        .join("memory")
+        .join("private.sqlite")
 }
 
-/// Does `conversations/meta/{session_id}.json` exist?
+/// Install the session-meta backend for a workspace (ADR-082 §4 step 3).
 ///
-/// ADR-024: the meta file, not the JSONL, is the session's existence marker.
-/// Lives here so the on-disk meta layout has exactly one owner — see the
-/// `run_meta_layout_redline` check in `dev/ci.sh`.
-pub(crate) fn session_exists(conversations_dir: &Path, session_id: &str) -> bool {
-    meta_path(conversations_dir, session_id).exists()
-}
-
-/// Cheap probe: how many entries `conversations/meta/` holds, read without
-/// opening a single file (measured 0.9 ms for 2000 entries).
-///
-/// Used as the cache validity token for [`META_INDEX`]. It changes when a
-/// meta file is added or removed, so a mismatch means the cached row set is
-/// out of date. It is a *hint*, not a correctness input: when it lies (a
-/// swapped pair of files keeps the count) the stale rows are served until
-/// the next real add or remove — see the ceiling note on
-/// [`with_meta_index`]. It also counts the `.json.tmp` file that
-/// [`write_session_meta`] renames into place, so a listing that races a
-/// write may rebuild once for nothing; that is a rebuild, not a wrong
-/// answer.
-fn count_meta_entries(conversations_dir: &Path) -> usize {
-    std::fs::read_dir(conversations_dir.join(META_DIR))
-        .map(|rd| rd.count())
-        .unwrap_or(0)
-}
-
-/// Process-wide cache of the `meta/*.json` scan.
-///
-/// Listing sessions used to re-read and re-parse every meta file on every
-/// request (measured 23 ms for 2000 sessions, and the bottleneck is the
-/// 2000 `open`/`read`/`close` syscalls, not the JSON parse). That scan is
-/// *derived* state: it changes only when a meta file is written or removed,
-/// and both of those go through [`write_session_meta`] /
-/// [`remove_session_meta`]. So the scan result is cached here and those two
-/// functions keep it in sync.
-///
-/// Keyed by conversations directory: a Runtime process hosts exactly one
-/// agent (one entry), while the unit tests share a process across many temp
-/// dirs.
-///
-/// ponytail: one global mutex, held across a rebuild (the 23 ms scan). That
-/// serializes concurrent listings instead of letting each one scan; if
-/// per-directory contention ever shows up, shard the map by directory.
-static META_INDEX: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, MetaIndex>>> =
-    std::sync::OnceLock::new();
-
-struct MetaIndex {
-    /// Every meta row, newest-`last_active_at` first (see [`sort_sessions`]).
-    rows: Vec<(String, SessionMeta)>,
-    /// What `count_meta_entries` returned when `rows` was built.
-    entries: usize,
-}
-
-/// Ordering shared by every session listing: newest `last_active_at` first,
-/// `session_id` ascending as a tie-break.
-///
-/// The tie-break is load-bearing. `last_active_at` has millisecond
-/// resolution, so two sessions created in the same millisecond tie; without
-/// it a cached index (ordered by write order) and a freshly scanned one
-/// (ordered by `read_dir`) would disagree on where the page boundary falls.
-fn sort_sessions(rows: &mut [(String, SessionMeta)]) {
-    rows.sort_by(|(a_id, a), (b_id, b)| {
-        b.last_active_at
-            .cmp(&a.last_active_at)
-            .then_with(|| a_id.cmp(b_id))
-    });
-}
-
-/// Run `f` against the cached scan of `conversations_dir`, rebuilding first
-/// if the entry-count probe says the directory changed.
-///
-/// `f` runs under the cache lock and must only touch the in-memory rows: no
-/// I/O, and no re-entry into this cache.
-///
-/// # Ceiling
-///
-/// The probe counts directory entries, so a change that preserves the count
-/// (one file replaced by another between two reads) is not detected.
-/// In-process writers all go through [`write_session_meta`], which updates
-/// the cache directly, so this is only reachable by a second process
-/// writing the same directory — which does not exist (ADR-055: one Runtime
-/// per agent, one work dir per Runtime).
-fn with_meta_index<T>(conversations_dir: &Path, f: impl FnOnce(&MetaIndex) -> T) -> T {
-    let entries = count_meta_entries(conversations_dir);
-    let mut guard = META_INDEX
-        .get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+/// Called once at startup with the same `Arc<SqliteStore>` the memory backend
+/// uses, so both share one connection. A re-install for the same workspace
+/// replaces the entry.
+pub fn install_session_meta_backend(
+    conversations_dir: &Path,
+    store: Arc<dyn SessionMetaStore>,
+) {
+    session_meta_registry()
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-
-    if guard.get(conversations_dir).map(|idx| idx.entries) != Some(entries) {
-        guard.insert(
-            conversations_dir.to_path_buf(),
-            MetaIndex {
-                rows: scan_sessions_from_meta(conversations_dir),
-                entries,
-            },
-        );
-    }
-
-    f(&guard[conversations_dir])
+        .unwrap()
+        .insert(session_meta_db_path(conversations_dir), store);
 }
 
-/// Reflect a meta write in the cache, if this directory has one.
+/// The session-meta store for `conversations_dir`. Always SQLite.
 ///
-/// Called from inside [`write_session_meta`], so the writer and the cache
-/// updater are the same function — there is no separate "remember to
-/// invalidate" step to forget. A write that lands before the first read
-/// finds no cache and is a no-op; that first read builds from disk anyway.
-fn index_upsert(conversations_dir: &Path, meta: &SessionMeta) {
-    let Some(cache) = META_INDEX.get() else {
-        return;
-    };
-    let Ok(mut guard) = cache.lock() else {
-        return;
-    };
-    let Some(idx) = guard.get_mut(conversations_dir) else {
-        return;
-    };
-
-    match idx.rows.iter_mut().find(|(sid, _)| sid == &meta.session_id) {
-        Some((_, row)) => *row = meta.clone(),
-        None => {
-            idx.rows.push((meta.session_id.clone(), meta.clone()));
-            idx.entries += 1;
-        }
+/// A registered store wins (production: the memory-shared connection).
+/// Otherwise the workspace's `private.sqlite` is opened on demand — dim-agnostic
+/// so a later memory-backend open still gets to record the real embedding
+/// dimension, see `SqliteStore::open_dim_agnostic`. `find_latest_session` runs
+/// before the memory backend is up, so the open has to live here rather than
+/// only in [`install_session_meta_backend`].
+fn session_meta_store(conversations_dir: &Path) -> std::io::Result<Arc<dyn SessionMetaStore>> {
+    let db_path = session_meta_db_path(conversations_dir);
+    if let Some(store) = session_meta_registry().lock().unwrap().get(&db_path) {
+        return Ok(store.clone());
     }
-    sort_sessions(&mut idx.rows);
+    let db = acowork_sqlite::SqliteStore::open_dim_agnostic(&db_path).map_err(|e| {
+        std::io::Error::other(format!("open session-meta store {}: {e}", db_path.display()))
+    })?;
+    let store: Arc<dyn SessionMetaStore> =
+        Arc::new(acowork_sqlite::SqliteSessionMetaStore::new(Arc::new(db)));
+
+    session_meta_registry()
+        .lock()
+        .unwrap()
+        .insert(db_path, store.clone());
+    Ok(store)
 }
 
-/// Atomically write session metadata to `conversations/meta/{session_id}.json`.
-///
-/// Uses write-to-temp + rename to prevent corruption on crash.
-///
-/// **The only writer of meta files.** It also updates the listing cache
-/// ([`META_INDEX`]) as part of the write, so a caller cannot persist a meta
-/// change that a later session listing fails to see.
+/// Legacy free-function form of `SessionMetaStore::upsert`.
 pub fn write_session_meta(conversations_dir: &Path, meta: &SessionMeta) -> std::io::Result<()> {
-    let meta_dir = conversations_dir.join(META_DIR);
-    std::fs::create_dir_all(&meta_dir)?;
-
-    let target = meta_path(conversations_dir, &meta.session_id);
-    let temp = meta_dir.join(format!("{}.json.tmp", meta.session_id));
-
-    let json = serde_json::to_string_pretty(meta)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    std::fs::write(&temp, json)?;
-    std::fs::rename(&temp, &target)?;
-
-    index_upsert(conversations_dir, meta);
-    Ok(())
+    session_meta_store(conversations_dir)?
+        .upsert(meta)
+        .map_err(|e| std::io::Error::other(e.to_string()))
 }
 
-/// Delete `conversations/meta/{session_id}.json` and drop it from the
-/// listing cache.
-///
-/// The mirror of [`write_session_meta`]: **the only place a meta file may be
-/// removed.** A removal that bypassed the cache would leave the session
-/// listed with no meta file on disk — the "resume a session whose JSONL is
-/// gone" failure `SessionManager::delete_session` already guards against.
-///
-/// Only the meta side: the JSONL is the caller's business, because pruning
-/// *archives* it (rename to `.archive`) while deleting removes it.
-pub(crate) fn remove_session_meta(conversations_dir: &Path, session_id: &str) {
-    let path = meta_path(conversations_dir, session_id);
-    let removed = match std::fs::remove_file(&path) {
-        Ok(()) => true,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
-        Err(e) => {
-            tracing::warn!(
-                session_id = %session_id,
-                error = %e,
-                "Failed to delete session meta file"
-            );
-            false
-        }
-    };
-
-    let Some(cache) = META_INDEX.get() else {
-        return;
-    };
-    let Ok(mut guard) = cache.lock() else {
-        return;
-    };
-    let Some(idx) = guard.get_mut(conversations_dir) else {
-        return;
-    };
-    if let Some(pos) = idx.rows.iter().position(|(sid, _)| sid == session_id) {
-        idx.rows.remove(pos);
-        // Keep the probe token equal to the real entry count so the next
-        // listing reuses the cache instead of rescanning.
-        if removed {
-            idx.entries = idx.entries.saturating_sub(1);
-        }
-    }
-}
-
-impl SessionMeta {
-    /// May `scope` **read** this session (ADR-076 §决策 4)?
-    ///
-    /// An unset (`None`) visibility is public: every signed-in account
-    /// may read it. Only an explicit `private` restricts reading to the
-    /// owning account.
-    ///
-    /// In practice `None` now shows up only on sessions with no owner
-    /// (pre-ADR-076 data, or local mode): the creation path stamps
-    /// `Private` on anything it can attribute to an account.
-    pub fn is_readable_by(&self, scope: &SessionScope) -> bool {
-        match scope {
-            SessionScope::Unfiltered => true,
-            SessionScope::User(uid) => match self.user_id.as_deref() {
-                // Ownerless sessions are a two-way split, and the split is
-                // the whole reason `None` and `Some(Private)` must not be
-                // collapsed:
-                //
-                //   `None` / `Public` → readable by every account.
-                //     This is pre-ADR-076 data (no owner to restrict it to)
-                //     and local-mode sessions. Hiding them on upgrade would
-                //     strand users outside their own history.
-                //
-                //   `Private` → readable by nobody but an administrator.
-                //     An *unclaimed* session. The agent creates one at cold
-                //     start, before any account has touched the process;
-                //     handing that to every account as a shared session is
-                //     how two users end up typing into the same
-                //     conversation. "Private with no owner" honestly means
-                //     "belongs to no one", so no account gets it.
-                //
-                // Note this is the *explicit* flag, set by the creation
-                // path or an administrator — not something a user can
-                // reach (see `is_writable_by` and `put_session_visibility`).
-                None => !self.visibility.is_some_and(SessionVisibility::is_private),
-                Some(owner) => {
-                    !self.visibility.is_some_and(SessionVisibility::is_private)
-                        || owner == uid
-                }
-            },
-        }
-    }
-
-    /// May `scope` **modify** this session (open / close / delete /
-    /// retitle / re-share)?
-    ///
-    /// Deliberately stricter than [`Self::is_readable_by`]: a public
-    /// session is *visible* to every account but *owned* by exactly one,
-    /// so sharing is not the same as handing over the delete button.
-    ///
-    /// Ownerless sessions keep the pre-ADR-076 rule — modifiable by any
-    /// signed-in account — for the same reason [`Self::is_readable_by`]
-    /// keeps them readable: that is the behaviour data predating accounts
-    /// (and local mode) depends on, and locking them to admins would
-    /// strand users outside their own history.
-    ///
-    /// The exception is an ownerless session marked `Private`: an
-    /// unclaimed session nobody may read is also one nobody may write, or
-    /// the first user to touch it could flip the flag back and re-share
-    /// it with everyone.
-    pub fn is_writable_by(&self, scope: &SessionScope) -> bool {
-        match scope {
-            SessionScope::Unfiltered => true,
-            SessionScope::User(uid) => match self.user_id.as_deref() {
-                None => !self.visibility.is_some_and(SessionVisibility::is_private),
-                Some(owner) => owner == uid,
-            },
-        }
-    }
-}
-
-/// Read session metadata from `conversations/meta/{session_id}.json`.
+/// Legacy free-function form of `SessionMetaStore::get`.
 pub fn read_session_meta(
     conversations_dir: &Path,
     session_id: &str,
 ) -> std::io::Result<SessionMeta> {
-    let path = meta_path(conversations_dir, session_id);
-    let data = std::fs::read_to_string(&path)?;
-    serde_json::from_str(&data).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    match session_meta_store(conversations_dir)?.get(session_id) {
+        Ok(Some(meta)) => Ok(meta),
+        Ok(None) => Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("session {session_id} not found"),
+        )),
+        Err(e) => Err(std::io::Error::other(e.to_string())),
+    }
 }
 
-/// Read every `meta/*.json` on disk and return the rows sorted for listing.
+/// `true` when the session-meta store holds a row for `session_id`.
 ///
-/// Files that fail to parse are silently skipped (the caller can detect
-/// missing sessions via the returned `Vec` length vs. the `.jsonl` file
-/// count).
-///
-/// Crate-private on purpose: this is the expensive full scan (23 ms for
-/// 2000 sessions) and must only be reached through [`with_meta_index`],
-/// which caches the result.
-fn scan_sessions_from_meta(conversations_dir: &Path) -> Vec<(String, SessionMeta)> {
-    let meta_dir = conversations_dir.join(META_DIR);
-    let Ok(rd) = std::fs::read_dir(&meta_dir) else {
-        return Vec::new();
+/// Unlike [`read_session_meta`] this keeps "absent" (`Ok(None)`) distinct from
+/// a backend error, which is exactly what the session lifecycle state machine
+/// needs. A missing database, or one without the row, both read as absent.
+pub fn session_meta_exists(conversations_dir: &Path, session_id: &str) -> bool {
+    session_meta_store(conversations_dir)
+        .ok()
+        .is_some_and(|store| matches!(store.get(session_id), Ok(Some(_))))
+}
+
+/// Legacy free-function form of `SessionMetaStore::delete`.
+pub fn delete_session_meta(conversations_dir: &Path, session_id: &str) -> std::io::Result<()> {
+    session_meta_store(conversations_dir)?
+        .delete(session_id)
+        .map_err(|e| std::io::Error::other(e.to_string()))
+}
+
+/// Legacy free-function form of `SessionMetaStore::list_recent`,
+/// preserving the `(session_id, SessionMeta)` tuple shape every caller
+/// already destructures.
+pub fn scan_sessions_from_meta(conversations_dir: &Path) -> Vec<(String, SessionMeta)> {
+    let store = match session_meta_store(conversations_dir) {
+        Ok(store) => store,
+        Err(e) => {
+            tracing::warn!(error = %e, "scan_sessions_from_meta: store unavailable");
+            return Vec::new();
+        }
     };
-    let mut sessions: Vec<(String, SessionMeta)> = rd
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
-        .filter_map(|e| {
-            let data = std::fs::read_to_string(e.path()).ok()?;
-            let meta: SessionMeta = serde_json::from_str(&data).ok()?;
-            Some((meta.session_id.clone(), meta))
-        })
-        .collect();
-    sort_sessions(&mut sessions);
-    sessions
+    match store.list_recent(usize::MAX) {
+        Ok(rows) => rows.into_iter().map(|m| (m.session_id.clone(), m)).collect(),
+        Err(e) => {
+            tracing::warn!(error = %e, "scan_sessions_from_meta: store failed");
+            Vec::new()
+        }
+    }
 }
 
 /// Prune excess sessions when **an owner's** session count exceeds
@@ -2637,8 +2241,8 @@ fn scan_sessions_from_meta(conversations_dir: &Path) -> Vec<(String, SessionMeta
 ///
 /// # Safety
 ///
-/// This function only looks at the meta files; it does NOT interact with
-/// `SessionManager`.  By design it can only prune sessions that have been
+/// This function only looks at the session-meta store; it does NOT interact
+/// with `SessionManager`.  By design it can only prune sessions that have been
 /// evicted from memory (idle timeout), because active sessions constantly
 /// update their `last_active_at` and will never be the oldest.
 pub(crate) fn prune_excess_sessions(conversations_dir: &Path, max_sessions: usize) -> usize {
@@ -2646,43 +2250,34 @@ pub(crate) fn prune_excess_sessions(conversations_dir: &Path, max_sessions: usiz
         return 0;
     }
 
-    // Cheap pre-check: a bucket can never be larger than the total, so a
-    // total at or below the cap means no bucket can exceed it. 0.9 ms for
-    // 2000 entries vs 23 ms to read and parse them — this runs on every
-    // session creation and the common case is "nowhere near the cap".
-    if count_meta_entries(conversations_dir) <= max_sessions {
+    // The meta backend tells us which sessions to delete; this function
+    // owns the matching JSONL archival. The trait returns the deleted
+    // ids newest-first, but we want oldest-first because that's the
+    // historical order the old code pruned in.
+    let store = match session_meta_store(conversations_dir) {
+        Ok(store) => store,
+        Err(e) => {
+            tracing::warn!(error = %e, "prune_excess_sessions: store unavailable");
+            return 0;
+        }
+    };
+    let victims = match store.prune_to(max_sessions) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(error = %e, "prune_excess_sessions: store failed");
+            return 0;
+        }
+    };
+    if victims.is_empty() {
         return 0;
     }
 
-    // ADR-076 §决策 4: bucket by owner, then apply the cap to each bucket
-    // independently, over the cached scan (no extra disk read).
-    let (doomed, total) = with_meta_index(conversations_dir, |idx| {
-        let mut by_owner: HashMap<Option<String>, Vec<(&str, &str)>> = HashMap::new();
-        for (sid, meta) in idx.rows.iter() {
-            by_owner
-                .entry(meta.user_id.clone())
-                .or_default()
-                .push((sid.as_str(), meta.last_active_at.as_str()));
-        }
-
-        let mut doomed: Vec<String> = Vec::new();
-        for sessions in by_owner.values_mut() {
-            if sessions.len() <= max_sessions {
-                continue;
-            }
-            // Oldest first, then drop the excess.
-            sessions.sort_by(|a, b| a.1.cmp(b.1));
-            let excess = sessions.len() - max_sessions;
-            doomed.extend(sessions.iter().take(excess).map(|(sid, _)| (*sid).to_string()));
-        }
-        (doomed, idx.rows.len())
-    });
-
+    // `prune_to` returns victims oldest-first, so we
+    // can archive the JSONL files in order without an extra sort.
     let mut pruned = 0usize;
-
-    for session_id in &doomed {
-        let jsonl_path = conversations_dir.join(format!("{}.jsonl", session_id));
-        let archive_path = conversations_dir.join(format!("{}.jsonl.archive", session_id));
+    for session_id in victims.iter() {
+        let jsonl_path = conversations_dir.join(format!("{session_id}.jsonl"));
+        let archive_path = conversations_dir.join(format!("{session_id}.jsonl.archive"));
 
         // ADR-024: archive the JSONL file (rename) instead of deleting.
         match std::fs::rename(&jsonl_path, &archive_path) {
@@ -2708,17 +2303,10 @@ pub(crate) fn prune_excess_sessions(conversations_dir: &Path, max_sessions: usiz
                 continue;
             }
         }
-
-        // Delete the per-session meta file (and its cached row).
-        remove_session_meta(conversations_dir, session_id);
     }
 
     if pruned > 0 {
-        tracing::info!(
-            pruned,
-            remaining = total - pruned,
-            "Archived excess sessions"
-        );
+        tracing::info!(pruned, "Archived excess sessions");
     }
 
     pruned
@@ -2847,18 +2435,32 @@ pub type StreamingStateMap = Arc<RwLock<HashMap<String, StreamingLine>>>;
 
 /// Find the most recently active session.
 ///
-/// ADR-024: reads the cached meta scan instead of index.json.
+/// ADR-082 §4 step 3: reads the session-meta store (SQLite).
+///
+/// Deliberately unscoped (ADR-076 §决策 4): this feeds the runtime's
+/// per-agent "resume my latest conversation" cache, written at startup before
+/// any caller exists. Scope-enforcing here would be wrong for that caller —
+/// cold start has no user. The HTTP surface that exposes the cache
+/// (`GET /sessions/latest`) is where ownership is checked: it answers 404
+/// rather than hand a caller a session id it may not read. The filtered
+/// listing lives in [`scan_sessions_async`].
 pub fn find_latest_session(conversations_dir: &Path) -> Option<String> {
-    with_meta_index(conversations_dir, |idx| {
-        idx.rows.first().map(|(sid, _)| sid.clone())
-    })
+    session_meta_store(conversations_dir)
+        .ok()?
+        .find_latest()
+        .ok()
+        .flatten()
+        .map(|m| m.session_id)
 }
 
-/// Asynchronously list sessions, newest `last_active_at` first.
+/// Asynchronously scan all sessions from the session-meta store.
 ///
-/// Serves the paginated [`SessionInfo`] page out of [`META_INDEX`] — the
-/// cached `meta/*.json` scan — so a listing costs one `read_dir().count()`
-/// probe instead of re-reading every meta file.
+/// Returns a paginated list of `SessionInfo` sorted by `last_active_at`
+/// descending (newest first). ADR-082 §4 step 3: the store is SQLite.
+///
+/// ADR-076 §决策 4: `scope` is applied *before* pagination (see
+/// [`build_session_page`]), so the page slice, `total`, and the token totals
+/// all describe only what the caller may read.
 ///
 /// ADR-028: in addition to the page slice, the join handle now also
 /// returns `(agent_total_input, agent_total_output, agent_total_cache_read,
@@ -2887,10 +2489,26 @@ pub fn scan_sessions_async(
     scope: SessionScope,
 ) -> tokio::task::JoinHandle<(Vec<SessionInfo>, usize, (u64, u64, u64, u64))> {
     tokio::task::spawn_blocking(move || {
-        // ADR-024: read the cached meta scan instead of index.json.
-        with_meta_index(&conversations_dir, |idx| {
-            build_session_page(&idx.rows, page, size, &scope)
-        })
+        // ADR-082 §4 step 3: the rows come from the session-meta store
+        // (SQLite). `scan_sessions_from_meta` is that store's full-scan form
+        // and keeps the `(session_id, SessionMeta)` shape the page builder
+        // already takes.
+        //
+        // The read filter and the slice both stay on this side of the store
+        // boundary on purpose: `SessionMeta::is_readable_by` is the *single*
+        // definition of the ADR-076 read rule. An equivalent SQL predicate
+        // would be a second copy to keep in sync, and a drift between them is
+        // a data leak, not a cosmetic bug.
+        //
+        // ponytail: full scan, then filter + slice in Rust. `total` and the
+        // token aggregates are full-scan by contract anyway (ADR-028 /
+        // ADR-066), so this is the O(n) the dashboard already pays. Ceiling:
+        // every session row is materialised per list request (≈23 ms at 2000
+        // rows). Upgrade path: push the predicate into SQL past ~10k sessions
+        // per workspace — keeping `is_readable_by` as the reference
+        // implementation the SQL would have to match.
+        let rows = scan_sessions_from_meta(&conversations_dir);
+        build_session_page(&rows, page, size, &scope)
     })
 }
 
@@ -3479,14 +3097,9 @@ mod tests {
         assert_eq!(entry.role, "tool_call");
         assert_eq!(entry.content, r#"{"path": "test.txt"}"#);
 
-        // Verify meta file exists
-        let meta_path = work_dir
-            .join("conversations")
-            .join("meta")
-            .join(format!("{}.json", session_id));
-        assert!(meta_path.exists(), "Per-session meta file must exist");
-        let meta: SessionMeta =
-            serde_json::from_str(&std::fs::read_to_string(&meta_path).unwrap()).unwrap();
+        // Verify the meta row exists in the session-meta store (SQLite).
+        let meta = read_session_meta(&work_dir.join("conversations"), &session_id)
+            .expect("Per-session meta row must exist");
         assert_eq!(meta.version, CONVERSATION_FORMAT_VERSION);
         assert_eq!(meta.session_id, session_id);
         assert_eq!(meta.agent_id, agent_id);
@@ -3580,15 +3193,13 @@ mod tests {
         assert!(session.build_meta().visibility.is_some_and(|v| v.is_private()));
 
         // Persisted, not just in memory.
-        let on_disk: SessionMeta =
-            serde_json::from_str(&std::fs::read_to_string(meta_path(&dir.join("conversations"), "visibility")).unwrap()).unwrap();
+        let on_disk = read_session_meta(&dir.join("conversations"), "visibility").unwrap();
         assert_eq!(on_disk.visibility, Some(SessionVisibility::Private));
 
-        // Clearing restores the public default and drops the key.
+        // Clearing restores the public default.
         session.set_visibility(None);
         assert!(!session.is_private());
-        let on_disk: SessionMeta =
-            serde_json::from_str(&std::fs::read_to_string(meta_path(&dir.join("conversations"), "visibility")).unwrap()).unwrap();
+        let on_disk = read_session_meta(&dir.join("conversations"), "visibility").unwrap();
         assert_eq!(on_disk.visibility, None);
     }
 
@@ -3626,11 +3237,11 @@ mod tests {
         assert_eq!(session.build_meta().user_id.as_deref(), Some("u-alice"));
     }
 
-    /// Seed a meta file plus an empty JSONL so the prune path has something
-    /// to archive.  Avoids spinning up a `ConversationSession` (and its
-    /// background writer thread) for what is a pure file-layout test.
+    /// Seed a session-meta row plus an empty JSONL so the prune path has
+    /// something to archive.  Avoids spinning up a `ConversationSession` (and
+    /// its background writer thread) for what is a pure store-layout test.
     fn seed_session(conv: &Path, sid: &str, owner: Option<&str>, last_active_at: &str) {
-        std::fs::create_dir_all(conv.join("meta")).unwrap();
+        std::fs::create_dir_all(conv).unwrap();
         let meta = SessionMeta {
             version: 1,
             session_id: sid.to_string(),
@@ -3705,120 +3316,57 @@ mod tests {
         // files. This is the assertion the old implementation failed.
         for i in 0..2 {
             assert!(conv.join(format!("alice_{i}.jsonl")).exists());
-            assert!(conv.join("meta").join(format!("alice_{i}.json")).exists());
+            assert!(session_meta_exists(&conv, &format!("alice_{i}")));
         }
 
         // Bob is over the cap → exactly his oldest session is archived.
         assert!(conv.join("bob_0.jsonl.archive").exists());
         assert!(!conv.join("bob_0.jsonl").exists());
-        assert!(!conv.join("meta").join("bob_0.json").exists());
+        assert!(!session_meta_exists(&conv, "bob_0"));
         for i in 1..3 {
             assert!(conv.join(format!("bob_{i}.jsonl")).exists());
-            assert!(conv.join("meta").join(format!("bob_{i}.json")).exists());
+            assert!(session_meta_exists(&conv, &format!("bob_{i}")));
         }
 
         // Ownerless sessions (pre-ADR-076 / local mode) form one bucket and
         // keep the pre-existing semantics.
         assert!(conv.join("legacy_0.jsonl.archive").exists());
-        assert!(!conv.join("meta").join("legacy_0.json").exists());
+        assert!(!session_meta_exists(&conv, "legacy_0"));
         assert!(conv.join("legacy_2.jsonl").exists());
 
-        // The cheap entry-count guard bails out before parsing anything.
+        // Nothing is over a cap of 100.
         assert_eq!(prune_excess_sessions(&conv, 100), 0);
     }
 
-    /// Session ids reachable through the listing cache, newest first — the
-    /// same `with_meta_index` an HTTP listing goes through.
-    fn listed_ids(conv: &Path) -> Vec<String> {
-        with_meta_index(conv, |idx| idx.rows.iter().map(|(sid, _)| sid.clone()).collect())
-    }
-
+    /// `delete_session_meta` must drop the store row, so the next listing no
+    /// longer advertises a session whose history is gone.
     #[test]
-    fn session_index_reflects_funnel_writes_without_rescanning() {
-        // The cache is invalidated by entry *count*, so rewriting an existing
-        // meta file cannot be caught by the probe — only by the upsert inside
-        // `write_session_meta`. Drop that upsert and this listing keeps
-        // serving the pre-change row, which is exactly what this asserts
-        // against.
-        let temp_dir = TempDir::new().unwrap();
-        let conv = temp_dir.path().join("conversations");
-        seed_session(&conv, "s-1", None, "2026-01-01T00:00:00Z");
-
-        // Build the cache (one meta file on disk).
-        assert_eq!(with_meta_index(&conv, |idx| idx.entries), 1);
-
-        let mut meta = read_session_meta(&conv, "s-1").unwrap();
-        meta.title = Some("renamed".to_string());
-        meta.last_active_at = "2026-01-02T00:00:00Z".to_string();
-        write_session_meta(&conv, &meta).unwrap();
-
-        let listed = with_meta_index(&conv, |idx| {
-            idx.rows
-                .iter()
-                .map(|(sid, m)| (sid.clone(), m.title.clone()))
-                .collect::<Vec<_>>()
-        });
-        assert_eq!(listed, vec![("s-1".to_string(), Some("renamed".to_string()))]);
-    }
-
-    #[test]
-    fn session_index_self_heals_on_out_of_band_meta_change() {
-        // A writer that bypasses `write_session_meta` — a second process, or
-        // a crash-leftover file — must not be served stale forever. The
-        // entry-count probe notices and rebuilds.
-        let temp_dir = TempDir::new().unwrap();
-        let conv = temp_dir.path().join("conversations");
-        seed_session(&conv, "s-old", None, "2026-01-01T00:00:00Z");
-        assert_eq!(find_latest_session(&conv).as_deref(), Some("s-old"));
-
-        // A newer session appears behind the cache's back.
-        let mut meta = read_session_meta(&conv, "s-old").unwrap();
-        meta.session_id = "s-new".to_string();
-        meta.last_active_at = "2026-02-01T00:00:00Z".to_string();
-        std::fs::write(
-            conv.join("meta").join("s-new.json"),
-            serde_json::to_string(&meta).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(find_latest_session(&conv).as_deref(), Some("s-new"));
-
-        // ...and vanishes the same way.
-        std::fs::remove_file(conv.join("meta").join("s-new.json")).unwrap();
-        assert_eq!(find_latest_session(&conv).as_deref(), Some("s-old"));
-    }
-
-    #[test]
-    fn remove_session_meta_drops_the_session_from_the_listing() {
-        // `delete_session` and pruning both funnel through
-        // `remove_session_meta`. Without it the row survives in the cache and
-        // the UI lists a session whose meta file is gone.
-        //
-        // This asserts the contract (file gone, session unlisted), not the
-        // cache's internal entry counter: a counter left out of sync is
-        // repaired by the next probe-triggered rebuild, so it is invisible
-        // from out here by design.
+    fn delete_session_meta_drops_the_session_from_the_listing() {
         let temp_dir = TempDir::new().unwrap();
         let conv = temp_dir.path().join("conversations");
         seed_session(&conv, "s-keep", None, "2026-01-01T00:00:00Z");
         seed_session(&conv, "s-drop", None, "2026-01-02T00:00:00Z");
-        assert_eq!(listed_ids(&conv), vec!["s-drop", "s-keep"]);
+        assert_eq!(scan_sessions_from_meta(&conv).len(), 2);
 
-        remove_session_meta(&conv, "s-drop");
+        delete_session_meta(&conv, "s-drop").unwrap();
 
-        assert_eq!(listed_ids(&conv), vec!["s-keep"]);
-        assert!(!conv.join("meta").join("s-drop.json").exists());
+        let ids: Vec<String> = scan_sessions_from_meta(&conv)
+            .into_iter()
+            .map(|(sid, _)| sid)
+            .collect();
+        assert_eq!(ids, vec!["s-keep".to_string()]);
     }
 
     #[test]
     fn write_meta_skips_when_jsonl_deleted() {
         // Regression: `ConversationSession::write_meta` used to rewrite the
-        // per-session meta file unconditionally. A detached distill task
-        // holding an `Arc<ConversationSession>` could therefore re-create a
-        // meta file for a session whose JSONL had already been deleted by
-        // `SessionManager::delete_session`. On the next startup the orphan
-        // meta was scanned as the "latest" session and resume failed because
-        // the JSONL was gone. Fix: `write_meta` now returns early when the
-        // JSONL file no longer exists.
+        // session meta unconditionally. A detached distill task holding an
+        // `Arc<ConversationSession>` could therefore re-create a meta row for
+        // a session whose JSONL had already been deleted by
+        // `SessionManager::delete_session`. On the next startup the orphan row
+        // was scanned as the "latest" session and resume failed because the
+        // JSONL was gone. Fix: `write_meta` returns early when the JSONL file
+        // no longer exists.
         let temp_dir = TempDir::new().unwrap();
         let work_dir = temp_dir.path();
         let session_id = generate_session_id();
@@ -3839,33 +3387,30 @@ mod tests {
 
         let conversations_dir = work_dir.join("conversations");
         let jsonl_path = conversations_dir.join(format!("{}.jsonl", session_id));
-        let meta_path = conversations_dir
-            .join("meta")
-            .join(format!("{}.json", session_id));
 
-        // Pre-condition: both files exist after creation.
+        // Pre-condition: the JSONL exists and the meta row is present.
         assert!(jsonl_path.exists());
-        assert!(meta_path.exists());
+        assert!(session_meta_exists(&conversations_dir, &session_id));
 
         // Shut down the writer so the JSONL handle is released (required
         // to delete the file on Windows), then simulate the delete path:
         // `SessionManager::delete_session` removes BOTH the JSONL and the
-        // meta file. The guard must then prevent `write_meta` from
-        // re-creating the orphan meta.
+        // meta row. The guard must then prevent `write_meta` from
+        // re-creating the orphan row.
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             session.close().await.unwrap();
         });
         std::fs::remove_file(&jsonl_path).unwrap();
-        std::fs::remove_file(&meta_path).unwrap();
+        delete_session_meta(&conversations_dir, &session_id).unwrap();
         assert!(!jsonl_path.exists());
-        assert!(!meta_path.exists());
+        assert!(!session_meta_exists(&conversations_dir, &session_id));
 
-        // The guard must prevent the meta file from being re-created.
+        // The guard must prevent the meta row from being re-created.
         session.write_meta();
         assert!(
-            !meta_path.exists(),
-            "write_meta must not re-create a meta file once its JSONL is gone"
+            !session_meta_exists(&conversations_dir, &session_id),
+            "write_meta must not re-create a meta row once its JSONL is gone"
         );
     }
 
@@ -3875,10 +3420,7 @@ mod tests {
         let conv_dir = temp_dir.path().join("conversations");
         std::fs::create_dir_all(&conv_dir).unwrap();
 
-        // ADR-024: find_latest_session scans per-session meta files.
-        let meta_dir = conv_dir.join("meta");
-        std::fs::create_dir_all(&meta_dir).unwrap();
-
+        // ADR-082 §4 step 3: find_latest_session reads the SQLite meta store.
         let base = chrono::Utc::now();
         let ids = vec![
             (
@@ -3921,8 +3463,7 @@ mod tests {
                 last_compaction_offset: None,
                 corrupted: false,
             };
-            let meta_path = meta_dir.join(format!("{}.json", id));
-            std::fs::write(&meta_path, serde_json::to_string(&meta).unwrap()).unwrap();
+            write_session_meta(&conv_dir, &meta).unwrap();
         }
 
         let latest = find_latest_session(&conv_dir);
@@ -4102,12 +3643,9 @@ mod tests {
         let conv_dir = temp_dir.path().join("conversations");
         std::fs::create_dir_all(&conv_dir).unwrap();
 
-        // ADR-024: create per-session meta files instead of JSONL headers.
-        // Create a valid session with meta file.
+        // ADR-082 §4 step 3: sessions live in the SQLite meta store.
+        // Create a valid session with a meta row.
         let valid_id = "20260503_100000_valid";
-        let meta_dir = conv_dir.join("meta");
-        std::fs::create_dir_all(&meta_dir).unwrap();
-        let meta_path = meta_dir.join(format!("{}.json", valid_id));
         let valid_meta = SessionMeta {
             version: CONVERSATION_FORMAT_VERSION,
             session_id: valid_id.to_string(),
@@ -4132,18 +3670,17 @@ mod tests {
             last_compaction_offset: None,
             corrupted: false,
         };
-        std::fs::write(&meta_path, serde_json::to_string(&valid_meta).unwrap()).unwrap();
+        write_session_meta(&conv_dir, &valid_meta).unwrap();
 
-        // Create a corrupted session with meta file (corrupted flag set).
+        // Create a corrupted session (corrupted flag set).
         let corrupt_id = "20260503_110000_corrupt";
-        let meta_path2 = meta_dir.join(format!("{}.json", corrupt_id));
         let corrupt_meta = SessionMeta {
             session_id: corrupt_id.to_string(),
             corrupted: true,
             title: None,
             ..valid_meta.clone()
         };
-        std::fs::write(&meta_path2, serde_json::to_string(&corrupt_meta).unwrap()).unwrap();
+        write_session_meta(&conv_dir, &corrupt_meta).unwrap();
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         let (sessions, _total, _agent_totals) =
@@ -4935,55 +4472,68 @@ mod tests {
         rt.block_on(async {
             let conv_dir = temp_dir.path().join("conversations");
             std::fs::create_dir_all(&conv_dir).unwrap();
-            std::fs::create_dir_all(conv_dir.join("meta")).unwrap();
+
+            let base = SessionMeta {
+                version: 3,
+                session_id: String::new(),
+                agent_id: "com.test".to_string(),
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                user_id: None,
+                visibility: None,
+                title: None,
+                workspace_id: None,
+                model: None,
+                provider: None,
+                account_id: None,
+                reasoning_effort: None,
+                temperature: None,
+                context_window: None,
+                todos: None,
+                message_count: 5,
+                last_active_at: "2026-01-02T00:00:00Z".to_string(),
+                tokens: None,
+                llm_call_counter: None,
+                model_ratio: None,
+                last_compaction_offset: None,
+                corrupted: false,
+            };
 
             // Session A: full cache breakdown.
-            let meta_a = serde_json::json!({
-                "version": 3,
-                "session_id": "scan_cache_a",
-                "agent_id": "com.test",
-                "created_at": "2026-01-01T00:00:00Z",
-                "last_active_at": "2026-01-02T00:00:00Z",
-                "message_count": 5,
-                "corrupted": false,
-                "tokens": {
-                    "last_input": 1000,
-                    "last_output": 200,
-                    "total_input": 1000,
-                    "total_output": 200,
-                    "last_cache_read": 400,
-                    "last_cache_write": 100,
-                    "total_cache_read": 400,
-                    "total_cache_write": 100
-                }
-            });
-            std::fs::write(
-                conv_dir.join("meta").join("scan_cache_a.json"),
-                serde_json::to_string(&meta_a).unwrap(),
-            )
-            .unwrap();
+            let meta_a = SessionMeta {
+                session_id: "scan_cache_a".to_string(),
+                tokens: Some(SessionTokens {
+                    last_input: 1000,
+                    last_output: 200,
+                    total_input: 1000,
+                    total_output: 200,
+                    last_cache_read: 400,
+                    last_cache_write: 100,
+                    total_cache_read: 400,
+                    total_cache_write: 100,
+                }),
+                ..base.clone()
+            };
+            write_session_meta(&conv_dir, &meta_a).unwrap();
 
-            // Session B: legacy meta (no cache fields).
-            let meta_b = serde_json::json!({
-                "version": 3,
-                "session_id": "scan_cache_b",
-                "agent_id": "com.test",
-                "created_at": "2026-01-03T00:00:00Z",
-                "last_active_at": "2026-01-04T00:00:00Z",
-                "message_count": 3,
-                "corrupted": false,
-                "tokens": {
-                    "last_input": 500,
-                    "last_output": 100,
-                    "total_input": 500,
-                    "total_output": 100
-                }
-            });
-            std::fs::write(
-                conv_dir.join("meta").join("scan_cache_b.json"),
-                serde_json::to_string(&meta_b).unwrap(),
-            )
-            .unwrap();
+            // Session B: legacy meta (cache fields default to 0).
+            let meta_b = SessionMeta {
+                session_id: "scan_cache_b".to_string(),
+                created_at: "2026-01-03T00:00:00Z".to_string(),
+                last_active_at: "2026-01-04T00:00:00Z".to_string(),
+                message_count: 3,
+                tokens: Some(SessionTokens {
+                    last_input: 500,
+                    last_output: 100,
+                    total_input: 500,
+                    total_output: 100,
+                    last_cache_read: 0,
+                    last_cache_write: 0,
+                    total_cache_read: 0,
+                    total_cache_write: 0,
+                }),
+                ..base.clone()
+            };
+            write_session_meta(&conv_dir, &meta_b).unwrap();
 
             let join = scan_sessions_async(conv_dir, None, None, SessionScope::Unfiltered);
             let (sessions, _total, (agent_in, agent_out, agent_cr, agent_cw)) = join.await.unwrap();
@@ -6526,7 +6076,7 @@ mod tests {
         session
     }
 
-    /// ADR-047 acceptance #2: apply_config writes to meta.json immediately.
+    /// ADR-047 acceptance #2: apply_config writes to the meta store immediately.
     #[test]
     fn test_apply_config_persists_model_to_meta() {
         let session = make_test_session();
@@ -6543,18 +6093,13 @@ mod tests {
         assert_eq!(snapshot.model.as_deref(), Some("gpt-4o"));
         assert_eq!(snapshot.provider.as_deref(), Some("openai"));
 
-        // Verify meta.json on disk reflects the new values
-        let meta_path = session
-            .conversations_dir
-            .join("meta")
-            .join(format!("{}.json", session.session_id));
-        let meta: SessionMeta =
-            serde_json::from_str(&std::fs::read_to_string(&meta_path).unwrap()).unwrap();
+        // Verify the persisted meta row reflects the new values.
+        let meta = read_session_meta(&session.conversations_dir, &session.session_id).unwrap();
         assert_eq!(meta.model.as_deref(), Some("gpt-4o"));
         assert_eq!(meta.provider.as_deref(), Some("openai"));
     }
 
-    /// ADR-047 acceptance #2: apply_config writes temperature to meta.json.
+    /// ADR-047 acceptance #2: apply_config writes temperature to the meta store.
     #[test]
     fn test_apply_config_persists_temperature_to_meta() {
         let session = make_test_session();
@@ -6568,12 +6113,7 @@ mod tests {
         let snapshot = session.config_snapshot();
         assert_eq!(snapshot.temperature, Some(0.7));
 
-        let meta_path = session
-            .conversations_dir
-            .join("meta")
-            .join(format!("{}.json", session.session_id));
-        let meta: SessionMeta =
-            serde_json::from_str(&std::fs::read_to_string(&meta_path).unwrap()).unwrap();
+        let meta = read_session_meta(&session.conversations_dir, &session.session_id).unwrap();
         assert_eq!(meta.temperature, Some(0.7));
     }
 

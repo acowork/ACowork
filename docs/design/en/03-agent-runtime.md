@@ -1,4 +1,4 @@
-# Agent Runtime (Unified Execution Engine)
+﻿# Agent Runtime (Unified Execution Engine)
 
 > Version: v3.6 | Last Updated: 2026-05-06
 
@@ -8,7 +8,7 @@ Agent Runtime is the only binary executable provided by the platform, similar to
 
 > **v3.7 Change (2026-05-28)**: Context compression strategy greatly simplified — see [ADR-010](../../adr/zh/ADR-010-context-compression-simplification.md). Core change: abandon programmatic folding strategies (Tool Result folding, content folding Phase 1); context compression returns to LLM summary as the sole normal path means. Daily compression flow simplified to: 70% alert → 80% LLM summary (complete context, no folding) → 95% emergency_trim safety net.
 
-> **v3.9 Change (2026-05-28)**: Compaction and Distillation unified — see [ADR-011](../../adr/zh/ADR-011-compaction-as-distillation.md). Core change: Compaction summary and Session distillation merge into a single Compact Model call; summary text used simultaneously for memory replacement and Grafeo experience layer writing ("summary is distillation"). Experience layer write sources simplified to only Compaction and Session close distillation, removing per-round conversation real-time write. SessionState adds `is_compacted` flag to control tail distillation decision.
+> **v3.9 Change (2026-05-28)**: Compaction and Distillation unified — see [ADR-011](../../adr/zh/ADR-011-compaction-as-distillation.md). Core change: Compaction summary and Session distillation merge into a single Compact Model call; summary text used simultaneously for memory replacement and SQLite memory layer experience layer writing ("summary is distillation"). Experience layer write sources simplified to only Compaction and Session close distillation, removing per-round conversation real-time write. SessionState adds `is_compacted` flag to control tail distillation decision.
 
 **Cross-references**:
 - Runtime internal structure: This document §2
@@ -19,7 +19,7 @@ Agent Runtime is the only binary executable provided by the platform, similar to
 
 ## 1. Startup Method
 
-**Design constraint**: Agent Runtime idle memory footprint target controlled at ~5-10 MB. This goal constrains Runtime's module design — lazy initialization (Grafeo, Wasmtime Engine and other heavyweight modules loaded on demand), minimized default cache, zero background polling threads.
+**Design constraint**: Agent Runtime idle memory footprint target controlled at ~5-10 MB. This goal constrains Runtime's module design — lazy initialization (SQLite, Wasmtime Engine and other heavyweight modules loaded on demand), minimized default cache, zero background polling threads.
 
 > **Verification method**: Phase 3 will report memory usage in real-time via `MemoryMetrics` struct in Debug mode, and provide `/metrics` endpoint for Desktop App display. Phase 2 validates via Rust standard library `alloc::alloc::GlobalStats` (nightly) or external `jemalloc` stats during development. Verification of target constraints is not within Phase 2 functional scope.
 
@@ -98,8 +98,8 @@ Agent Runtime binary
 │   ├── Middleware Chain   # Memory middleware
 │   ├── Store Backend      # MemoryStore trait implementation
 │   └── RagClient (opt)    # RAG retrieval client
-├── Grafeo (embedded)     # Private Memory storage engine
-├── Skill Loader        # Load Skills (SKILL.md + Grafeo experience layer)
+├── SQLite memory layer (embedded)     # Private Memory storage engine
+├── Skill Loader        # Load Skills (SKILL.md + SQLite memory layer experience layer)
 ├── Debug/DevMode       # Debug protocol (HTTP RPC + MQTT events, ADR-048; optional)
 ├── MCP Manager         # MCP server connection management (activate on demand)
 ├── Search Config       # Web search provider config (synced from Gateway)
@@ -141,14 +141,14 @@ User message / Intent / Scheduled trigger / Interrupt message injection
 │     ├─ Capability Overview (from Gateway push)
 │     ├─ Skill Instructions (from skills/)
 │     ├─ Memory Retrieve → MemoryManager.retrieve()
-│     │   ├─ Grafeo channel (always executed)
+│     │   ├─ SQLite memory layer channel (always executed)
 │     │   │   hybrid_search + graph_expand
 │     │   └─ RAG channel (only when manifest declares rag)
 │     │       RagClient.query(user message, top_k=3)
 │     │       timeout(5s)/unreachable → skip, don't block
 │     ├─ Memory Inject → MemoryManager.inject()   
 │     │   Trim and format memory context by token budget
-│     │   Results labeled by source [Grafeo] / [RAG:<name>]
+│     │   Results labeled by source [Memory] / [RAG:<name>]
 │     └─ Conversation history (from History Manager)
 │
 │  ②.5 Context compression (Token budget management)
@@ -224,12 +224,12 @@ Prompt Builder splices context in the following order, higher priority is more f
 |-------|------|--------|-------------|
 | 1 | System Prompt | `prompts/system.md` + `prompts/constraints.md` | Agent identity definition and behavior constraints, cannot be overridden later |
 | 2 | Identity Context | Gateway injection | User identity info (name, city etc.), Agent "knows" user |
-| 2.5 | Autobiographical | Grafeo AutobiographicalNode | Agent self-cognition (Identity/Capability/Limitation), injection cap 200 tokens. History Manager detects History node count when building context; exceeds 10 triggers rule engine merge (concatenate events by timeline, deduplicate, truncate to 200 tokens, zero LLM calls); merge executed by Runtime background task, no user intervention needed. Phase 3 can upgrade to LLM semantic summary |
+| 2.5 | Autobiographical | SQLite memory layer AutobiographicalNode | Agent self-cognition (Identity/Capability/Limitation), injection cap 200 tokens. History Manager detects History node count when building context; exceeds 10 triggers rule engine merge (concatenate events by timeline, deduplicate, truncate to 200 tokens, zero LLM calls); merge executed by Runtime background task, no user intervention needed. Phase 3 can upgrade to LLM semantic summary |
 | 2.8 | Workspace Context | Gateway push | Workspace environment info (current selection + high-weight Top2, max 3) |
 | 3 | Tool Definitions | `manifest.toml [tools]` | Convert to JSON Schema format tool descriptions for LLM to call |
 | 4 | Capability Overview | Gateway push | Installed Agents and their capability summary, so LLM knows who to collaborate with |
-| 5 | Skill Instructions | `skills/*/SKILL.md` + Grafeo experience layer | Optional skill instructions, extending Agent behavior patterns. See [13-skill-system.md](./13-skill-system.md) |
-| 6 | Memory Context | `MemoryManager.retrieve()` + `MemoryManager.inject()` | Memory retrieval and injection. Retrieve via MemoryStore trait's `hybrid_search` + `graph_expand` on Grafeo channel; if manifest declares RAG (`rag_client: Option<Arc<RagClient>>`), parallel query RAG channel (user message as query, top_k=3, 5s timeout degradation); results labeled `[Grafeo]` / `[RAG:<name>]` by source, trimmed by token budget for injection. See [05-memory.md](./05-memory.md) §10, [00-prd.md](./00-prd.md) §1.13.1 |
+| 5 | Skill Instructions | `skills/*/SKILL.md` + SQLite memory layer experience layer | Optional skill instructions, extending Agent behavior patterns. See [13-skill-system.md](./13-skill-system.md) |
+| 6 | Memory Context | `MemoryManager.retrieve()` + `MemoryManager.inject()` | Memory retrieval and injection. Retrieve via MemoryStore trait's `hybrid_search` + app-layer multi-hop expansion on SQLite memory channel; if manifest declares RAG (`rag_client: Option<Arc<RagClient>>`), parallel query RAG channel (user message as query, top_k=3, 5s timeout degradation); results labeled `[Memory]` / `[RAG:<name>]` by source, trimmed by token budget for injection. See [05-memory.md](./05-memory.md) §10, [00-prd.md](./00-prd.md) §1.13.1 |
 | 7 | Conversation History | History Manager | Complete message sequence of current conversation |
 
 #### 2.8 Workspace Context
@@ -267,10 +267,10 @@ All listed directories are authorized for access at the indicated permission lev
 **Token budget allocation and trimming strategy**: When total context length approaches model limit, use three-stage strategy:
 
 1. **70% monitoring**: Report token usage to Gateway via ContextUsage event, don't intervene.
-2. **80% LLM summary (Compaction)**: Use Compact Model to perform LLM summary on full conversation history (`compact_via_llm`). Summary text simultaneously used for: (a) replacing memory middle section (`replace_middle_with_summary`, preserve system prompt + last 3 rounds), (b) writing Grafeo experience layer (summary is distillation, ADR-011). After Compaction complete, set `is_compacted = true`; when new user message arrives, reset to `false`.
+2. **80% LLM summary (Compaction)**: Use Compact Model to perform LLM summary on full conversation history (`compact_via_llm`). Summary text simultaneously used for: (a) replacing memory middle section (`replace_middle_with_summary`, preserve system prompt + last 3 rounds), (b) writing SQLite memory layer experience layer (summary is distillation, ADR-011). After Compaction complete, set `is_compacted = true`; when new user message arrives, reset to `false`.
 3. **95% emergency_trim**: Preserve system prompt + last 4 non-system messages, as safety net. Only used when LLM summary cannot execute (API error) or usage spikes to 95%.
 
-> **Design decision**: Context compression is a semantic understanding task; only LLM can reliably judge what info can be discarded. Programmatic strategies (character truncation, FIFO, role folding) essentially use proxy metrics to replace semantic understanding, and will inevitably fail. See [ADR-010](../../adr/zh/ADR-010-context-compression-simplification.md). Compaction and Distillation unified as single call: same summary text both replaces memory (compress context) and writes Grafeo (generate experience memory). See [ADR-011](../../adr/zh/ADR-011-compaction-as-distillation.md).
+> **Design decision**: Context compression is a semantic understanding task; only LLM can reliably judge what info can be discarded. Programmatic strategies (character truncation, FIFO, role folding) essentially use proxy metrics to replace semantic understanding, and will inevitably fail. See [ADR-010](../../adr/zh/ADR-010-context-compression-simplification.md). Compaction and Distillation unified as single call: same summary text both replaces memory (compress context) and writes SQLite memory layer (generate experience memory). See [ADR-011](../../adr/zh/ADR-011-compaction-as-distillation.md).
 
 System Prompt (1), Identity Context (2), Autobiographical (2.5), Workspace Context (2.8), Tool Definitions (3) are always retained, not participating in trimming.
 
