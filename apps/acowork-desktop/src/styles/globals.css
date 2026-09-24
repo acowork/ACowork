@@ -439,7 +439,7 @@
   /* = zinc-700, #3f3f46 — sender-role label pill */
   --color-chat-user: color-mix(in srgb, var(--color-accent) 90%, transparent);
   /* = accent 50% — user message bubble */
-  --color-chat-user-text: hsl(240 5.9% 10% / 0.9);
+  --color-chat-user-text: hsl(240 100% 100% / 1.0);
   /* = zinc-900 — user message bubble text (always dark, regardless of theme) */
   /* Editor canvas (dark) — auto-flips the @theme light value. */
   --color-editor-canvas: #1E1E1E;

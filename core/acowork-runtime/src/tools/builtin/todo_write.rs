@@ -3,7 +3,7 @@
 //! The actual todo state lives in `SessionState.todos`. This tool's `execute()`
 //! is a no-op placeholder; the real logic is intercepted in `AgentLoop` which
 //! parses the parameters, updates `SessionState.todos`, and injects the formatted
-//! list into `ContextBuilder` so the LLM sees current tasks in every system prompt.
+//! list into `ContextBuilder` so the LLM sees current TODOs in every system prompt.
 
 use acowork_core::tools::traits::{Tool, ToolResult, ToolSpec};
 use async_trait::async_trait;
@@ -26,28 +26,28 @@ impl TodoWriteTool {
         ToolSpec {
             name: "todo_write".to_string(),
             description:
-                "Create and manage a structured task list for your current working session. \
+                "Create and manage a structured TODO list for your current working session. \
                  Update the list in real time as you work: write it before starting, mark each \
                  item in_progress when you begin it, and mark it completed as soon as you finish — \
-                 do not batch updates at the end of the task. \
-                 Only one todo list exists per session — each call replaces or merges into the current list."
+                 Do not batch updates at the end of the TODO. \
+                 Only one TODO list exists per session — each call replaces or merges into the current list."
                     .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "todos": {
                         "type": "array",
-                        "description": "The todo items to set. Each item must have: id (unique string), content (description), status (one of: pending, in_progress, completed).",
+                        "description": "The TODO items to set. Each item must have: id (unique string), content (description), status (one of: pending, in_progress, completed).",
                         "items": {
                             "type": "object",
                             "properties": {
                                 "id": {
                                     "type": "string",
-                                    "description": "Unique identifier for this todo item (e.g. a short slug like 'add-login')"
+                                    "description": "Unique identifier for this TODO item (e.g. a short slug like 'add-login')"
                                 },
                                 "content": {
                                     "type": "string",
-                                    "description": "Human-readable task description"
+                                    "description": "Human-readable TODO description"
                                 },
                                 "status": {
                                     "type": "string",
@@ -60,7 +60,7 @@ impl TodoWriteTool {
                     },
                     "merge": {
                         "type": "boolean",
-                        "description": "If true, merge with existing todos by id (update matching ids, add new ones). If false, replace the entire list. Default: false.",
+                        "description": "If true, merge with existing TODOs by id (update matching ids, add new ones). If false, replace the entire list. Default: false.",
                         "default": false
                     }
                 },
