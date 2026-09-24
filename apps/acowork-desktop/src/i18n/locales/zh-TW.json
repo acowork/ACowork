@@ -236,6 +236,10 @@
       "skills": "技能"
     },
     "compressing": "壓縮中...",
+    "cancelCompact": "取消壓縮",
+    "compactionCancelled": "壓縮已取消",
+    "compactionTimeout": "壓縮逾時（5 分鐘）。可嘗試更換預設精簡模型後重試。",
+    "compactionFailed": "壓縮失敗，請更換精簡模型後重試。",
     "agentRunning": "Agent 執行中",
     "compressContext": "壓縮上下文",
     "compressSummary": "壓縮整個上下文",

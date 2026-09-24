@@ -23,7 +23,8 @@ use tokio::sync::{Mutex, oneshot};
 
 use acowork_core::defaults;
 use acowork_core::mqtt_proto::{
-    AgentConfig, AgentMeta, AskQuestionPayload, ChunkPayload, CompactingPayload,
+    AgentConfig, AgentMeta, AskQuestionPayload, ChunkPayload, CompactionCancelledPayload,
+    CompactingPayload, CompactionCancelReason as ProtoCompactionCancelReason,
     ContextUsagePayload, DataEnvelope, DonePayload, ErrorPayload, IterationLimitPausedPayload,
     LoopDetectedPausedPayload, McpTransport as ProtoMcpTransport, NewDataAvailablePayload,
     NodeInfo, RecordCompletePayload, SessionMessage, StoppedPayload, StreamDeltaPayload,
@@ -2044,6 +2045,42 @@ impl MqttChunkPublisher {
         };
         let bytes = prost::Message::encode_to_vec(&envelope);
         self.publish(&sid, event_type, &bytes).await;
+    }
+
+    /// Publish a `compaction_cancelled` event (ADR-083, QoS 1).
+    ///
+    /// Emitted on every non-success end of a compaction — user cancel,
+    /// deadline expiry, or all tiers failing — so the frontend can reset its
+    /// dual-state button and show a reason-specific toast. The success path
+    /// keeps [`Self::publish_compacting`]`(started = false)`.
+    pub(crate) async fn publish_compaction_cancelled(
+        &self,
+        session_id: &str,
+        reason: crate::agent::loop_::CompactionCancelReason,
+    ) {
+        use crate::agent::loop_::CompactionCancelReason as R;
+        let sid = session_id.to_string();
+        let agent_id = self.agent_id.clone();
+        let proto_reason = match reason {
+            R::UserCancelled => ProtoCompactionCancelReason::User,
+            R::Timeout => ProtoCompactionCancelReason::Timeout,
+            R::Failed => ProtoCompactionCancelReason::Failed,
+        } as i32;
+        let payload = CompactionCancelledPayload {
+            session_id: sid.clone(),
+            reason: proto_reason,
+        };
+        let event = session_message::Event::CompactionCancelled(payload);
+        let envelope = DataEnvelope {
+            version: 1,
+            payload: Some(data_envelope::Payload::SessionMessage(SessionMessage {
+                agent_id,
+                session_id: sid.clone(),
+                event: Some(event),
+            })),
+        };
+        let bytes = prost::Message::encode_to_vec(&envelope);
+        self.publish(&sid, "compaction_cancelled", &bytes).await;
     }
 
     /// Publish an ask_question event via MQTT (QoS 1, retained).

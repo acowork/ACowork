@@ -154,6 +154,10 @@
       "skills": "Skills"
     },
     "compressing": "Compacting...",
+    "cancelCompact": "Cancel compaction",
+    "compactionCancelled": "Compaction cancelled",
+    "compactionTimeout": "Compaction timed out (5 min). Try a different compact model.",
+    "compactionFailed": "Compaction failed. Try a different compact model.",
     "agentRunning": "Agent running",
     "compressContext": "compact context",
     "compressSummary": "Compress Summary",

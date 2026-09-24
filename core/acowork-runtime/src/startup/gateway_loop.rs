@@ -1057,11 +1057,54 @@ async fn dispatch_inbound(
         // CompressType::SUMMARY (1)     → CompressionAction::CompressSummary
         // Anything else is rejected (forwarded to session_task which emits an error).
         InboundMessage::CompressAction { compress_type, .. } => {
+            // ADR-083: compress_type = 3 cancels the in-flight compaction.
+            //
+            // This MUST be dispatched HERE, not forwarded to the session
+            // inbox like the other compress types: while a compaction runs the
+            // session task is blocked inside `compact_history_if_needed().await`,
+            // so an inbox message would sit unread until the very thing we are
+            // trying to cancel had already finished. Firing the shared handle
+            // directly wakes the compaction's `tokio::select!` on the next poll
+            // (same pattern as the Stop arm above).
+            if compress_type == 3 {
+                // NOTE(deadlock): hoist the handle + agent_id out of the match
+                // scrutinee. The guard temporary would live until the end of
+                // the whole match expression and re-locking inside an arm
+                // self-deadlocks on the non-reentrant `tokio::sync::Mutex`
+                // (see the Stop arm's 2026-08-20 incident note).
+                let agent_id = session_manager.lock().await.agent_id().to_string();
+                let handle = session_manager
+                    .lock()
+                    .await
+                    .compaction_cancel_handle(&session_id);
+                match handle {
+                    Some(handle) => {
+                        handle.cancel(CancellationReason::UserStop {
+                            source: StopSource::ChatPanel {
+                                agent_id,
+                                session_id: session_id.clone(),
+                            },
+                            reason: "cancel compaction".to_string(),
+                        });
+                        tracing::info!(
+                            session_id = %session_id,
+                            "ADR-083: compaction cancel handle fired (compress_type=3)"
+                        );
+                    }
+                    None => {
+                        tracing::debug!(
+                            session_id = %session_id,
+                            "compress_type=3: no compaction cancel handle registered (session evicted?)"
+                        );
+                    }
+                }
+                return Ok(());
+            }
             let action = match compress_type {
                 1 => CompressionAction::CompressSummary,
                 other => {
                     return Err(RuntimeError::Config(format!(
-                        "CompressAction: invalid compress_type {} (expected 1=SUMMARY or 2=TOOL_RESULTS)",
+                        "CompressAction: invalid compress_type {} (expected 1=SUMMARY or 3=CANCEL)",
                         other
                     )));
                 }

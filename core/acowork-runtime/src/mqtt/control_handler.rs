@@ -240,7 +240,8 @@ pub fn parse_control_payload(topic: &str, payload: &[u8]) -> Option<ControlActio
         mqtt_proto::control_command::Command::CompressAction(ca) => ControlAction::CompressAction {
             session_id: ca.session_id,
             // CompressType enum is generated as i32 in prost. Values:
-            // 0 = UNSPECIFIED, 1 = SUMMARY, 2 = TOOL_RESULTS.
+            // 0 = UNSPECIFIED, 1 = SUMMARY, 2 = TOOL_RESULTS (retired),
+            // 3 = CANCEL (ADR-083).
             compress_type: ca.compress_type,
         },
         mqtt_proto::control_command::Command::WorkspaceSwitch(ws) => {

@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import { Pencil, X } from "lucide-react";
+import { Minimize2, Pencil, Square, X } from "lucide-react";
 import { useChatStore } from "../../stores/chatStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { useTranslation } from "../../i18n/useTranslation";
@@ -100,6 +100,7 @@ export function ContextUsageIcon({ agentId, sessionId }: { agentId: string; sess
     (s) => s.agents[agentId]?.meta?.debug_state === "enabled" && !!s.agents[agentId]?.meta?.alive,
   );
   const sendCompressAction = useChatStore((s) => s.sendCompressAction);
+  const cancelCompressAction = useChatStore((s) => s.cancelCompressAction);
   // ADR-067: section byte sizes are emitted by the runtime's always-on
   // `process_llm_response_usage` path and live on `contextUsage.sections`
   // alongside the billed totals — no longer dependent on `useDebugStore`
@@ -169,12 +170,25 @@ export function ContextUsageIcon({ agentId, sessionId }: { agentId: string; sess
   // string literals. The compiler checks exhaustiveness — adding a new
   // non-idle phase will not silently bypass this check.
   const isIdle = getProcessingPhase(sessionStatus) === "idle";
-  const canAct = isIdle && !isCompacting && contextUsage != null;
+  // ADR-083: the compress button is dual-state, mirroring the ChatPanel
+  // send→stop button. `canStart` gates idle→compress; `canCancel` is true
+  // only while a compaction is in flight (the session is otherwise busy).
+  const canStart = isIdle && !isCompacting && contextUsage != null;
+  const canCancel = isCompacting;
+  const canAct = canStart || canCancel;
 
 const handleCompressSummary = () => {
-    if (!canAct) return;
+    if (!canStart) return;
     // 1 = CompressType::SUMMARY (see core/acowork-core/proto/mqtt_payload.proto).
     sendCompressAction(agentId, sessionId, 1);
+    setOpen(false);
+  };
+
+  const handleCancelCompact = () => {
+    if (!canCancel) return;
+    // 3 = CompressType::CANCEL (ADR-083). The Runtime aborts the
+    // distillation call and leaves history untouched.
+    cancelCompressAction(agentId, sessionId);
     setOpen(false);
   };
 
@@ -509,19 +523,34 @@ const handleCompressSummary = () => {
           ) : null}
 
           <div className="border-t border-border-divider" />
+          {/* ADR-083: dual-state button — idle → "compress summary";
+              compacting → a clickable "cancel compaction" (accent colour +
+              Square icon), same shape as the ChatPanel send→stop button. */}
           <button
-            onClick={handleCompressSummary}
+            onClick={isCompacting ? handleCancelCompact : handleCompressSummary}
             disabled={!canAct}
+            aria-label={isCompacting
+              ? t("contextUsage.cancelCompact")
+              : t("contextUsage.compressSummary")}
             className={cn(
               "mx-3 mb-2.5 mt-2 flex w-[calc(100%-1.5rem)] items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors",
-              "bg-zinc-100 text-text-secondary hover:bg-zinc-200 hover:text-zinc-900",
-              "dark:bg-white/10  dark:hover:bg-white/15 dark:hover:text-zinc-100",
+              isCompacting
+                ? "bg-[var(--color-accent)]/10 text-[var(--color-accent)] hover:bg-[var(--color-accent)]/20"
+                : "bg-zinc-100 text-text-secondary hover:bg-zinc-200 hover:text-zinc-900 dark:bg-white/10 dark:hover:bg-white/15 dark:hover:text-zinc-100",
               "disabled:cursor-not-allowed disabled:opacity-40",
             )}
           >
-            {isCompacting
-              ? t("contextUsage.compressing")
-              : t("contextUsage.compressSummary")}
+            {isCompacting ? (
+              <>
+                <Square size={14} fill="currentColor" />
+                {t("contextUsage.cancelCompact")}
+              </>
+            ) : (
+              <>
+                <Minimize2 size={14} />
+                {t("contextUsage.compressSummary")}
+              </>
+            )}
           </button>
         </div>
       )}

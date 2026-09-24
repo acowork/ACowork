@@ -1278,6 +1278,22 @@ fn session_message_to_flat(
             m.insert("session_id".into(), serde_json::Value::String(p.session_id.clone()));
             Some(serde_json::Value::Object(m))
         }
+        // ADR-083: compaction ended without a summary. `reason` is carried as
+        // a stable string ("user" | "timeout" | "failed") so the frontend can
+        // pick the matching toast without knowing the proto enum numbering.
+        session_message::Event::CompactionCancelled(p) => {
+            let mut m = base.as_object().unwrap().clone();
+            m.insert("type".into(), serde_json::Value::String("compaction_cancelled".into()));
+            m.insert("session_id".into(), serde_json::Value::String(p.session_id.clone()));
+            let reason = match acowork_core::mqtt_proto::CompactionCancelReason::try_from(p.reason) {
+                Ok(acowork_core::mqtt_proto::CompactionCancelReason::User) => "user",
+                Ok(acowork_core::mqtt_proto::CompactionCancelReason::Timeout) => "timeout",
+                Ok(acowork_core::mqtt_proto::CompactionCancelReason::Failed) => "failed",
+                _ => "failed",
+            };
+            m.insert("reason".into(), serde_json::Value::String(reason.into()));
+            Some(serde_json::Value::Object(m))
+        }
         session_message::Event::ContextUsage(p) => {
             // Prefer the fully-populated `context_usage` payload when the
             // Runtime publishes it: it carries `context_window`, `total_tokens`,

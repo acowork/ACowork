@@ -46,6 +46,16 @@ pub enum RuntimeError {
     #[error("Context compaction failed: {0}")]
     CompactionFailed(String),
 
+    /// ADR-083: compaction ended WITHOUT a summary because the user
+    /// cancelled it or the end-to-end deadline expired. History is left
+    /// untouched and the session returns to Idle (non-retryable, same as
+    /// [`RuntimeError::CompactionFailed`]) so the user can switch model
+    /// and retry. Distinct from `CompactionFailed` so callers can suppress
+    /// the generic error bubble — the `CompactionCancelled` chunk event
+    /// already told the frontend what happened.
+    #[error("Context compaction cancelled: {0}")]
+    CompactionCancelled(String),
+
     #[error("Unsupported model: {0}")]
     UnsupportedModel(String),
 
@@ -169,6 +179,13 @@ impl RuntimeError {
                         .to_string(),
                     msg.clone(),
                     "ContextOverflow".to_string(),
+                )
+            }
+            RuntimeError::CompactionCancelled(msg) => {
+                (
+                    "Context compaction was cancelled.".to_string(),
+                    msg.clone(),
+                    "CompactionCancelled".to_string(),
                 )
             }
             RuntimeError::BudgetExceeded(msg) => {

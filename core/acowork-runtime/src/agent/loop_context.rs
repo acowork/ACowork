@@ -16,7 +16,7 @@ use crate::agent::compression_constants::MIN_COMPRESSION_RATIO;
 use crate::agent::context::{
     ContextBuilder, count_chat_request_chars, patch_agent_totals, patch_session_totals,
 };
-use crate::agent::loop_::{AgentLoop, ChunkEvent};
+use crate::agent::loop_::{AgentLoop, ChunkEvent, CompactionCancelReason};
 use crate::agent::session::session_manager::RuntimeConfigOverrides;
 
 // ── Context compression thresholds ─────────────────────────────────────
@@ -688,6 +688,20 @@ impl AgentLoop {
                 .session_core
                 .try_send_chunk(ChunkEvent::CompactingStarted);
 
+            // ADR-083: arm the per-compaction cancel slot. This must happen
+            // BEFORE `CompactingStarted` is published, so the "cancel
+            // compaction" button the frontend renders in response is already
+            // bound to a live handle. `begin_compaction` swaps in a fresh
+            // one-shot handle, so a `cancel()` that arrives before this point
+            // targets the retired handle and is harmlessly discarded.
+            let compaction_cancel = self.session_core.begin_compaction();
+
+            // ADR-083: ONE end-to-end deadline shared by every distill tier
+            // (§3.2). Established here, never re-armed per tier — that is the
+            // whole point: without it, `provider_request_timeout_ms` (10 min)
+            // × `max_attempts` (3) × N tiers had no upper bound.
+            let deadline = tokio::time::Instant::now() + self.core.config.timeouts.compaction();
+
             // Build combined text from history for model-aware token counting.
             let combined_text: String =
                 self.session
@@ -750,20 +764,54 @@ impl AgentLoop {
                 (String, acowork_core::providers::traits::UsageInfo),
             )> = None;
             let mut last_err: Option<crate::error::RuntimeError> = None;
+            // ADR-083: set when the loop stopped short of a summary because
+            // of a cancel or the shared deadline (not because a tier erred).
+            let mut cancel_reason: Option<CompactionCancelReason> = None;
+
+            /// Outcome of one distill tier under the ADR-083 guards.
+            enum TierOutcome {
+                Done((String, acowork_core::providers::traits::UsageInfo)),
+                Errored(crate::error::RuntimeError),
+                Cancelled,
+                TimedOut,
+            }
+
             for target in &targets {
+                // Cancelled between tiers (e.g. while the previous tier was
+                // tearing down) — stop before spending another tier's budget.
+                if compaction_cancel.is_cancelled() {
+                    cancel_reason = Some(CompactionCancelReason::UserCancelled);
+                    break;
+                }
+                // Shared budget exhausted by earlier tiers → no more tiers.
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if remaining.is_zero() {
+                    cancel_reason = Some(CompactionCancelReason::Timeout);
+                    break;
+                }
+
                 let (compact_provider, compact_model, _tier) = self.distill_provider(target);
-                match self
-                    .session
-                    .history
-                    .compact_via_llm(
-                        compact_provider.as_ref(),
-                        &compact_model,
-                        system_prompt,
-                        self.session.identity_context(),
-                    )
-                    .await
-                {
-                    Ok((summary, usage)) => {
+                let call = self.session.history.compact_via_llm(
+                    compact_provider.as_ref(),
+                    &compact_model,
+                    system_prompt,
+                    self.session.identity_context(),
+                );
+                // ADR-083: race the LLM against the user's cancel and the
+                // remaining shared budget. `biased` gives the cancel branch
+                // priority on a dead heat — an explicit user request wins.
+                let outcome = tokio::select! {
+                    biased;
+                    _ = compaction_cancel.cancelled() => TierOutcome::Cancelled,
+                    r = tokio::time::timeout(remaining, call) => match r {
+                        Ok(Ok(v)) => TierOutcome::Done(v),
+                        Ok(Err(e)) => TierOutcome::Errored(e),
+                        Err(_) => TierOutcome::TimedOut,
+                    },
+                };
+
+                match outcome {
+                    TierOutcome::Done((summary, usage)) => {
                         tracing::info!(
                             target_provider = %target.provider_id,
                             target_model = %target.model_id,
@@ -774,7 +822,7 @@ impl AgentLoop {
                         succeeded = Some((target.clone(), compact_model, (summary, usage)));
                         break;
                     }
-                    Err(e) => {
+                    TierOutcome::Errored(e) => {
                         tracing::warn!(
                             target_provider = %target.provider_id,
                             target_model = %target.model_id,
@@ -793,6 +841,24 @@ impl AgentLoop {
                         if non_retryable {
                             break;
                         }
+                    }
+                    TierOutcome::Cancelled => {
+                        tracing::warn!(
+                            target_provider = %target.provider_id,
+                            tier = ?target.tier,
+                            "ADR-083: compaction cancelled by user — history untouched"
+                        );
+                        cancel_reason = Some(CompactionCancelReason::UserCancelled);
+                        break;
+                    }
+                    TierOutcome::TimedOut => {
+                        tracing::warn!(
+                            target_provider = %target.provider_id,
+                            tier = ?target.tier,
+                            "ADR-083: compaction deadline expired — history untouched"
+                        );
+                        cancel_reason = Some(CompactionCancelReason::Timeout);
+                        break;
                     }
                 }
             }
@@ -1138,13 +1204,18 @@ impl AgentLoop {
                 }
             }
 
-            // Notify frontend that compaction has finished, so it can clear
-            // the "compacting..." indicator (both success and error paths).
-            // Also send updated context usage so the frontend shows the new
-            // token count and percentage after compaction.
-            let _ = self
-                .session_core
-                .try_send_chunk(ChunkEvent::CompactingEnded);
+            // ADR-083: the end event now carries the outcome. Success keeps
+            // `CompactingEnded`; every non-success path emits
+            // `CompactionCancelled { reason }` so the frontend can reset its
+            // dual-state button and pick the matching toast.
+            let end_event = if compaction_failed {
+                ChunkEvent::CompactionCancelled {
+                    reason: cancel_reason.unwrap_or(CompactionCancelReason::Failed),
+                }
+            } else {
+                ChunkEvent::CompactingEnded
+            };
+            let _ = self.session_core.try_send_chunk(end_event);
 
             // Re-emit the runtime session-state snapshot now that
             // `last_input` reflects the post-compaction history size (via
@@ -1229,7 +1300,18 @@ impl AgentLoop {
             // the agent never keeps looping with an un-compactable context.
             if compaction_failed {
                 let detail = last_err.as_ref().map(|e| e.to_string()).unwrap_or_default();
-                return Err(crate::error::RuntimeError::CompactionFailed(detail));
+                // ADR-083: a user cancel / deadline expiry is not a "failure".
+                // History is untouched and the session returns to Idle so the
+                // user can immediately retry with another model. The distinct
+                // `CompactionCancelled` variant lets the manual-path caller
+                // suppress the generic error bubble — the
+                // `CompactionCancelled` chunk event already told the UI.
+                return Err(match cancel_reason {
+                    Some(reason) => crate::error::RuntimeError::CompactionCancelled(
+                        format!("{reason:?}"),
+                    ),
+                    None => crate::error::RuntimeError::CompactionFailed(detail),
+                });
             }
         } else if usage_percent >= CONTEXT_CRITICAL_PERCENT {
             // NOTE: this branch is unreachable today — CONTEXT_COMPACT_PERCENT
@@ -2772,6 +2854,173 @@ mod tests {
         assert!(
             !has_marker,
             "low-quality compaction must leave history untouched"
+        );
+    }
+
+    // ── ADR-083: compaction deadline + cancellation ────────────────────
+
+    /// Provider whose `chat()` never returns — models the incident where the
+    /// distill provider is unreachable/too slow. Counts calls so tests can
+    /// assert the shared budget stops the tier chain.
+    struct HangingProvider {
+        calls: std::sync::Arc<std::sync::Mutex<usize>>,
+    }
+
+    impl HangingProvider {
+        fn new() -> Self {
+            Self {
+                calls: std::sync::Arc::new(std::sync::Mutex::new(0)),
+            }
+        }
+        fn calls(&self) -> std::sync::Arc<std::sync::Mutex<usize>> {
+            self.calls.clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for HangingProvider {
+        fn name(&self) -> &str {
+            "hanging"
+        }
+        async fn chat(&self, _request: ChatRequest) -> acowork_core::error::Result<ChatResponse> {
+            *self.calls.lock().unwrap() += 1;
+            // Never resolves — only the ADR-083 timeout/cancel can end this.
+            std::future::pending::<()>().await;
+            unreachable!()
+        }
+        async fn chat_stream(
+            &self,
+            _request: ChatRequest,
+        ) -> acowork_core::error::Result<Box<dyn futures_core::Stream<Item = StreamEvent> + Send>>
+        {
+            unimplemented!()
+        }
+        async fn chat_token_count(
+            &self,
+            _messages: &[ChatMessage],
+        ) -> acowork_core::error::Result<u64> {
+            Ok(0)
+        }
+    }
+
+    /// Seed a loop whose every distill tier resolves to `HangingProvider`,
+    /// with a tiny ADR-083 deadline, and some history to compact.
+    fn hanging_loop(deadline_ms: u64) -> (AgentLoop, std::sync::Arc<std::sync::Mutex<usize>>) {
+        let mut loop_ = build_loop();
+        seed_providers(&loop_);
+        set_session(&mut loop_, "deepseek", "deepseek-v4-pro");
+        set_provider_compact(&mut loop_, "deepseek", Some("deepseek-v4-flash"));
+        // Aim every tier at the SESSION provider (`deepseek`) so all of them
+        // resolve to the injected mock via `distill_provider`'s same-provider
+        // fast path. (Pointing Tier 1 at `ollama-local` would make
+        // `build_provider_for` construct a real Ollama client and hit the
+        // network — the very thing this test needs to avoid.)
+        *loop_.core.default_compact_model.write().unwrap() =
+            Some(("deepseek".to_string(), "deepseek-v4-flash".to_string()));
+
+        let hanging = HangingProvider::new();
+        let calls = hanging.calls();
+        loop_.core.update_provider(
+            std::sync::Arc::new(hanging) as std::sync::Arc<dyn Provider>,
+            "deepseek-v4-pro".to_string(),
+        );
+        // Bypass `validate()` (which floors ms fields at 1000) — the test
+        // wants a sub-second deadline to keep the suite fast.
+        loop_.core.config.timeouts.compaction_deadline_ms = deadline_ms;
+
+        for i in 0..10 {
+            loop_.session.history.append(ChatMessage {
+                role: MessageRole::User,
+                content: format!("Message #{i}"),
+                ..Default::default()
+            });
+        }
+        (loop_, calls)
+    }
+
+    #[tokio::test]
+    async fn compaction_times_out_on_deadline_and_does_not_try_more_tiers() {
+        let (mut loop_, calls) = hanging_loop(300);
+        // Guard the premise: the chain must actually offer more than one
+        // tier, otherwise "stopped the chain" would be vacuous.
+        assert!(
+            loop_.resolve_distill_targets().len() >= 2,
+            "test needs a multi-tier distill chain"
+        );
+        let start = std::time::Instant::now();
+        let result = loop_.compact_history_if_needed("deepseek-v4-pro", true).await;
+        let elapsed = start.elapsed();
+
+        // Bounded: the deadline (300ms) + slack, NOT 10 minutes.
+        assert!(
+            elapsed < std::time::Duration::from_secs(3),
+            "compaction must be bounded by the deadline, took {elapsed:?}"
+        );
+        // Typed as a cancellation with the Timeout reason.
+        match result {
+            Err(crate::error::RuntimeError::CompactionCancelled(msg)) => assert!(
+                msg.contains("Timeout"),
+                "expected Timeout reason, got {msg:?}"
+            ),
+            other => panic!("expected CompactionCancelled(Timeout), got {other:?}"),
+        }
+        // Shared budget: the first tier consumed it, so no further tier ran.
+        assert_eq!(*calls.lock().unwrap(), 1, "deadline must stop the tier chain");
+        // History untouched — no compaction marker.
+        assert!(
+            !loop_
+                .session
+                .history
+                .messages()
+                .iter()
+                .any(|m| m.name.as_deref() == Some(crate::agent::history::COMPACTION_SUMMARY_NAME)),
+            "timed-out compaction must leave history untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn compaction_is_cancelled_by_user_signal() {
+        let (mut loop_, _calls) = hanging_loop(60_000);
+        let slot = loop_.session_core.compaction_cancel_handle_arc();
+        // Fire the cancel repeatedly: the compaction re-arms the slot with a
+        // fresh handle at start, so a cancel that lands before the arm is
+        // discarded (by design) and the next iteration hits the live handle.
+        let canceller = tokio::spawn(async move {
+            for _ in 0..200 {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                slot.lock().cancel(crate::cancellation::CancellationReason::UserStop {
+                    source: crate::cancellation::StopSource::Test,
+                    reason: "test cancel compaction".to_string(),
+                });
+            }
+        });
+
+        let start = std::time::Instant::now();
+        let result = loop_.compact_history_if_needed("deepseek-v4-pro", true).await;
+        let elapsed = start.elapsed();
+        canceller.abort();
+
+        // Interrupted well before the (60s) deadline — the cancel path, not
+        // the timeout path.
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "cancel must interrupt promptly, took {elapsed:?}"
+        );
+        match result {
+            Err(crate::error::RuntimeError::CompactionCancelled(msg)) => assert!(
+                msg.contains("UserCancelled"),
+                "expected UserCancelled reason, got {msg:?}"
+            ),
+            other => panic!("expected CompactionCancelled(UserCancelled), got {other:?}"),
+        }
+        assert!(
+            !loop_
+                .session
+                .history
+                .messages()
+                .iter()
+                .any(|m| m.name.as_deref() == Some(crate::agent::history::COMPACTION_SUMMARY_NAME)),
+            "cancelled compaction must leave history untouched"
         );
     }
 }

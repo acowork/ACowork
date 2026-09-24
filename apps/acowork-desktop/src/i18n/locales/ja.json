@@ -237,6 +237,10 @@
       "skills": "スキル"
     },
     "compressing": "圧縮中...",
+    "cancelCompact": "圧縮をキャンセル",
+    "compactionCancelled": "圧縮をキャンセルしました",
+    "compactionTimeout": "圧縮がタイムアウトしました（5分）。別の圧縮モデルをお試しください。",
+    "compactionFailed": "圧縮に失敗しました。別の圧縮モデルをお試しください。",
     "agentRunning": "Agent実行中",
     "compressContext": "コンテキストを圧縮",
     "compressSummary": "コンテキスト全体を圧縮",

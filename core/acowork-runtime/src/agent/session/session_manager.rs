@@ -474,6 +474,18 @@ pub struct SessionManager {
     /// Storing a plain clone here would freeze the generation to whatever
     /// was in the slot at registration time — the exact bug §4.5 fixes.
     cancel_handles: HashMap<String, Arc<parking_lot::Mutex<CancelHandle>>>,
+    /// ADR-083: per-session compaction-cancel slots, keyed by `session_id`.
+    ///
+    /// A compaction cancel (`compress_type = 3`) must reach the compaction
+    /// that is currently running — but the session task is *blocked* inside
+    /// `compact_history_if_needed().await` while it runs, so an inbox message
+    /// cannot deliver it. The MQTT dispatcher therefore fires this handle
+    /// directly (same pattern as `cancel_handles` for Stop), and the
+    /// compaction's `tokio::select!` observes the cancellation.
+    ///
+    /// Kept separate from `cancel_handles` so cancelling a compaction never
+    /// crosses semantics with cancelling the whole request.
+    compaction_cancel_handles: HashMap<String, Arc<parking_lot::Mutex<CancelHandle>>>,
     /// Per-session committed_lines counter, shared between the writer thread
     /// (ConversationWriter) and the session's SessionCore. Each session gets its
     /// own independent counter; `committed_lines_for(session_id)` returns the
@@ -541,6 +553,7 @@ impl SessionManager {
             debug_service: None,
             urgent_stops: HashMap::new(),
             cancel_handles: HashMap::new(),
+            compaction_cancel_handles: HashMap::new(),
             session_committed_lines: HashMap::new(),
             session_delivery_cursors: std::sync::RwLock::new(HashMap::new()),
             streaming_lines: Arc::new(std::sync::RwLock::new(HashMap::new())),
@@ -752,6 +765,12 @@ impl SessionManager {
         // needed here.
         self.cancel_handles
             .insert(session_id.clone(), task.cancel_handle_arc());
+
+        // ADR-083: register the compaction-cancel slot so the MQTT
+        // `compress_type = 3` dispatcher can fire it while the session task
+        // is blocked inside `compact_history_if_needed().await`.
+        self.compaction_cancel_handles
+            .insert(session_id.clone(), task.compaction_cancel_handle_arc());
 
         // Spawn the session task with panic isolation.
         // catch_unwind ensures that if SessionTask::run() panics, we log the
@@ -1216,6 +1235,7 @@ impl SessionManager {
         self.pending_workspaces.remove(session_id);
         self.urgent_stops.remove(session_id);
         self.cancel_handles.remove(session_id);
+        self.compaction_cancel_handles.remove(session_id);
         self.session_committed_lines.remove(session_id);
         self.session_delivery_cursors
             .write()
@@ -1250,6 +1270,18 @@ impl SessionManager {
     /// map remains for incremental rollback and is removed in Phase 4.
     pub fn cancel_handle(&self, session_id: &str) -> Option<CancelHandle> {
         let slot = self.cancel_handles.get(session_id)?;
+        Some(slot.lock().clone())
+    }
+
+    /// ADR-083: read the **current** compaction-cancel handle for a session.
+    ///
+    /// Used by the `compress_type = 3` dispatcher in
+    /// `startup/gateway_loop.rs`. Same slot semantics as
+    /// [`Self::cancel_handle`] — always the latest generation — and `None`
+    /// when the session is unknown (evicted / never created), in which case
+    /// the caller treats it as a no-op.
+    pub fn compaction_cancel_handle(&self, session_id: &str) -> Option<CancelHandle> {
+        let slot = self.compaction_cancel_handles.get(session_id)?;
         Some(slot.lock().clone())
     }
 
@@ -1299,6 +1331,7 @@ impl SessionManager {
             self.pending_workspaces.remove(session_id);
             self.urgent_stops.remove(session_id);
             self.cancel_handles.remove(session_id);
+            self.compaction_cancel_handles.remove(session_id);
             self.session_committed_lines.remove(session_id);
             self.session_delivery_cursors
                 .write()

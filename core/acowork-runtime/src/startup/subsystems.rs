@@ -363,6 +363,10 @@ async fn relay_chunk_event_mqtt(
             publisher.publish_compacting(sid, false).await;
         }
 
+        ChunkEvent::CompactionCancelled { reason } => {
+            publisher.publish_compaction_cancelled(sid, reason).await;
+        }
+
         ChunkEvent::IterationLimitPaused {
             iteration,
             max_iterations,

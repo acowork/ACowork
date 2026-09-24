@@ -273,7 +273,8 @@ acowork/agents/{agent_id}/
 │   │                             #   取消单工具（区别于 stop 整轮），到达即终止对应工具进程
     │   ├── model_switch              # payload = { agent_id, sid, model_id }
     │   ├── reasoning_effort          # payload = { agent_id, sid, effort }
-    │   └── compact_context           # payload = { agent_id, sid }
+    │   └── compact_context           # payload = { agent_id, sid, compress_type }
+    │                                 #   compress_type=1 触发压缩，3 取消进行中的压缩（ADR-083）
     └── {sid}/                        # session 内部状态（sid 在路径中定位具体 session）
         ├── meta                      # [Retained] session meta：usage、state、title、...
         │                             #   （payload 始终是最新完整 meta）
@@ -292,7 +293,9 @@ acowork/agents/{agent_id}/
             ├── reasoning_started     # 推理阶段开始
             ├── reasoning_ended       # 推理阶段结束
             ├── compacting_started    # 上下文压缩开始
-            ├── compacting_ended      # 上下文压缩结束
+            ├── compacting_ended      # 上下文压缩结束（成功路径）
+            ├── compaction_cancelled  # ADR-083 压缩未产出摘要：取消 / 超时 / 全部 tier 失败
+            │                         #   payload = { session_id, reason: "user"|"timeout"|"failed" }
             ├── context_usage         # 上下文用量
             ├── memory_updated        # session 内 Memory 发生变更（通知性事件）
             └── skill_executed        # 技能执行完毕
@@ -1023,6 +1026,7 @@ Desktop POST /api/agents/{id}/control {agent_id, sid, cmd: "switch_model", model
 | 切换模型 | HTTP | 需 ack（要确认切换结果） |
 | 推理强度调整 | HTTP | 需 ack |
 | 上下文压缩 | HTTP | 需 ack |
+| 取消压缩（ADR-083） | MQTT `control/compact_context`（`compress_type=3`） | 无需 ack（下行 `messages/compaction_cancelled` 带 `reason` 反馈） |
 | 启用 debug 模式 | HTTP | 需 ack |
 | 工具审批 / 问答回答 | HTTP | 需 ack |
 
