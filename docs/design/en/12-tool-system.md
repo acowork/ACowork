@@ -1,4 +1,4 @@
-# Tool System
+﻿# Tool System
 
 > Version: v3.4 | Last Updated: 2026-04-16
 
@@ -31,8 +31,8 @@ The following tools are built-in implementations of Agent Runtime; Agents can de
 
 | Tool Name | Function | Required Permission | Description |
 |-----------|----------|---------------------|-------------|
-| `memory_recall` | Semantic search of private Grafeo | `memory:read` | Hybrid search (HNSW + BM25) + associative diffusion (1-2 hop graph expansion), returns relevant memory fragments |
-| `memory_store` | Write to private Grafeo | `memory:write` | Real-time extraction via Tool Call mechanism: LLM autonomously decides whether to call; supports Fact/Preference/Relation/Procedural/Autobiographical five types, with importance (0-1) and privacy (Public/Personal/Sensitive) parameters. Fact deduplicated semantically by (subject, predicate) |
+| `memory_recall` | Semantic search of private SQLite memory layer | `memory:read` | Hybrid search (HNSW + BM25) + associative diffusion (1-2 hop graph expansion), returns relevant memory fragments |
+| `memory_store` | Write to private SQLite memory layer | `memory:write` | Real-time extraction via Tool Call mechanism: LLM autonomously decides whether to call; supports Fact/Preference/Relation/Procedural/Autobiographical five types, with importance (0-1) and privacy (Public/Personal/Sensitive) parameters. Fact deduplicated semantically by (subject, predicate) |
 | `http_request` | HTTP requests (GET/POST/PUT/DELETE) | `network:<url_pattern>` | Supports method parameter for HTTP method selection; JSON responses auto-parsed; supports JSON body and form |
 | `web_fetch` | Fetch web page content | `network:<url_pattern>` | HTML → Markdown conversion, Agent directly receives readable text |
 | `web_search` | Web search | `search:web` | Calls search engine API, returns structured results; API Key distributed by Vault |
@@ -346,9 +346,9 @@ All errors do not terminate the main loop. Error info is returned to LLM as tool
 
 ## 4. RAG Tools (Enterprise Knowledge Base Integration)
 
-RAG tools let Agents connect to enterprise-built RAG knowledge bases, enabling "dual-channel retrieval" — local Grafeo (personal memory) and enterprise RAG (collective knowledge) queried in parallel, with results spliced into LLM context. ACowork does not host RAG services; only defines standard query protocol (request/response JSON Schema); enterprise RAG adapts to this protocol itself (see `00-prd.md` §1.13).
+RAG tools let Agents connect to enterprise-built RAG knowledge bases, enabling "dual-channel retrieval" — local SQLite memory layer (personal memory) and enterprise RAG (collective knowledge) queried in parallel, with results spliced into LLM context. ACowork does not host RAG services; only defines standard query protocol (request/response JSON Schema); enterprise RAG adapts to this protocol itself (see `00-prd.md` §1.13).
 
-**Configuration-Driven Opt-In**: RAG is not a default capability; only enabled when manifest declares `[[tools]] type = "rag"`. For Agents without RAG declaration, Tool Dispatcher doesn't register RAG tool, MemoryManager.retrieve() only queries Grafeo channel, behavior identical to no RAG.
+**Configuration-Driven Opt-In**: RAG is not a default capability; only enabled when manifest declares `[[tools]] type = "rag"`. For Agents without RAG declaration, Tool Dispatcher doesn't register RAG tool, MemoryManager.retrieve() only queries SQLite memory layer channel, behavior identical to no RAG.
 
 **Hybrid Dual Trigger**: RAG has two triggering methods, both driven by manifest configuration:
 
@@ -421,10 +421,10 @@ Automatically triggered each iteration (only when manifest declares RAG), uses u
 
 ```
 Step ② MemoryManager.retrieve()
-  ├─ Grafeo channel: hybrid_search + graph_expand  ← Always executed
+  ├─ SQLite memory layer channel: hybrid_search + graph_expand  ← Always executed
   └─ RAG channel: RagClient.query(user message, top_k=3)  ← Only when manifest declares RAG
-     ├─ Success → results labeled [Grafeo] / [RAG:enterprise_knowledge] by source
-     ├─ Timeout(5s) → skip RAG channel, use Grafeo results only
+     ├─ Success → results labeled [Memory] / [RAG:enterprise_knowledge] by source
+     ├─ Timeout(5s) → skip RAG channel, use SQLite memory layer results only
      └─ Unreachable → same, doesn't block Agent
   Results merged, deduplicated, trimmed by token budget then injected into LLM context
 ```
@@ -441,9 +441,9 @@ Step ② MemoryManager.retrieve()
 
 ### 4.4 Relationship with Local Memory
 
-RAG tool and local Grafeo are two completely independent retrieval channels:
+RAG tool and local SQLite memory layer are two completely independent retrieval channels:
 
-| Dimension | Local Grafeo (memory_recall) | Enterprise RAG (rag tool) |
+| Dimension | Local SQLite memory layer (memory_recall) | Enterprise RAG (rag tool) |
 |-----------|------------------------------|---------------------------|
 | Data ownership | Personal user | Enterprise |
 | Storage location | Local file (rusqlite) | Enterprise RAG service (remote) |
@@ -451,14 +451,14 @@ RAG tool and local Grafeo are two completely independent retrieval channels:
 | Retrieval method | Vector + fulltext + associative diffusion (graph expand) | Vector retrieval + optional hybrid keyword + metadata filter |
 | Privacy boundary | Agent-private, filtered by PrivacyLevel when sharing package | Enterprise-managed, Agent read-only |
 
-RAG retrieval results and local Grafeo retrieval results are spliced in the transient layer and uniformly fed into LLM context, but not integrated into the Memory system's abstraction layer — their query paradigms and storage models are entirely different.
+RAG retrieval results and local SQLite memory layer retrieval results are spliced in the transient layer and uniformly fed into LLM context, but not integrated into the Memory system's abstraction layer — their query paradigms and storage models are entirely different.
 
 **Runtime Behavior Differences Driven by RAG Configuration:**
 
 | Runtime Behavior | manifest No RAG Declaration | manifest Has RAG Declaration |
 |------------------|------------------------------|------------------------------|
-| Step ② MemoryManager.retrieve() | Query Grafeo channel only | Parallel query Grafeo + RAG dual channels |
-| Step ② Context injection | Grafeo retrieval results only | Grafeo + RAG results spliced, labeled by source |
+| Step ② MemoryManager.retrieve() | Query SQLite memory layer channel only | Parallel query SQLite memory layer + RAG dual channels |
+| Step ② Context injection | SQLite memory layer retrieval results only | SQLite memory layer + RAG results spliced, labeled by source |
 | Step ③ LLM Tool Definitions | RAG tool not included | RAG tool included (can explicitly call) |
 | Step ⑤ Tool Dispatch | No RAG tool routing | RAG tool → RagClient HTTP call |
 

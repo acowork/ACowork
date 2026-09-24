@@ -1,4 +1,4 @@
-# acowork-core — Shared Types and Protocols
+﻿# acowork-core — Shared Types and Protocols
 
 > Part of [Module Design Overview](00-overview.md)
 
@@ -26,7 +26,7 @@ crates/acowork-core/
     │   └── traits.rs          # Provider trait + ChatMessage + ChatResponse + StreamEvent
     ├── memory/
     │   ├── mod.rs
-    │   └── traits.rs          # Memory trait (Grafeo abstraction layer)
+    │   └── traits.rs          # Memory trait (storage-agnostic abstraction layer)
     └── error.rs               # unified error type
 ```
 

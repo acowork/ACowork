@@ -1,4 +1,4 @@
-# MQTT 协议
+﻿# MQTT 协议
 
 > Gateway 内嵌 MQTT Broker（[`rumqttd`](https://github.com/bytebeamio/rumqtt)），承担 **实时事件总线 + 轻量级状态同步** 职责。Topic 树遵循 **"按数据源 pub/sub"** 原则：每个主题代表一份数据资源，发布者 = 数据源权威，订阅者按需订阅。
 
@@ -299,7 +299,7 @@ acowork/agents/{agent_id}/
             ├── context_usage         # 上下文用量
             ├── memory_updated        # session 内 Memory 发生变更（通知性事件）
             └── skill_executed        # 技能执行完毕
-└── memory/                           # Agent 记忆图（Grafeo）数据源
+└── memory/                           # Agent 记忆（SQLite `memory/private.sqlite`）数据源
     └── nodes/                        # node 级别增量事件
         └── {nid}/update              # 【增量事件】Memory node 增删/整合
                                       #   payload = 最新完整 node

@@ -1,4 +1,4 @@
-# Gateway Component Detailed Design
+﻿# Gateway Component Detailed Design
 
 > Version: v3.2 | Last Updated: 2026-07-12
 > Major revision in this version: §9 IPC section fully aligned with [ADR-033](./docs/design/zh/../adr/zh/ADR-033-mqtt-replace-grpc-websocket.md) — Gateway ↔ Runtime channel replaced with **MQTT pub/sub + HTTP reverse proxy**. HTTP API still keeps REST interfaces; streaming events changed from WebSocket to MQTT topic subscription.
@@ -38,7 +38,7 @@ Both share Gateway's internal state, just different access layers.
 ## 1. Package Manager
 
 - **Install**: Extract `.agent` to `~/.local/share/agent-gateway/agents/<agent_id>/`, verify manifest integrity, record version. Must verify package signature before installation (see [02-agent-package.md](./02-agent-package.md)); if signature is invalid or doesn't match the installed version's signature, reject installation.
-- **Uninstall**: Delete the corresponding directory, optionally back up user data (including private Grafeo).
+- **Uninstall**: Delete the corresponding directory, optionally back up user data (including private SQLite memory layer).
 - **Upgrade**: Preserve `data/` and user-modified `config/`, replace other files. If `runtime_version` is incompatible, prompt the user. On upgrade, verify the new package's signing certificate fingerprint matches the installed version.
 - **Repository support**: Configurable multiple HTTP repository sources (like apt), periodically check for updates. Repository-provided .agent packages must be signed.
 
@@ -57,7 +57,7 @@ Both share Gateway's internal state, just different access layers.
 
 **Sleep and wake:**
 - Use kill-restart strategy: After idle timeout, directly kill Agent Runtime process, re-spawn when needed next time.
-- Agent state persists via private Grafeo, restores context from Memory on startup.
+- Agent state persists via private SQLite, restores context from Memory on startup.
 - Do not use SIGSTOP/SIGCONT (Windows doesn't support, process still occupies memory, state serialization difficult).
 - Agent can declare `startup_timeout_ms` in manifest; Gateway uses this to decide whether to pre-warm (start ahead of time).
 
@@ -153,7 +153,7 @@ Coordinates concurrent requests from multiple Agents to the same LLM Provider, a
 - **Each Agent's workspace**: `~/.local/share/agent-gateway/agents/<agent_id>/workspace/`:
   - `data/`: Copied from package, read-write.
   - `config/`: User-modifiable configuration (initially from package config).
-  - `memory/`: Private Grafeo database file (`private.grafeo`).
+  - `memory/`: Private SQLite memory layer database file (`private.sqlite`).
   - `runtime/`: Temporary files (pid, HTTP port).
 - **Logs**: Gateway collects stdout/stderr from all Agents, writes to `~/.local/share/agent-gateway/logs/`, supports filtering by Agent.
 

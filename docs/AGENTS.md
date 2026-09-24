@@ -1,4 +1,4 @@
-# AGENTS.md — docs/
+﻿# AGENTS.md — docs/
 
 Public architecture & design docs for ACowork.AI (v3.x).
 
@@ -33,7 +33,7 @@ docs/
 | Rust crate 结构 | [`module-design/zh/00-overview.md`](./module-design/zh/00-overview.md) |
 | Security / 隔离 | [`design/zh/08-security.md`](./design/zh/08-security.md) |
 | Gateway 组件 | [`module-design/zh/03-gateway.md`](./module-design/zh/03-gateway.md) |
-| 记忆（Grafeo） | [`module-design/zh/04-grafeo.md`](./module-design/zh/04-grafeo.md) |
+| 记忆（SQLite） | [`module-design/zh/04-memory-sqlite.md`](./module-design/zh/04-memory-sqlite.md) |
 | 平台 PRD | [`prd/zh/prd.md`](./prd/zh/prd.md) |
 | Desktop UI/UX | [`prd/zh/prd-ui-ux.md`](./prd/zh/prd-ui-ux.md) |
 | HTTP API 协议 | [`protocols/zh/http.md`](./protocols/zh/http.md) |

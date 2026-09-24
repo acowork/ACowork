@@ -1,4 +1,4 @@
-# 架构：依赖关系、数据流、路线图、编译产物、测试
+﻿# 架构：依赖关系、数据流、路线图、编译产物、测试
 
 ## 1. 模块间依赖关系
 
@@ -14,13 +14,13 @@
     │                │ │gateway    │ │sign          │
     │    依赖:       │ │           │ │              │
     │  · core        │ │ 依赖:     │ │ 依赖:        │
-    │  · grafeo      │ │ · core    │ │ · core       │
+    │  · SQLite 记忆层      │ │ · core    │ │ · core       │
     │  · sign(验证)  │ │ · sign    │ │ (无运行时依赖)│
     └────────┬───────┘ │ · vault   │ └──────────────┘
              │         └───┬───────┘
              │             │
     ┌────────▼──────┐ ┌───▼──────────┐
-    │acowork-grafeo│ │acowork-vault│
+    │acowork-sqlite│ │acowork-vault│
     │               │ │              │
     │ 依赖:         │ │ 依赖:        │
     │ · core(Memory │ │ · core       │
@@ -30,7 +30,7 @@
 
 **关键约束**：
 - `acowork-core` 不依赖任何其他内部 crate
-- `acowork-grafeo` 仅依赖 `acowork-core` 的 Memory trait
+- `acowork-sqlite` 仅依赖 `acowork-core` 的 Memory trait
 - `acowork-runtime` 和 `acowork-gateway` 之间**没有直接依赖**，它们通过 IPC 通信
 - `acowork-sign` 是独立工具 crate，不依赖运行时 crate
 
@@ -67,7 +67,7 @@ Agent Runtime 进程启动
     │
     ├─3→ IPC Client: KeyRelease → SecretString (存入进程内存)
     │
-    ├─4→ Grafeo::open(workspace/memory/private.grafeo)
+    ├─4→ `acowork-sqlite`::open(workspace/memory/private.SQLite 记忆层)
     │
     └─5→ 主循环:
          每轮迭代:
@@ -102,7 +102,7 @@ Gateway IntentRouter:
 | Phase | 需实现的 Crate | 核心模块 |
 |-------|--------------|---------|
 | **Phase 1: MVP** | core, runtime, gateway, sign, vault | `core`: manifest + protocol + traits<br>`runtime`: agent/loop + package/loader + providers/openai + tools/builtin(核心17) + tools/memory(5) + tools/agent(intent_send, ask_user) + ipc/client<br>`gateway`: package_manager + lifecycle + ipc/server + vault<br>`sign`: keygen + sign + verify<br>`vault`: 加密存储 |
-| **Phase 2: Memory** | + grafeo | `grafeo`: 全部模块（episodic + semantic + fulltext + hybrid + embedding）<br>`runtime`: memory/ 模块<br>`gateway`: system_agent/identity_injector |
+| **Phase 2: Memory** | + SQLite 记忆层 | `SQLite`: 全部模块（episodic + semantic + fulltext + hybrid + embedding）<br>`runtime`: memory/ 模块<br>`gateway`: system_agent/identity_injector |
 | **Phase 2.5: DevFramework** | + runtime/debug | `runtime`: debug/ 全部模块<br>`gateway`: lifecycle 扩展（克隆 API） |
 | **Phase 3: 安全沙箱** | + gateway/sandbox | `gateway`: sandbox/ 各平台实现<br>`runtime`: tools/wasm<br>`core`: permission 增强 |
 | **Phase 4: 通信协调** | gateway 扩展 | `gateway`: intent/ + budget/ + rate/<br>`runtime`: tools/gateway 增强 |

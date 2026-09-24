@@ -1,4 +1,4 @@
-# Skill System（技能系统）
+﻿# Skill System（技能系统）
 
 > 版本：v3.2 | 更新日期：2026-04-14
 
@@ -6,7 +6,7 @@
 
 Skill 是 Agent 行为模式的扩展机制。LLM 通过 Skill Instructions 获得特定领域的知识和操作流程，从而具备超出基础能力的专业行为。
 
-Skill 系统采用**双层模型**：SKILL.md 作为静态定义层（发布态），Grafeo 作为动态经验层（运行态）。调试阶段的 Skill 在 Grafeo 中迭代，完善后提交到 SKILL.md。
+Skill 系统采用**双层模型**：SKILL.md 作为静态定义层（发布态），SQLite 记忆层 作为动态经验层（运行态）。调试阶段的 Skill 在 SQLite 记忆层中迭代，完善后提交到 SKILL.md。
 
 ## 1. 架构概览
 
@@ -16,14 +16,14 @@ Skill System
 │   ├── YAML frontmatter        元数据（名称、触发词、工具依赖、模型兼容性快照）
 │   └── Markdown body           指令正文（执行步骤、注意事项、输出格式）
 │
-├── Experience Layer（动态）    ← Grafeo 图节点，Agent 私有
+├── Experience Layer（动态）    ← SQLite nodes 行，Agent 私有
 │   ├── SkillDraft              草稿 Skill（调试阶段）
 │   ├── SkillIteration          迭代版本（每次修改的快照）
 │   ├── SkillExecution          执行记录（每次试运行的结果）
 │   └── SkillExperience         已发布 Skill 的运行经验
 │
 └── Runtime Integration
-    ├── Skill Loader            加载 SKILL.md + 查询 Grafeo 经验
+    ├── Skill Loader            加载 SKILL.md + 查询 SQLite 经验层
     ├── Prompt Builder          合并静态定义 + 动态经验 + 模型适配
     └── Debug Controller        调试模式（创建/试运行/迭代/发布）
 ```
@@ -33,9 +33,9 @@ Skill System
 | 层级 | 存储位置 | 生命周期 | 可分发 | 可审计 | 可版本控制 |
 |------|---------|---------|--------|--------|-----------|
 | Definition Layer | SKILL.md | 随 .agent 包版本管理 | 是 | 是（直接打开看） | 是 |
-| Experience Layer | Grafeo | 持久化到 Agent 工作区 | 否（私有数据） | 否（图数据库） | 否 |
+| Experience Layer | SQLite 记忆层 | 持久化到 Agent 工作区 | 否（私有数据） | 否（图数据库） | 否 |
 
-类比：SKILL.md 是**教科书**（公共的、标准的、可分享的），Grafeo 经验层是**个人笔记**（私有的、基于实践的、因人而异的）。两者结合才能形成完整的 Skill 行为。
+类比：SKILL.md 是**教科书**（公共的、标准的、可分享的），SQLite 经验层是**个人笔记**（私有的、基于实践的、因人而异的）。两者结合才能形成完整的 Skill 行为。
 
 ## 2. SKILL.md 格式（静态定义层）
 
@@ -80,7 +80,7 @@ platforms:
   desktop: required              # 桌面端必需
   mobile: optional               # 移动端可选（行为可能降级）
 
-# === 模型兼容性（发布时快照，运行时以 Grafeo 为准）===
+# === 模型兼容性（发布时快照，运行时以 SQLite 记忆层 为准）===
 tested_models:
   - provider: openai
     model: gpt-4o
@@ -148,14 +148,14 @@ platforms:
 
 **降级场景示例：** 一个依赖 `shell` 工具的 "DevOps Deploy" Skill 声明 `desktop: required`，因为 `shell` 在移动端不可用。一个依赖 `web_fetch` 的 "News Digest" Skill 默认全平台，因为 `web_fetch` 全平台可用。
 
-## 3. Grafeo 经验层（动态运行态）
+## 3. SQLite 记忆层经验层（动态运行态）
 
-Agent 在使用 Skill 的过程中积累的经验数据存储在 Grafeo 中，作为 SKILL.md 静态定义之上的增强层。
+Agent 在使用 Skill 的过程中积累的经验数据存储在 SQLite 中，作为 SKILL.md 静态定义之上的增强层。
 
 ### 3.1 节点类型概览
 
 ```
-Grafeo Semantic Memory Layer
+SQLite 记忆层（`nodes` 表）
 │
 ├─ SkillDraft            草稿 Skill（调试阶段，未发布）
 ├─ SkillIteration        迭代版本（每次修改草稿时的快照）
@@ -342,13 +342,13 @@ SkillDraft (当前草稿)
 
 Skill 的完整生命周期分为三个阶段：创建与调试、发布、运行与进化。
 
-### 4.1 Phase 1：创建与调试（纯 Grafeo）
+### 4.1 Phase 1：创建与调试（纯 SQLite 记忆层）
 
 ```
 用户：学一下怎么帮我做周报总结
        │
        ▼
-① Agent 在 Grafeo 创建 SkillDraft
+① Agent 在 SQLite 记录 SkillDraft
    status = Draft
        │
        ▼
@@ -356,7 +356,7 @@ Skill 的完整生命周期分为三个阶段：创建与调试、发布、运�
        │
        ├─ 运行 1 → SkillExecution (Failure)
        │   → Agent 修改草稿 → SkillIteration #2
-       │   → Grafeo 记录 failure_case + change_summary
+       │   → SQLite 记录 failure_case + change_summary
        │
        ├─ 运行 2 → SkillExecution (Partial)
        │   → 用户反馈："输出太长了"
@@ -387,12 +387,12 @@ Skill 的完整生命周期分为三个阶段：创建与调试、发布、运�
 | 草稿保存 | 中断后下次继续，草稿状态完整保留 |
 | 模型切换 | 可在不同模型上试运行，验证跨模型兼容性 |
 
-### 4.2 Phase 2：发布（Grafeo → SKILL.md）
+### 4.2 Phase 2：发布（SQLite 记忆层 → SKILL.md）
 
 用户确认 Skill 调试完成后，Runtime 执行发布操作：
 
 ```
-① 从 Grafeo 读取 SkillDraft 最终状态
+① 从 SQLite 读取 SkillDraft 最终状态
    （最新 SkillIteration 的 instructions + 元数据）
        │
        ▼
@@ -408,7 +408,7 @@ Skill 的完整生命周期分为三个阶段：创建与调试、发布、运�
 ④ 写入 skills/<skill_name>/SKILL.md
        │
        ▼
-⑤ 更新 Grafeo
+⑤ 更新 SQLite
    ├─ SkillDraft.status = Published
    ├─ 创建 SkillExperience 节点
    │   （从调试期间的 learned_patterns / model_compatibility 迁移）
@@ -449,7 +449,7 @@ tested_models:
 （Markdown body，来自最终迭代版本的 instructions）
 ```
 
-### 4.3 Phase 3：运行与进化（SKILL.md + Grafeo 经验）
+### 4.3 Phase 3：运行与进化（SKILL.md + SQLite 经验层）
 
 发布后的 Skill 在每次执行时，Runtime 组装完整的上下文：
 
@@ -457,7 +457,7 @@ tested_models:
 Skill Loader 加载 SKILL.md（静态定义）
        │
        ▼
-Grafeo 查询 SkillExperience 节点（动态经验）
+SQLite 记忆层 查询 SkillExperience 节点（动态经验）
        │
        ├─ 无经验节点（首次发布后第一次使用）
        │   → 直接使用 SKILL.md 原始指令
@@ -471,7 +471,7 @@ Grafeo 查询 SkillExperience 节点（动态经验）
             └─ 注入当前模型的 adaptations（如有）
        │
        ▼
-执行结果写入 Grafeo
+执行结果写入 SQLite
        │
        ├─ 成功 → 情景记忆 + 更新 SkillExperience.success_count
        ├─ 失败 → 更新 SkillExperience.failure_cases
@@ -551,17 +551,17 @@ Runtime 在组装 Skill 上下文时，检查当前模型兼容性：
 
 ### 6.1 Skill Loader
 
-Skill Loader 负责加载 SKILL.md 并查询 Grafeo 经验：
+Skill Loader 负责加载 SKILL.md 并查询 SQLite 经验层：
 
 ```rust
 struct SkillLoader {
-    grafeo: Grafeo,
+    memory_store: Arc<SqliteStore>,
 }
 
 struct LoadedSkill {
     name: String,
     definition: SkillDefinition,      // 来自 SKILL.md
-    experience: Option<SkillExperience>, // 来自 Grafeo（可能为空）
+    experience: Option<SkillExperience>, // 来自 SQLite 记忆层（可能为空）
     model_adaptations: Vec<String>,   // 当前模型的适配指令
 }
 
@@ -573,8 +573,8 @@ impl SkillLoader {
         // 1. 读取 skills/<skill_name>/SKILL.md
         let definition = self.parse_skill_md(skill_name)?;
 
-        // 2. 查询 Grafeo 的 SkillExperience
-        let experience = self.grafeo.get_skill_experience(skill_name)?;
+        // 2. 查询 SQLite 记忆层 的 SkillExperience
+        let experience = self.memory_store.get_skill_experience(skill_name)?;
 
         // 3. 提取当前模型的适配指令
         let model_adaptations = experience
@@ -635,14 +635,14 @@ System Prompt 组装（步骤 5：Skill Instructions）
 
 | 决策 | 选择 | 理由 |
 |------|------|------|
-| 双层模型 | SKILL.md（静态）+ Grafeo（动态） | SKILL.md 保证可分发、可审计、可版本控制；Grafeo 支持自学习和经验积累 |
-| 调试在 Grafeo | 不直接修改 SKILL.md | 调试是探索性过程，需要迭代历史、回滚、A/B 测试，图数据库天然支持 |
-| 单向提交 | Grafeo → SKILL.md | 类似 git 工作流：工作区迭代 → commit 到仓库 |
+| 双层模型 | SKILL.md（静态）+ SQLite 经验层（动态） | SKILL.md 保证可分发、可审计、可版本控制；SQLite 记忆层 支持自学习和经验积累 |
+| 调试在 SQLite 记忆层 | 不直接修改 SKILL.md | 调试是探索性过程，需要迭代历史、回滚、A/B 测试，图数据库天然支持 |
+| 单向提交 | SQLite 记忆层 → SKILL.md | 类似 git 工作流：工作区迭代 → commit 到仓库 |
 | 模型兼容性记录 | SkillExecution + SkillExperience | Skill 效果与 LLM 强相关，不同模型需要不同适配，必须有记录 |
 | SKILL.md 格式 | YAML frontmatter + Markdown | 兼容 Agent Skills 开放标准（agentskills.io），六大主流平台事实标准 |
 | 经验注入而非替换 | 运行时合并，不修改 SKILL.md | 保证 SKILL.md 作为稳定基准，经验作为动态增强层叠加 |
 | 上下文裁剪 | 经验层优先裁剪 | 基础指令是 Skill 的核心逻辑，经验是锦上添花 |
-| 草稿不进包 | SkillDraft 仅存 Grafeo | 未发布的草稿不应该作为包的一部分分发 |
+| 草稿不进包 | SkillDraft 仅存 SQLite 记忆层 | 未发布的草稿不应该作为包的一部分分发 |
 
 ## 8. 未来扩展
 

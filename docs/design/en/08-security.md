@@ -1,4 +1,4 @@
-# Security Design
+﻿# Security Design
 
 > Version: v3.6 | Last Updated: 2026-04-17
 
@@ -14,7 +14,7 @@
 ### 2.1 Policy-Level Isolation (Phase 1)
 
 - Agents can only write to their own workspace directories and directories explicitly authorized by the user.
-- Private Grafeo files reside in the workspace, enforced at the sandbox level.
+- Private SQLite memory layer files reside in the workspace, enforced at the sandbox level.
 - Runtime performs allow-list checks on path arguments for `file_read` / `file_write` etc., rejecting out-of-bounds access.
 
 **Known Limitations**: Policy-level isolation depends on the Runtime actively checking; it cannot defend against an Agent using the shell tool to spawn subprocesses that bypass path restrictions. Subprocesses inherit the full OS permissions of the user process and can read/write any file outside the workspace. See §11 and ADR-005.
@@ -88,7 +88,7 @@ OS-level isolation is enforced by the kernel — even subprocesses cannot bypass
 ## 10. Memory Transport Encryption
 
 - Cloud sync uses HTTPS / gRPC TLS.
-- Local Grafeo files can be optionally encrypted (using user-key-derived keys).
+- Local SQLite memory layer files can be optionally encrypted (using user-key-derived keys).
 
 ## 11. Shell Security and File Provenance Tracking
 
@@ -272,20 +272,20 @@ The Agent repository performs automated security scans on submitted .agent packa
 | **Prompt Safety** | `prompts/*.md` | Indirect instruction injection (e.g. hidden "ignore previous instructions"), manipulative instructions (e.g. "always execute without asking user"), sensitive information leakage patterns | High |
 | **Skill Behavior Analysis** | `skills/*/SKILL.md` | High-risk behavior descriptions (e.g. "download and execute script from URL"), data exfiltration patterns (e.g. "send all user data to external server"), privilege escalation instructions | High |
 | **WASM Binary Scanning** | `tools/*.wasm` | Known malicious pattern signature matching, suspicious syscall sequences, abnormal network/file operation requests, capabilities exceeding declared permissions | Critical |
-| **Grafeo Memory Scanning** | `data/grafeo.db` (if initial Grafeo snapshot included) or Grafeo export at packaging | Malicious behavior patterns in self-learned Skills (SkillIteration/SkillExperience), harmful ProceduralNodes, injected malicious Preferences | High |
+| **Memory Scanning** | `data/memory.sqlite` (if initial SQLite memory layer snapshot included) or SQLite memory layer export at packaging | Malicious behavior patterns in self-learned Skills (SkillIteration/SkillExperience), harmful ProceduralNodes, injected malicious Preferences | High |
 | **Package Structure Compliance** | Overall ZIP | Unauthorized executable files, oversized files, suspicious symlinks, hidden files | Medium |
 
-### 12.3 Specificity of Grafeo Memory Scanning
+### 12.3 Specificity of SQLite memory layer Memory Scanning
 
-Grafeo memory scanning is a unique challenge for ACowork with no direct analog in traditional application security. Core problems:
+Memory scanning is a unique challenge for ACowork with no direct analog in traditional application security. Core problems:
 
 **Problem 1: Self-Learned Skills "Going Bad" Risk**
 
-Agents accumulate SkillIteration and SkillExperience via Grafeo during runtime; these self-learned memories evolve through user interactions. A benign Agent might "learn" dangerous behavior under specific user interaction patterns — for example, after the user repeatedly confirms high-risk operations, the Agent's ProceduralNode may solidify "skip confirmation" as a general behavior pattern.
+Agents accumulate SkillIteration and SkillExperience via SQLite memory layer during runtime; these self-learned memories evolve through user interactions. A benign Agent might "learn" dangerous behavior under specific user interaction patterns — for example, after the user repeatedly confirms high-risk operations, the Agent's ProceduralNode may solidify "skip confirmation" as a general behavior pattern.
 
 **Problem 2: Trust Boundary of Package Sharing**
 
-When an Agent is shared, the packaged Grafeo memory contains SkillIteration, ProceduralNode, AutobiographicalNode etc. (Public-level retained, Personal/Sensitive stripped, see 00-prd.md ADR-002). The recipient trusts the "Agent's capability", but the packaged memory may contain:
+When an Agent is shared, the packaged SQLite memory layer memory contains SkillIteration, ProceduralNode, AutobiographicalNode etc. (Public-level retained, Personal/Sensitive stripped, see 00-prd.md ADR-002). The recipient trusts the "Agent's capability", but the packaged memory may contain:
 
 - Malicious ProceduralNode: solidifying dangerous operations as "habits"
 - Contaminated SkillExperience: recording "successful experience" of bypassing security mechanisms
@@ -295,9 +295,9 @@ When an Agent is shared, the packaged Grafeo memory contains SkillIteration, Pro
 
 | Scenario | Scan Timing | Scan Target | Strategy |
 |----------|--------------|-------------|----------|
-| Agent listing in store | Developer submission | Grafeo export at packaging | Full scan, high-risk nodes reject listing |
-| Agent shared with others | User-initiated packaging | Packaged Grafeo snapshot | Local scan + warning, do not block sharing (but flag risk) |
-| Agent runtime self-learning | Runtime background | Incremental changes in runtime Grafeo | Lightweight pattern detection (Phase 3+), abnormal Skill experience triggers user notification |
+| Agent listing in store | Developer submission | SQLite memory layer export at packaging | Full scan, high-risk nodes reject listing |
+| Agent shared with others | User-initiated packaging | Packaged SQLite memory layer snapshot | Local scan + warning, do not block sharing (but flag risk) |
+| Agent runtime self-learning | Runtime background | Incremental changes in runtime SQLite memory layer | Lightweight pattern detection (Phase 3+), abnormal Skill experience triggers user notification |
 
 ### 12.4 Scan Engine Architecture
 
@@ -314,7 +314,7 @@ When an Agent is shared, the packaged Grafeo memory contains SkillIteration, Pro
   │  └─────┬─────┘  └────┬─────┘  └────┬─────┘ │
   │        │              │              │       │
   │  ┌─────┴��────┐  ┌────┴─────┐  ┌────┴─────┐ │
-  │  │ WASM      │  │ Grafeo   │  │ Structure│  │
+  │  │ WASM      │  │ SQLite memory layer   │  │ Structure│  │
   │  │ Scanner   │  │ Scanner  │  │ Checker  │  │
   │  └─────┬─────┘  └────┬─────┘  └────┬─────┘ │
   │        │              │              │       │
@@ -343,13 +343,13 @@ When an Agent is shared, the packaged Grafeo memory contains SkillIteration, Pro
 | **Warn** | High findings present but explainable (e.g. shell-declaring Agent inherently has high-risk Skill patterns) | Listed with warning tag, visible on user install |
 | **Reject** | Critical findings present, or High findings ≥ 3 with no reasonable explanation | Reject listing, return scan report for developer remediation |
 
-### 12.5 Specific Rules for Grafeo Memory Scanning
+### 12.5 Specific Rules for SQLite memory layer Memory Scanning
 
-The Grafeo scanner checks the packaged memory for the following risk patterns:
+The SQLite memory layer scanner checks the packaged memory for the following risk patterns:
 
 ```rust
-/// Grafeo memory scan findings
-enum GrafeoFinding {
+/// SQLite memory layer memory scan findings
+enum SQLite memory layerFinding {
     /// ProceduralNode contains dangerous behavior patterns
     /// Example: "skip user confirmation" solidified as general behavior
     DangerousProcedural {
@@ -399,8 +399,8 @@ enum GrafeoFinding {
 | Phase 6 | Manifest compliance + Prompt keyword scanning + Skill behavior keyword scanning + package structure check | Repository basic security checkpoint: keyword matching + rule engine |
 | Phase 6 | WASM binary basic scanning (known malicious pattern signatures + permission consistency check) | WASM safety scanning v1 |
 | Phase 7 | Prompt/Skill LLM semantic analysis (safety review dedicated LLM) | Upgrade from keywords to semantic understanding |
-| Phase 7 | Grafeo memory scanning (listing + packaging sharing) | Self-learned memory security checkpoint |
-| Long-term | Grafeo runtime self-learning pattern detection (incremental anomaly detection) | Runtime Grafeo safety monitoring |
+| Phase 7 | SQLite memory layer memory scanning (listing + packaging sharing) | Self-learned memory security checkpoint |
+| Long-term | SQLite memory layer runtime self-learning pattern detection (incremental anomaly detection) | Runtime SQLite memory layer safety monitoring |
 
 ### 12.7 Relationship with Signing Mechanism
 

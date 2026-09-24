@@ -1,4 +1,4 @@
-# MQTT Protocol
+﻿# MQTT Protocol
 
 > The Gateway embeds an MQTT Broker ([`rumqttd`](https://github.com/bytebeamio/rumqtt)) serving as a **real-time event bus + lightweight state synchronization** component. The topic tree follows the **"publish/subscribe by data source"** principle: each topic represents a data resource, the publisher is the authoritative source of that data, and subscribers consume as needed.
 
@@ -295,7 +295,7 @@ acowork/agents/{agent_id}/
             ├── context_usage         # context usage
             ├── memory_updated        # in-session Memory change (notification event)
             └── skill_executed        # skill execution completed
-└── memory/                           # Agent memory graph (Grafeo) data source
+└── memory/                           # Agent memory graph (SQLite 记忆层) data source
     └── nodes/                        # node-level increment events
         └── {nid}/update              # [Increment event] Memory node add/merge/delete
                                       #   payload = latest full node

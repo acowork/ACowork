@@ -1,4 +1,4 @@
-# Agent as APP: Platform Design Overview
+﻿# Agent as APP: Platform Design Overview
 
 > Version: v3.4 | Last Updated: 2026-04-16
 
@@ -25,9 +25,9 @@ Design a decentralized, high-security, scalable AI Agent runtime platform. The c
 
 - **Standardized Packaging**: Agents are distributed as compressed packages (.agent), containing configuration, Prompts, Skills, and tool declarations — **no executable code**. All packages must be signed; Gateway enforces signature verification during installation.
 - **Unified Execution Engine**: Agent Runtime is the platform's single binary, responsible for loading .agent packages and executing Agent logic (LLM interaction, tool dispatch, memory read/write).
-- **Process-Level Isolation**: Each Agent runs as an independent Agent Runtime process managed by Gateway, with its own workspace, private Grafeo database, filesystem isolation, and optional resource limits (cgroups/containers).
+- **Process-Level Isolation**: Each Agent runs as an independent Agent Runtime process managed by Gateway, with its own workspace, private SQLite memory layer database, filesystem isolation, and optional resource limits (cgroups/containers).
 - **Agent Autonomy**: Agent processes connect directly to LLM APIs, execute tools autonomously, and manage permission checks without relying on Gateway to proxy business logic.
-- **Biomimetic Memory System**: Each Agent has an embedded private Grafeo, using a three-tier five-type biomimetic hierarchy (Transient / Experiential / Consolidated), including forgetting mechanisms (three-factor decay), privacy levels (PrivacyLevel), associative diffusion retrieval, and memory lifecycle (Retrieve/Inject/Record/Consolidate/Decay/Compact) with content-classified compression. Gateway manages user identity and preferences directly via UserProfile, pushing deltas to Agents through the handshake protocol. Cloud sync transmits all Zones in plaintext; platform-hosted (PrivacyLevel only controls whether data is stripped during package sharing, decoupled from sync strategy).
+- **Biomimetic Memory System**: Each Agent has an embedded private SQLite, using a three-tier five-type biomimetic hierarchy (Transient / Experiential / Consolidated), including forgetting mechanisms (three-factor decay), privacy levels (PrivacyLevel), associative diffusion retrieval, and memory lifecycle (Retrieve/Inject/Record/Consolidate/Decay/Compact) with content-classified compression. Gateway manages user identity and preferences directly via UserProfile, pushing deltas to Agents through the handshake protocol. Cloud sync transmits all Zones in plaintext; platform-hosted (PrivacyLevel only controls whether data is stripped during package sharing, decoupled from sync strategy).
 - **Permission Declaration and Authorization**: Agents declare required permissions (network, filesystem, cross-Agent calls, etc.) in their manifest; Gateway configures sandboxes at startup; Agents perform runtime self-checks.
 - **Cross-Platform Support**: .agent package format and Gateway Service API contract are unified across platforms; per-platform runtime mechanisms (process model, transport layer, sandbox) adapt to platform characteristics.
 
@@ -64,7 +64,7 @@ Design a decentralized, high-security, scalable AI Agent runtime platform. The c
 │ │  tem)        ││ │ │  skills)    ││ │ │  skills)    ││
 │ └─────────────┘│ │ └─────────────┘│ │ └─────────────┘│
 │                 │ │                 │ │                 │
-│ ✅ Private Grafeo│ │ ✅ Private Grafeo│ │ ✅ Private Grafeo│
+│ ✅ Private SQLite memory layer│ │ ✅ Private SQLite memory layer│ │ ✅ Private SQLite memory layer│
 │ ✅ Direct LLM   │ │ ✅ Direct LLM   │ │ ✅ Direct LLM   │
 │ ✅ Tool Execute │ │ ✅ Tool Execute │ │ ✅ Tool Execute │
 │ ✅ Local Budget │ │ ✅ Local Budget │ │ ✅ Local Budget │
@@ -92,7 +92,7 @@ Design a decentralized, high-security, scalable AI Agent runtime platform. The c
 |----------------|-------------------|--------|
 | LLM calls | Agent process | Direct connection, no RPC overhead, streaming natural, Agent autonomy |
 | Tool execution | Agent process | Autonomous permission checks, low latency |
-| Private memory read/write | Agent process (embedded Grafeo) | Zero latency, data isolation |
+| Private memory read/write | Agent process (embedded SQLite memory layer) | Zero latency, data isolation |
 | API Key storage | Gateway Vault | Centralized secure management |
 | API Key distribution | One-time at startup to Agent | Agent needs direct LLM access |
 | Budget tracking | Gateway (receives reports) | Cross-Agent statistics |
@@ -135,7 +135,7 @@ In the long run, LLM capabilities will continue to improve (lower hallucination 
 > - [09-roadmap-and-scenarios.md](./09-roadmap-and-scenarios.md) — Implementation roadmap and usage scenarios
 > - [10-debug-protocol.md](./10-debug-protocol.md) — Debug protocol (DevMode, breakpoints, record/replay)
 > - [12-tool-system.md](./12-tool-system.md) — Tool system (Built-in / WASM / Gateway)
-> - [13-skill-system.md](./13-skill-system.md) — Skill system (SKILL.md + Grafeo experience layer)
+> - [13-skill-system.md](./13-skill-system.md) — Skill system (SKILL.md + SQLite memory layer experience layer)
 > - [14-desktop-app.md](./14-desktop-app.md) — Desktop app (Tauri, layout, system tray)
 
 ---

@@ -1,4 +1,4 @@
-# 记忆写入入口决策摘要（Memory Write-Entrypoint Decisions）
+﻿# 记忆写入入口决策摘要（Memory Write-Entrypoint Decisions）
 
 > 本文档是代码注释的权威引用；完整分析报告见本地归档
 > `docs/_internal/archive/review/memory-write-entrypoints-garbage-analysis.md`
@@ -18,7 +18,7 @@
 | B | `record_tool_failures` / `record_procedural_from_failure` | Procedural（fail_count） | 工具失败是运行时异常/待修 bug，非长期记忆；首行 80 字截断无复用价值 |
 | B2 | `run_self_evaluation` | Autobiographical Limitation（批量） | 统计口径残缺（success_count 恒 0）→ 系统性假阳性；能力边界非工具计数器可推导 |
 | G | `record_turn` / `ConversationRecord`（死代码） | Episodic | 无调用者；留档接口有被误用风险 |
-| H | grafeo `auto_generate_limitation_nodes` | Autobiographical Limitation（批量） | 与 B2 同一逻辑的重复实现 |
+| H | SQLite 记忆层 `auto_generate_limitation_nodes` | Autobiographical Limitation（批量） | 与 B2 同一逻辑的重复实现 |
 | I（2026-09） | `generalization.rs::detect_simple_patterns` / `run_generalization` | ProceduralNode | 伪规则归纳（字符串全等计数 + action/tool_calls 文本特征 hack）；LLM 端已改由 `EpisodicDistiller::promote_procedures` 承担 |
 | J（2026-09） | `MemoryManager::run_post_compaction_tasks` / `run_relationship_generation` / `run_history_compression` | Autobiographical Relationship / History | Relationship 30 天规则第二生产者违反 single-producer 原则且不经 opt-in；History 自动合并下线（回归测试 `post_compaction_tasks_do_not_write_relationship_nodes` 锁定） |
 
@@ -41,6 +41,6 @@
   `retrieve_and_inject_memories` 不再返回 node IDs（原消费者已删）。
 - `core/acowork-runtime/src/agent/loop_.rs`：删除工具失败记录调用与
   `retrieved_memory_ids` 传递链；`execute_single_iteration` 移除未使用参数。
-- `core/acowork-grafeo/src/consolidation/offline.rs`：删除
+- `core/acowork-sqlite/src/consolidation/offline.rs`：删除
   `auto_generate_limitation_nodes`（步骤 7），步骤重编号。
 - `core/acowork-runtime/src/agent/session_state.rs`：删除只增不读的 `turn_counter`。

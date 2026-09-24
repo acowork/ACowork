@@ -1,4 +1,4 @@
-# Agent Runtime（统一执行引擎）
+﻿# Agent Runtime（统一执行引擎）
 
 > 版本：v3.6 | 更新日期：2026-05-06
 
@@ -8,7 +8,7 @@ Agent Runtime 是平台提供的唯一二进制可执行文件，类似 Android 
 
 > **v3.7 变更（2026-05-28）**：上下文压缩策略大幅简化——见 [ADR-010](../../adr/zh/ADR-010-context-compression-simplification.md)。核心变更：放弃程序化折叠策略（Tool Result 折叠、内容折叠 Phase 1），上下文压缩回归 LLM 摘要作为唯一正常路径手段。日常压缩流程简化为：70% 告警 → 80% LLM 摘要（完整上下文，不折叠） → 95% emergency_trim 安全网。
 
-> **v3.9 变更（2026-05-28）**：Compaction 与 Distillation 统一——见 [ADR-011](../../adr/zh/ADR-011-compaction-as-distillation.md)。核心变更：Compaction 摘要与 Session 蒸馏合并为单次 Compact Model 调用，摘要文本同时用于内存替换和 Grafeo 经历层写入（"摘要即蒸馏"）。经历层写入来源简化为仅 Compaction 和 Session 关闭蒸馏，移除每轮对话实时写入。SessionState 新增 `is_compacted` 标志控制尾部蒸馏决策。
+> **v3.9 变更（2026-05-28）**：Compaction 与 Distillation 统一——见 [ADR-011](../../adr/zh/ADR-011-compaction-as-distillation.md)。核心变更：Compaction 摘要与 Session 蒸馏合并为单次 Compact Model 调用，摘要文本同时用于内存替换和 SQLite 经历层写入（"摘要即蒸馏"）。经历层写入来源简化为仅 Compaction 和 Session 关闭蒸馏，移除每轮对话实时写入。SessionState 新增 `is_compacted` 标志控制尾部蒸馏决策。
 
 **交叉引用**：
 - 运行时内部结构：本文档 §2
@@ -19,7 +19,7 @@ Agent Runtime 是平台提供的唯一二进制可执行文件，类似 Android 
 
 ## 1. 启动方式
 
-**设计约束：** Agent Runtime 空闲内存占用目标控制在 ~5-10 MB。该目标约束 Runtime 的模块设计——懒初始化（Grafeo、Wasmtime Engine 等重量级模块按需加载）、最小化默认缓存、零后台轮询线程。
+**设计约束：** Agent Runtime 空闲内存占用目标控制在 ~5-10 MB。该目标约束 Runtime 的模块设计——懒初始化（SqliteStore、Wasmtime Engine 等重量级模块按需加载）、最小化默认缓存、零后台轮询线程。
 
 > **验证方式**：Phase 3 将通过 `MemoryMetrics` 结构在 Debug 模式下实时报告内存占用，并提供 `/metrics` 端点供 Desktop App 展示。Phase 2 通过 Rust 标准库 `alloc::alloc::GlobalStats`（nightly）或外部 `jemalloc` 统计进行开发阶段验证。目标约束的验证不在 Phase 2 功能范围内。
 
@@ -98,8 +98,8 @@ Agent Runtime 二进制
 │   ├── Middleware Chain   # 记忆中间件
 │   ├── Store Backend      # MemoryStore trait 实现
 │   └── RagClient (opt)    # RAG 检索客户端
-├── Grafeo (嵌入式)     # 私有 Memory 存储引擎
-├── Skill Loader        # 加载 Skills（SKILL.md + Grafeo 经验层）
+├── SqliteStore (嵌入式)     # 私有 Memory 存储引擎（单文件 SQLite）
+├── Skill Loader        # 加载 Skills（SKILL.md + SQLite 经验层）
 ├── Debug/DevMode       # 调试协议（HTTP RPC + MQTT events，ADR-048；可选）
 ├── MCP Manager         # MCP 服务器连接管理（按需激活）
 ├── Search Config       # Web 搜索提供商配置（从 Gateway 同步）
@@ -141,14 +141,14 @@ Agent Runtime 的核心是 LLM 交互循环：
 │     ├─ Capability Overview (from Gateway 推送)
 │     ├─ Skill Instructions (from skills/)
 │     ├─ Memory Retrieve → MemoryManager.retrieve()
-│     │   ├─ Grafeo 通道（始终执行）
+│     │   ├─ SQLite 记忆通道（始终执行）
 │     │   │   hybrid_search + graph_expand
 │     │   └─ RAG 通道（仅 manifest 声明 rag 时）
 │     │       RagClient.query(用户消息, top_k=3)
 │     │       超时(5s)/不可达 → 跳过，不阻塞
 │     ├─ Memory Inject → MemoryManager.inject()   
 │     │   按 token 预算裁剪并格式化记忆上下文
-│     │   结果按来源标注 [Grafeo] / [RAG:<name>]
+│     │   结果按来源标注 [Memory] / [RAG:<name>]
 │     └─ 对话历史 (from History Manager)
 │
 │  ②.5 上下文压缩（Token 预算管理）
@@ -226,12 +226,12 @@ Prompt Builder 按以下顺序拼接上下文，越靠前优先级越高（LLM �
 |------|------|------|------|
 | 1 | System Prompt | `prompts/system.md` + `prompts/constraints.md` | Agent 身份定义和行为约束，不可被后续覆盖 |
 | 2 | Identity Context | Gateway 注入 | 用户身份信息（name、city 等），Agent "认识"用户 |
-| 2.5 | Autobiographical | Grafeo AutobiographicalNode | Agent 自我认知（Identity/Capability/Limitation），注入上限 200 token。History Manager 在构建上下文时检测 History 节点数量，超过 10 条时自动触发规则引擎合并（按时间线拼接事件描述、去重、截断至 200 token，零 LLM 调用），合并由 Runtime 的后台任务执行，不需要用户干预。Phase 3 可升级为 LLM 语义摘要 |
+| 2.5 | Autobiographical | AutobiographicalNode（`label=Autobiographical`） | Agent 自我认知（Identity/Capability/Limitation），注入上限 200 token。History Manager 在构建上下文时检测 History 节点数量，超过 10 条时自动触发规则引擎合并（按时间线拼接事件描述、去重、截断至 200 token，零 LLM 调用），合并由 Runtime 的后台任务执行，不需要用户干预。Phase 3 可升级为 LLM 语义摘要 |
 | 2.8 | Workspace Context | Gateway 推送 | 工作区环境信息（当前选中 + 高权重 Top2，最多 3 个） |
 | 3 | Tool Definitions | `manifest.toml [tools]` | 转换为 JSON Schema 格式的工具描述，供 LLM 调用 |
 | 4 | Capability Overview | Gateway 推送 | 已安装 Agent 及其能力摘要，供 LLM 知道可以向谁协作 |
-| 5 | Skill Instructions | `skills/*/SKILL.md` + Grafeo 经验层 | 可选技能指令，扩展 Agent 的行为模式。详见 [13-skill-system.md](./13-skill-system.md) |
-| 6 | Memory Context | `MemoryManager.retrieve()` + `MemoryManager.inject()` | 记忆检索与注入。通过 MemoryStore trait 的 `hybrid_search` + `graph_expand` 检索 Grafeo 通道；若 manifest 声明 RAG（`rag_client: Option<Arc<RagClient>>`），并行查询 RAG 通道（用户消息作 query，top_k=3，超时 5s 降级）；结果按来源标注 `[Grafeo]` / `[RAG:<name>]`，按 token 预算裁剪注入。详见 [05-memory.md](./05-memory.md) §10、[00-prd.md](./00-prd.md) §1.13.1 |
+| 5 | Skill Instructions | `skills/*/SKILL.md` + SQLite 经验层 | 可选技能指令，扩展 Agent 的行为模式。详见 [13-skill-system.md](./13-skill-system.md) |
+| 6 | Memory Context | `MemoryManager.retrieve()` + `MemoryManager.inject()` | 记忆检索与注入。通过 MemoryStore trait 的 `hybrid_search` + `graph_expand` 检索 SQLite 记忆通道；若 manifest 声明 RAG（`rag_client: Option<Arc<RagClient>>`），并行查询 RAG 通道（用户消息作 query，top_k=3，超时 5s 降级）；结果按来源标注 `[Memory]` / `[RAG:<name>]`，按 token 预算裁剪注入。详见 [05-memory.md](./05-memory.md) §10、[00-prd.md](./00-prd.md) §1.13.1 |
 | 7 | Conversation History | History Manager | 当前对话的完整消息序列 |
 
 #### 2.8 Workspace Context（工作区上下文）
@@ -269,17 +269,17 @@ All listed directories are authorized for access at the indicated permission lev
 **Token 预算分配与截断策略：** 当上下文总长度接近模型限制时，采用三阶段策略：
 
 1. **70% 监控**：通过 ContextUsage 事件向 Gateway 报告 token 使用率，不做任何干预。
-2. **80% LLM 摘要（Compaction）**：使用 Compact Model 对完整对话历史做 LLM 摘要（`compact_via_llm`）。摘要文本同时用于：(a) 替换内存中间段（`replace_middle_with_summary`，保留 system prompt + 最后 3 轮），(b) 写入 Grafeo 经历层（摘要即蒸馏，ADR-011）。Compaction 完成后设置 `is_compacted = true`，新用户消息到达时重置为 `false`。
+2. **80% LLM 摘要（Compaction）**：使用 Compact Model 对完整对话历史做 LLM 摘要（`compact_via_llm`）。摘要文本同时用于：(a) 替换内存中间段（`replace_middle_with_summary`，保留 system prompt + 最后 3 轮），(b) 写入 SQLite 经历层（摘要即蒸馏，ADR-011）。Compaction 完成后设置 `is_compacted = true`，新用户消息到达时重置为 `false`。
 3. **95% emergency_trim**：保留 system prompt + 最后 4 条非 system 消息，作为安全网。仅在 LLM 摘要无法执行（API 报错）或使用率飙升至 95% 时使用。
 
-> **设计决策**：上下文压缩是一个语义理解任务，只有 LLM 能可靠判断哪些信息可以丢弃。程序化策略（字符截断、FIFO、角色折叠）本质是用 proxy 指标替代语义理解，必然失效。详见 [ADR-010](../../adr/zh/ADR-010-context-compression-simplification.md)。Compaction 与 Distillation 统一为单次调用：同一个摘要文本既替换内存（压缩上下文），又写入 Grafeo（产生经历记忆）。详见 [ADR-011](../../adr/zh/ADR-011-compaction-as-distillation.md)。
+> **设计决策**：上下文压缩是一个语义理解任务，只有 LLM 能可靠判断哪些信息可以丢弃。程序化策略（字符截断、FIFO、角色折叠）本质是用 proxy 指标替代语义理解，必然失效。详见 [ADR-010](../../adr/zh/ADR-010-context-compression-simplification.md)。Compaction 与 Distillation 统一为单次调用：同一个摘要文本既替换内存（压缩上下文），又写入 SQLite 经历层（产生经历记忆）。详见 [ADR-011](../../adr/zh/ADR-011-compaction-as-distillation.md)。
 
 System Prompt（1）、Identity Context（2）、Autobiographical（2.5）、Workspace Context（2.8）、Tool Definitions（3）始终保留，不参与裁剪。
 
 #### 3.1.1 包级 LLM Prompt 覆盖（ADR-063）
 
 > **ADR-063**：Agent 包可声明 9 个 LLM prompt override 文件（`prompts/<name>.md`），覆盖
-> 内置常量（`crate::prompt::*` 与 grafeo / memory 模块的 LLM 指令）。这些文件**不参与**
+> 内置常量（`crate::prompt::*` 与 `acowork-memory` 模块的 LLM 指令）。这些文件**不参与**
 > §3.1 的主 prompt 拼接（它们的语义是"任务指令性 prompt"而非"身份定义"），只通过
 > `load_optional_prompt` 在对应 LLM 调用点注入。
 
@@ -292,9 +292,9 @@ System Prompt（1）、Identity Context（2）、Autobiographical（2.5）、Wor
 | `search` | `SEARCH_SYSTEM_PROMPT` | perplexity 联网搜索 system prompt |
 | `compact-template` | `COMPACT_PROMPT` | 全文压缩模板（含 `{messages_text}`） |
 | `title` | `TITLE_PROMPT` | 会话标题生成（含 `{language}` + `{user_message}`） |
-| `extraction` | grafeo `EXTRACTION_SYSTEM_PROMPT` | grafeo 记忆抽取（live reload 延后，§6.1） |
-| `conflict-classification` | grafeo `CONFLICT_CLASSIFICATION_PROMPT` | grafeo 冲突分类（live reload 延后） |
-| `generalization` | grafeo `GENERALIZATION_PROMPT` | grafeo 泛化（live reload 延后） |
+| `extraction` | `EXTRACTION_SYSTEM_PROMPT` | SQLite 记忆层 记忆抽取（live reload 延后，§6.1） |
+| `conflict-classification` | `CONFLICT_CLASSIFICATION_PROMPT` | SQLite 记忆层 冲突分类（live reload 延后） |
+| `generalization` | `GENERALIZATION_PROMPT` | SQLite 记忆层 泛化（live reload 延后） |
 | `abstention` | memory `DEFAULT_ABSTENTION_PROMPT` | RAG 弃答（live reload 延后） |
 
 **加载链（三阶段）**：
@@ -320,7 +320,7 @@ System Prompt（1）、Identity Context（2）、Autobiographical（2.5）、Wor
   1 MiB 大小上限、空白拒绝、路径穿越拦截 — Runtime 的 `http/prompts.rs` 是
   白名单与原子语义的唯一权威，Gateway 仅做透明反代（[protocols/zh/http.md §5.6](../../protocols/zh/http.md#56-包级-llm-prompt-覆盖-prompts)）。
 - Live reload 只覆盖 `compaction / fallback / search / title / compact-template`
-  这 5 个 runtime 内调用点；grafeo / memory 的 4 个常量是模块级 `&'static str`，
+  这 5 个 runtime 内调用点；SQLite 记忆层 / memory 的 4 个常量是模块级 `&'static str`，
   重新加载需重启 Runtime（ADR-063 §6.1 已记录此限制）。
 
 ### 3.2 循环检测策略
@@ -700,7 +700,7 @@ Permission Check 通过 → Approval Gate 检查
 | Rate Limit 分层 | 区分可重试限流 / 不可重试余额不足 | 避免对余额不足的错误做无意义重试 |
 | Streaming + tool_calls | 检测到 tool_calls 立即中断 streaming | 标准 streaming + function calling 处理模式（OpenAI/Anthropic SDK 均采用），已输出的 text 暂存到历史 |
 | Autobiographical 压缩 | History Manager 规则引擎合并（零 LLM 调用） | Phase 1 用确定性合并（拼接+去重+截断），避免额外 API 成本；Phase 3 升级为 LLM 语义摘要 |
-| 记忆接入方式 | MemoryManager 生命周期阶段调用（RXT-01/02） | Runtime 不直接调用 Grafeo，通过 trait 接入，记忆迭代不影响 Runtime |
+| 记忆接入方式 | MemoryManager 生命周期阶段调用（RXT-01/02） | Runtime 不直接调用 SQLite 记忆层，通过 trait 接入，记忆迭代不影响 Runtime |
 
 ### 设计演进记录
 
@@ -715,7 +715,7 @@ Permission Check 通过 → Approval Gate 检查
 | v3.4 | 主循环记忆触发点改为 MemoryManager 生命周期阶段调用 | Runtime 可扩展性设计准则 |
 | v3.4 | 新增 §9 Runtime 可扩展性设计准则 + 紧耦合审计 | 架构审查 |
 | v3.7 | 上下文压缩策略大幅简化：移除所有程序化折叠，改为三阶段 LLM 驱动 | ADR-010 |
-| v3.9 | Compaction 与 Distillation 统一（摘要即蒸馏），移除每轮 Grafeo 写入，SessionState 新增 is_compacted 标志 | ADR-011 |
+| v3.9 | Compaction 与 Distillation 统一（摘要即蒸馏），移除每轮 SQLite 记忆层 写入，SessionState 新增 is_compacted 标志 | ADR-011 |
 
 ## 9. Runtime 可扩展性设计准则
 
@@ -740,8 +740,8 @@ Permission Check 通过 → Approval Gate 检查
 
 | 模块 | 紧耦合点 | 风险等级 | 状态 | 说明 |
 |------|---------|---------|------|------|
-| **Memory** | Runtime 直接调用 Grafeo hybrid_search / graph_expand | 🔴 高 | ✅ 已修复（v3.4） | 改为 MemoryManager 生命周期阶段调用，详见 05-memory.md §10 |
-| **Memory** | Grafeo 与 rusqlite 紧耦合 | 🟡 中 | ✅ 已修复（v3.4） | 引入 MemoryStore trait，GrafeoStore 作为实现 |
+| **Memory** | Runtime 直接调用 SQLite 记忆层 hybrid_search / graph_expand | 🔴 高 | ✅ 已修复（v3.4） | 改为 MemoryManager 生命周期阶段调用，详见 05-memory.md §10 |
+| **Memory** | SQLite 记忆层 与 rusqlite 紧耦合 | 🟡 中 | ✅ 已修复（v3.4） | 引入 MemoryStore trait，SqliteStore 作为实现 |
 | **Memory** | 遗忘参数硬编码（λ=0.03, FLOOR=0.05 等） | 🟡 中 | ✅ 已修复（v3.4） | DecayConfig 参数化，通过 manifest 注入 |
 | **Tool Dispatch** | Tool Dispatcher 直接匹配 tool_name 字符串路由 | 🟡 中 | 📋 待 Phase 2 | 未来考虑 Tool trait + ToolRegistry 注册机制 |
 | **LLM Client** | LLM Provider 切换硬编码在 routing 表 | 🟢 低 | 📋 可接受 | Provider 差异大，trait 抽象收益有限，当前 routing 表已足够灵活 |

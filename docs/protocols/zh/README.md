@@ -1,4 +1,4 @@
-# ACowork.AI 协议文档（纲要）
+﻿# ACowork.AI 协议文档（纲要）
 
 > 本目录是 ACowork.AI Gateway 的 API 使用参考。当前架构采用 **两种协议**：
 >
@@ -43,7 +43,7 @@ graph LR
         RMQTT["mqtt/client.rs<br/>(rumqttc)"]
         RSVR["localhost HTTP server<br/>:random"]
         LOOP["AgentLoop / Skill / Tool"]
-        MEM["Memory Grafeo"]
+        MEM["Memory (SQLite)"]
     end
 
     UI -->|"HTTP REST"| HTTP

@@ -1,4 +1,4 @@
-# Debug Protocol
+﻿# Debug Protocol
 
 > Version: v3.2 | Last Updated: 2026-04-16
 
@@ -571,7 +571,7 @@ Runtime: ReloadSkills handler
    ├─ Re-parse YAML frontmatter + Markdown body
    ├─ Update Skill Loader cache
    ├─ Invalidate Skill Experience association
-   └─ Optionally: Re-load SkillExperience from Grafeo
+   └─ Optionally: Re-load SkillExperience from SQLite memory layer
        │
        ▼
 Runtime: Returns reloaded skills list

@@ -1,4 +1,4 @@
-# ACowork Platform Requirements Definition
+﻿# ACowork Platform Requirements Definition
 
 > Version: v1.6 | Updated: 2026-08-15
 >
@@ -55,7 +55,7 @@ The developer toolchain is complete: `acowork-sign` (with `keygen / sign / verif
 | PKG‑06 | Provide a signing toolchain (`acowork-sign` with `keygen / sign / verify` subcommands) | P1 | Developer self‑signing workflow |
 | PKG‑07 | Provide Debug signing mode (local development auto‑signing) | P1 | Lower development barrier |
 | PKG‑08 | Support remote repositories (multiple HTTP sources, periodic update checks) | P2 | Ecosystem distribution – **not implemented**, planned Phase 6 |
-| PKG‑08a | Repository listing security scan: six‑dimensional automated scan (Manifest/Prompt/Skill/WASM/Grafeo/Structure) with Pass/Warn/Reject | P2 | Publishing‑side security gate – **not implemented**, depends on PKG‑08 |
+| PKG‑08a | Repository listing security scan: six‑dimensional automated scan (Manifest/Prompt/Skill/WASM/Memory/Structure) with Pass/Warn/Reject | P2 | Publishing‑side security gate – **not implemented**, depends on PKG‑08 |
 | PKG‑09 | Support dual‑key model (Upload Key + Distribution Key) | P3 | Store distribution – **not implemented**, planned Phase 6+ |
 | PKG‑10 | Support key rotation (Proof‑of‑Rotation) | P3 | Long‑term operations – **not implemented**, Phase 6+ |
 | PKG‑11 | Support Certificate Revocation Lists (CRL) | P3 | Security incident response – **not implemented**, Phase 6+ |
@@ -96,7 +96,7 @@ The developer toolchain is complete: `acowork-sign` (with `keygen / sign / verif
 
 | ID | Requirement | Priority | Notes |
 |----|-------------|----------|-------|
-| MEM‑01 | Each Agent owns a completely independent private Grafeo; no shared database | P0 | Data isolation baseline |
+| MEM‑01 | Each Agent owns a completely independent private SQLite memory layer (`memory/private.sqlite`); no shared database | P0 | Data isolation baseline |
 | MEM‑02 | Three layers, five types biomimetic hierarchy: Transient (working memory) → Episodic (experience) → Consolidated (semantic + procedural + autobiographical) | P0 | Biomimetic memory architecture |
 | MEM‑03 | Immediate extraction: LLM autonomously decides via `memory_store` tool whether to store, zero extra API cost | P0 | Core mechanism for memory accumulation |
 | MEM‑04 | Forgetting: graded decay model – ① background periodic scan (`run_decay_scan`) computes decay_score = importance × activity_signal, nodes below threshold move Active→Dormant; ② Dormant nodes automatically Purge after expiry; ③ capacity pressure triggers eviction (lowest decay_score first). Background scan non‑blocking, scheduled by Gateway Cron, scanning granularity by label batches | P1 | Prevent memory bloat |
@@ -104,9 +104,9 @@ The developer toolchain is complete: `acowork-sign` (with `keygen / sign / verif
 | MEM‑06 | Autobiographical memory: six‑dimensional self‑perception, auto‑derived from manifest, injected into System Prompt | P1 | Agent self‑perception |
 | MEM‑07 | Procedural memory: common behavioural patterns across Skills | P2 | Self‑learning capability |
 | MEM‑08 | Privacy grading: PrivacyLevel (Public/Personal/Sensitive), automatically determined by LLM. Controls whether a node is included when packaging/sharing – Personal/Sensitive nodes are stripped on export, Public nodes retained. In‑context data cannot be technically access‑controlled, only constrained via prompt conventions | P1 | Packaging‑boundary privacy protection |
-| MEM‑09 | Offline consolidation: triggers dedicated LLM calls during idle time to distill Episodic layer to Consolidated layer | P3 | Memory quality improvement – `acowork-grafeo/src/consolidation/` (`offline.rs`/`scheduler.rs`/`generalization.rs`/`triple_extraction.rs`) has skeleton and scheduling framework; Runtime `memory/consolidation_bg.rs` provides `ConsolidationBgTask` entry point. Full LLM‑driven offline consolidation still pending Phase 6 activation |
-| MEM‑10 | Grafeo full‑Zone cross‑device sync (platform‑hosted cleartext, consistent multi‑device experience). enterprise Zone renamed to work Zone (personal work memory, unrelated to enterprise RAG). Privacy grading and sync strategy are fully decoupled – PrivacyLevel controls packaging boundary (whether Personal/Sensitive data is stripped on sharing), Zone serves only as semantic packaging boundary, not sync scope | P1 | Multi‑device sync – MemoryStore currently local only (Grafeo files under `{agent_home}/data/grafeo/`), **cloud sync not implemented**. Cloud Sync and enterprise MemStore planned Phase 6 together |
-| MEM‑11 | Content‑type compression: artifact content (code/files/command output) stores only summary + ArtifactRef reference | P1 | Prevent Grafeo bloat |
+| MEM‑09 | Offline consolidation: triggers dedicated LLM calls during idle time to distill Episodic layer to Consolidated layer | P3 | Memory quality improvement – `acowork-sqlite/src/consolidation/` (`offline.rs`/`scheduler.rs`/`generalization.rs`/`triple_extraction.rs`) has skeleton and scheduling framework; Runtime `memory/consolidation_bg.rs` provides `ConsolidationBgTask` entry point. Full LLM‑driven offline consolidation still pending Phase 6 activation |
+| MEM‑10 | SQLite memory layer full‑Zone cross‑device sync (platform‑hosted cleartext, consistent multi‑device experience). enterprise Zone renamed to work Zone (personal work memory, unrelated to enterprise RAG). Privacy grading and sync strategy are fully decoupled – PrivacyLevel controls packaging boundary (whether Personal/Sensitive data is stripped on sharing), Zone serves only as semantic packaging boundary, not sync scope | P1 | Multi‑device sync – MemoryStore currently local only (`memory/private.sqlite`), **cloud sync not implemented**. Cloud Sync and enterprise MemStore planned Phase 6 together |
+| MEM‑11 | Content‑type compression: artifact content (code/files/command output) stores only summary + ArtifactRef reference | P1 | Prevent SQLite 记忆层 bloat |
 | MEM‑12 | Embedding generation: Ollama local (`/api/embed`) → Remote API (`/embeddings`) fallback chain, `MemoryManager.retrieve()` internally times out at 200ms auto‑generate | P1 | Vector retrieval prerequisite |
 
 ### 1.5 Tool System
@@ -159,9 +159,9 @@ The developer toolchain is complete: `acowork-sign` (with `keygen / sign / verif
 
 | ID | Requirement | Priority | Notes |
 |----|-------------|----------|-------|
-| SKL‑01 | Two‑layer model: SKILL.md (static definition) + Grafeo (dynamic experience) – Phase 2 completes SKILL.md parsing, agentskills.io compatibility deferred to Phase 3 | P0 | Skill architecture foundation |
+| SKL‑01 | Two‑layer model: SKILL.md (static definition) + SQLite 记忆层 (dynamic experience) – Phase 2 completes SKILL.md parsing, agentskills.io compatibility deferred to Phase 3 | P0 | Skill architecture foundation |
 | SKL‑02 | SKILL.md compatible with agentskills.io open standard | P2 | Reuse community skills – deferred to Phase 3 |
-| SKL‑03 | Debug workflow: Agent creates draft in Grafeo → Debug mode trial run → user confirmation → commit to SKILL.md | P2 | Skill development loop – depends on Debug Protocol (Phase 5), recommend simple SKILL.md hot‑load by end of Phase 2 |
+| SKL‑03 | Debug workflow: Agent creates draft in SQLite 记忆层 → Debug mode trial run → user confirmation → commit to SKILL.md | P2 | Skill development loop – depends on Debug Protocol (Phase 5), recommend simple SKILL.md hot‑load by end of Phase 2 |
 | SKL‑04 | Self‑learning loop: after publication, accumulated experience reaches threshold prompting user to update SKILL.md | P2 | Continuous improvement |
 | SKL‑05 | Model compatibility: SkillExecution records model info, SkillExperience aggregates by model, runtime auto‑injects adaptation instructions | P2 | Cross‑model portability |
 
@@ -316,7 +316,7 @@ Full endpoint matrix see [ADR‑034 §11.1](docs/adr/zh/ADR-034-mqtt-http-bounda
 | SEC‑06 | Sandbox hardening – Linux uses bubblewrap + seccomp-bpf | P2 | Deep isolation – deferred to Phase 7 (ADR‑007) |
 | SEC‑07 | API Keys not distributed via environment variables, transmitted once via socket | P0 | Prevent ps/procfs leakage |
 | SEC‑08 | Shell command risk grading + file provenance tracking + audit logs | P3 | Runtime‑layer Shell security – deferred to Phase 3 |
-| SEC‑09 | Agent repository listing security scan: manifest compliance + Prompt/Skill behaviour analysis + WASM binary scan + Grafeo memory scan + package structure compliance | P2 | Publishing‑side security gate, forming defence in depth with runtime security |
+| SEC‑09 | Agent repository listing security scan: manifest compliance + Prompt/Skill behaviour analysis + WASM binary scan + SQLite 记忆层 memory scan + package structure compliance | P2 | Publishing‑side security gate, forming defence in depth with runtime security |
 
 ### 1.11 Desktop App
 
@@ -348,7 +348,7 @@ Full endpoint matrix see [ADR‑034 §11.1](docs/adr/zh/ADR-034-mqtt-http-bounda
 **Design principles**:
 
 - **Pure integration, no hosting**: ACowork does not operate RAG services; knowledge belongs to enterprises. ACowork defines a standard query protocol (request/response JSON Schema); enterprise RAG systems adapt to this protocol; ACowork does not implement adapters for each vendor.
-- **Isolation first**: local Grafeo (personal memory) and enterprise RAG (collective knowledge) are two independent retrieval channels, non‑interfering.
+- **Isolation first**: local SQLite 记忆层 (personal memory) and enterprise RAG (collective knowledge) are two independent retrieval channels, non‑interfering.
 - **Configuration‑driven Opt‑In**: RAG is not a default capability; it is enabled only when Agent manifest declares `[[tools]] type = "rag"`; Agents without RAG declaration behave exactly as without RAG, zero intrusion.
 - **Hybrid dual‑trigger**: automatic trigger (MemoryManager Retrieve phase) + explicit trigger (LLM tool_call), both driven by manifest configuration.
 
@@ -356,7 +356,7 @@ Full endpoint matrix see [ADR‑034 §11.1](docs/adr/zh/ADR-034-mqtt-http-bounda
 
 | Channel | Storage | Content | Ownership |
 |---------|---------|---------|-----------|
-| Local memory channel | Grafeo (graph database) | Personal preferences, interaction history, autobiographical, episodic, semantic consolidation | User local |
+| Local memory channel | SQLite 记忆层 (graph database) | Personal preferences, interaction history, autobiographical, episodic, semantic consolidation | User local |
 | Enterprise knowledge channel | Enterprise self‑hosted RAG | Product documentation, business processes, industry knowledge, internal norms | Enterprise owned |
 
 Agents retrieve memory by querying both channels in parallel; results are source‑tagged and concatenated into the LLM context. LLM can reference both personal experience and enterprise knowledge, but privacy boundaries and ownership remain clear: personal stays personal, enterprise stays enterprise.
@@ -370,7 +370,7 @@ Agents retrieve memory by querying both channels in parallel; results are source
 
 Automatic results are injected as "background context"; explicit tool results are appended to History as "tool return values". They occupy different positions in context with non‑overlapping semantics.
 
-Agents without RAG declaration: `MemoryManager.retrieve()` only queries Grafeo channel; Tool Dispatcher does not register RAG tools; behaviour is identical to RAG‑less Agents.
+Agents without RAG declaration: `MemoryManager.retrieve()` only queries SQLite 记忆层 channel; Tool Dispatcher does not register RAG tools; behaviour is identical to RAG‑less Agents.
 
 #### 1.13.2 RAG Tool Definition
 
@@ -386,7 +386,7 @@ Agents without RAG declaration: `MemoryManager.retrieve()` only queries Grafeo c
 
 #### 1.13.3 Architectural Boundary
 
-Enterprise RAG integration is strictly limited to the retrieval channel; it is not unified upward into the Memory system abstraction layer. Reason: Grafeo is a graph database (supports associative diffusion, decay forgetting), while RAG is vector retrieval (batch queries, stateless). Their query paradigms and storage models are completely different. Forcing a unified abstraction introduces unnecessary complexity, and multi‑tenant isolation and data write permissions of enterprise RAG are incompatible with Grafeo's model.
+Enterprise RAG integration is strictly limited to the retrieval channel; it is not unified upward into the Memory system abstraction layer. Reason: SQLite memory layer is a relational store (nodes / edges / vectors with application-layer multi-hop and decay forgetting), while RAG is vector retrieval (batch queries, stateless). Their query paradigms and storage models are completely different. Forcing a unified abstraction introduces unnecessary complexity, and multi‑tenant isolation and data write permissions of enterprise RAG are incompatible with the local memory model's privacy boundary.
 
 Enterprise RAG integration belongs to the "enterprise Agent development paradigm", does not require all Agents to support RAG, and is not part of ACowork core platform feature commitments. RAG is enabled only when manifest declares it; Runtime behaviour is configuration‑driven.
 
@@ -409,7 +409,7 @@ Enterprise RAG integration belongs to the "enterprise Agent development paradigm
 | ID | Requirement | Target |
 |----|-------------|--------|
 | REL‑01 | Agent process crash does not affect other Agents | Process‑level isolation guarantee |
-| REL‑02 | Agent state not lost after crash | Private Grafeo persistence |
+| REL‑02 | Agent state not lost after crash | Private SQLite 记忆层 persistence |
 | REL‑03 | LLM Provider failure auto‑fallback | Multi‑Provider + retry mechanism |
 | REL‑04 | Conversation writes not lost | WAL + write queue + timeout degraded retry |
 
@@ -420,13 +420,13 @@ Enterprise RAG integration belongs to the "enterprise Agent development paradigm
 | SECR‑01 | `.agent` package unsigned or invalid signature → reject installation | Mandatory verification on install |
 | SECR‑02 | API Keys not leaked to process arguments or environment variables | One‑time socket distribution |
 | SECR‑03 | WASM tools cannot escalate privileges | Wasmtime + WASI Preview 2 |
-| SECR‑04 | Inter‑Agent data invisible by default | Private Grafeo + process isolation |
+| SECR‑04 | Inter‑Agent data invisible by default | Private SQLite 记忆层 + process isolation |
 
 ### 2.4 Maintainability
 
 | ID | Requirement | Target |
 |----|-------------|--------|
-| MNT‑01 | Rust workspace modular (**13 crates**) | acowork‑core / acowork‑embed / acowork‑gateway / acowork‑grafeo / acowork‑lsp‑relay / acowork‑mcp / acowork‑memory / acowork‑mqtt‑session / acowork‑node / acowork‑runtime / acowork‑sign / acowork‑tool‑sdk / acowork‑vault |
+| MNT‑01 | Rust workspace modular (**13 crates**) | acowork‑core / acowork‑embed / acowork‑gateway / acowork‑SQLite 记忆层 / acowork‑lsp‑relay / acowork‑mcp / acowork‑memory / acowork‑mqtt‑session / acowork‑node / acowork‑runtime / acowork‑sign / acowork‑tool‑sdk / acowork‑vault |
 | MNT‑02 | Configuration‑driven – Agent behaviour defined by manifest + prompt, no code changes needed | Declarative architecture guarantee |
 | MNT‑03 | ADRs record all major technical decisions | Each design document includes decision record table |
 
@@ -524,7 +524,7 @@ RUN‑04~06, RUN‑10~12, RUN‑13a, MEM‑04~06, MEM‑08, MEM‑10~12, TOL‑0
 
 ### 5.1 Personal User Daily Scenario
 
-User installs a Weather Agent and a Calendar Agent (or packages themselves). Every morning at 7, Weather Agent via cron auto‑fetches weather, sends Intent to Calendar Agent to create a reminder (e.g., "bring umbrella"). Weather Agent remembers user city in its private Grafeo, no need to ask each time.
+User installs a Weather Agent and a Calendar Agent (or packages themselves). Every morning at 7, Weather Agent via cron auto‑fetches weather, sends Intent to Calendar Agent to create a reminder (e.g., "bring umbrella"). Weather Agent remembers user city in its private SQLite memory, no need to ask each time.
 
 ### 5.2 Developer Creates Agent Scenario
 
@@ -540,11 +540,11 @@ User uses the same `.agent` package on mobile. Shell tool unavailable, file oper
 
 ### 5.5 Enterprise Agent Scenario
 
-An enterprise develops a "Sales Assistant Agent" with manifest declaring `[[tools]] type = "rag"` pointing to their internal Qdrant RAG service (product knowledge base, sales scripts, compliance docs). User installs and converses in Desktop App; Agent queries both local Grafeo (user preferences, history) and enterprise RAG (product specs, competitor comparisons, compliance points), then gives an answer. RAG service is operated by the enterprise; ACowork platform touches no enterprise data; user growth imposes zero load on ACowork cloud.
+An enterprise develops a "Sales Assistant Agent" with manifest declaring `[[tools]] type = "rag"` pointing to their internal Qdrant RAG service (product knowledge base, sales scripts, compliance docs). User installs and converses in Desktop App; Agent queries both local SQLite 记忆层 (user preferences, history) and enterprise RAG (product specs, competitor comparisons, compliance points), then gives an answer. RAG service is operated by the enterprise; ACowork platform touches no enterprise data; user growth imposes zero load on ACowork cloud.
 
 ### 5.6 Agent Packaging and Sharing Scenario
 
-User shares their well‑tuned "Personal Assistant Agent" with a friend. On packaging, PrivacyLevel filtering automatically strips Personal/Sensitive nodes (friend cannot see original user's preferences, history, private conversations). The exported Agent retains: SkillIteration self‑learned by the Agent (capability), ProceduralNode (general behavioural patterns), and AutobiographicalNode about the Agent itself (style, expertise). Friend installs; Agent runs on a fresh Grafeo, memory empty, starts accumulating from scratch.
+User shares their well‑tuned "Personal Assistant Agent" with a friend. On packaging, PrivacyLevel filtering automatically strips Personal/Sensitive nodes (friend cannot see original user's preferences, history, private conversations). The exported Agent retains: SkillIteration self‑learned by the Agent (capability), ProceduralNode (general behavioural patterns), and AutobiographicalNode about the Agent itself (style, expertise). Friend installs; Agent runs on a fresh SQLite memory layer, memory empty, starts accumulating from scratch.
 
 ---
 
@@ -556,17 +556,17 @@ User shares their well‑tuned "Personal Assistant Agent" with a friend. On pack
 | `.agent` package | Declarative archive containing configuration, prompts, Skills, tool declarations, no executables |
 | Agent Runtime | Platform's single binary that loads and executes `.agent` packages |
 | Gateway | Always‑on system process managing Agent lifecycle and cross‑Agent coordination |
-| Grafeo | Agent‑private graph database storing layered memory |
+| SQLite 记忆层 | Agent‑private graph database storing layered memory |
 | Intent | Cross‑Agent message, analogous to Android Intent |
-| Skill | Extension of Agent behavioural patterns, with static definition layer (SKILL.md) and dynamic experience layer (Grafeo) |
+| Skill | Extension of Agent behavioural patterns, with static definition layer (SKILL.md) and dynamic experience layer (SQLite 记忆层) |
 | System Agent | `com.acowork.system`, built‑in Agent providing system‑level services like identity management |
 | Vault | Encrypted API Key storage service inside Gateway |
 | ContentProvider | Read‑only data service provided by System Agent, queried by other Agents via Intent |
 | identity_deps | Identity dependency fields declared by Agent, injected by Gateway at startup |
 | Platform Key | Platform‑issued signing key for System Agents |
 | Enterprise RAG | Enterprise self‑hosted RAG knowledge service; Agent connects via standard `rag` tool, no ACowork cloud relay |
-| Dual‑channel retrieval | Agent simultaneously queries local Grafeo and enterprise RAG |
-| work Zone | Memory partition in Grafeo's Consolidated layer for personal work‑related memory (formerly enterprise Zone), unrelated to ACowork enterprise RAG |
+| Dual‑channel retrieval | Agent simultaneously queries local SQLite 记忆层 and enterprise RAG |
+| work Zone | Memory partition in SQLite's `nodes` Consolidated layer for personal work‑related memory (formerly enterprise Zone), unrelated to ACowork enterprise RAG |
 | PrivacyLevel | Node‑level privacy marker (Public/Personal/Sensitive), controls whether node is included when packaging/sharing, decoupled from sync strategy |
 
 ---
@@ -595,7 +595,7 @@ All Architecture Decision Records have been extracted from this PRD and placed i
 | ID | Priority | Current Status | Planned Phase | Notes |
 |----|----------|----------------|---------------|-------|
 | PKG‑08 | P2 | ❌ Not implemented | Phase 6 | Remote repositories (multiple HTTP sources, periodic updates) not yet implemented. Current Agents only support local `.agent` package installation |
-| PKG‑08a | P2 | ❌ Not implemented | Phase 6 | Repository listing security scan (Manifest/Prompt/Skill/WASM/Grafeo/Structure six dimensions) |
+| PKG‑08a | P2 | ❌ Not implemented | Phase 6 | Repository listing security scan (Manifest/Prompt/Skill/WASM/Memory/Structure six dimensions) |
 | PKG‑09 | P3 | ❌ Not implemented | Phase 6+ | Dual‑key model (Upload Key + Distribution Key) |
 | PKG‑10 | P3 | ❌ Not implemented | Phase 6+ | Key rotation (Proof‑of‑Rotation) |
 | PKG‑11 | P3 | ❌ Not implemented | Phase 6+ | Certificate Revocation List (CRL) |
@@ -615,7 +615,7 @@ All Architecture Decision Records have been extracted from this PRD and placed i
 | ID | Priority | Current Status | Planned Phase | Notes |
 |----|----------|----------------|---------------|-------|
 | SKL‑02 | P2 | ⚠️ Partial | Phase 3 | SKILL.md YAML frontmatter + Markdown body parsing implemented (`core/acowork-runtime/src/skills/parser.rs`), but **full agentskills.io standard compatibility** deferred to Phase 3 |
-| SKL‑03 | P2 | ❌ Not implemented | Phase 6 | Skill debug workflow (Grafeo draft → Debug mode → SKILL.md commit). Debug Panel delivered but end‑to‑end not connected |
+| SKL‑03 | P2 | ❌ Not implemented | Phase 6 | Skill debug workflow (SQLite 记忆层 draft → Debug mode → SKILL.md commit). Debug Panel delivered but end‑to‑end not connected |
 | SKL‑04 | P2 | ❌ Not implemented | Phase 6+ | Self‑learning loop (SkillExperience threshold → prompt to update SKILL.md) |
 | SKL‑05 | P2 | ❌ Not implemented | Phase 6+ | SkillExecution model compatibility (experience aggregation by model, auto‑injected adaptation instructions) |
 
@@ -659,8 +659,8 @@ All Architecture Decision Records have been extracted from this PRD and placed i
 
 | ID | Priority | Current Status | Planned Phase | Notes |
 |----|----------|----------------|---------------|-------|
-| MEM‑09 | P3 | ⚠️ Partial | Phase 3+ | Offline consolidation skeleton in place (`acowork-grafeo/src/consolidation/` + Runtime `consolidation_bg.rs`), **full LLM‑driven offline consolidation** not activated |
-| MEM‑10 | P1 | ❌ Not implemented | Phase 6 | Grafeo Cloud Sync. Current MemoryStore is local only (Grafeo files under `{agent_home}/data/grafeo/`), no cloud sync. Phase 6 together with RemoteMemoryStore (enterprise‑grade memory upgrade) |
+| MEM‑09 | P3 | ⚠️ Partial | Phase 3+ | Offline consolidation skeleton in place (`acowork-sqlite/src/consolidation/` + Runtime `consolidation_bg.rs`), **full LLM‑driven offline consolidation** not activated |
+| MEM‑10 | P1 | ❌ Not implemented | Phase 6 | SQLite memory layer Cloud Sync. Current MemoryStore is local only (`memory/private.sqlite`), no cloud sync. Phase 6 together with RemoteMemoryStore (enterprise‑grade memory upgrade) |
 
 ### A.10 Developer Experience (§2.6)
 

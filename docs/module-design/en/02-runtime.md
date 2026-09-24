@@ -1,4 +1,4 @@
-# acowork-runtime — Agent Runtime
+﻿# acowork-runtime — Agent Runtime
 
 **Position**: Unified binary that loads .agent package and executes Agent logic. Each Agent is an independent process.
 
@@ -52,7 +52,7 @@ crates/acowork-runtime/
     │   │   ├── image_gen.rs       # text-to-image (fal.ai)
     │   │   ├── llm_task.rs        # LLM sub-call (no tools, pure text/JSON)
     │   │   └── identity_query.rs  # query identity from system Agent (ACowork-specific)
-    │   ├── memory/                # === Memory tools (Grafeo backend) ===
+    │   ├── memory/                # === Memory tools (SqliteStore backend) ===
     │   │   ├── mod.rs
     │   │   ├── memory_store.rs    # store memory
     │   │   ├── memory_recall.rs   # retrieve memory
@@ -139,7 +139,7 @@ crates/acowork-runtime/
     │   └── node.rs                # Node device capability tool
     ├── memory/
     │   ├── mod.rs                 # Memory facade
-    │   ├── grafeo_client.rs       # Grafeo read/write wrapper
+    │   ├── sqlite_store.rs       # SqliteStore read/write wrapper
     │   ├── embedding/              # Embedding provider (Ollama + Remote fallback chain)
     │   ├── session_handle.rs       # MemorySessionHandle shared state
     ├── skills/
@@ -266,7 +266,7 @@ fn build_tool_registry(manifest: &AgentManifest, all_tools: Vec<Arc<dyn Tool>>) 
 | Category | ACowork Directory | Tool Count | Phase 1 Implemented |
 |----------|-------------------|------------|---------------------|
 | Core Builtin | `builtin/` | 17 | ✅ 13 (weather/git/pdf/screenshot/image series moved to WASM or Agent built-in) |
-| Memory | `memory/` | 5 | ✅ Implemented (Grafeo backend) |
+| Memory | `memory/` | 5 | ✅ Implemented (SqliteStore backend) |
 | Scheduled tasks | `schedule/` | 7 | ❌ Phase 2 |
 | Third-party integration | `integration/` | 8 | ❌ Provided by independent Agents |
 | Agent collaboration | `agent/` | 6 | ✅ intent_send/receive implemented, others Phase 2 |
@@ -328,7 +328,7 @@ impl DevModeController {
 ## Dependencies
 
 - `acowork-core` — shared types
-- `acowork-grafeo` — private Memory (dimension dynamically injected via `GrafeoConfig.embedding_dim`)
+- `acowork-sqlite` — private Memory (dimension recorded in `meta.embedding_dim` at `SqliteStore::from_connection` time)
 - `acowork-vault` — not directly depended on, Key obtained via IPC from Gateway
 - `tokio`, `reqwest`, `clap`, `serde_json`
 - `wasmtime` (feature-gated: `wasm-tools`)

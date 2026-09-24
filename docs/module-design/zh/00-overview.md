@@ -1,4 +1,4 @@
-# ACowork-AI 模块设计 — 总览
+﻿# ACowork-AI 模块设计 — 总览
 
 > 版本：v1.2 | 更新日期：2026-04-16
 
@@ -10,7 +10,7 @@
 
 1. **二进制边界 = Crate 边界**：Gateway 和 Agent Runtime 是不同进程，必须有独立 crate
 2. **共享类型独立 crate**：协议消息、manifest 结构等被多个 crate 使用的类型，放入 `acowork-core`
-3. **重型依赖隔离**：Grafeo（图数据库 + ONNX Runtime）、WASM 运行时等重型依赖，封装在独立 crate 中以便条件编译和交叉编译
+3. **重型依赖隔离**：WASM 运行时（`wasmtime`）、ONNX Runtime（`acowork-embed`）等重型依赖，封装在独立 crate 中以便条件编译和交叉编译
 4. **可测试性**：每个 crate 可独立测试，不依赖其他 crate 的运行时
 
 ---
@@ -25,7 +25,7 @@ acowork-ai/
 │   ├── acowork-memory/          # MemoryStore trait + 共享记忆类型（v3.4 新增）
 │   ├── acowork-runtime/         # Agent Runtime 二进制 + 库
 │   ├── acowork-gateway/         # Gateway 二进制 + 库
-│   ├── acowork-grafeo/          # Grafeo 图数据库引擎（实现 MemoryStore trait）
+│   ├── acowork-sqlite/          # SQLite 记忆层 图数据库引擎（实现 MemoryStore trait）
 │   ├── acowork-vault/           # 密钥加密存储
 │   └── acowork-sign/            # .agent 包签名/验签工具
 ├── apps/
@@ -47,7 +47,7 @@ members = [
     "crates/acowork-memory",
     "crates/acowork-runtime",
     "crates/acowork-gateway",
-    "crates/acowork-grafeo",
+    "crates/acowork-sqlite",
     "crates/acowork-vault",
     "crates/acowork-sign",
     "apps/acowork-desktop",
@@ -110,7 +110,7 @@ uuid = { version = "1.22", features = ["v4", "std"] }
 
 # 内部 crate 引用
 acowork-core = { path = "crates/acowork-core" }
-acowork-grafeo = { path = "crates/acowork-grafeo" }
+acowork-sqlite = { path = "crates/acowork-sqlite" }
 acowork-vault = { path = "crates/acowork-vault" }
 acowork-sign = { path = "crates/acowork-sign" }
 ```
@@ -121,6 +121,6 @@ acowork-sign = { path = "crates/acowork-sign" }
 > - [01-core.md](01-core.md) — acowork-core：共享类型与协议
 > - [02-runtime.md](02-runtime.md) — acowork-runtime：Agent Runtime
 > - [03-gateway.md](03-gateway.md) — acowork-gateway：Gateway
-> - [04-grafeo.md](04-grafeo.md) — acowork-grafeo：Grafeo 图数据库引擎
+> - [04-sqlite.md](04-sqlite.md) — acowork-sqlite：SQLite 记忆层 图数据库引擎
 > - [05-vault-sign.md](05-vault-sign.md) — acowork-vault + acowork-sign
 > - [06-architecture.md](06-architecture.md) — 依赖关系、数据流、路线图、编译产物、测试策略

@@ -1,4 +1,4 @@
-# Tool System（工具系统）
+﻿# Tool System（工具系统）
 
 > 版本：v3.4 | 更新日期：2026-04-16
 
@@ -31,8 +31,8 @@ Tool Dispatcher
 
 | 工具名                 | 功能                             | 所需权限                  | 说明                                                                                                                                                                                                                      |
 | ---------------------- | -------------------------------- | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `memory_recall`        | 语义检索私有 Grafeo              | `memory:read`             | 混合检索（HNSW + BM25）+ 关联扩散（1-2 跳图扩展），返回相关记忆片段                                                                                                                                                       |
-| `memory_store`         | 写入私有 Grafeo                  | `memory:write`            | 即时提取 Tool Call 机制：LLM 自主判断是否调用，支持 Fact/Preference/Relation/Procedural/Autobiographical 五种类型，带 importance（0-1）和 privacy（Public/Personal/Sensitive）参数。Fact 按 (subject, predicate) 语义去重 |
+| `memory_recall`        | 语义检索私有 SQLite 记忆层              | `memory:read`             | 混合检索（HNSW + BM25）+ 关联扩散（1-2 跳图扩展），返回相关记忆片段                                                                                                                                                       |
+| `memory_store`         | 写入私有 SQLite 记忆层                  | `memory:write`            | 即时提取 Tool Call 机制：LLM 自主判断是否调用，支持 Fact/Preference/Relation/Procedural/Autobiographical 五种类型，带 importance（0-1）和 privacy（Public/Personal/Sensitive）参数。Fact 按 (subject, predicate) 语义去重 |
 | `http_request`         | HTTP 请求（GET/POST/PUT/DELETE） | `network:<url_pattern>`   | 支持 method 参数选择 HTTP 方法，JSON 响应自动解析，JSON body 和表单                                                                                                                                                       |
 | `web_fetch`            | 获取网页内容                     | `network:<url_pattern>`   | HTML → Markdown 转换，Agent 直接获得可读文本                                                                                                                                                                              |
 | `web_search`           | 网页搜索                         | `search:web`              | 调用搜索引擎 API，返回结构化结果；API Key 由 Vault 分发                                                                                                                                                                   |
@@ -344,9 +344,9 @@ fn execute(input: ToolInput) -> Result<ToolOutput, ToolError> {
 
 ## 4. RAG Tools（企业知识库接入）
 
-RAG 工具让 Agent 对接企业自建的 RAG 知识库，实现"双通道检索"——本地 Grafeo（个人记忆）和企业 RAG（集体知识）并行查询，结果拼接送入 LLM 上下文。ACowork 不托管 RAG 服务，只定义标准查询协议（请求/响应 JSON Schema），企业 RAG 自行适配此协议（详见 00-prd.md §1.13）。
+RAG 工具让 Agent 对接企业自建的 RAG 知识库，实现"双通道检索"——本地记忆层（个人记忆）和企业 RAG（集体知识）并行查询，结果拼接送入 LLM 上下文。ACowork 不托管 RAG 服务，只定义标准查询协议（请求/响应 JSON Schema），企业 RAG 自行适配此协议（详见 00-prd.md §1.13）。
 
-**配置驱动 Opt-In**：RAG 不是默认能力，仅当 manifest 声明 `[[tools]] type = "rag"` 时使能。无 RAG 声明的 Agent，Tool Dispatcher 不注册 RAG 工具，MemoryManager.retrieve() 仅查 Grafeo 通道，行为与无 RAG 完全一致。
+**配置驱动 Opt-In**：RAG 不是默认能力，仅当 manifest 声明 `[[tools]] type = "rag"` 时使能。无 RAG 声明的 Agent，Tool Dispatcher 不注册 RAG 工具，MemoryManager.retrieve() 仅查 SQLite 记忆通道，行为与无 RAG 完全一致。
 
 **混合双触发**：RAG 有两种触发方式，均由 manifest 配置驱动：
 
@@ -419,10 +419,10 @@ Runtime 解析 tool_call
 
 ```
 步骤② MemoryManager.retrieve()
-  ├─ Grafeo 通道: hybrid_search + graph_expand  ← 始终执行
+  ├─ SQLite 记忆通道: hybrid_search + graph_expand  ← 始终执行
   └─ RAG 通道: RagClient.query(用户消息, top_k=3)  ← 仅 manifest 声明 RAG 时
-     ├─ 成功 → 结果按来源标注 [Grafeo] / [RAG:enterprise_knowledge]
-     ├─ 超时(5s) → 跳过 RAG 通道，仅用 Grafeo 结果
+     ├─ 成功 → 结果按来源标注 [Memory] / [RAG:enterprise_knowledge]
+     ├─ 超时(5s) → 跳过 RAG 通道，仅用 SQLite 记忆结果
      └─ 不可达 → 同上，不阻塞 Agent
   结果合并、去重、按 token 预算裁剪后注入 LLM 上下文
 ```
@@ -439,9 +439,9 @@ Runtime 解析 tool_call
 
 ### 4.4 与本地 Memory 的关系
 
-RAG 工具和本地 Grafeo 是两条完全独立的检索通道：
+RAG 工具和本地记忆层 是两条完全独立的检索通道：
 
-| 维度       | 本地 Grafeo（memory_recall）               | 企业 RAG（rag tool）                   |
+| 维度       | 本地记忆层（memory_recall）               | 企业 RAG（rag tool）                   |
 | ---------- | ------------------------------------------ | -------------------------------------- |
 | 数据所有权 | 用户个人                                   | 企业所有                               |
 | 存储位置   | 本地文件（rusqlite）                       | 企业 RAG 服务（远程）                  |
@@ -449,14 +449,14 @@ RAG 工具和本地 Grafeo 是两条完全独立的检索通道：
 | 检索方式   | 向量 + 全文 + 关联扩散（图扩展）           | 向量检索 + 可选混合关键词 + 元数据过滤 |
 | 隐私边界   | Agent 私有，打包分享时按 PrivacyLevel 过滤 | 企业管理，Agent 只读                   |
 
-RAG 检索结果与本地 Grafeo 检索结果在瞬态层拼接后统一送入 LLM 上下文，但不整合进 Memory 系统的抽象层——两者查询范式和存储模型完全不同。
+RAG 检索结果与本地记忆层 检索结果在瞬态层拼接后统一送入 LLM 上下文，但不整合进 Memory 系统的抽象层——两者查询范式和存储模型完全不同。
 
 **RAG 配置驱动的 Runtime 行为差异**：
 
 | Runtime 行为                   | manifest 无 RAG 声明 | manifest 有 RAG 声明              |
 | ------------------------------ | -------------------- | --------------------------------- |
-| 步骤② MemoryManager.retrieve() | 仅查 Grafeo 通道     | 并行查 Grafeo + RAG 双通道        |
-| 步骤② 上下文注入               | 仅 Grafeo 检索结果   | Grafeo + RAG 结果拼接，按来源标注 |
+| 步骤② MemoryManager.retrieve() | 仅查 SQLite 记忆通道     | 并行查 SQLite 记忆层 + RAG 双通道        |
+| 步骤② 上下文注入               | 仅 SQLite 记忆层检索结果   | SQLite 记忆层 + RAG 结果拼接，按来源标注 |
 | 步骤③ LLM Tool Definitions     | 不含 RAG 工具        | 含 RAG 工具（可显式调用）         |
 | 步骤⑤ Tool Dispatch            | 无 RAG 工具路由      | RAG 工具 → RagClient HTTP 调用    |
 

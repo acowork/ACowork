@@ -1,4 +1,4 @@
-# Memory Biomimetic Layered Architecture
+﻿# Memory Biomimetic Layered Architecture
 
 > Version: v3.7 | Last Updated: 2026-04-22
 
@@ -6,11 +6,13 @@
 
 > **v3.8 Change (2026-05-28)**: Context compression strategy greatly simplified, programmatic folding strategies all abandoned — see [ADR-010](../../adr/zh/ADR-010-context-compression-simplification.md). Core changes: remove content folding (Phase 1), three-stage progressive trimming, retrieval result 8-level priority, elastic budget partition. Transient layer compression simplified to: 70% alert → 80% LLM summary (complete context) → 95% emergency_trim safety net.
 
-> **v3.9 Change (2026-05-28)**: Experience layer write sources simplified — see [ADR-011](../../adr/zh/ADR-011-compaction-as-distillation.md). Core changes: remove per-round conversation real-time write to Grafeo; experience layer only written via Compaction summary and Session close distillation. Compaction and Distillation unified as single Compact Model call ("summary is distillation").
+> **v3.9 Change (2026-05-28)**: Experience layer write sources simplified — see [ADR-011](../../adr/zh/ADR-011-compaction-as-distillation.md). Core changes: remove per-round conversation real-time write to SQLite; experience layer only written via Compaction summary and Session close distillation. Compaction and Distillation unified as single Compact Model call ("summary is distillation").
+
+> **v4.0 Change**: Memory layer switched to SQLite (single database + WAL + FTS5 + sqlite-vss vectors; consolidated layer graph relations handled by application-level `MemoryNode.edges` table, no longer relying on storage engine native LPG/GQL; see [ADR-082](../../adr/zh/ADR-082-sqlite-memory-cutover.md)). The `acowork-grafeo` crate has been deleted; memory engine code (`EpisodicDistiller` / `RetrievalMetrics`) migrated to `core/acowork-memory/`.
 
 ---
 
-Memory uses **biomimetic layered** design, with human cognitive science as reference and Grafeo graph database as storage engine. Each Agent has completely independent private Memory, no Gateway-maintained public database exists. Cross-Agent data sharing is implemented through Intent queries and system Agent services, not shared storage.
+Memory uses **biomimetic layered** design, with human cognitive science as reference and SQLite memory layer graph database as storage engine. Each Agent has completely independent private Memory, no Gateway-maintained public database exists. Cross-Agent data sharing is implemented through Intent queries and system Agent services, not shared storage.
 
 **Design philosophy**: Memory is not storage, it is cognition. A memory system without forgetting is a dump, a memory system without consolidation is a fragment pile, a memory system without self-awareness is a database. What the Memory module should answer is not "how to store", but "how to remember, how to forget, how to think".
 
@@ -25,9 +27,9 @@ Memory uses **biomimetic layered** design, with human cognitive science as refer
 ├─────────────────────────────────────────────────────────┤
 │  Experiential Layer                                    │
 │  ───                                                   │
-│  Episodic memory — Grafeo episodic                      │
+│  Episodic memory — SQLite memory layer episodic                      │
 │  Interaction fragments, conversation snapshots, perceptual raw records │
-│  Grafeo native HNSW vector index + BM25 full-text search │
+│  SQLite-native HNSW vector index + BM25 full-text search │
 │  Lifecycle: days → weeks, promotes to consolidated layer after consolidation │
 │  Biomimetic correspondence: hippocampus temporary encoding │
 ├─────────────────────────────────────────────────────────┤
@@ -62,23 +64,23 @@ The old three-tier (working memory / private memory / cloud sync) confused two d
 
 | Flow Direction | Mechanism | Trigger Condition |
 |----------------|-----------|-------------------|
-| Transient → Experiential | Summary write | Compaction triggers (80% token usage) or Session close, LLM summary asynchronously writes to Grafeo. No longer per-round write, avoiding redundancy with JSONL |
+| Transient → Experiential | Summary write | Compaction triggers (80% token usage) or Session close, LLM summary asynchronously writes to SQLite. No longer per-round write, avoiding redundancy with JSONL |
 | Experiential → Consolidated | Consolidation pipeline | Instant extraction (LLM autonomous tool call) + offline replay (dedicated call when idle) |
-| Consolidated → Transient | Retrieval injection | When user input arrives, retrieve related memory and inject into context. **Default OFF since 2026-09-12** (`MemoryManagerConfig::auto_inject_enabled = false`): different Agents have different recall needs, Grafeo triple/preference memory is incomplete, raw user message as query has low hit rate. Recovery method: set `auto_inject_enabled` to `true` (can be per-agent configured). Explicit `memory_recall` tool not affected |
+| Consolidated → Transient | Retrieval injection | When user input arrives, retrieve related memory and inject into context. **Default OFF since 2026-09-12** (`MemoryManagerConfig::auto_inject_enabled = false`): different Agents have different recall needs, SQLite memory layer triple/preference memory is incomplete, raw user message as query has low hit rate. Recovery method: set `auto_inject_enabled` to `true` (can be per-agent configured). Explicit `memory_recall` tool not affected |
 | Intra Consolidated/Experiential flow | Associative diffusion | Retrieval extends 1-2 hops along graph edges |
 | Consolidated → Dormant | Forgetting decay | Background periodically calculates decay_score |
 
 **Irreversible one-way gate**: Experiential → Consolidated is information refinement process (raw fragments → structured knowledge), naturally one-way. But Consolidated → Experiential can be implemented through "recall" mechanism — when user or Agent actively triggers, extract related knowledge from consolidated layer as new episodic context injected into transient layer.
 
-**Mapping between layers and Grafeo storage:**
+**Mapping between layers and SQLite memory layer storage:**
 
-| Cognitive Layer | Content | Grafeo Storage | Description |
+| Cognitive Layer | Content | SQLite memory layer Storage | Description |
 |----------------|---------|----------------|-------------|
-| Transient | Working memory | Not in Grafeo | LLM context window, pure process memory |
-| Experiential | Episodic memory | `Episodic` Label | Grafeo native HNSW + BM25 + metadata |
+| Transient | Working memory | Not in SQLite memory layer | LLM context window, pure process memory |
+| Experiential | Episodic memory | `Episodic` Label | SQLite-native HNSW + BM25 + metadata |
 | Consolidated | Semantic/Procedural/Autobiographical/Skill experience | `Knowledge` / `Procedural` / `Autobiographical` Label + Edge | LPG knowledge graph |
 
-There is no ambiguity like "experiential layer nodes exist in Grafeo semantic" — cognitive layering and LPG Label are one-to-one mapping, storage format is `.grafeo` single file.
+There is no ambiguity like "experiential layer nodes exist in semantic memory" — cognitive layering and `nodes.label` are one-to-one mapping, storage format is `memory/private.sqlite` single file.
 
 ## 0.1 LLM-First Principle
 
@@ -161,7 +163,7 @@ Context compression is a semantic understanding task; only LLM can reliably judg
 Episodic memory stores Agent's interaction fragments with users, is the "raw material" of memory.
 
 ```
-Grafeo Episodic Store
+SQLite `episodes` row
 ├── episode_id: String              // unique ID
 ├── timestamp: DateTime             // occurrence time
 ├── role: Role                      // user / agent / tool
@@ -180,21 +182,21 @@ Grafeo Episodic Store
 **Key Design Decision: Episode Content Storage Strategy**
 
 - **v3.10**: Episode content no longer does classified compression. Conversation text directly completely stored, summary generated by Compact Model in Compaction phase.
-- **Compaction**: When context usage reaches 80%, Compact Model does natural language summary on full context (including entity and triple extraction), summary writes to Grafeo distilled Episode.
+- **Compaction**: When context usage reaches 80%, Compact Model does natural language summary on full context (including entity and triple extraction), summary writes to SQLite memory layer distilled Episode.
 - Reason see [ADR-011](../../adr/zh/ADR-011-compaction-as-distillation.md): Compaction = Distillation, summary is distillation.
 
-**Retrieval Capability (based on grafeo-engine native API)**:
+**Retrieval Capability (based on SQLite (rusqlite) native API)**:
 
-- **Semantic retrieval**: `db.vector_search()` — Grafeo native HNSW vector index, supports cosine/Euclidean/dot product distance, SIMD acceleration
-- **Keyword retrieval**: `db.text_search()` — Grafeo native BM25 full-text index, built-in Unicode tokenizer
-- **Hybrid retrieval**: `db.hybrid_search()` — Grafeo native RRF fusion ranking, supports `topology_boost` graph connectivity reranking
+- **Semantic retrieval**: `db.vector_search()` — SQLite-native HNSW vector index, supports cosine/Euclidean/dot product distance, SIMD acceleration
+- **Keyword retrieval**: `db.text_search()` — SQLite-native BM25 full-text index, built-in Unicode tokenizer
+- **Hybrid retrieval**: `db.hybrid_search()` — SQLite-native RRF fusion ranking, supports `topology_boost` graph connectivity reranking
 - **MMR deduplication**: `db.mmr_search()` — Maximal Marginal Relevance, ensures result diversity, avoids duplicate semantics
 - **Time filter**: Narrow retrieval space by time range
 - **Cross-layer associative diffusion** (§6): Retrieved episodes through consolidated layer KnowledgeNode's `source_episode` field reverse query related nodes, extend to consolidated layer knowledge and other experiential layer episodes along GQL native graph traversal. Example: user asks "hotel stayed at last time in Shanghai", episodic retrieves business trip record → reverse query consolidated layer "user usually stays at Jinjiang Inn" → through `MATCH (m)-[r*1..3]-(other)` graph traversal extend to another business trip episode at same hotel.
 
 **Embedding Generation Strategy**:
 
-Embedding generated by Runtime layer via `EmbeddingProvider` trait (rather than GrafeoStore internal), passed as `Vec<f32>` into `Episode` / `MemoryQuery`.
+Embedding generated by Runtime layer via `EmbeddingProvider` trait (rather than SqliteStore internal), passed as `Vec<f32>` into `Episode` / `MemoryQuery`.
 
 **Provider Fallback Chain**: Ollama local (primary, `nomic-embed-text`, 768d) → Remote API (fallback, OpenAI-compatible `/embeddings`, 512-1536d). `FallbackEmbeddingProvider` automatically manages primary→fallback switching (2 consecutive failures + 200ms timeout).
 
@@ -202,7 +204,7 @@ Embedding generated by Runtime layer via `EmbeddingProvider` trait (rather than 
 - Retrieval: `MemoryManager.retrieve()` method head auto-generates embedding (200ms timeout), timeout/failure then `query.embedding = None`, fall back to `text_search` pure text retrieval
 - Write: When episode distilled-written, sync generate embedding, same 200ms timeout degradation
 
-GrafeoStore only responsible for storage and indexing, doesn't hold `EmbeddingProvider`.
+SqliteStore only responsible for storage and indexing, doesn't hold `EmbeddingProvider`.
 
 **Experiential Layer Forgetting**:
 
@@ -217,7 +219,7 @@ Episodic memory's forgetting is more aggressive than consolidated layer — this
 
 ## 3. Consolidated Layer: Long-Term Memory
 
-Consolidated layer is Agent's "knowledge foundation", containing three memory types, all stored in Grafeo's semantic memory graph.
+Consolidated layer is Agent's "knowledge foundation", containing three memory types, all stored in SQLite's semantic memory graph.
 
 ### 3.1 Semantic Memory (KnowledgeNode)
 
@@ -297,7 +299,7 @@ Stores "what to do in what situation" behavior patterns, complementary to Skill 
 
 ```
 Skill system's procedural memory: SkillExperience (Skill-level, specific skill execution experience)
-Grafeo's procedural memory: ProceduralNode (cross-Skill general behavior pattern)
+SQLite's procedural memory: ProceduralNode (cross-Skill general behavior pattern)
 ```
 
 ```rust
@@ -495,7 +497,7 @@ This is a comprehensive architecture document covering memory layers, retrieval 
 - **Compaction = Distillation** (ADR-011): single LLM call for both memory replacement and experience layer writing
 - **Privacy levels** (Public/Personal/Sensitive) for package sharing
 - **Forgetting mechanisms** with three-factor decay and Dormant→Purge lifecycle
-- **Grafeo integration** with native HNSW + BM25 + RRF hybrid retrieval
+- **SQLite-native** HNSW + BM25 + RRF hybrid retrieval
 - **Associative diffusion** via LPG graph traversal for cross-layer retrieval
 
 For full details on sections 4.2 (Offline Consolidation), 4.3 (Conflict Detection), 4.4 (Pending → Active Promotion), 4.5 (LLM Judge), 4.6 (Embedding Update), and chapters 5-11 (Quality Framework, Self-Evaluation, etc.), see the Chinese source document `docs/design/zh/05-memory.md`.

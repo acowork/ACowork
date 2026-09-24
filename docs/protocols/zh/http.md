@@ -1,4 +1,4 @@
-# HTTP 协议
+﻿# HTTP 协议
 
 > Gateway 暴露在 `127.0.0.1:19876`（默认）的 REST API。底层为 Axum。
 > 详细路由聚合见源码：[`core/acowork-gateway/src/http/routes.rs`](../../../core/acowork-gateway/src/http/routes.rs)
@@ -105,7 +105,7 @@ sequenceDiagram
 | 全局资源主动拉取（`GET /api/global-resources`） | Gateway 单点响应 Runtime 主动拉取 | **否**（见 [§4.13](#413-全局资源快照runtime-主动拉取入口)） |
 
 Gateway **不持久化业务数据**：Memory、Skill、Agent 运行时配置、Session 状态等真实数据存于
-Runtime 本地文件 / Grafeo；Gateway 通过 HTTP 反向代理拉取快照或透传请求，
+Runtime 本地文件 / SQLite 记忆层；Gateway 通过 HTTP 反向代理拉取快照或透传请求，
 命令 / 写入则通过 MQTT 控制主题。
 
 ---
@@ -623,7 +623,7 @@ snake_case：`document_id` / `size_bytes` / `abs_path` / `start_line` / `end_lin
 
 ### 5.4 记忆 (Memory)
 
-> **Runtime 真实持有 Grafeo 存储**。HTTP 反代在 [mqtt.md §7.5](./mqtt.md) 详述。
+> **Runtime 真实持有 SQLite 存储**。HTTP 反代在 [mqtt.md §7.5](./mqtt.md) 详述。
 > Gateway `memory_api.rs` 本身**为空路由器**（ADR-033）：注册路径会与
 > `proxy_routes` 冲突，`Router::merge()` 启动时直接 panic。
 
@@ -1032,7 +1032,7 @@ if body["instance_id"] != cache.bootstrap_instance_id().unwrap_or("") {
 ## 10. 注意事项
 
 1. **Gateway 不持久化业务数据**：Memory、Skill、Agent 运行时配置、Session 状态等真实数据
-   存于 Runtime 本地文件 / Grafeo；Gateway 通过 HTTP 反向代理拉取快照或透传请求。
+   存于 Runtime 本地文件 / SQLite 记忆层；Gateway 通过 HTTP 反向代理拉取快照或透传请求。
 2. **反代端点要求 Runtime 在线**：Runtime 未注册 / 已退出时返回 503；MQTT 通道
    `acowork/agents/{id}/http_port` 是 Gateway 反代发现 Runtime 端口的唯一来源，
    **retained publish** 是关键（Gateway 重启后 broker 会重放上一次的端口）。

@@ -1,4 +1,4 @@
-# Agent 打包格式（.agent）
+﻿# Agent 打包格式（.agent）
 
 > 版本：v3.3 | 更新日期：2026-04-17
 
@@ -17,7 +17,7 @@
 │   └── constraints.md     # 约束和安全规则
 ├── config/                # 默认配置文件（用户可覆盖）
 │   └── settings.toml
-├── data/                  # 初始数据（如空 Grafeo 快照）
+├── data/                  # 初始数据（如空 SQLite 记忆层 快照）
 ├── skills/                # Skill 定义（兼容 Agent Skills 开放标准）
 │   └── weather-query/
 │       ├── SKILL.md       # YAML frontmatter（---）+ Markdown body
@@ -501,7 +501,7 @@ fn matches_permission(declared: &str, requested: &str) -> bool {
 | 签名方案 | v2 风格（单签名者） | Phase 1 最小实现，密钥轮换等复杂特性延迟到 Phase 5 |
 | 签名信息位置 | Signing Block 元数据 | 签名验证数据不属于开发者声明层，不放在 manifest.toml 中 |
 | `system` 字段位置 | manifest 顶级字段 | 安全敏感属性独立声明 |
-| 包大小上限 | 50 MB | 防止包含过大 Grafeo 快照或 WASM 工具导致安装问题 |
+| 包大小上限 | 50 MB | 防止包含过大 SQLite 记忆层 快照或 WASM 工具导致安装问题 |
 | capabilities 语法 | 映射（非数组） | action 名称天然唯一，映射比数组更直观 |
 | 平台兼容性模型 | Android uses-feature（required/optional） | shell 在移动端不可用、文件操作受限，需要声明式降级机制 |
 | target_platforms | 当前未实现，留待 Phase 5+ | 移动端兼容性声明 |

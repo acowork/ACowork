@@ -1,4 +1,4 @@
-# ACowork.AI Protocol Documentation (Outline)
+﻿# ACowork.AI Protocol Documentation (Outline)
 
 > This directory is the API reference for the ACowork.AI Gateway. The current architecture uses **two protocols**:
 >
@@ -43,7 +43,7 @@ graph LR
         RMQTT["mqtt/client.rs<br/>(rumqttc)"]
         RSVR["localhost HTTP server<br/>:random"]
         LOOP["AgentLoop / Skill / Tool"]
-        MEM["Memory Grafeo"]
+        MEM["Memory (SQLite)"]
     end
 
     UI -->|"HTTP REST"| HTTP

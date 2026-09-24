@@ -1,4 +1,4 @@
-# RAG 标准查询协议 — 企业接入指南
+﻿# RAG 标准查询协议 — 企业接入指南
 
 > 版本：1.0 | 协议版本：1.0 | 更新日期：2026-04-27
 > 模块：acowork-runtime (Phase 4 S4)
@@ -405,10 +405,10 @@ RAG 有两种触发方式，均由 manifest 配置使能：
 
 ```
 步骤② MemoryManager.retrieve()
-  ├─ Grafeo 通道: hybrid_search + graph_expand  ← 始终执行
+  ├─ SQLite 记忆通道: hybrid_search + graph_expand  ← 始终执行
   └─ RAG 通道: RagClient.query(用户消息, top_k=3)  ← 仅 manifest 声明 RAG 时
-     ├─ 成功 → 结果按来源标注 [Grafeo] / [RAG:enterprise_knowledge]
-     ├─ 超时(5s) → 跳过 RAG 通道，仅用 Grafeo 结果
+     ├─ 成功 → 结果按来源标注 [Memory] / [RAG:enterprise_knowledge]
+     ├─ 超时(5s) → 跳过 RAG 通道，仅用 SQLite 记忆结果
      └─ 不可达 → 同上，不阻塞 Agent
 ```
 

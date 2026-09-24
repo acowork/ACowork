@@ -1,4 +1,4 @@
-# HTTP Protocol
+﻿# HTTP Protocol
 
 > Gateway exposes a REST API at `127.0.0.1:19876` (default). Built on Axum.
 > For detailed route aggregation see source: [`core/acowork-gateway/src/http/routes.rs`](../../../core/acowork-gateway/src/http/routes.rs)
@@ -95,7 +95,7 @@ sequenceDiagram
 | MQTT commands / streaming | rumqttd Broker relay | Yes (Runtime responds via MQTT subscription) |
 | Global resource active pull (`GET /api/global-resources`) | Gateway single‑point responds to Runtime active pull | **No** (see [§4.13](#413-global-resource-snapshot-runtime-active-pull-entry)) |
 
-Gateway **does not persist business data**: Memory, Skill, Agent runtime config, Session state, etc. are stored in Runtime local files / Grafeo; Gateway pulls snapshots or passthrough requests via HTTP reverse proxy, while commands / writes go through MQTT control topics.
+Gateway **does not persist business data**: Memory, Skill, Agent runtime config, Session state, etc. are stored in Runtime local files / SQLite memory layer; Gateway pulls snapshots or passthrough requests via HTTP reverse proxy, while commands / writes go through MQTT control topics.
 
 ---
 
@@ -518,7 +518,7 @@ Runtime receives the **typed** attachment item array pushed from the frontend vi
 
 ### 5.4 Memory
 
-> **Runtime holds the actual Grafeo storage**. HTTP reverse proxy detailed in [mqtt.md §7.5](./mqtt.md).
+> **Runtime holds the actual SQLite 记忆层 storage**. HTTP reverse proxy detailed in [mqtt.md §7.5](./mqtt.md).
 > Gateway `memory_api.rs` itself is an **empty router** (ADR-033): registering its paths would conflict with `proxy_routes`, causing `Router::merge()` to panic at startup.
 
 | Method | Path | Purpose | Runtime path |
@@ -888,7 +888,7 @@ if body["instance_id"] != cache.bootstrap_instance_id().unwrap_or("") {
 
 ## 10. Notes
 
-1. **Gateway does not persist business data**: Memory, Skill, Agent runtime config, Session state, etc. are stored in Runtime local files / Grafeo; Gateway pulls snapshots or passthrough via HTTP reverse proxy.
+1. **Gateway does not persist business data**: Memory, Skill, Agent runtime config, Session state, etc. are stored in Runtime local files / SQLite memory layer; Gateway pulls snapshots or passthrough via HTTP reverse proxy.
 2. **Proxy endpoints require Runtime online**: if Runtime is not registered / has exited, returns 503; the MQTT channel `acowork/agents/{id}/http_port` is the **sole source** for Gateway to discover the Runtime port — **retained publish** is critical (after Gateway restart, broker replays the last port).
 3. **Most writes trigger hot pushes**: for example, after modifying Provider / MCP / Search config, Gateway synchronises the latest available list to all connected Runtimes via MQTT **retained publish**; see [mqtt.md §Global resource availability broadcast](./mqtt.md).
 4. **CORS**: always enabled as `CorsLayer::permissive()` (any origin, any method, any header; **without** `allow_credentials(true)` — `*` wildcard conflicts with `Access-Control-Allow-Credentials: true`, tower-http panics at build; also frontend `fetch` defaults to `credentials: 'same-origin'`, so this header is unnecessary). Dev mode Vite (`:5173`) and production Tauri custom protocol (`tauri://localhost` / `http(s)://tauri.localhost`) both cross‑origin access Gateway (`:19876`); any hardcoded allowlist would be broken when browsers resolve `localhost` to different IP literals. Local bind defaults to `127.0.0.1` — an attacker would already need access to the loopback to exploit permissive CORS, so it's zero‑risk on loopback. For remote deployments, CSRF protection relies on `Authorization: Bearer <token>` (`[http].auth_enabled = true`); Gateway does not send Set‑Cookie, and browsers by default do not send cookies with `credentials: 'same-origin'`.

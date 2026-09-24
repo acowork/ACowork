@@ -1,4 +1,4 @@
-# acowork-core — 共享类型与协议
+﻿# acowork-core — 共享类型与协议
 
 > 属于 [模块设计总览](00-overview.md) 的一部分
 
@@ -26,7 +26,7 @@ crates/acowork-core/
     │   └── traits.rs          # Provider trait + ChatMessage + ChatResponse + StreamEvent
     ├── memory/
     │   ├── mod.rs
-    │   └── traits.rs          # Memory trait（Grafeo 抽象层）
+    │   └── traits.rs          # Memory trait（SQLite 记忆层 抽象层）
     └── error.rs               # 统一错误类型
 ```
 

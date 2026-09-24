@@ -1,4 +1,4 @@
-# Desktop App
+﻿# Desktop App
 
 > Version: v3.4 | Last Updated: 2026-04-16
 
@@ -263,7 +263,7 @@ Step 5: Install first Agent
 
 - User input message → Desktop App calls Gateway `/api/agents/:id/message` → Gateway forwards to Agent Runtime via Intent Router
 - Agent responses are pushed back to Desktop App via MQTT streaming subscription
-- Conversation history is stored in Agent's private Grafeo; Desktop App does not persist conversation data
+- Conversation history is stored in Agent's private SQLite; Desktop App does not persist conversation data
 
 ### 4.4 Settings Page
 
@@ -309,7 +309,7 @@ Clone dialog pops up:
   ├─ Source Agent: com.example.weather
   ├─ Clone mode:
   │   ○ Skeleton clone (manifest + prompts + config only)
-  │   ● Full clone (+ skills + data + Grafeo snapshot)
+  │   ● Full clone (+ skills + data + SQLite memory layer snapshot)
   ├─ New Agent ID: [com.example.weather-dev    ]
   └─ [Cancel]  [Clone]
        │

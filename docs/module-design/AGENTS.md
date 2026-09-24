@@ -1,4 +1,4 @@
-# AGENTS.md — docs/module-design/
+﻿# AGENTS.md — docs/module-design/
 
 Detailed Rust crate specifications for ACowork.AI implementation.
 
@@ -15,7 +15,7 @@ module-design/
 │   ├── 01-core.md            # acowork-core: shared types, protocol, traits
 │   ├── 02-runtime.md         # acowork-runtime: Agent Runtime binary
 │   ├── 03-gateway.md         # acowork-gateway: IPC gateway, lifecycle mgmt
-│   ├── 04-grafeo.md          # acowork-grafeo: graph DB + HNSW + BM25
+│   ├── 04-sqlite.md          # acowork-sqlite: graph DB + HNSW + BM25
 │   ├── 05-vault-sign.md      # acowork-vault + acowork-sign: secrets, signing
 │   ├── 06-architecture.md    # Dependency graph, data flows, compilation
 │   └── 07-ask-user-question-tool.md  # AskUserQuestion tool design
@@ -30,7 +30,7 @@ module-design/
 | acowork-core         | `zh/01-core.md`         |
 | acowork-runtime      | `zh/02-runtime.md`      |
 | acowork-gateway      | `zh/03-gateway.md`      |
-| acowork-grafeo       | `zh/04-grafeo.md`       |
+| acowork-sqlite       | `zh/04-sqlite.md`       |
 | acowork-vault + sign | `zh/05-vault-sign.md`   |
 | Architecture overview | `zh/06-architecture.md` |
 

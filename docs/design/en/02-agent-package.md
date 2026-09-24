@@ -1,4 +1,4 @@
-# Agent Packaging Format (.agent)
+﻿# Agent Packaging Format (.agent)
 
 > Version: v3.3 | Last Updated: 2026-04-17
 
@@ -17,7 +17,7 @@ The `.agent` file is essentially a ZIP archive. Agent packages **contain no exec
 │   └── constraints.md     # Constraints and safety rules
 ├── config/                # Default config files (user-overridable)
 │   └── settings.toml
-├── data/                  # Initial data (e.g. empty Grafeo snapshot)
+├── data/                  # Initial data (e.g. empty SQLite memory layer snapshot)
 ├── skills/                # Skill definitions (compatible with Agent Skills open standard)
 │   └── weather-query/
 │       ├── SKILL.md       # YAML frontmatter (---) + Markdown body
@@ -502,7 +502,7 @@ fn matches_permission(declared: &str, requested: &str) -> bool {
 | Signature scheme | v2 style (single signer) | Phase 1 minimum implementation; complex features like key rotation deferred to Phase 5 |
 | Signature metadata location | Signing Block metadata | Signature verification data is not part of the developer declaration layer; not placed in manifest.toml |
 | `system` field location | Top-level manifest field | Security-sensitive attributes declared independently |
-| Package size limit | 50 MB | Prevents oversized Grafeo snapshots or WASM tools causing installation issues |
+| Package size limit | 50 MB | Prevents oversized SQLite memory layer snapshots or WASM tools causing installation issues |
 | capabilities syntax | Map (not array) | Action names are naturally unique; maps are more intuitive than arrays |
 | Platform compatibility model | Android uses-feature (required/optional) | shell is unavailable on mobile, file ops are restricted; declarative degradation is needed |
 | target_platforms | Not implemented yet, left for Phase 5+ | Mobile compatibility declarations |
