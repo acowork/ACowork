@@ -282,18 +282,25 @@ mod tests {
     async fn test_retrieve_abstention() {
         let store = test_store();
         let emb = test_embedding();
-        store_episode(&store, "test content", &emb);
-
+        // Episode content is lexically disjoint from the query ("test
+        // content" vs "unrelated query"), so the BM25 text source cannot
+        // match. The query embedding is orthogonal to the stored one, so the
+        // vector source contributes a far hit but no longer has an absolute
+        // cosine floor to keep it out. Recall quality now rests on `k` and
+        // the eventual z-score gate (commit 2 follow-up); this test
+        // exercises the simplest no-hit case — an empty store.
         let manager = MemoryManager::new(MemoryManagerConfig::default());
-        // Cosine-orthogonal to the stored vector (≈ 0.0), so the cosine floor
-        // rejects it. Reusing `emb` would score cosine 1.0 — a perfect match —
-        // and legitimately survive the floor.
         let mut query = MemoryQuery {
             query_text: "unrelated query".to_string(),
             embedding: Some(orthogonal_embedding()),
             filters: Default::default(),
             limit: 5,
             expand_hops: 0,
+            // `min_cosine` is now ignored by `MemoryManager::retrieve` — the
+            // absolute cosine floor is unreliable as a relevance signal
+            // (anisotropic embeddings cluster most pairs at cos 0.5–0.9);
+            // recall quality is controlled by `k` instead. The field is kept
+            // for backwards compatibility with callers that still set it.
             min_cosine: Some(0.99),
             abstention_enabled: true,
             hint_type: HintType::Semantic,
@@ -367,8 +374,10 @@ mod tests {
     async fn test_process_turn_abstention() {
         let store = test_store();
         let emb = test_embedding();
-        store_episode(&store, "some content", &emb);
-
+        // Empty store: the new `manager.retrieve` no longer applies an
+        // absolute cosine floor (see `test_retrieve_abstention` for the
+        // rationale). With no episodes at all, no source can return a hit
+        // and abstention must trigger.
         let manager = MemoryManager::new(MemoryManagerConfig::default());
         let mut query = MemoryQuery {
             query_text: "completely unrelated".to_string(),

@@ -646,18 +646,17 @@ fn hybrid_keeps_lexical_hit_whose_embedding_is_far() {
     // Both are single-source rank-1 hits, so the id tie-break decides; what
     // matters is that neither was filtered out.
     assert_eq!(hits.len(), 2);
-    // Scores live in the normalized-cosine domain, not the RRF domain
-    // (`~0.016`), so downstream `min_score` / abstention thresholds still mean
-    // what they used to.
+    // Scores are the RRF fused value: a single-source rank-1 hit gets
+    // `weight / 61`. Both sources are gated or absent (the lexical hit has
+    // a `cos = 0` embedding that fails the 0.3 floor, the vector hit has no
+    // lexical overlap), so each surviving hit is single-source and both
+    // land on the same `1 / 61` regardless of which source they came from.
+    let expected = 1.0 / 61.0;
     for (id, score) in &hits {
-        assert!((0.0..=1.0).contains(score), "score out of range: {score}");
-        if *id == vector_id {
-            assert!((score - 1.0).abs() < 1e-9);
-        } else {
-            // Cosine was not recovered (gated out of the vector source), so the
-            // hit is scored as orthogonal: (1 + 0) / 2.
-            assert!((score - 0.5).abs() < 1e-9);
-        }
+        assert!(
+            (score - expected).abs() < 1e-9,
+            "id {id} got score {score}, expected single-source RRF rank-1 (1/61)"
+        );
     }
 }
 
@@ -715,7 +714,14 @@ fn hybrid_gates_vector_source_by_min_cosine() {
         .unwrap();
     assert_eq!(ungated.len(), 1);
     assert_eq!(ungated[0].0, far_id);
-    assert!((ungated[0].1 - 0.5).abs() < 1e-9, "cos 0 -> (1+0)/2");
+    // Score is the RRF fused value for a single-source rank-1 hit:
+    // `text_weight / (60 + 0 + 1) = 1 / 61 ≈ 0.01639` (text only; the vector
+    // source was disabled because cos = 0 < the gate in the prior test).
+    assert!(
+        (ungated[0].1 - 1.0 / 61.0).abs() < 1e-9,
+        "got {:?}, expected text-only RRF rank-1 (1/61)",
+        ungated[0].1
+    );
 }
 
 /// Even with an impossibly high floor, a lexical hit is retained: a BM25 match

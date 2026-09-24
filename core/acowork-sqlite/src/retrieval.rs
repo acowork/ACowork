@@ -8,18 +8,23 @@
 //! separate:
 //!
 //! * **vector source** gates on `cos >= min_cosine` — the absolute cosine
-//!   domain (`MemoryQualityConfig::min_cosine`, default `0.3`).
+//!   domain. Callers may pass `None` to disable the gate; `memory_recall`
+//!   currently passes `None` and relies on the result count (`k`) as the
+//!   quality knob instead, because anisotropic embeddings make an absolute
+//!   cosine floor unreliable as a relevance signal.
 //! * **text source** has no fixed threshold: BM25 carries IDF and drifts with
 //!   corpus statistics, so a lexical hit is independent evidence and survives
 //!   even when its embedding sits far away.
 //! * **fusion** is equal-weight RRF (k = 60) over the union of the two ranked
 //!   lists.
 //!
-//! The returned score is deliberately *not* the fused score: RRF encodes rank
-//! position only and is not comparable across queries. The recovered absolute
-//! cosine is normalized to `(1 + cos) / 2 ∈ [0, 1]`, which is the domain the
-//! `min_score` gates, abstention thresholds and [`crate::SqliteStore`] callers
-//! expect.
+//! The returned `score` is the RRF fused score (`Σ w / (60 + rank + 1)`).
+//! RRF encodes rank position only and is not comparable across queries — do
+//! not threshold on its absolute value. Use the result count (`k`) for
+//! recall-quality control; the previous `(1 + cos) / 2` re-mapping was
+//! removed because it conflated fusion rank with similarity and made
+//! `score == 0.5` mean both "orthogonal vector hit" and "BM25-only hit",
+//! breaking downstream thresholds for both interpretations.
 
 use std::collections::HashMap;
 
@@ -34,12 +39,14 @@ impl SqliteStore {
     /// * `text_weight` / `vector_weight` scale each source's RRF contribution.
     ///   `(0.0, 0.0)` means "unspecified" and falls back to equal weight.
     /// * `min_cosine` is an absolute cosine floor applied to the **vector source
-    ///   only**; `None` disables it. Callers resolve the effective value from
-    ///   `MemoryQualityConfig::min_cosine` before calling.
+    ///   only**; `None` disables it. Callers that care about recall quality
+    ///   should pass `None` and rely on `k` as the quality knob, since
+    ///   anisotropic embeddings make an absolute cosine floor unreliable.
     ///
     /// Results come back ordered by fused rank. The returned score is the
-    /// normalized cosine `(1 + cos) / 2`, or `0.5` (i.e. "assume orthogonal")
-    /// for a text-only hit whose cosine was not recovered.
+    /// RRF fused score (`Σ w / (60 + rank + 1)`) — *not* the cosine. RRF is
+    /// a rank-position signal, so absolute values are not comparable across
+    /// queries and must not be thresholded on.
     #[allow(clippy::too_many_arguments)]
     pub fn hybrid_search_full(
         &self,
@@ -60,12 +67,10 @@ impl SqliteStore {
         let pool = k.saturating_mul(2);
 
         let floor = f64::from(min_cosine.unwrap_or(-1.0_f32));
-        let mut cosine: HashMap<u64, f64> = HashMap::new();
         let mut vector_ranked: Vec<u64> = Vec::new();
         if !embedding.is_empty() {
             for (id, cos) in self.vector_search(label, embedding, pool)? {
                 if cos >= floor {
-                    cosine.insert(id, cos);
                     vector_ranked.push(id);
                 }
             }
@@ -108,10 +113,12 @@ impl SqliteStore {
 
         Ok(ranked
             .into_iter()
-            .map(|(id, _fused)| {
-                let cos = cosine.get(&id).copied().unwrap_or(0.0);
-                (id, (1.0 + cos) / 2.0)
-            })
+            // Return the fused score itself. The previous `(1 + cos) / 2`
+            // re-mapping conflated rank fusion with cosine similarity and made
+            // `score == 0.5` carry two incompatible meanings; downstream
+            // `min_score` / `min_cosine` / NRR thresholds were silently
+            // working against a non-existent semantic for text-only hits.
+            .map(|(id, fused)| (id, fused))
             .collect())
     }
 

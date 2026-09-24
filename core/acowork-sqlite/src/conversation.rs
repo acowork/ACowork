@@ -49,6 +49,8 @@ pub struct ConversationHit {
     pub message_index: usize,
     pub role: String,
     pub content: String,
+    /// RRF fused score (`Σ w / (60 + rank + 1)`). Larger = more relevant.
+    /// Rank-position signal only; do not threshold on its absolute value.
     pub score: f64,
 }
 
@@ -377,7 +379,10 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].role, "user");
         assert_eq!(hits[0].content, "deploy the gateway");
-        assert!(hits[0].score > 0.5, "score {:?}", hits[0].score);
+        // Score is the RRF fused value (`Σ w / (60 + rank + 1)`); for a
+        // single-source rank-1 dual-source hit that's `2 / 61 ≈ 0.0328`.
+        // Anything strictly positive is the real assertion.
+        assert!(hits[0].score > 0.0, "score {:?}", hits[0].score);
     }
 
     /// ADR-082 D5 anchor, conversation flavour: a message the vector source

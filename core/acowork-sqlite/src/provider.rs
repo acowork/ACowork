@@ -193,10 +193,12 @@ impl MemoryProvider for SqliteStore {
     /// All-label retrieval.
     ///
     /// Labels are searched independently and then merged on the *same* score
-    /// scale ([`SqliteStore::hybrid_search_full`] returns normalized cosine for
-    /// every label), so a cross-label top-k is meaningful. `MemoryManager`
-    /// prefers the per-label `hybrid_search_full` path when it needs the label
-    /// alongside each hit.
+    /// scale ([`SqliteStore::hybrid_search_full`] returns the RRF fused score
+    /// for every label), so a cross-label top-k is meaningful. RRF is a
+    /// rank-position signal — absolute values are not comparable across
+    /// queries and must not be thresholded on. `MemoryManager` prefers the
+    /// per-label `hybrid_search_full` path when it needs the label alongside
+    /// each hit.
     fn hybrid_search(&self, query: &MemoryQuery) -> AcoworkResult<Vec<SearchResult>> {
         if query.embedding.is_none() && query.query_text.trim().is_empty() {
             return Ok(Vec::new());

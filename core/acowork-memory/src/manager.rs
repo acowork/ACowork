@@ -326,7 +326,6 @@ impl MemoryManager {
         } else {
             self.config.default_k
         };
-        let min_cosine = query.min_cosine.unwrap_or(self.config.quality.min_cosine);
         let hint_type = query.hint_type;
         let (vector_weight, text_weight) = hint_weights(hint_type);
 
@@ -343,6 +342,14 @@ impl MemoryManager {
         ];
 
         // Run hybrid search on each label.
+        //
+        // Quality knob is `k` (result count), not `min_cosine`. The absolute
+        // cosine floor is unreliable as a relevance signal: real sentence
+        // embeddings are anisotropic (unrelated pairs sit at cos 0.5–0.9;
+        // measured on the live store, even 0.6 filtered nothing). The gate
+        // only affected the vector source anyway, so passing `None` is the
+        // honest choice — quality is controlled downstream by `k` and by
+        // the eventual LLM-judge / z-score follow-up tracked separately.
         let mut all_results: Vec<(u64, f64, String, String)> = Vec::new();
 
         for label in &search_labels {
@@ -355,7 +362,7 @@ impl MemoryManager {
                         k,
                         text_weight,
                         vector_weight,
-                        Some(min_cosine),
+                        None,
                     )
                     .map_err(|e| AcoworkError::Memory(format!("Hybrid search failed: {e}")))
             } else {

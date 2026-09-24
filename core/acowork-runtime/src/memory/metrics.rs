@@ -210,6 +210,12 @@ impl RetrievalMetricsAggregator {
     /// Compute NRR from a RetrievalMetrics value.
     ///
     /// NRR = avg_score / max_possible_score
+    ///
+    /// `avg_score` and `max_possible_score` are both RRF fused scores
+    /// (`Σ w / (60 + rank + 1)`) — absolute values are not comparable across
+    /// queries, but the ratio is a meaningful relative-quality signal because
+    /// the denominator is dynamically updated to the largest score observed
+    /// this session (see [`Self::set_max_possible_score`]).
     fn nrr(&self, metrics: &RetrievalMetrics) -> f32 {
         if self.max_possible_score <= 0.0 {
             return 0.0;

@@ -61,6 +61,10 @@ pub struct SearchHit {
     pub scope: String,
     pub title: String,
     pub snippet: String,
+    /// Per-scope score. Semantics depend on the scope:
+    /// - `memory`, `conversation`: RRF fused score (`Σ w / (60 + rank + 1)`);
+    ///   rank-position signal only, not comparable across queries.
+    /// - `git`, `file`: synthetic `1.0 - i * 1e-4` ranking score.
     pub score: f64,
     /// Scope-specific payload (see each scope builder).
     pub payload: Value,
