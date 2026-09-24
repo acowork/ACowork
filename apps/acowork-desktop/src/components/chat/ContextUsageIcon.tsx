@@ -357,7 +357,7 @@ const handleCompressSummary = () => {
 
             {/* ADR-074: per-session window editor (inline, same popover). */}
             {editingWindow && (
-              <div className="mt-2.5 rounded-md border border-border-outer bg-zinc-50/80 p-2  dark:bg-zinc-800/50">
+              <div className="mt-2.5 rounded-md border border-border-outer p-2">
                 <div className="flex items-center gap-1.5">
                   <input
                     type="number"
@@ -374,7 +374,7 @@ const handleCompressSummary = () => {
                     }}
                     placeholder={formatTokens(contextUsage?.context_window ?? 0)}
                     aria-label={t("contextUsage.editWindow")}
-                    className="w-full min-w-0 rounded border border-zinc-300 bg-white px-1.5 py-1 text-xs tabular-nums text-text-secondary outline-none focus:border-indigo-400 dark:border-zinc-600 dark:bg-zinc-900 "
+                    className="w-full min-w-0 rounded border border-input-border bg-input-bg px-1.5 py-1 text-xs tabular-nums text-text-secondary outline-none focus:border-indigo-400 "
                   />
                   <span className="shrink-0 text-[10px] text-text-tertiary">{t("contextUsage.windowUnitK")}</span>
                 </div>
