@@ -530,12 +530,12 @@
   /* Unified generic input box background (dark) — preserve the
      value the user tuned. Must be a literal value for Tailwind v4 to
      generate the .bg-input-bg utility class. */
-  --color-input-border: hsl(0 0% 13%);
+  --color-input-border: hsl(0 0% 18%);
   /* Unified generic input box outline (dark) — literal value for
      Tailwind v4 utility generation. */
   --color-dropdown-bg: hsl(240 3.8% 16.7%);
   /* Dropdown / <select> background (dark). Literal value. */
-  --color-dropdown-border: hsl(0 0% 13%);
+  --color-dropdown-border: hsl(0 0% 18%);
   /* Dropdown / <select> outline (dark). Literal value. */
   --color-nav-control-hover: hsl(0 0% 28%);
   /* = #474749 — primary action hover (dark) */
