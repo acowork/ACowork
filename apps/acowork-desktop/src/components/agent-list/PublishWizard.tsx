@@ -297,7 +297,7 @@ export function PublishWizard({
                 <div
                   className={cn(
                     "flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium transition-colors",
-                    active && "bg-zinc-200 text-text dark:bg-zinc-300 ",
+                    active && "bg-zinc-200 text-text dark:bg-zinc-700 ",
                     passed && "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400",
                     !active && !passed && "text-text-tertiary ",
                   )}

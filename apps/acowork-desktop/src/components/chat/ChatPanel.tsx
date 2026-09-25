@@ -3258,6 +3258,10 @@ function ModelMenu({
             </div>
           )}
 
+          {/* Divider between the filter box and the model list — same
+              token as the provider-section dividers below. */}
+          {showSearch && <div className="border-t border-border-divider" />}
+
           {/* Level 1: grouped model list (level 2 — accounts — flies out on
               the right; this panel no longer swaps to show it). */}
           <div className="max-h-[420px] overflow-y-auto py-1">

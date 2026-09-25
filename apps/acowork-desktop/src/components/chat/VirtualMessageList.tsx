@@ -11,6 +11,7 @@ import type { ChatListAdapterV2 } from "./chatListAdapter";
 import { estimateBlockHeight, recordMeasuredHeight } from "./blockHeightEstimator";
 import { StreamingSourceBlock } from "./StreamingSourceBlock";
 import { EmptyState } from "./EmptyState";
+import { decideBottomPin } from "./bottomAnchor";
 // ADR-050 post-C5 fix: StreamingSourceBlock is used by VML to render
 // isLive assistant blocks (streaming preview).  Thought streaming
 // previews are still rendered inside ExploreBlock via ThinkBlock.
@@ -18,6 +19,12 @@ import { EmptyState } from "./EmptyState";
 // ResizeObserver instances per element.  WeakMap so they're GC'd when the
 // element is removed from the DOM (virtual list recycling).
 const resizeObservers = new WeakMap<HTMLElement, ResizeObserver>();
+
+// Bottom-anchor tuning for `scrollToBottom`.  While armed, the viewport is
+// re-pinned to the bottom on every commit until the layout settles
+// (measurements land).  MAX is a safety valve; RELEASE_PX lives in
+// ./bottomAnchor.ts with the disarm rule it feeds.
+const BOTTOM_PIN_MAX_MS = 2000;
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -385,6 +392,34 @@ export const VirtualMessageList = React.forwardRef<
     resizeObservers.set(el, ro);
   }, []);
 
+  // ── Bottom anchor (event-driven scroll-to-bottom convergence) ─────
+  // While armed, re-pin scrollTop to the (still growing) bottom on every
+  // commit.  The virtualizer re-renders as ResizeObserver measurements land,
+  // so the anchor rides the bottom until the layout settles — no frame-count
+  // guessing.  Disarms when the user scrolls away from the bottom (so it
+  // never fights a deliberate scroll-up) or after BOTTOM_PIN_MAX_MS.
+  const pinToBottomRef = useRef(false);
+  const lastPinTopRef = useRef(0);
+  const pinDeadlineRef = useRef(0);
+  useLayoutEffect(() => {
+    if (!pinToBottomRef.current) return;
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    if (performance.now() > pinDeadlineRef.current) {
+      pinToBottomRef.current = false;
+      return;
+    }
+    const max = el.scrollHeight - el.clientHeight;
+    // See ./bottomAnchor.ts: a layout shrink clamps scrollTop too, and must
+    // not be mistaken for the user scrolling away.
+    if (decideBottomPin({ scrollTop: el.scrollTop, max, lastPinTop: lastPinTopRef.current }) === "disarm") {
+      pinToBottomRef.current = false;
+      return;
+    }
+    el.scrollTop = max;
+    lastPinTopRef.current = max;
+  });
+
   // ── Imperative handle ─────────────────────────────────────
   // Exposes data-derived queries and scroll actions to the parent
   // (ScrollController). None of the queries rely on scrollTop pixel math
@@ -423,43 +458,25 @@ export const VirtualMessageList = React.forwardRef<
         if (count === 0) return;
         const el = virtualizer.scrollElement;
         if (!el) return;
-        // Step 1: force the virtualizer to mount the last item.  The
-        // resulting DOM growth is *asynchronous* and spans several frames:
-        //   scrollToIndex → browser scroll event → virtualizer re-evaluates
-        //   visible items → React commit → ResizeObserver measures new
-        //   items → measurementsCache + totalSize update → scrollHeight
-        //   grows (repeat).  estimateSize-based offsets land short because
-        //   explore_group caps at 272px and assistant text with Mermaid/
-        //   code underestimates by hundreds of px.  In a 2k+ message
-        //   session most bottom blocks have never been measured, so a single
-        //   scrollToIndex leaves the user hundreds of px above the real
-        //   bottom — then each subsequent click measures a few more items
-        //   and the scrollTop creeps forward.
+        // Mount the last item so the virtualizer starts measuring it.  The
+        // resulting DOM growth is *asynchronous*: scrollToIndex → browser
+        // scroll event → virtualizer re-evaluates visible items → React
+        // commit → ResizeObserver measures new items → measurementsCache +
+        // totalSize update → scrollHeight grows (repeat).  estimateSize
+        // lands short for never-measured blocks (assistant markdown / code
+        // underestimates by hundreds of px), so a single scrollToIndex leaves
+        // a long session above the real bottom.
         virtualizer.scrollToIndex(count - 1, { align: "end" });
-        // Step 2: keep snapping to the real bottom until scrollHeight
-        // stops growing across consecutive frames.  Each frame we set
-        // scrollTop = scrollHeight - clientHeight based on the *current*
-        // DOM truth, so as React commits and ResizeObserver fires the
-        // scrollTop rides forward with the bottom.  Bail out after 2
-        // stable frames, or 30 frames (500ms) as a safety cap.
-        let stableFrames = 0;
-        let prevMax = -1;
-        let n = 0;
-        const tick = () => {
-          n++;
-          const max = el.scrollHeight - el.clientHeight;
-          el.scrollTop = max;
-          if (max === prevMax && el.scrollTop >= max - 0.5) {
-            stableFrames++;
-          } else {
-            stableFrames = 0;
-            prevMax = max;
-          }
-          if (stableFrames < 2 && n < 30) {
-            requestAnimationFrame(tick);
-          }
-        };
-        requestAnimationFrame(tick);
+        // Arm the bottom anchor and pin once now.  The anchor re-pins on
+        // every subsequent commit (see the useLayoutEffect above), riding the
+        // bottom as the async measurements land, then disarms itself.  This
+        // replaces the old fixed-frame rAF loop (2 stable frames / 30
+        // frames), which bailed BEFORE the measurements landed — so each
+        // click of the jump-to-bottom arrow only crept a little closer.
+        pinToBottomRef.current = true;
+        pinDeadlineRef.current = performance.now() + BOTTOM_PIN_MAX_MS;
+        lastPinTopRef.current = el.scrollHeight - el.clientHeight;
+        el.scrollTop = lastPinTopRef.current;
       },
       scrollToTop: () => {
         const count = virtualizer.options.count;

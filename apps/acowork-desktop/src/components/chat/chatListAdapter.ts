@@ -35,7 +35,7 @@
  * deleted.
  */
 import { useMemo, useSyncExternalStore } from "react";
-import { useChatStore } from "../../stores/chatStore";
+import { useChatStore, expandWindowToTurnBoundary } from "../../stores/chatStore";
 import {
   type ChatAdapterEvent,
   subscribeChatAdapter,
@@ -181,6 +181,10 @@ class AdapterStore {
   private unsubHistory: (() => void) | null = null;
   private unsubAdapter: (() => void) | null = null;
 
+  /** In-flight jump-to-bottom, shared with duplicate callers (see
+   *  scrollToBottom). */
+  private bottomJump: Promise<void> | null = null;
+
   constructor(agentId: string, sessionId: string) {
     this.agentId = agentId;
     this.sessionId = sessionId;
@@ -303,7 +307,23 @@ class AdapterStore {
    * page is already cached, just signal the controller.  Otherwise
    * REPLACE the cache with the tail page in a single request.
    */
-  scrollToBottom = async (): Promise<void> => {
+  scrollToBottom = (): Promise<void> => {
+    // Coalesce concurrent jumps.  The arrow click and the controller's
+    // followMode-convergence effect both call jumpToBottom about one frame
+    // apart, and loadSessionMessages aborts the previous in-flight request
+    // (and bumps `loadSequence`) BEFORE any guard — so a second call used to
+    // throw away the page the first one was fetching, leaving the pane pinned
+    // to the bottom of a mid-history window.  Duplicates now await the same
+    // jump instead of starting a competing load.
+    if (!this.bottomJump) {
+      this.bottomJump = this.runScrollToBottom().finally(() => {
+        this.bottomJump = null;
+      });
+    }
+    return this.bottomJump;
+  };
+
+  private runScrollToBottom = async (): Promise<void> => {
     const ss = useChatStore.getState();
     const cur = ss.agentStates[this.agentId]?.sessionStates[this.sessionId];
     if (!cur) return;
@@ -324,6 +344,9 @@ class AdapterStore {
     // Single jump: replace cache with the tail page.
     const tailOffset = Math.max(0, cur.messageTotal - PAGINATION_PAGE_SIZE);
     await ss.loadSessionMessages(this.agentId, this.sessionId, tailOffset, PAGINATION_PAGE_SIZE, true);
+    // A bare tail page can fold to a LONE explore block (see the helper) —
+    // same treatment as the session-open/switch-back path.
+    await expandWindowToTurnBoundary(this.agentId, this.sessionId, PAGINATION_PAGE_SIZE);
     this.cacheGeneration++;
     this.bumpVersion();
   };

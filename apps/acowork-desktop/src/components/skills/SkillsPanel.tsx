@@ -280,27 +280,26 @@ export function SkillsPanel({ textHidden }: { textHidden?: boolean } = {}) {
               </div>
             )}
 
-            {/* Actions */}
             </div>
-          </div>
 
-          {/* Footer */}
-          <div className="flex items-center justify-end gap-2 border-t border-border-divider px-5 min-h-[var(--ui-dialog-zone-h)]">
-            <button
-              onClick={handleCloseDialog}
-              disabled={importing}
-              className="rounded-md px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-zinc-100 disabled:opacity-50  dark:hover:bg-zinc-700"
-            >
-              {t("common.cancel")}
-            </button>
-            <button
-              onClick={handleImport}
-              disabled={!selectedFile || importing}
-              className="flex items-center gap-2 rounded btn-accent px-3 py-1.5 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              {importing && <Loader2 className="h-3 w-3 animate-spin" />}
-              {importing ? t("skillsPanel.importing") : t("skillsPanel.buttonImport")}
-            </button>
+            {/* Footer */}
+            <div className="flex items-center justify-end gap-2 border-t border-border-divider px-5 min-h-[var(--ui-dialog-zone-h)]">
+              <button
+                onClick={handleCloseDialog}
+                disabled={importing}
+                className="rounded-md px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-zinc-100 disabled:opacity-50  dark:hover:bg-zinc-700"
+              >
+                {t("common.cancel")}
+              </button>
+              <button
+                onClick={handleImport}
+                disabled={!selectedFile || importing}
+                className="flex items-center gap-2 rounded btn-accent px-3 py-1.5 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {importing && <Loader2 className="h-3 w-3 animate-spin" />}
+                {importing ? t("skillsPanel.importing") : t("skillsPanel.buttonImport")}
+              </button>
+            </div>
           </div>
         </div>
       )}
