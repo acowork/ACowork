@@ -2007,6 +2007,9 @@ export function ChatPanel() {
   }
 
   // ── Agent not running ──
+  // Auto-sleep was retired in Sept 2026 — this branch only renders
+  // when the agent has been stopped (or never started). The Start
+  // button here is the user-visible recovery path.
   if (!selectedAgent.alive) {
     return (
       <div className="flex flex-1 items-center justify-center">
@@ -2039,7 +2042,7 @@ export function ChatPanel() {
               <Play className="h-8 w-8" />
             </button>
           </Tooltip>
-          <p className="mt-3 text-xs text-text-tertiary ">{agentDisplayName} is sleeping</p>
+          <p className="mt-3 text-xs text-text-tertiary ">{t("chatPanel.agentStopped")}</p>
         </div>
       </div>
     );

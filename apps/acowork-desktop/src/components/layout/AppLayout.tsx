@@ -55,7 +55,6 @@ import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { useSearchStore, isGlobalSearchShortcut } from "../../stores/searchStore";
 import { GlobalSearchDialog } from "../search/GlobalSearchDialog";
 import { useTranslation } from "../../i18n/useTranslation";
-import { useActiveHeartbeatForSelection } from "../../hooks/useActiveHeartbeat";
 import { AlertTriangle, Bot, Check, Cpu, RefreshCw } from "lucide-react";
 import { ChunkLoadBoundary } from "../common/ErrorBoundary";
 import { log } from "../../lib/logger";
@@ -173,12 +172,9 @@ export function AppLayout() {
   }, []);
 
   // ADR-XXX: Presence heartbeat for the idle-watcher. The selected
-  // agent's Runtime renews its idle deadline while this hook's
-  // interval is alive; switching agents (or closing the webview)
-  // cleanly stops the heartbeats so the previous agent's Runtime can
-  // resume normal idle accounting. Single integration point at the
-  // app shell — do NOT mount additional copies elsewhere.
-  useActiveHeartbeatForSelection();
+  // Auto-sleep was retired in Sept 2026 — the ActiveHeartbeat loop is
+  // gone. The selected agent's Runtime stays alive for as long as the
+  // user keeps it running; stop / start is the only transition.
 
   // Refs to track latest panel widths for proportional window-resize scaling
   const fileWidthValueRef = useRef(fileWidth);
@@ -286,7 +282,6 @@ export function AppLayout() {
   const selectedAgentId = useAgentStore((s) => s.selectedAgentId);
   const agents = useAgentStore((s) => s.agents);
   const selectedAgent = selectedAgentId ? (agents[selectedAgentId]?.meta ?? null) : null;
-  const isSleeping = selectedAgentId ? (agents[selectedAgentId]?.meta.sleeping ?? false) : false;
   const isDebugMode = selectedAgent?.debug_state === "enabled" && selectedAgent?.alive;
   // ADR-009 §V-Q: the name is server-side (Runtime `.overrides.json`,
   // mirrored into the Gateway's list view) — no local override.
@@ -599,7 +594,7 @@ export function AppLayout() {
     prevGatewayAliveRef.current = gatewayAlive;
     applyGatewayTransition(prev, gatewayAlive, {
       getAgentIds: () => Object.keys(useAgentStore.getState().agents),
-      setAgentOffline: (id) => useAgentStore.getState().updateAgentLiveness(id, false, false),
+      setAgentOffline: (id) => useAgentStore.getState().updateAgentLiveness(id, false),
       clearAgentSessions: (id) => useChatStore.getState().clearAgentSessions(id),
       refreshServices: () => {
         void useServicesStore.getState().diagnose();
@@ -653,13 +648,9 @@ export function AppLayout() {
   // the first mqtt-status event reaching the frontend).
   useEffect(() => {
     if (gatewayStatus !== "connected") return;
-    // When the agent is sleeping (auto-slept, process exited), MQTT disconnect
-    // is expected — do not show a warning. Only surface disconnects for
-    // actively-running agents.
-    if (isSleeping) {
-      clearStatus("mqtt");
-      return;
-    }
+    // Auto-sleep was retired in Sept 2026 — every MQTT disconnect is a
+    // real connection problem, not the expected aftermath of an
+    // auto-slept Runtime. Surface the warning unconditionally.
     if (!mqttConnected && lastMqttError !== null) {
       const reason = lastMqttError ? `: ${lastMqttError}` : "";
       setStatus(t("statusBar.mqttDisconnected", { reason }), "warning", "mqtt");
@@ -669,7 +660,7 @@ export function AppLayout() {
       // displayed string (which would break if translations change).
       clearStatus("mqtt");
     }
-  }, [mqttConnected, lastMqttError, gatewayStatus, isSleeping, setStatus, clearStatus, t]);
+  }, [mqttConnected, lastMqttError, gatewayStatus, setStatus, clearStatus, t]);
 
   // Detect wake from sleep via visibility change and reconnect.
   //

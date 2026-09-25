@@ -1586,10 +1586,12 @@ input[type="radio"]:checked {
   letter-spacing: 0.04em;
 }
 
-/* ── "zzz" sleep indicator (AgentList sidebar) ──
- * Three z's that drift upward and grow, staggered to evoke a sleeping
- * agent. The base rule sets the infinite loop; nth-child offsets the
- * start so each z rises in turn. */
+/* ── "zzz" idle indicator (AgentList sidebar) ──
+ * Five z's that drift upward and grow, staggered to indicate an agent
+ * with no current session. Since auto-sleep was retired in Sept 2026,
+ * this animation now means "agent is stopped" (or "session is idle"),
+ * not "auto-sleep fired". The base rule sets the infinite loop;
+ * nth-child offsets the start so each z rises in turn. */
 @keyframes zzz-rise {
   0% {
     transform: translateY(2px) scale(0.4);

@@ -404,13 +404,11 @@ message AgentStatus {
   /// Package identity (from manifest).
   string agent_id = 1;
   bool online = 2;
-  // True when the Runtime self-published `"sleeping"` just before
-  // `process::exit(0)` (idle auto-sleep, see
-  // `acowork-runtime::agent::idle_watcher`). Lets the Desktop render an
-  // "auto-slept at HH:MM" badge distinct from a manual stop. Mutually
-  // informative with `online` — `online=true, sleeping=true` means
-  // "process just exited via idle, retained message still cached".
-  bool sleeping = 3;
+  // Field 3 was `sleeping` (auto-sleep flag) until the auto-sleep
+  // subsystem was removed (Sept 2026). Reserved, never reused — kept
+  // empty so that wire encoders do not shift and historical retained
+  // messages stay decodable.
+  reserved 3;
   /// ADR-073: instance identity (UUID v4, immutable).
   string instance_id = 4;
   /// ADR-073: current location (mutable, updated on migration).
@@ -914,36 +912,23 @@ message ControlCommand {
     // The proto fields are *deleted*, not deprecated: with no field to
     // set, the capability is unrepresentable rather than checked.
     // `enable_notify` / `disable_notify` were dropped earlier as dead
-    // (ADR-035 Phase 3).
+    // (ADR-035 Phase 3), and `ActiveHeartbeat` was dropped along with
+    // the auto-sleep subsystem (Sept 2026).
     //
     // What remains is traffic that is *not* a user action and therefore
     // needs no user identity:
     //   - `Intent` — Gateway → Runtime (cron triggers, cross-agent
-    //     messaging);
-    //   - `ActiveHeartbeat` — a presence pulse, not a state transition.
+    //     messaging).
 
     // ── System ──
     Intent              intent                = 2;
 
-    // ── Presence — frontend ↔ runtime idle heartbeat ──
-    //
-    // Periodically broadcast by the Desktop frontend (~every 15s) for the
-    // currently selected agent. Pure observer signal — does NOT carry any
-    // state-transition semantics. The Runtime's idle_watcher maintains
-    // `last_heartbeat_at_ms` independently from `last_inbound_at_ms` and
-    // renews the idle deadline while the heartbeat is fresh.
-    //
-    // Crash-safe by construction: if the frontend exits / disconnects,
-    // heartbeats simply stop arriving and the watcher falls through to
-    // the normal inbound-based deadline check after `heartbeat_timeout`.
-    ActiveHeartbeat     active_heartbeat      = 3;
+    // Field 3 was `ActiveHeartbeat` (Desktop frontend idle heartbeat)
+    // until the auto-sleep subsystem was removed (Sept 2026). The
+    // oneof slot is gone — historical retained ControlCommand messages
+    // that carried it will fail to decode, but the field was never used
+    // as a Retained message and no live sessions depend on it.
   }
-}
-
-// Empty payload — the heartbeat carries no data, only the act of being
-// sent. Topic alone identifies the target agent
-// (acowork/agents/{id}/control/active_heartbeat).
-message ActiveHeartbeat {
 }
 
 // ── System ────────────────────────────────────────────────────────────────

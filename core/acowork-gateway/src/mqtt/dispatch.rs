@@ -1,23 +1,16 @@
 //! MQTT message dispatch (ADR-033).
 //!
 //! Handles incoming MQTT messages on the Gateway's broker connection.
-//! Plain-text payloads (`http_port`, agent `status`) carry simple semantic
-//! data (port number, online/offline) rather than `DataEnvelope` protobuf,
-//! so they are matched by topic pattern and parsed inline.
-//!
-//! Status messages from the Runtime (`acowork/agents/{id}/status`) are
-//! additionally re-published as protobuf `DataEnvelope` payloads on a
-//! separate topic. This bridges the legacy plain-text retained topic
-//! (used by older Runtimes and the Gateway's internal AgentRegistry) to
-//! the modern protobuf contract consumed by the Desktop's
-//! `data_envelope::Payload::AgentStatus` handler.
+//! Most topics are matched by topic pattern and either decoded as
+//! `DataEnvelope` protobuf or treated as plain text where the payload is
+//! genuinely a small textual signal (e.g. `http_endpoint`, agent `ready`).
 //!
 //! See `docs/zh/protocols/mqtt.md` §8 (Topic patterns).
 
 use std::sync::Arc;
 
 use acowork_core::mqtt_proto::{
-    data_envelope, AgentStatus as AgentStatusProto, DataEnvelope, NodeEnrollResult,
+    data_envelope, DataEnvelope, NodeEnrollResult,
 };
 use acowork_core::operation::{OperationId, OperationState};
 use acowork_core::{StructuredErrorBody, StructuredErrorCode};
@@ -183,8 +176,8 @@ pub struct DispatchContext {
     /// Node registry — LWT-driven online state + retained info
     /// snapshots (ADR-055 §6.2).
     pub node_registry: SharedNodeRegistry,
-    /// Gateway MQTT client for re-publishing plain-text statuses as
-    /// protobuf envelopes. `None` in tests without a broker.
+    /// Gateway MQTT client for node-control plane replies (enrollment
+    /// handshake, etc.). `None` in tests without a broker.
     pub mqtt_client: Option<Arc<GatewayMqttClient>>,
     /// Shared Gateway state.
     pub state: SharedState,
@@ -273,10 +266,7 @@ pub fn topic_matches(filter: &str, topic: &str) -> bool {
 ///
 /// Topics with simple text payloads rather than protobuf envelopes:
 /// - `acowork/agents/+/http_endpoint` → registers Runtime HTTP port for reverse proxy
-/// - `acowork/agents/+/status` → updates AgentRegistry online/offline
-///   status AND re-publishes as a protobuf `DataEnvelope` so the
-///   Desktop's `data_envelope::Payload::AgentStatus` handler also
-///   receives the transition.
+/// - `acowork/agents/+/ready` → updates `running_agents[id].ready`
 /// - `acowork/nodes/+/status` → updates NodeRegistry online/offline
 ///   (ADR-055 §6.2; plain text + LWT, same shape as agent status).
 /// - `acowork/nodes/+/info` → protobuf `DataEnvelope<NodeInfo>`
@@ -286,6 +276,12 @@ pub fn topic_matches(filter: &str, topic: &str) -> bool {
 /// - `acowork/nodes/+/enroll` → ADR-055 Phase 5a enrollment handshake
 ///   (protobuf `DataEnvelope<NodeEnroll>`); validated, then answered
 ///   with an `enroll_result` reply on the per-node result topic.
+///
+/// Agent status (`acowork/agents/+/status`) is decoded as a protobuf
+/// `DataEnvelope<AgentStatus>` — see the dedicated arm below. The plain
+/// text was retired when the auto-sleep subsystem was removed (Sept
+/// 2026): the only on/off transition is now stop / start, and both
+/// sides of that wire are protobuf.
 ///
 /// This replaces the inline callback previously in `gateway/mod.rs`.
 pub fn handle_plaintext_message(topic: &str, payload: &[u8], ctx: &DispatchContext) {
@@ -331,149 +327,67 @@ pub fn handle_plaintext_message(topic: &str, payload: &[u8], ctx: &DispatchConte
         });
         tracing::info!(agent_id = %aid_for_log, endpoint = %endpoint_for_log, "Registered Runtime HTTP endpoint via MQTT");
     } else if topic_matches("acowork/agents/+/status", topic) {
-        let reg = ctx.agent_registry.clone();
+        // Decode the protobuf DataEnvelope<AgentStatus> on a detached
+        // task — the handler does an async registry write, but
+        // `handle_plaintext_message` is called from a sync MQTT callback
+        // and must return promptly to avoid backing up the broker
+        // dispatch loop.
+        let instance_id = match extract_agent_id_from_status_topic(topic) {
+            Some(id) => id,
+            None => {
+                tracing::warn!(
+                    topic,
+                    "agent status topic matched but instance_id extraction failed — ignoring"
+                );
+                return;
+            }
+        };
+        let agent_registry = ctx.agent_registry.clone();
+        let state = ctx.state.clone();
         let topic_owned = topic.to_string();
         let payload_owned = payload.to_vec();
-        let state_for_status = ctx.state.clone();
-        // Clone the (optional) GatewayMqttClient for the spawned
-        // re-publish task. None means the Gateway is running without
-        // an embedded broker (e.g. tests); in that case we skip
-        // re-publishing but still update the AgentRegistry.
-        let mqtt_client_for_republish = ctx.mqtt_client.clone();
+        let id_for_task = instance_id.clone();
         tokio::spawn(async move {
-            // 1) Update internal registry (sleeping_at stamping, etc.)
-            //    `online` here covers `online`, `sleeping` and
-            //    `degraded` payloads (all mean the MQTT session is
-            //    alive — `degraded` = bootstrap failed but the
-            //    process is still connected); `offline` flips it
-            //    back to false. The registry is the single source of
-            //    truth for the "is the Runtime's MQTT session
-            //    reachable" question.
-            reg.write().await.update_from_mqtt(&topic_owned, &payload_owned);
-
-            // 2) Symmetric reconciliation into `running_agents`
-            //    (ADR-055 §6.2). The dispatch surface has two paths
-            //    that touch `running_agents`:
-            //      - `status` topic → tracks MQTT liveness
-            //      - `ready` topic → tracks Runtime session readiness
-            //    Before this fix only the `offline` branch dropped the
-            //    entry, so an OS sleep/wake cycle (broker fires LWT
-            //    `offline` → 121 ms later Runtime reconnects and
-            //    publishes `online`) left `running_agents` empty while
-            //    the AgentRegistry said the agent was online — UI
-            //    showed 休眠 and POST /start idempotently short-circuited.
-            //
-            //    The fix: every status transition MUST keep the entry
-            //    and the registered fields consistent with the
-            //    broker's authoritative view. `offline` removes the
-            //    entry (broker knows the process is gone); every other
-            //    payload keeps / re-installs a node-hosted entry with
-            //    the latest ready value (last known; the `ready`
-            //    topic handler will refine it).
-            if let Some(agent_id) = extract_agent_id_from_status_topic(&topic_owned) {
-                let payload_trim = String::from_utf8_lossy(&payload_owned).trim().to_string();
-                match payload_trim.as_str() {
-                    "offline" => {
-                        // The broker only publishes `offline` (LWT or
-                        // clean shutdown) after the Runtime's
-                        // connection actually dropped, so it is
-                        // authoritative: remove the entry. The
-                        // `NodeReplayGuard` protects the *node* topic
-                        // set only; for agent status topics retained
-                        // snapshot semantics already rule out stale
-                        // replays (a topic retains only its latest
-                        // payload, so a replay always reflects the
-                        // most recent truth). A live `online` from
-                        // the Runtime's reconnect re-installs the
-                        // entry via the online-class branch below.
-                        state_for_status.write().await.remove_running(&agent_id);
-                    }
-                    "online" | "sleeping" | "degraded" => {
-                        // Re-track on every online-class signal so a
-                        // post-wake reconnect always re-installs the
-                        // entry. `track_running_agent` is idempotent —
-                        // it preserves the existing entry's ready /
-                        // dev_mode / debug_state fields.
-                        track_running_agent_for_status(
-                            &state_for_status,
-                            &agent_id,
-                            payload_trim == "sleeping",
-                        )
-                        .await;
-                    }
-                    _ => {
-                        // Protobuf loopback (the Gateway re-publishes
-                        // its own status as DataEnvelope on the same
-                        // topic; the AgentRegistry handles the
-                        // protobuf decoding) and any unknown payload
-                        // — no `running_agents` mutation.
-                    }
-                }
-            }
-
-            // 3) Re-publish as a protobuf DataEnvelope so subscribers
-            //    that listen for `data_envelope::Payload::AgentStatus`
-            //    (the Desktop's chat_mqtt) also see the transition.
-            //    Without this, the Desktop would only see the
-            //    plain-text retained payload (which the Desktop also
-            //    handles — see `parse_plaintext_agent_status` — but
-            //    the protobuf branch is needed for any future Desktop
-            //    code that wants the structured AgentStatus type
-            //    rather than a string).
-            let Some(client) = mqtt_client_for_republish else {
-                return;
-            };
-            // ADR-073: the topic variable under `acowork/agents/` is the
-            // INSTANCE identity. The plain-text status carries no package
-            // id, so `agent_id` stays empty here — consumers key on
-            // `instance_id`.
-            let Some(instance_id) = extract_agent_id_from_status_topic(&topic_owned) else {
-                tracing::warn!(topic = %topic_owned, "status topic matched but instance_id extraction failed");
-                return;
-            };
-            let payload_str = String::from_utf8_lossy(&payload_owned);
-            let (online, sleeping) = match payload_str.trim() {
-                "sleeping" => (true, true),
-                "online" => (true, false),
-                "degraded" => (true, false),
-                "offline" => (false, false),
-                other => {
-                    // Expected for the Gateway's own protobuf loopback
-                    // (the AgentRegistry handles that path) and for any
-                    // future plain-text statuses; nothing to re-publish.
-                    tracing::debug!(
+            let envelope = match DataEnvelope::decode(payload_owned.as_slice()) {
+                Ok(env) => env,
+                Err(e) => {
+                    tracing::warn!(
                         topic = %topic_owned,
-                        payload = %other,
-                        "republish: non-plain-text agent status payload, skipping"
+                        instance_id = %id_for_task,
+                        error = %e,
+                        "agent status payload is not a DataEnvelope protobuf — ignoring"
                     );
                     return;
                 }
             };
-            let envelope = DataEnvelope {
-                version: 1,
-                payload: Some(data_envelope::Payload::AgentStatus(AgentStatusProto {
-                    agent_id: String::new(),
-                    online,
-                    sleeping,
-                    instance_id,
-                    node_id: String::new(),
-                })),
+            let status = match envelope.payload {
+                Some(data_envelope::Payload::AgentStatus(s)) => s,
+                _ => {
+                    tracing::warn!(
+                        topic = %topic_owned,
+                        instance_id = %id_for_task,
+                        "DataEnvelope did not carry an AgentStatus payload — ignoring"
+                    );
+                    return;
+                }
             };
-            // Same topic — the broker will replace the retained
-            // plain-text payload with this protobuf envelope for new
-            // subscribers. Existing plain-text subscribers continue to
-            // see the cached plain text (broker delivers different
-            // payloads to the same topic to subscribers based on
-            // subscription time).
-            if let Err(e) = client
-                .publish_envelope(&topic_owned, &envelope, MqttQoS::AtLeastOnce, true)
+            // Update the registry (authoritative online/offline source).
+            agent_registry
+                .write()
                 .await
-            {
-                tracing::warn!(
-                    topic = %topic_owned,
-                    error = %e,
-                    "failed to re-publish agent status as protobuf"
-                );
+                .update_from_mqtt(&topic_owned, &payload_owned);
+            // Drive running_agents to match the broker view.
+            if status.online {
+                track_running_agent_for_status(&state, &id_for_task).await;
+            } else {
+                let mut gw = state.write().await;
+                if gw.running_agents.contains_key(&id_for_task) {
+                    tracing::info!(
+                        agent_id = %id_for_task,
+                        "agent status=offline — removing running_agents entry"
+                    );
+                    gw.running_agents.remove(&id_for_task);
+                }
             }
         });
     } else if topic_matches("acowork/agents/+/ready", topic) {
@@ -485,10 +399,10 @@ pub fn handle_plaintext_message(topic: &str, payload: &[u8], ctx: &DispatchConte
         // reports it; the Desktop fast-path keeps its `running && ready`
         // gate closed until the Gateway mirrors `ready=true`.
         //
-        // The plain-text shape is intentional: it parallels
-        // `acowork/agents/+/status` so the dispatch surface is uniform
-        // and the broker's retained message gives a fresh Gateway
-        // startup the same answer without polling the Runtime.
+        // Plain text (not `DataEnvelope`) is deliberate for this one: the
+        // value is a single boolean with no companion fields, and unlike
+        // `status` it never needed a structured shape. (`status` moved to
+        // `DataEnvelope<AgentStatus>` in Sept 2026.)
         let agent_id = match topic
             .strip_prefix("acowork/agents/")
             .and_then(|s| s.strip_suffix("/ready"))
@@ -1522,29 +1436,28 @@ fn extract_agent_id_from_status_topic(topic: &str) -> Option<String> {
     None
 }
 
-/// Re-install (or keep) a `running_agents` entry on a non-offline
-/// status transition. Symmetric counterpart of the `offline` branch in
-/// the status dispatch path.
+/// Re-install (or keep) a `running_agents` entry on an online status
+/// transition. Symmetric counterpart of the `offline` branch in the
+/// status dispatch path.
 ///
 /// **Why this exists**: the original code only removed the
-/// `running_agents` entry on `status=offline`. After an OS
-/// sleep/wake the broker fires LWT `offline` (which correctly removes
-/// the entry), then 100-300 ms later the Runtime reconnects and
-/// publishes `online` — but no path re-installs the entry, so the
-/// Gateway's view of "running" diverges from the broker's view of
-/// "online". The Desktop showed `休眠`, POST `/start` short-circuited
-/// via the ADR-055 idempotent fast-path (because `is_online` is true),
-/// and the user could not recover.
+/// `running_agents` entry on `status=offline`. After an OS sleep/wake
+/// the broker fires LWT `offline` (which correctly removes the entry),
+/// then 100-300 ms later the Runtime reconnects and publishes
+/// `online` — but no path re-installed the entry, so the Gateway's
+/// view of "running" diverged from the broker's view of "online". The
+/// Desktop showed `休眠`, POST `/start` short-circuited via the
+/// ADR-055 idempotent fast-path (because `is_online` is true), and
+/// the user could not recover.
 ///
 /// Idempotent: preserves the existing entry's `ready`, `dev_mode`,
 /// `debug_state` and `started_at` fields if the entry already
 /// exists. The `ready` topic handler refines `ready` separately, so
 /// this helper only needs to install the bare-minimum liveness shape.
-async fn track_running_agent_for_status(
-    state: &SharedState,
-    agent_id: &str,
-    sleeping: bool,
-) {
+///
+/// Auto-sleep was removed in Sept 2026 — this helper now only handles
+/// the online transition; `sleeping` no longer exists as a state.
+async fn track_running_agent_for_status(state: &SharedState, agent_id: &str) {
     let mut gw = state.write().await;
     if gw.running_agents.contains_key(agent_id) {
         // Already tracked — keep the existing rich fields (ready,
@@ -1552,7 +1465,6 @@ async fn track_running_agent_for_status(
         // is read from the AgentRegistry (MQTT), never re-derived here.
         tracing::debug!(
             agent_id,
-            sleeping,
             "running_agents: entry already tracked; keeping rich fields"
         );
         return;
@@ -1598,9 +1510,9 @@ async fn track_running_agent_for_status(
         // startup (and is unavoidable when the process has truly
         // just reconnected).
         ready: false,
-        // Status is online-class (online / sleeping / degraded); the
-        // Runtime's session has been resumed. dev_mode / debug_state
-        // default to off until the ready topic handler refines them.
+        // Status is online-class; the Runtime's session has been resumed.
+        // dev_mode / debug_state default to off until the ready topic
+        // handler refines them.
         dev_mode: false,
         debug_state: crate::gateway::state::DebugState::Disabled,
         debug_port: None,
@@ -1610,8 +1522,7 @@ async fn track_running_agent_for_status(
     });
     tracing::info!(
         agent_id,
-        sleeping,
-        "Auto-tracked node-hosted Runtime from status=online/sleeping (pid=0, post-wake recovery)"
+        "Auto-tracked node-hosted Runtime from status=online (pid=0, post-wake recovery)"
     );
 }
 
@@ -2731,7 +2642,7 @@ mod tests {
         );
 
         // Dispatch the online-class status.
-        track_running_agent_for_status(&state, INSTANCE_ARCHITECT, false).await;
+        track_running_agent_for_status(&state, INSTANCE_ARCHITECT).await;
 
         // Post-condition: entry installed, pid=0 (node-hosted).
         let entry = state
@@ -2799,7 +2710,7 @@ mod tests {
                 .insert(INSTANCE_ARCHITECT.to_string(), installed_agent_info(REMOTE));
         }
 
-        track_running_agent_for_status(&state, INSTANCE_ARCHITECT, false).await;
+        track_running_agent_for_status(&state, INSTANCE_ARCHITECT).await;
         let entry = state
             .read()
             .await
@@ -2814,7 +2725,7 @@ mod tests {
 
         // No install record (inventory not aggregated yet) → the
         // documented `local` fallback is the only correct answer.
-        track_running_agent_for_status(&state, UNKNOWN, false).await;
+        track_running_agent_for_status(&state, UNKNOWN).await;
         let entry = state
             .read()
             .await
@@ -2837,7 +2748,7 @@ mod tests {
     #[tokio::test]
     async fn track_running_agent_for_status_is_idempotent_on_repeated_online() {
         let state = test_state();
-        track_running_agent_for_status(&state, INSTANCE_ARCHITECT, false).await;
+        track_running_agent_for_status(&state, INSTANCE_ARCHITECT).await;
         let started_at_first = state
             .read()
             .await
@@ -2849,7 +2760,7 @@ mod tests {
         // Sleep so the timestamp would observably change if the helper
         // naively re-inserted the entry.
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        track_running_agent_for_status(&state, INSTANCE_ARCHITECT, false).await;
+        track_running_agent_for_status(&state, INSTANCE_ARCHITECT).await;
 
         let started_at_second = state
             .read()
@@ -2862,24 +2773,6 @@ mod tests {
             started_at_first, started_at_second,
             "repeated online signals must NOT reset started_at"
         );
-    }
-
-    /// A `sleeping` payload must install an entry the same way `online`
-    /// does — auto-sleep keeps the process alive. Without this, the
-    /// post-wake `running_agents` entry would disappear as soon as the
-    /// Runtime flipped to sleeping, re-opening the desync window.
-    #[tokio::test]
-    async fn track_running_agent_for_status_installs_entry_on_sleeping() {
-        let state = test_state();
-        track_running_agent_for_status(&state, INSTANCE_ARCHITECT, true).await;
-        let entry = state
-            .read()
-            .await
-            .running_agents
-            .get(INSTANCE_ARCHITECT)
-            .cloned()
-            .expect("sleeping must install a node-hosted entry too");
-        assert_eq!(entry.pid, 0, "sleeping entry is node-hosted (pid=0)");
     }
 
     /// `reconcile_running_agents` is the safety-net backstop for the
@@ -2936,9 +2829,24 @@ mod tests {
         // but `running_agents` has no entry — this is the 2026-09-07
         // desync the user observed.
         let reg = crate::mqtt::agent_registry::new_shared_registry();
-        reg.write()
-            .await
-            .update_from_mqtt(&format!("acowork/agents/{}/status", INSTANCE_ARCHITECT), b"online");
+        let envelope = acowork_core::mqtt_proto::DataEnvelope {
+            version: 1,
+            payload: Some(
+                acowork_core::mqtt_proto::data_envelope::Payload::AgentStatus(
+                    acowork_core::mqtt_proto::AgentStatus {
+                        agent_id: "com.acowork.architect".to_string(),
+                        online: true,
+                        instance_id: INSTANCE_ARCHITECT.to_string(),
+                        node_id: acowork_core::node::LOCAL_NODE_ID.to_string(),
+                    },
+                ),
+            ),
+        };
+        let payload = prost::Message::encode_to_vec(&envelope);
+        reg.write().await.update_from_mqtt(
+            &format!("acowork/agents/{}/status", INSTANCE_ARCHITECT),
+            &payload,
+        );
         assert!(
             reg.read().await.is_online(INSTANCE_ARCHITECT),
             "preflight: broker says online"
@@ -3051,11 +2959,26 @@ mod tests {
     async fn reconcile_running_agents_preserves_entries_consistent_with_broker_view() {
         let state = test_state();
         let reg = crate::mqtt::agent_registry::new_shared_registry();
-        reg.write()
-            .await
-            .update_from_mqtt(&format!("acowork/agents/{}/status", INSTANCE_ARCHITECT), b"online");
+        let envelope = acowork_core::mqtt_proto::DataEnvelope {
+            version: 1,
+            payload: Some(
+                acowork_core::mqtt_proto::data_envelope::Payload::AgentStatus(
+                    acowork_core::mqtt_proto::AgentStatus {
+                        agent_id: "com.acowork.architect".to_string(),
+                        online: true,
+                        instance_id: INSTANCE_ARCHITECT.to_string(),
+                        node_id: acowork_core::node::LOCAL_NODE_ID.to_string(),
+                    },
+                ),
+            ),
+        };
+        let payload = prost::Message::encode_to_vec(&envelope);
+        reg.write().await.update_from_mqtt(
+            &format!("acowork/agents/{}/status", INSTANCE_ARCHITECT),
+            &payload,
+        );
 
-        track_running_agent_for_status(&state, INSTANCE_ARCHITECT, false).await;
+        track_running_agent_for_status(&state, INSTANCE_ARCHITECT).await;
         let started_at = state
             .read()
             .await

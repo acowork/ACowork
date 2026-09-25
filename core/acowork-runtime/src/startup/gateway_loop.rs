@@ -32,7 +32,6 @@ pub(crate) async fn phase_d_run(
     let SessionBootContext {
         session_manager,
         committed_lines: _committed_lines,
-        idle_watcher,
     } = session_ctx;
 
     let SubsystemHandles {
@@ -46,23 +45,11 @@ pub(crate) async fn phase_d_run(
     let (mqtt_dispatch_tx, mqtt_dispatch_rx) = tokio::sync::mpsc::unbounded_channel();
 
     // ADR-033: Forward Runtime HTTP dispatch messages to the MQTT dispatch channel.
-    //
-    // ADR-076 §决策 4: this is now the *only* funnel for user-originated
-    // session actions (they arrive over HTTP), so the idle-watcher
-    // `record_inbound()` lives here rather than in the MQTT control loop
-    // below. Without it a user who only ever sends chat over HTTP would
-    // have no inbound signal at all, and the session would auto-sleep
-    // underneath them.
     if let Some(http_rx) = ctx.http_dispatch_rx.take() {
         let tx = mqtt_dispatch_tx.clone();
-        let idle_watcher = idle_watcher.clone();
         tokio::spawn(async move {
             let mut rx = http_rx;
             while let Some(msg) = rx.recv().await {
-                // `None` means the user chose "never sleep".
-                if let Some(watcher) = idle_watcher.as_ref() {
-                    watcher.record_inbound();
-                }
                 let _ = tx.send(msg);
             }
             tracing::info!("Runtime HTTP dispatch channel closed");
@@ -74,43 +61,15 @@ pub(crate) async fn phase_d_run(
     // SystemNotification { notification_type: ... }.
     let _mqtt_handle = ctx.control_rx.take().map(|ctrl_rx| {
         let tx = mqtt_dispatch_tx.clone();
-        // Phase B-3: idle watcher (if spawned) gets a `record_inbound()` on
-        // every user action so its deadline resets. Clone-able handle,
-        // so it's safe to share with this spawned task.
-        let idle_watcher = idle_watcher.clone();
         tokio::spawn(async move {
             let mut rx = ctrl_rx;
             while let Some((topic, payload)) = rx.recv().await {
                 match crate::mqtt::control_handler::parse_control_payload(&topic, &payload) {
                     Some(action) => {
-                        // Presence heartbeat is a signal-only command: it
-                        // touches the idle watcher and does NOT route to
-                        // dispatch_inbound (no InboundMessage, no session
-                        // task to wake). It is the user's "I'm here, keep
-                        // the agent warm" pulse, semantically distinct from
-                        // record_inbound which fires on event-driven user
-                        // actions (send/stop/switch/etc.).
-                        if matches!(
-                            action,
-                            crate::mqtt::control_handler::ControlAction::ActiveHeartbeat
-                        ) {
-                            if let Some(watcher) = idle_watcher.as_ref() {
-                                watcher.record_heartbeat();
-                            }
-                            tracing::trace!(topic, "frontend active heartbeat received");
-                            continue;
-                        }
-
-                        if let Some((session_id, msg)) = control_action_to_inbound(action) {
-                            // Reset the auto-sleep deadline on every parsed
-                            // user action. `None` means the user chose
-                            // "never sleep" — nothing to do.
-                            if let Some(watcher) = idle_watcher.as_ref() {
-                                watcher.record_inbound();
-                            }
-                            if tx.send((session_id, msg)).is_err() {
-                                tracing::warn!(topic, "MQTT dispatch channel closed");
-                            }
+                        if let Some((session_id, msg)) = control_action_to_inbound(action)
+                            && tx.send((session_id, msg)).is_err()
+                        {
+                            tracing::warn!(topic, "MQTT dispatch channel closed");
                         }
                     }
                     None => {
@@ -135,7 +94,7 @@ pub(crate) async fn phase_d_run(
     let lifecycle_publisher: crate::mqtt::MqttChunkPublisher =
         if let Some(ref mqtt) = ctx.mqtt_client {
             // Status first — `online` is the "TCP connection + AgentRegistry sees
-            // us" signal that the Gateway uses for `online` / `sleeping` tracking.
+            // us" signal that the Gateway uses for `online` tracking.
             // The `ready=true` signal was already published at the end of Phase A
             // (see `agent_init.rs::phase_a_init_agent`) so the Gateway could
             // start reverse-proxying Phase-A-ready endpoints (`/workspaces`,
@@ -200,13 +159,13 @@ pub(crate) async fn phase_d_run(
 ///
 /// ADR-076 §决策 4: after the second wave of the HTTP migration this
 /// mapper is nearly empty. The MQTT control channel now carries only
-/// `Intent` (Gateway → Runtime: cron triggers, cross-agent messaging) and
-/// `ActiveHeartbeat` (presence). Every **user-initiated** action — chat,
-/// stop, continue, approval, question_answer, cancel_tool, compress, and
-/// the session lifecycle before them — arrives over the Gateway's
-/// authenticated HTTP API and is injected directly into the dispatch
-/// channel by `http::server::dispatch_session_action`, so it never passes
-/// through `ControlAction` at all.
+/// `Intent` (Gateway → Runtime: cron triggers, cross-agent messaging).
+/// Every **user-initiated** action — chat, stop, continue, approval,
+/// question_answer, cancel_tool, compress, and the session lifecycle
+/// before them — arrives over the Gateway's authenticated HTTP API and
+/// is injected directly into the dispatch channel by
+/// `http::server::dispatch_session_action`, so it never passes through
+/// `ControlAction` at all.
 ///
 /// The mapper is exhaustive over `ControlAction` — adding a variant in
 /// `control_handler.rs` triggers a compile error here, which is the point.
@@ -237,19 +196,6 @@ fn control_action_to_inbound(
                 },
             ))
         }
-
-        // ── Presence heartbeat (defensive) ──────────────────────────────
-        //
-        // The phase_d_run dispatcher catches `ControlAction::ActiveHeartbeat`
-        // upstream and routes it to `IdleWatcherHandle::record_heartbeat`
-        // WITHOUT going through this mapper. This arm is therefore
-        // unreachable in normal flow, but is required by the exhaustive
-        // `match` over `ControlAction` and acts as a defensive net: if a
-        // future caller forgets to short-circuit, the heartbeat is
-        // silently dropped here rather than synthesised into an
-        // `InboundMessage` that the session task cannot meaningfully
-        // handle (no session_id, no payload).
-        ControlAction::ActiveHeartbeat => None,
     }
 }
 
@@ -1072,14 +1018,14 @@ mod tests {
     use crate::mqtt::control_handler::ControlAction;
 
     /// ADR-076 §决策 4: after the second wave of the HTTP migration the MQTT
-    /// control plane holds exactly two variants, and neither is a user
-    /// action. A session-scoped command cannot be expressed at all — there is
-    /// no `ControlAction` variant and no proto field for it — so "refused over
-    /// MQTT" is enforced by the compiler rather than by an assert.
+    /// control plane holds exactly one variant — `Intent` — and it is
+    /// not a user action. A session-scoped command cannot be expressed
+    /// at all — there is no `ControlAction` variant and no proto field
+    /// for it — so "refused over MQTT" is enforced by the compiler
+    /// rather than by an assert.
     ///
-    /// What this test pins is the *routing* of the two survivors: `Intent`
-    /// maps to a system-level (`""`) `IntentMessage`, and the heartbeat is
-    /// dropped here because `phase_d_run` already handled it upstream.
+    /// What this test pins is the *routing* of the survivor: `Intent`
+    /// maps to a system-level (`""`) `IntentMessage`.
     #[test]
     fn only_non_user_signals_map_over_mqtt() {
         let (route, msg) = control_action_to_inbound(ControlAction::IntentReceived {
@@ -1102,11 +1048,6 @@ mod tests {
             }
             other => panic!("expected IntentMessage, got {other:?}"),
         }
-
-        assert!(
-            control_action_to_inbound(ControlAction::ActiveHeartbeat).is_none(),
-            "the heartbeat is handled by phase_d_run and must not become an InboundMessage"
-        );
     }
 
     /// Malformed `params_json` must not panic — it degrades to `{}`.

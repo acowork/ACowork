@@ -6,7 +6,7 @@
  * 2. Editor conflict UX — dirty / clean / deleted paths + echo suppression
  *    + touch-metadata re-check before prompting a dirty conflict.
  * 3. Reconnect full-sync fallback (invalidate + root re-fetch).
- * 4. Wake-transition detection (review H-1: sleeping → online must sync).
+ * 4. Wake-transition detection (review H-1: offline → online must sync).
  * 5. skipIfDirty reload guard (review M-3: in-flight edits never clobbered).
  */
 
@@ -334,44 +334,22 @@ describe("ADR-058: reconnect / wake full-sync fallback", () => {
     });
 });
 
-// ── Review H-1: wake-transition detection ────────────────────────────────
+// ── ADR-058 review H-1: wake-transition detection ────────────────────────
+//
+// Auto-sleep was retired in Sept 2026 — `AgentStatusSnapshot.sleeping`
+// is gone. A wake is now simply `offline → online` (e.g. crash + restart).
 
 describe("ADR-058 review H-1: isWakeTransition", () => {
     it("cold start (retained online, no previous state) is not a wake", () => {
-        expect(isWakeTransition(undefined, { online: true, sleeping: false })).toBe(false);
+        expect(isWakeTransition(undefined, { online: true })).toBe(false);
     });
 
     it("online → online (status re-publish) is not a wake", () => {
-        expect(
-            isWakeTransition({ online: true, sleeping: false }, { online: true, sleeping: false }),
-        ).toBe(false);
+        expect(isWakeTransition({ online: true }, { online: true })).toBe(false);
     });
 
     it("offline → online (Will-message path) is a wake", () => {
-        expect(
-            isWakeTransition({ online: false, sleeping: false }, { online: true, sleeping: false }),
-        ).toBe(true);
-    });
-
-    it("sleeping → online (idle-sleep wake, the H-1 regression) is a wake", () => {
-        // sleeping maps to online=true in the Tauri payload; a clean
-        // disconnect never fires the LWT, so this is the ONLY sequence a
-        // connected Desktop sees on the normal idle-sleep wake path.
-        expect(
-            isWakeTransition({ online: true, sleeping: true }, { online: true, sleeping: false }),
-        ).toBe(true);
-    });
-
-    it("falling asleep (online → sleeping) is not a wake", () => {
-        expect(
-            isWakeTransition({ online: true, sleeping: false }, { online: true, sleeping: true }),
-        ).toBe(false);
-    });
-
-    it("offline → sleeping is not a wake (process is still down)", () => {
-        expect(
-            isWakeTransition({ online: false, sleeping: false }, { online: true, sleeping: true }),
-        ).toBe(false);
+        expect(isWakeTransition({ online: false }, { online: true })).toBe(true);
     });
 });
 

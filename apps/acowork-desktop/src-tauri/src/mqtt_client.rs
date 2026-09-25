@@ -25,7 +25,6 @@ use rumqttc::{AsyncClient, QoS};
 use tokio::sync::Mutex;
 
 use acowork_core::defaults;
-use acowork_core::mqtt_proto::{self, ControlCommand, DataEnvelope, data_envelope};
 use acowork_mqtt_session::{
     ErrClass, MqttClient, MqttClientConfig, MqttClientHandler, SessionState,
 };
@@ -371,71 +370,6 @@ impl DesktopMqttClient {
             .subscribe(filter, qos.into())
             .await
             .map_err(|e| format!("subscribe '{filter}': {e}"))
-    }
-
-    /// Publish a control command to the broker.
-    ///
-    /// Desktop → Runtime control commands:
-    /// - `control/chat_message` — send message to agent
-    /// - `control/stop` — stop current generation
-    ///
-    /// ADR-076 §决策 4: session lifecycle / per-session config no longer
-    /// travel this way (they need an authenticated caller) — see
-    /// `commands/chat_mqtt.rs`.
-    pub async fn publish_control(
-        &self,
-        instance_id: &str,
-        command: &str,
-        payload: &[u8],
-    ) -> Result<(), String> {
-        let topic = format!(
-            "acowork/agents/{}/sessions/control/{}",
-            instance_id, command
-        );
-        self.inner
-            .publish_raw(&topic, payload.to_vec(), QoS::AtLeastOnce, false)
-            .await
-            .map_err(|e| format!("publish control '{command}': {e}"))
-    }
-
-    /// Publish a control command as a `DataEnvelope` protobuf payload.
-    ///
-    /// This is the canonical way to send control commands via MQTT
-    /// per `docs/zh/protocols/mqtt.md` §4 — all messages must use
-    /// Protobuf `DataEnvelope` encoding for wire compatibility.
-    pub async fn publish_control_protobuf(
-        &self,
-        instance_id: &str,
-        control_command: ControlCommand,
-    ) -> Result<(), String> {
-        let envelope = DataEnvelope {
-            version: 1,
-            payload: Some(data_envelope::Payload::ControlCommand(control_command)),
-        };
-        let payload = prost::Message::encode_to_vec(&envelope);
-
-        // Determine the sub-topic from the command type.
-        //
-        // ADR-076 §决策 4: `active_heartbeat` is the only command the
-        // Desktop still publishes — every user-initiated action goes over
-        // the Gateway's authenticated HTTP API, and the proto variants for
-        // those commands are deleted (so they cannot reach this match).
-        // The `None` fallback is unreachable in practice: a `ControlCommand`
-        // with no `oneof` set carries no meaning.
-        let command = match &envelope.payload {
-            Some(data_envelope::Payload::ControlCommand(cmd)) => {
-                match &cmd.command {
-                    Some(mqtt_proto::control_command::Command::ActiveHeartbeat(_)) => {
-                        "active_heartbeat"
-                    }
-                    Some(mqtt_proto::control_command::Command::Intent(_)) => "intent",
-                    None => "active_heartbeat",
-                }
-            }
-            _ => "active_heartbeat",
-        };
-
-        self.publish_control(instance_id, command, &payload).await
     }
 
     /// Force a soft-restart of the MQTT event loop (deterministic

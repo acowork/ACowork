@@ -482,12 +482,12 @@ fn integration_lwt_offline_on_disconnect() {
             .await
             .unwrap();
 
-        let status = tokio::time::timeout(Duration::from_secs(3), async {
+        let lwt_payload = tokio::time::timeout(Duration::from_secs(3), async {
             loop {
                 match events.poll().await {
                     Ok(rumqttc::Event::Incoming(rumqttc::Incoming::Publish(p))) => {
                         if p.topic.contains(&format!("/{}/status", TEST_INSTANCE_ID)) {
-                            return String::from_utf8_lossy(&p.payload).to_string();
+                            return p.payload.to_vec();
                         }
                     }
                     _ => continue,
@@ -497,7 +497,17 @@ fn integration_lwt_offline_on_disconnect() {
         .await
         .expect("should receive retained LWT message");
 
-        assert_eq!(status, "offline", "LWT should publish offline status");
+        // The wire is uniformly `DataEnvelope<AgentStatus>` since the
+        // auto-sleep subsystem was retired (Sept 2026) — decode and
+        // assert `online=false`.
+        let env: acowork_core::mqtt_proto::DataEnvelope =
+            prost::Message::decode(lwt_payload.as_slice())
+                .expect("LWT payload must be a DataEnvelope");
+        let status = match env.payload {
+            Some(acowork_core::mqtt_proto::data_envelope::Payload::AgentStatus(s)) => s,
+            _ => panic!("LWT envelope did not carry an AgentStatus payload"),
+        };
+        assert!(!status.online, "LWT must publish AgentStatus with online=false");
 
         drop(client);
     });

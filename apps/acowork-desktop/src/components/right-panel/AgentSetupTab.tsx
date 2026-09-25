@@ -22,10 +22,6 @@ import {
 } from "../../lib/avatar";
 import type { AvatarAssetEntry, AvatarConfigResponse } from "../../lib/types";
 import { log } from "../../lib/logger";
-import {
-  IDLE_TIMEOUT_OPTIONS,
-  idleTimeoutDisplayValue,
-} from "../../lib/idleTimeoutOptions";
 import { useToast } from "../common/ToastProvider";
 import { ListBox, ExpandableRow } from "../common/list";
 
@@ -74,7 +70,6 @@ type WiredField =
   | "contextWindow"
   | "shellApprovalThreshold"
   | "approvalTimeoutSecs"
-  | "idleTimeoutSecs"
   | "compressionRatioThreshold"
   | "sessionLanguage";
 
@@ -86,7 +81,6 @@ const WIRE_FIELD: Record<WiredField, string> = {
   contextWindow: "context_window",
   shellApprovalThreshold: "shell_approval_threshold",
   approvalTimeoutSecs: "approval_timeout_secs",
-  idleTimeoutSecs: "idle_timeout_secs",
   compressionRatioThreshold: "compression_ratio_threshold",
   sessionLanguage: "session_language",
 };
@@ -98,7 +92,6 @@ const DEBOUNCE_BY_FIELD: Record<WiredField, number> = {
   temperature: FIELD_DEBOUNCE_MS,
   contextWindow: FIELD_DEBOUNCE_MS,
   approvalTimeoutSecs: FIELD_DEBOUNCE_MS,
-  idleTimeoutSecs: FIELD_DEBOUNCE_MS,
   maxTokens: FIELD_DEBOUNCE_MS,
   maxIterations: FIELD_DEBOUNCE_MS,
   maxSessions: FIELD_DEBOUNCE_MS,
@@ -236,7 +229,6 @@ export function AgentSetupTab() {
           context_window?: number | null;
           shell_approval_threshold?: string | null;
           approval_timeout_secs?: number | null;
-          idle_timeout_secs?: number | null;
           compression_ratio_threshold?: number | null;
           session_language?: string | null;
         };
@@ -281,9 +273,6 @@ export function AgentSetupTab() {
         if (typeof cfg.approval_timeout_secs === "number") {
           patch.approvalTimeoutSecs = cfg.approval_timeout_secs;
         }
-        if (typeof cfg.idle_timeout_secs === "number") {
-          patch.idleTimeoutSecs = cfg.idle_timeout_secs;
-        }
         if (typeof cfg.compression_ratio_threshold === "number") {
           patch.compressionRatioThreshold = cfg.compression_ratio_threshold;
         }
@@ -324,7 +313,6 @@ export function AgentSetupTab() {
               context_window?: number | null;
               shell_approval_threshold?: string | null;
               approval_timeout_secs?: number | null;
-              idle_timeout_secs?: number | null;
               session_language?: string | null;
             };
             // Same race-safe merge as the mount effect above. The
@@ -361,9 +349,6 @@ export function AgentSetupTab() {
             }
             if (typeof cfg.approval_timeout_secs === "number") {
               patch.approvalTimeoutSecs = cfg.approval_timeout_secs;
-            }
-            if (typeof cfg.idle_timeout_secs === "number") {
-              patch.idleTimeoutSecs = cfg.idle_timeout_secs;
             }
             if (cfg.session_language !== undefined) {
               patch.sessionLanguage = cfg.session_language;
@@ -857,7 +842,7 @@ export function AgentSetupTab() {
       <div className="-mx-3 my-2 border-t border-border-divider" />
 
       {/* ── Card 2: Session Parameters ─────────────────────────
-          Iteration / session-count / approval / idle /
+          Iteration / session-count / approval /
           shell-approval / compression-ratio knobs. Same
           level-1 collapsible grammar as Card 1. */}
       <ListBox dividers={false}>
@@ -968,33 +953,6 @@ export function AgentSetupTab() {
             </p>
           </div>
 
-    {/* Idle (auto-sleep) Timeout — ponytail: hidden per user request, auto-sleep disabled. Remove `false && (` / `)` to restore. */}
-    {false && (
-      <div className="space-y-1">
-        <label className="block text-[10px] font-medium text-text-tertiary ">
-          {t("agentSetup.idleTimeout")}
-        </label>
-        <Dropdown
-          value={idleTimeoutDisplayValue(profile!.idleTimeoutSecs)}
-          onChange={(v) => {
-            if (v === "") {
-              saveField("idleTimeoutSecs", undefined);
-              return;
-            }
-            const n = parseInt(v, 10);
-            saveField("idleTimeoutSecs", Number.isFinite(n) && n >= 0 ? n : undefined);
-          }}
-          placeholder={{ value: "", label: t("agentSetup.idleTimeoutPlaceholder") }}
-          options={IDLE_TIMEOUT_OPTIONS.map((opt) => ({
-            value: String(opt.value),
-            label: t(opt.labelKey),
-          }))}
-        />
-        <p className="text-[9px] text-text-tertiary ">
-          {t("agentSetup.idleTimeoutDesc")}
-        </p>
-      </div>
-    )}
 
     {/* Shell Command Approval Threshold */}
           <div className="space-y-1">
@@ -1262,7 +1220,6 @@ export function AgentSetupTab() {
                   context_window: null,
                   shell_approval_threshold: null,
                   approval_timeout_secs: null,
-                  idle_timeout_secs: null,
                   session_language: null,
                 }),
               },

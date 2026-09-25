@@ -2741,7 +2741,6 @@ async fn put_agent_config(
         req.context_window,
         req.shell_approval_threshold,
         req.approval_timeout_secs,
-        req.idle_timeout_secs,
         req.compression_ratio_threshold,
         req.distiller_enabled,
         req.distiller_model,
@@ -2878,11 +2877,6 @@ struct UpdateAgentConfigRequest {
     shell_approval_threshold: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     approval_timeout_secs: Option<serde_json::Value>,
-    /// Idle (auto-sleep) timeout in seconds before the Runtime
-    /// self-terminates. `0` = never sleep. `None` outer = leave the
-    /// on-disk value alone (partial PUT).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    idle_timeout_secs: Option<serde_json::Value>,
     /// ADR-061: minimum compression ratio for levels 1-7 (0.05–0.95;
     /// 0.90 default = "compress until at most 10% remains"). Absent =
     /// leave the on-disk value alone (partial PUT).

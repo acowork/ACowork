@@ -9,20 +9,19 @@
 //! Note: rumqttd 0.14's Broker::start() panics inside tokio runtime.
 //! Broker startup tests run in a separate OS thread via start_broker.
 
-use acowork_core::mqtt_proto::{
-    self, ControlCommand, DataEnvelope, control_command::Command,
-    data_envelope::Payload,
-};
+use acowork_core::mqtt_proto::{self, DataEnvelope, data_envelope::Payload};
 use acowork_gateway::mqtt::broker::build_broker_config;
-use acowork_runtime::mqtt::control_handler::{self, ControlAction};
+use acowork_runtime::mqtt::control_handler;
 use prost::Message;
 
 // ═══════════════════════════════════════════════════════════════════════
 // Test 1: Broker config building (pure function, no runtime needed)
 // ═══════════════════════════════════════════════════════════════════════
 
-/// Test-only instance identity (ADR-073: must be a UUIDv4).
-const INSTANCE_ID: &str = "0a0b0c0d-1e2f-4a3b-8c7d-9e8f7a6b5c4d";
+// NOTE (Sept 2026): the only MQTT control-plane command now is
+// `Intent` — `ActiveHeartbeat` was retired alongside auto-sleep.
+// Earlier tests that exercised `ControlCommand::ActiveHeartbeat` and
+// the matching `ControlAction::ActiveHeartbeat` arm have been removed.
 
 #[test]
 fn test_build_broker_config() {
@@ -47,8 +46,8 @@ fn test_build_broker_config_custom_port() {
 
 /// Garbage bytes must not panic and must not produce an action. This is the
 /// only remaining parser-level assertion that is not about a specific
-/// command: with the control plane reduced to `Intent` + `ActiveHeartbeat`
-/// (ADR-076 §决策 4) there is nothing else to parse.
+/// command: with the control plane reduced to just `Intent`
+/// (auto-sleep removed), there is nothing else to parse.
 #[test]
 fn test_parse_invalid_payload() {
     let action = control_handler::parse_control_payload("test", b"not valid protobuf");
@@ -304,55 +303,6 @@ async fn adr046_image_pipeline_produces_multimodal_chat_message_shape() {
     }
 }
 
-// ═════════════════════════════════════════════════════════════════════════
-// ADR-XXX: ActiveHeartbeat — frontend presence signal for idle-watch
-// ═════════════════════════════════════════════════════════════════════════
-
-/// Protobuf round-trip: ActiveHeartbeat is an empty payload — the act of
-/// arriving is the signal, no data is carried.
-#[test]
-fn test_control_command_active_heartbeat_encode_decode() {
-    let cmd = ControlCommand {
-        instance_id: INSTANCE_ID.into(),
-        command: Some(Command::ActiveHeartbeat(mqtt_proto::ActiveHeartbeat {})),
-    };
-    let env = DataEnvelope {
-        version: 1,
-        payload: Some(Payload::ControlCommand(cmd)),
-    };
-    let bytes = env.encode_to_vec();
-    let decoded = DataEnvelope::decode(bytes.as_slice()).unwrap();
-    match decoded.payload {
-        Some(Payload::ControlCommand(cmd)) => match cmd.command {
-            Some(Command::ActiveHeartbeat(_)) => {} // expected
-            other => panic!("Expected ActiveHeartbeat, got {:?}", other),
-        },
-        _ => panic!("Expected ControlCommand"),
-    }
-}
-
-/// `parse_control_payload` must map the proto enum into the dedicated
-/// `ControlAction::ActiveHeartbeat` variant. If it fell through to the
-/// "unknown command" path this parser returns `None`, so the assertion
-/// below is what keeps the presence signal alive.
-#[test]
-fn test_parse_control_active_heartbeat() {
-    let cmd = ControlCommand {
-        instance_id: INSTANCE_ID.into(),
-        command: Some(Command::ActiveHeartbeat(mqtt_proto::ActiveHeartbeat {})),
-    };
-    let env = DataEnvelope {
-        version: 1,
-        payload: Some(Payload::ControlCommand(cmd)),
-    };
-    let bytes = env.encode_to_vec();
-
-    let action = control_handler::parse_control_payload(
-        "acowork/agents/com.acowork.test/control/active_heartbeat",
-        &bytes,
-    );
-    match action {
-        Some(ControlAction::ActiveHeartbeat) => {} // expected
-        other => panic!("Expected ActiveHeartbeat ControlAction, got {:?}", other),
-    }
-}
+// (ActiveHeartbeat tests removed along with the auto-sleep subsystem —
+// see mqtt_payload.proto `ControlCommand` doc. Only `Intent` is left on
+// the control channel.)

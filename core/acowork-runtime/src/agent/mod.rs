@@ -9,7 +9,6 @@ pub mod context;
 #[cfg(test)]
 mod e2e_prompt_cache;
 pub mod history;
-pub mod idle_watcher;
 pub mod inbound;
 pub mod llm_availability;
 pub mod loop_;

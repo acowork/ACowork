@@ -33,11 +33,8 @@ pub struct ConfigResponse {
     pub log_file_size_mb: u64,
     /// Maximum number of log files to keep (0 = unlimited, default 20)
     pub log_file_count: u64,
-    // idle_timeout_secs was removed: the decision is now owned by the
-    // Runtime (see `acowork-runtime::agent::idle_watcher`). The field is
-    // still accepted in the Gateway TOML for backward compatibility but
-    // is no longer exposed over HTTP. Per-agent idle timeout is configured
-    // via the Runtime's `PUT /api/agents/{id}/config` endpoint.
+    // Auto-sleep (per-agent `idle_timeout_secs`) was retired in
+    // Sept 2026 — there is no Gateway-level equivalent to expose.
     pub dev_mode: bool,
     pub http: HttpConfigResponse,
     /// Default LLM provider (if configured)
@@ -74,10 +71,12 @@ pub struct UpdateConfigRequest {
     /// Maximum number of log files to keep (0 = unlimited)
     #[serde(default)]
     pub log_file_count: Option<u64>,
-    // `idle_timeout_secs` removed from the Gateway update payload:
-    // the per-agent decision is owned by the Runtime now. The
-    // Gateway-level field is no longer accepted here (use the
-    // per-agent Runtime config endpoint instead).
+    // Auto-sleep (`idle_timeout_secs`) was retired in Sept 2026 — the
+    // Gateway no longer carries a corresponding field. A legacy client
+    // still sending it is harmless: `UpdateConfigRequest` has no
+    // `deny_unknown_fields`, so serde drops the unknown key and the
+    // request still succeeds (see
+    // `test_update_config_request_ignores_legacy_idle_timeout_secs`).
     /// Default LLM provider for all agents
     #[serde(default)]
     pub default_provider: Option<String>,
@@ -152,10 +151,12 @@ pub async fn update_config(
         }
         updates.push(format!("log_level={}", level));
     }
-    // `idle_timeout_secs` removed: per-agent decision is owned by the
-    // Runtime now. The struct field is kept on the wire (#[serde(default)])
-    // so legacy clients that still send it don't get a 400 — but the
-    // Gateway silently drops the value.
+    // Auto-sleep was retired in Sept 2026 — there is no Gateway-level
+    // `idle_timeout` field to update, and no migration work here. A legacy
+    // client that still sends the key is ignored by serde (no
+    // `deny_unknown_fields`) and still gets a 200. Note the per-agent
+    // auto-sleep field on the Runtime's `PUT /api/agents/{id}/config` was
+    // retired in the same change.
     if let Some(ref provider) = body.default_provider {
         updates.push(format!("default_provider={}", provider));
     }
@@ -190,9 +191,8 @@ pub async fn update_config(
         if let Some(level) = &body.log_level {
             config.log_level = level.clone();
         }
-        // `body.idle_timeout_secs` removed — see struct definition. The
-        // Gateway no longer writes this field; the Runtime owns the
-        // per-agent value via its own config endpoint.
+        // Auto-sleep was retired in Sept 2026 — there is no
+        // `idle_timeout_secs` field for the Gateway to write.
         // Update default_provider: Some("name") sets it, Some("") clears it
         if let Some(ref provider) = body.default_provider {
             if provider.is_empty() {

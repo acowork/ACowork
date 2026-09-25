@@ -3,7 +3,7 @@ import type { GatewayAlive } from "../../stores/gatewayStore";
 export interface GatewayTransitionActions {
   /** Snapshot of known agents (instance id → any). The helper only needs keys. */
   getAgentIds: () => string[];
-  /** Patch an agent's liveness (mirrors `updateAgentLiveness(id, alive, false)`). */
+  /** Patch an agent's liveness (mirrors `updateAgentLiveness(id, alive)`). */
   setAgentOffline: (agentId: string) => void;
   /** Drop every cached session's runtime state for an agent — releases
    *  the messages / pending approvals / tool progress / abort controllers

@@ -1,19 +1,20 @@
 /**
  * Regression coverage for distributed agent liveness.
  *
- * Background (2026-09-xx refactor):
+ * Background (Sept 2026 refactor):
  *   `running`/`connected` (process/PID-flavoured signals) are gone.
- *   The Gateway's `/api/agents` now exposes `alive` — the MQTT
- *   registry verdict (Runtime's broker-level session reachable:
- *   `online` / `sleeping` / `degraded`). It is topology independent:
- *   the same answer for local, remote and node-hosted Runtimes, and
- *   never consults a PID on the Gateway's machine.
+ *   Auto-sleep was retired, so there is no `sleeping` state any more.
+ *   The Gateway's `/api/agents` exposes `alive` — the MQTT registry
+ *   verdict (Runtime's broker-level session reachable: `online`).
+ *   It is topology independent: the same answer for local, remote
+ *   and node-hosted Runtimes, and never consults a PID on the
+ *   Gateway's machine.
  *
  *   The Desktop's contract:
  *   - `fetchAgents` adopts the Gateway's `meta.alive` verbatim
  *     (authoritative reconcile path).
  *   - `updateAgentLiveness` is the realtime MQTT path — it patches
- *     `meta.alive` / `meta.sleeping` immediately on `agent_status`.
+ *     `meta.alive` immediately on `agent_status`.
  *
  * These tests pin that contract.
  */
@@ -79,7 +80,6 @@ function makeMeta(overrides: Partial<AgentInfo>): AgentInfo {
         display_name: null,
         role: null,
         alive: false,
-        sleeping: false,
         ready: false,
         debug_state: "disabled",
         debug_port: null,
@@ -139,7 +139,6 @@ describe("fetchAgents — adopts the Gateway's `alive` verdict verbatim", () => 
 
         const storage = useAgentStore.getState().agents[INSTANCE_ID];
         expect(storage.meta.alive).toBe(true);
-        expect(storage.meta.sleeping).toBe(false);
     });
 
     it("adopts alive=true for a REMOTE runtime — no local PID probing involved", async () => {
@@ -156,32 +155,17 @@ describe("fetchAgents — adopts the Gateway's `alive` verdict verbatim", () => 
         expect(storage.meta.alive).toBe(true);
     });
 
-    it("adopts alive=false + sleeping=false when the Gateway says the agent is gone", async () => {
+    it("adopts alive=false when the Gateway says the agent is gone", async () => {
         // Genuine shutdown (manual stop / crash / LWT offline): the
         // Gateway is authoritative, so the desktop converges to
-        // alive=false even if a stale MQTT event left sleeping=true.
-        seedAgent({ alive: true, sleeping: true });
-        mockListAgents.mockResolvedValue([makeMeta({ alive: false, sleeping: false })]);
+        // alive=false even if a stale MQTT event left alive=true.
+        seedAgent({ alive: true });
+        mockListAgents.mockResolvedValue([makeMeta({ alive: false })]);
 
         await useAgentStore.getState().fetchAgents();
 
         const storage = useAgentStore.getState().agents[INSTANCE_ID];
         expect(storage.meta.alive).toBe(false);
-        expect(storage.meta.sleeping).toBe(false);
-    });
-
-    it("adopts sleeping=true when the Gateway reports auto-sleep (retained `sleeping` status)", async () => {
-        // Auto-sleep: alive=true (retained status still cached) +
-        // sleeping=true → the UI renders the Start button + "auto-slept"
-        // badge instead of a live session.
-        seedAgent({ alive: true, sleeping: false });
-        mockListAgents.mockResolvedValue([makeMeta({ alive: true, sleeping: true })]);
-
-        await useAgentStore.getState().fetchAgents();
-
-        const storage = useAgentStore.getState().agents[INSTANCE_ID];
-        expect(storage.meta.alive).toBe(true);
-        expect(storage.meta.sleeping).toBe(true);
     });
 
     it("creates a brand-new agent with the Gateway's verdict when not previously known", async () => {
@@ -192,7 +176,6 @@ describe("fetchAgents — adopts the Gateway's `alive` verdict verbatim", () => 
         const storage = useAgentStore.getState().agents[INSTANCE_ID];
         expect(storage).toBeDefined();
         expect(storage.meta.alive).toBe(true);
-        expect(storage.meta.sleeping).toBe(false);
     });
 
     it("removes agents that are no longer in the Gateway's list", async () => {
@@ -236,30 +219,19 @@ describe("fetchAgents — adopts the Gateway's `alive` verdict verbatim", () => 
 
 describe("updateAgentLiveness — realtime MQTT path patches meta", () => {
     it("flips meta.alive=false on MQTT `offline`", () => {
-        seedAgent({ alive: true, sleeping: false });
-        useAgentStore.getState().updateAgentLiveness(INSTANCE_ID, false, false);
+        seedAgent({ alive: true });
+        useAgentStore.getState().updateAgentLiveness(INSTANCE_ID, false);
 
         const storage = useAgentStore.getState().agents[INSTANCE_ID];
         expect(storage.meta.alive).toBe(false);
-        expect(storage.meta.sleeping).toBe(false);
     });
 
-    it("carries the sleeping flag on MQTT `sleeping`", () => {
-        seedAgent({ alive: false, sleeping: false });
-        useAgentStore.getState().updateAgentLiveness(INSTANCE_ID, true, true);
-
-        const storage = useAgentStore.getState().agents[INSTANCE_ID];
-        expect(storage.meta.alive).toBe(true);
-        expect(storage.meta.sleeping).toBe(true);
-    });
-
-    it("defaults sleeping=false for statuses that omit it (legacy Runtimes)", () => {
-        seedAgent({ alive: true, sleeping: true });
+    it("flips meta.alive=true on MQTT `online`", () => {
+        seedAgent({ alive: false });
         useAgentStore.getState().updateAgentLiveness(INSTANCE_ID, true);
 
         const storage = useAgentStore.getState().agents[INSTANCE_ID];
         expect(storage.meta.alive).toBe(true);
-        expect(storage.meta.sleeping).toBe(false);
     });
 });
 
@@ -276,7 +248,7 @@ describe("startAgent — waits for the MQTT online EVENT (no polling)", () => {
         expect(settled).toBe(false); // still waiting — no polling, no state read
 
         // MQTT `agent_status online` event arrives.
-        useAgentStore.getState().updateAgentLiveness(INSTANCE_ID, true, false);
+        useAgentStore.getState().updateAgentLiveness(INSTANCE_ID, true);
         await expect(p).resolves.toBeUndefined();
     });
 

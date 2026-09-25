@@ -24,8 +24,9 @@
  *    Desktop uses clean_session=true, so anything that happened while
  *    disconnected is lost. Two triggers force a full tree re-sync:
  *    - `mqtt-status` connected:true (Desktop reconnect / Gateway restart)
- *    - agent `status` offline|sleeping → online transition (Runtime wake
- *      from idle sleep, which is a process exit by design)
+ *    - agent `status` offline → online transition (Runtime wake —
+ *      rare; auto-sleep was retired in Sept 2026, but a crash + restart
+ *      can still produce this same shape)
  */
 
 import { listen } from "@tauri-apps/api/event";
@@ -138,31 +139,26 @@ let _initPromise: Promise<void> | null = null;
 /** Last full-sync moment (epoch ms) — dedupes reconnect-triggered storms. */
 let _lastFullSyncAt = 0;
 
-/** Previous agent online/sleeping status, keyed by agent id. */
+/** Previous agent online status, keyed by agent id. */
 const _prevAgentStatus = new Map<string, AgentStatusSnapshot>();
 
-/** One agent status snapshot as delivered by the `agent-event` channel. */
+/** One agent status snapshot as delivered by the `agent-event` channel.
+ *
+ * Auto-sleep was retired in Sept 2026 — only `online` is meaningful.
+ * `sleeping` was dropped alongside the rest of the auto-sleep surface.
+ */
 export interface AgentStatusSnapshot {
     online: boolean;
-    sleeping: boolean;
 }
 
 /**
  * ADR-058 §3.4 wake detection: should a status transition force a full
  * tree re-sync?
  *
- * A wake is any "down-ish" previous state followed by a genuinely
- * online next state. "Down-ish" covers BOTH:
- * - `online=false` (the Will-message "offline", e.g. crash disconnect)
- * - `sleeping=true` — the idle-sleep path publishes "sleeping" and then
- *   performs a CLEAN disconnect + process::exit(0). Per MQTT spec (and
- *   rumqttd's `Packet::Disconnect` handler, which deletes the last
- *   will) the LWT "offline" is NEVER published on a clean disconnect —
- *   so "sleeping → online" is the ONLY transition sequence a connected
- *   Desktop ever sees for the normal idle-sleep wake path. Testing only
- *   `!prev.online` would silently miss it.
- *
- * `prev === undefined` (cold start: retained "online" re-delivered on
+ * A wake is `prev.online === false` followed by `next.online === true`.
+ * Auto-sleep was retired — there is no longer a `sleeping → online`
+ * sequence, just an `offline → online` one (crash + restart). Cold
+ * start (`prev === undefined`: retained "online" re-delivered on
  * subscribe) is NOT a wake — the initial tree fetch happens on mount.
  */
 export function isWakeTransition(
@@ -170,8 +166,7 @@ export function isWakeTransition(
     next: AgentStatusSnapshot,
 ): boolean {
     if (!prev) return false;
-    const wasDown = !prev.online || prev.sleeping;
-    return wasDown && next.online && !next.sleeping;
+    return !prev.online && next.online;
 }
 
 export async function initWorkspaceFsListener(): Promise<void> {
@@ -213,19 +208,17 @@ async function doInit(): Promise<void> {
         }
     });
 
-    // Fallback trigger 2: Runtime wake from idle sleep (= process exit +
-    // respawn). The retained `agents/{id}/status` topic re-delivers the
-    // current status on (re)subscribe; we only act on a genuine
-    // down-ish → online TRANSITION (see isWakeTransition for why
-    // "sleeping" counts as down) so cold start does not trigger a
-    // pointless full sync (the initial tree fetch happens on mount).
+    // Fallback trigger 2: Runtime wake (= process exit + respawn). The
+    // retained `agents/{id}/status` topic re-delivers the current status
+    // on (re)subscribe; we only act on a genuine offline → online
+    // TRANSITION (see isWakeTransition) so cold start does not trigger
+    // a pointless full sync (the initial tree fetch happens on mount).
     _agentEventUnlisten = await listen<Record<string, unknown>>("agent-event", (event) => {
         const data = event.payload;
         if (data.type !== "agent_status" || typeof data.instance_id !== "string") return;
         const agentId = data.instance_id as string;
         const next: AgentStatusSnapshot = {
             online: data.online === true,
-            sleeping: data.sleeping === true,
         };
         const prev = _prevAgentStatus.get(agentId);
         _prevAgentStatus.set(agentId, next);

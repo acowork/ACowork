@@ -531,18 +531,15 @@ export function AgentList({ width }: AgentListProps) {
               className={isCollapsed ? "mx-auto" : ""}
             />
             {/* IM-style "needs attention" indicator dot — solid accent color,
-                * borderless. Shown when the agent is running AND has at
+                * borderless. Shown when the agent is alive AND has at
                 * least one session in a non-idle status (streaming /
                 * waiting_approval / paused), per ADR-014. Disappears
                 * once every session returns to idle. Offline agents
-                * (online === false) AND auto-slept agents
-                * (sleeping === true) show no dot — the latter is
-                * about to flip to offline via the Runtime's Will
-                * "offline" message; we suppress the dot to avoid
-                * one final "active" flash on its way out. */}
-            {agent.alive &&
-              activeAgentIds.has(id) &&
-              agentsMap[id]?.meta.sleeping !== true && (
+                * (alive === false) show no dot.
+                *
+                * Auto-sleep was retired in Sept 2026 — the `sleeping`
+                * carve-out is gone; an agent that is alive IS running. */}
+            {agent.alive && activeAgentIds.has(id) && (
                 <span
                   className={cn(
                     "absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full bg-[var(--color-accent)]"
@@ -591,7 +588,7 @@ export function AgentList({ width }: AgentListProps) {
                     )}
                   >
                     {sessionTitle === null ? (
-                      <span aria-label="agent sleeping" className="inline-flex items-baseline">
+                      <span aria-label="agent idle" className="inline-flex items-baseline">
                         <span className="zzz-n">z</span>
                         <span className="zzz-n">z</span>
                         <span className="zzz-n">z</span>
@@ -602,7 +599,7 @@ export function AgentList({ width }: AgentListProps) {
                   </span>
                 )
               ) : (
-                // Stopped agent — render the sleep animation directly
+                // Stopped agent — render the idle animation directly
                 // rather than the loading skeleton. A stopped agent will
                 // never have its sessionTitle populated by the backend
                 // (Runtime HTTP server is not listening), so the
@@ -610,7 +607,7 @@ export function AgentList({ width }: AgentListProps) {
                 // stuck forever, misleading the user into thinking a
                 // session is still being fetched.
                 <span
-                  aria-label="agent sleeping"
+                  aria-label="agent stopped"
                   className={cn(
                     "block truncate",
                     selectedAgentId === id

@@ -3849,19 +3849,18 @@ export function handleMessageEvent(
       const aid = data.instance_id as string | undefined;
       const online = data.online as boolean | undefined;
       if (aid && online !== undefined) {
-        // `alive` mirrors `online` — the MQTT payload is the network-level
-        // liveness verdict (`online`/`sleeping`/`degraded` → alive;
-        // `offline` → dead). `sleeping` rides along from the `sleeping`
-        // payload and is optional for legacy Runtimes that omit it.
-        const sleeping = (data as { sleeping?: boolean }).sleeping ?? false;
-        useAgentStore.getState().updateAgentLiveness(aid, online, sleeping);
+        // `alive` mirrors `online` — the MQTT payload is the protobuf
+        // `DataEnvelope<AgentStatus>::online` (Sept 2026; auto-sleep was
+        // retired so the only transitions are start/stop). The
+        // `node_id` rides along for per-node grouping.
+        useAgentStore.getState().updateAgentLiveness(aid, online);
         // HTTP health double-check on MQTT disconnect (distributed liveness):
         // the Runtime may run on a remote node, and its MQTT connection can
         // drop (e.g. system sleep → KeepAlive timeout → Gateway marks the
         // agent offline) while the Runtime process itself stays alive.
         // Probe `/health` through the Gateway reverse-proxy; if the Runtime
         // answers 2xx it is alive, so override back to alive instead of
-        // rendering it offline/sleeping.
+        // rendering it offline.
         if (!online) {
           // The trailing `.catch(() => {})` is defensive: in production
           // `verifyAgentHealth` always resolves (it has its own try/catch
@@ -3871,9 +3870,7 @@ export function handleMessageEvent(
           void verifyAgentHealth(aid)
             .then((alive) => {
               if (alive) {
-                useAgentStore
-                  .getState()
-                  .updateAgentLiveness(aid, true, false);
+                useAgentStore.getState().updateAgentLiveness(aid, true);
               }
             })
             .catch(() => {

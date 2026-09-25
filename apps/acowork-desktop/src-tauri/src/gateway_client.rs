@@ -1202,16 +1202,11 @@ pub struct AgentListEntry {
     pub builtin_avatar: Option<String>,
     pub version: String,
     /// Distributed liveness verdict: whether the Runtime's MQTT session is
-    /// reachable at the broker level (`online` / `sleeping` / `degraded`
-    /// payloads). Topology independent — never a process/PID probe. Mirrors
-    /// the Gateway's `AgentListResponse.alive`; the only field the UI gates
+    /// reachable at the broker level (protobuf `AgentStatus::online`).
+    /// Topology independent — never a process/PID probe. Mirrors the
+    /// Gateway's `AgentListResponse.alive`; the only field the UI gates
     /// "agent is alive" on.
     pub alive: bool,
-    /// Whether the Runtime self-reported auto-sleep (idle watcher fired)
-    /// before exiting. `alive=true, sleeping=true` means the retained
-    /// `sleeping` status is still cached; the UI renders an "auto-slept"
-    /// badge + Start button, not a live session.
-    pub sleeping: bool,
     pub ready: bool,
     pub dev_mode: bool,
     /// Whether DevMode is live right now (ADR-048 follow-up; can be enabled
@@ -1224,9 +1219,6 @@ pub struct AgentListEntry {
     /// Last user interaction time (RFC 3339).  Drives the frontend auto-select
     /// logic: on webview reload the agent with the largest value is selected.
     pub last_interaction_at: Option<String>,
-    /// Wall-clock timestamp (RFC 3339) the Runtime published the `sleeping`
-    /// retained status (the Gateway skips it unless the agent is sleeping).
-    pub sleeping_at: Option<String>,
 }
 
 /// Agent detail response
@@ -1514,8 +1506,14 @@ mod tests {
 
     /// Real `GET /api/agents` sample (single entry) — locks the Tauri mirror
     /// to the Gateway's current wire shape after the `running`/`connected`
-    /// → `alive`/`sleeping` rename. A dropped or renamed Gateway field must
-    /// fail this test instead of silently emptying the agent list at runtime.
+    /// → `alive` rename and the Sept 2026 protobuf/`sleeping` removal. A
+    /// dropped or renamed Gateway field must fail this test instead of
+    /// silently emptying the agent list at runtime.
+    ///
+    /// NOTE: this fixture is hand-written, so it only catches a field the
+    /// Gateway *renames or drops while the fixture keeps it*. When you
+    /// change `AgentListResponse` (acowork-gateway/src/http/agents.rs),
+    /// update this JSON in the same commit.
     #[test]
     fn agent_list_entry_decodes_gateway_wire_shape() {
         let json = r#"{
@@ -1529,7 +1527,6 @@ mod tests {
             "builtin_avatar": null,
             "version": "1.0.0",
             "alive": true,
-            "sleeping": false,
             "ready": true,
             "dev_mode": false,
             "debug_state": "disabled",
@@ -1538,39 +1535,7 @@ mod tests {
         let entry: AgentListEntry =
             serde_json::from_str(json).expect("Gateway list entry must decode");
         assert!(entry.alive);
-        assert!(!entry.sleeping);
         assert!(entry.ready);
-        assert_eq!(entry.sleeping_at, None);
-    }
-
-    /// Sleeping variant — `sleeping_at` present on the wire and carried
-    /// through to the frontend mirror.
-    #[test]
-    fn agent_list_entry_decodes_sleeping_snapshot() {
-        let json = r#"{
-            "instance_id": "83733de1-17de-43bd-b95f-6f4f96bb2231",
-            "agent_id": "com.acowork.ponytail",
-            "node_id": "94688c78-e36f-4355-8540-d4da4c442cbf",
-            "name": "Ponytail",
-            "display_name": "C.Ponytail",
-            "role": "Senior Software Engineer",
-            "avatar": "assets/avatar.png",
-            "builtin_avatar": null,
-            "version": "1.0.0",
-            "alive": true,
-            "sleeping": true,
-            "sleeping_at": "2026-09-14T12:30:00Z",
-            "ready": false,
-            "dev_mode": false,
-            "debug_state": "disabled",
-            "debug_port": null,
-            "last_interaction_at": "2026-09-14T12:27:32.516Z"
-        }"#;
-        let entry: AgentListEntry =
-            serde_json::from_str(json).expect("Gateway list entry must decode");
-        assert!(entry.alive);
-        assert!(entry.sleeping);
-        assert_eq!(entry.sleeping_at.as_deref(), Some("2026-09-14T12:30:00Z"));
     }
 
     /// Detail endpoint shares the rename — `pid` stays as a diagnostic-only

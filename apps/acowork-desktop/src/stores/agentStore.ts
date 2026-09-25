@@ -56,9 +56,6 @@ export interface AgentProfileSettings {
   globalMaxTokens?: number;
   activeModel?: string;
   activeProvider?: string;
-  /** Idle (auto-sleep) timeout in seconds before the Runtime self-terminates.
-   *  0 = never sleep. Undefined = use manifest default or system default (1800). */
-  idleTimeoutSecs?: number;
   /** ADR-061: minimum compression ratio for context compaction levels 1-7
    *  (0.05–0.95, expressed as the SAVED share). 0.90 = compress until at
    *  most 10% remains (e.g. 200K → 20K). Undefined = use built-in default (0.90). */
@@ -81,7 +78,6 @@ const DEFAULT_PROFILE: AgentProfileSettings = {
   systemPrompt: undefined,
   shellApprovalThreshold: undefined,
   approvalTimeoutSecs: undefined,
-  idleTimeoutSecs: undefined,
 };
 
 const STORAGE_KEY = "acowork-agent-profiles";
@@ -144,11 +140,6 @@ function normalizeProfile(s: Partial<AgentProfileSettings>): AgentProfileSetting
     globalMaxTokens: typeof s.globalMaxTokens === "number" ? s.globalMaxTokens : undefined,
     activeModel: typeof s.activeModel === "string" ? s.activeModel : undefined,
     activeProvider: typeof s.activeProvider === "string" ? s.activeProvider : undefined,
-    // idleTimeoutSecs: number >= 0 (0 = never sleep). Undefined = use manifest default.
-    idleTimeoutSecs:
-      typeof s.idleTimeoutSecs === "number" && s.idleTimeoutSecs >= 0
-        ? s.idleTimeoutSecs
-        : undefined,
     // compressionRatioThreshold: 0.05–0.95 (saved share). Undefined = built-in default.
     compressionRatioThreshold:
       typeof s.compressionRatioThreshold === "number" &&
@@ -318,14 +309,10 @@ interface AgentStoreState {
   // ── Agent lifecycle (MQTT-driven) ──
 
   /** Update agent liveness from the MQTT `agent_status` event
-   *  (`online` / `sleeping` / `degraded` / `offline`). Writes the
-   *  authoritative `alive` / `sleeping` verdict into `meta` — the single
-   *  field every UI consumer gates on. */
-  updateAgentLiveness: (
-    agentId: string,
-    alive: boolean,
-    sleeping?: boolean,
-  ) => void;
+   *  (protobuf `DataEnvelope<AgentStatus>::online`, Sept 2026 —
+   *  auto-sleep retired). Writes the authoritative `alive` verdict
+   *  into `meta` — the single field every UI consumer gates on. */
+  updateAgentLiveness: (agentId: string, alive: boolean) => void;
   /** Patch specific meta fields without a full state reload.
    *  `debug_state` is writable because the debug flow (exit DevMode)
    *  may need to align the local cache to the Gateway's confirmed
@@ -408,9 +395,9 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
           const id = instanceIdOf(meta);
           const existing = state.agents[id];
           if (existing) {
-            // `alive` / `sleeping` / `ready` come from the Gateway's
-            // authoritative MQTT-registry snapshot — no client-side
-            // reconciliation needed. The MQTT `agent_status` handler
+            // `alive` / `ready` come from the Gateway's authoritative
+            // MQTT-registry snapshot — no client-side reconciliation
+            // needed. The MQTT `agent_status` handler
             // (updateAgentLiveness) provides the realtime path; this
             // poll is the reconcile fallback that converges any gap.
             next[id] = { ...existing, meta };
@@ -833,8 +820,9 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       const title = data.title ?? null;
       // Persist into the sidebar cache. Empty string matches the legacy
       // `fetchLatestSessionTitle` semantics so UI consumers keep working
-      // (the AgentList treats `""` and `null` differently: `""` → untitled,
-      // `null` → sleep animation). Only running agents reach this branch.
+      // (the AgentList treats `""` and `null` differently: `""` →
+      // untitled, `null` → idle animation). Only running agents reach
+      // this branch.
       set((state) => patchAgent(state, agentId, { sessionTitle: title ?? "" }));
       return { session_id: data.session_id, title };
     } catch (e) {
@@ -1094,20 +1082,17 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
 
   // ── Agent lifecycle (MQTT-driven) ──
 
-  updateAgentLiveness: (
-    agentId: string,
-    alive: boolean,
-    sleeping = false,
-  ) => {
+  updateAgentLiveness: (agentId: string, alive: boolean) => {
     // `alive` is the network-level verdict from `acowork/agents/{id}/status`
-    // (`online` / `sleeping` / `degraded` → alive; `offline` → not).
-    // `sleeping` rides along from the `sleeping` payload. Patch `meta`
-    // because that is the single field every UI consumer reads.
+    // — protobuf `DataEnvelope<AgentStatus>::online` (Sept 2026). Auto-sleep
+    // was retired alongside the plaintext wire, so the only transitions
+    // are `start_agent` / `stop_agent`. Patch `meta` because that is the
+    // single field every UI consumer reads.
     set((state) => {
       const existing = state.agents[agentId];
       if (!existing) return state;
       return patchAgent(state, agentId, {
-        meta: { ...existing.meta, alive, sleeping },
+        meta: { ...existing.meta, alive },
       });
     });
     // One-shot online event for startAgent's waiter (no polling).

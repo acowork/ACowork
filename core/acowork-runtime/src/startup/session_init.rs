@@ -741,22 +741,6 @@ pub(crate) async fn phase_b_init_session(
             }
             c.approval_timeout_secs = updated.approval_timeout_secs;
 
-            // ── idle_timeout_secs: resolve + writeback ──────
-            // Phase B: resolve the effective idle timeout from the three-layer
-            // chain (user override -> manifest default -> 1800s) and write it back
-            // to agent_config.json so subsequent boots get the same value
-            // (and the UI dropdown in the Setup panel is restored from disk).
-            // The watcher itself is spawned at the end of session_init; the
-            // writeback below is the only side-effect of `Some(0)` ("never sleep").
-            let effective_idle_timeout_secs = crate::agent::idle_watcher::resolve_idle_timeout_secs(
-                updated.idle_timeout_secs,
-                ctx.loaded.manifest.resources.idle_timeout_secs,
-            );
-            if updated.idle_timeout_secs.is_none() {
-                updated.idle_timeout_secs = Some(effective_idle_timeout_secs);
-                dirty = true;
-            }
-
             // ── ADR-071 D4: distiller runtime fields — first-boot seed ──
             // Global semantics: `agent_config.json` is the single runtime
             // source of truth for the memory-panel controls. On first boot
@@ -1065,12 +1049,12 @@ pub(crate) async fn phase_b_init_session(
         session_manager.apply_runtime_config_override(&RuntimeConfigOverrides::from(&agent_cfg));
     }
 
-    // Wrap SessionManager in an Arc<tokio::sync::Mutex<>> so the
-    // IdleWatcher can poll `any_session_active()` without taking
-    // `&mut session_manager` (which is already borrowed by the
-    // `runtime_overrides` setup below). The lock is only held for
-    // the duration of the `any_session_active` call, so contention
-    // with the rest of the runtime is negligible.
+    // Wrap SessionManager in an Arc<tokio::sync::Mutex<>> so the late-bind
+    // slot below and any future background observers can read session
+    // state without taking `&mut session_manager` (which is already
+    // borrowed by the `runtime_overrides` setup above). The lock is
+    // only held for the duration of the read call, so contention with
+    // the rest of the runtime is negligible.
     let session_manager_arc: Arc<tokio::sync::Mutex<SessionManager>> =
         Arc::new(tokio::sync::Mutex::new(session_manager));
 
@@ -1102,74 +1086,8 @@ pub(crate) async fn phase_b_init_session(
         }
     }
 
-    // -- Phase B epilogue: auto-sleep idle watcher ----
-    //
-    // Spawn the IdleWatcher after SessionManager is fully constructed
-    // so the SessionActivityChecker can call
-    // `SessionManager::any_session_active()` against the live state.
-    // The watcher is a detached background task; it terminates by
-    // exiting the process, never by falling out of the loop.
-    //
-    // We skip the spawn when there is no MQTT client (standalone
-    // mode): the watcher publishes `acowork/agents/{id}/status =
-    // sleeping` before exiting, and in standalone mode there is no
-    // Gateway to receive that payload.
-    // ponytail: idle watcher disabled per user request — agent auto-sleep is turned off.
-    // The whole spawn block is commented out; `idle_watcher` stays None so no
-    // background task runs and the process can never self-terminate from idle.
-    // To re-enable: restore the original `if let Some(ref mqtt_client) = ...`
-    // block below (search `// ponytail: idle watcher disabled` to find this spot).
-    #[allow(unused_variables)]
-    let idle_watcher: Option<crate::agent::idle_watcher::IdleWatcherHandle> = None;
-    // let idle_watcher = if let Some(ref mqtt_client) = ctx.mqtt_client {
-    //     let effective = crate::agent::idle_watcher::resolve_idle_timeout_secs(
-    //         agent_cfg.idle_timeout_secs,
-    //         ctx.loaded.manifest.resources.idle_timeout_secs,
-    //     );
-    //     let session_activity: Arc<dyn crate::agent::idle_watcher::SessionActivityChecker> =
-    //         Arc::new(SessionActivityFromManager {
-    //             session_manager: Arc::clone(&session_manager_arc),
-    //         });
-    //     crate::agent::idle_watcher::spawn_idle_watcher(
-    //         crate::agent::idle_watcher::IdleWatcherConfig {
-    //             effective_timeout_secs: effective,
-    //             agent_id: ctx.loaded.manifest.agent_id.clone(),
-    //             instance_id: mqtt_client.instance_id().to_string(),
-    //             mqtt_client: mqtt_client.clone(),
-    //             session_activity,
-    //         },
-    //     )
-    // } else {
-    //     tracing::info!(
-    //         agent_id = %ctx.loaded.manifest.agent_id,
-    //         "Idle watcher: no MQTT client (standalone mode), not spawned",
-    //     );
-    //     None
-    // };
-
     Ok(SessionBootContext {
         session_manager: session_manager_arc,
         committed_lines,
-        idle_watcher,
     })
-}
-
-/// Adapter: implements [`SessionActivityChecker`] over a shared
-/// `tokio::sync::Mutex<SessionManager>`. The lock is held only for
-/// the duration of the `any_session_active` call.
-///
-/// ponytail: marked `#[allow(dead_code)]` while the idle watcher is
-/// disabled — the only call site (spawn block above) is commented out.
-/// Remove this attribute when re-enabling the watcher.
-#[allow(dead_code)]
-pub struct SessionActivityFromManager {
-    pub session_manager: Arc<tokio::sync::Mutex<SessionManager>>,
-}
-
-#[async_trait::async_trait]
-impl crate::agent::idle_watcher::SessionActivityChecker for SessionActivityFromManager {
-    async fn any_active(&self) -> bool {
-        let sm = self.session_manager.lock().await;
-        sm.any_session_active()
-    }
 }

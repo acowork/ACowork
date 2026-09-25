@@ -182,21 +182,6 @@ pub struct AgentConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_timeout_secs: Option<u64>,
 
-    /// Idle (auto-sleep) timeout in seconds before the Runtime self-terminates.
-    ///
-    /// Resolution chain at runtime (Layer 1 = highest priority):
-    /// 1. **this field** — user's agent-level setting (set via Agent Setup panel)
-    /// 2. `manifest.resources.idle_timeout_secs` — package author default
-    /// 3. `crate::agent::idle_watcher::DEFAULT_IDLE_TIMEOUT_SECS` — hardcoded
-    ///    final fallback (1800 s)
-    ///
-    /// `None` means "I don't have an opinion" — fall through to the next level.
-    /// `Some(0)` means "never sleep" — the Runtime runs forever until manually
-    /// stopped. The user can clear this value in the UI to revert to the
-    /// manifest default.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub idle_timeout_secs: Option<u64>,
-
     /// Minimum compression ratio for ADR-061 context compaction (levels 1-7).
     ///
     /// Expressed as the *saved* share: 0.90 means "compress until at most

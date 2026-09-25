@@ -108,9 +108,6 @@ pub enum ConfigField {
     ShellApprovalThreshold,
     /// `AgentConfig::approval_timeout_secs` — `Option<u64>`.
     ApprovalTimeoutSecs,
-    /// `AgentConfig::idle_timeout_secs` — `Option<u64>`.
-    /// `0` means "never sleep" (Runtime runs until manually stopped).
-    IdleTimeoutSecs,
     /// `AgentConfig::compression_ratio_threshold` — `Option<f64>`.
     /// ADR-061 compression ratio bar for levels 1-7 (0.90 default =
     /// "compress until at most 10% remains").
@@ -157,7 +154,6 @@ impl ConfigField {
             ConfigField::ContextWindow => "context_window",
             ConfigField::ShellApprovalThreshold => "shell_approval_threshold",
             ConfigField::ApprovalTimeoutSecs => "approval_timeout_secs",
-            ConfigField::IdleTimeoutSecs => "idle_timeout_secs",
             ConfigField::CompressionRatioThreshold => "compression_ratio_threshold",
             ConfigField::DistillerEnabled => "distiller_enabled",
             ConfigField::DistillerModel => "distiller_model",
@@ -232,7 +228,6 @@ impl PutAgentConfigBody {
         context_window: Option<serde_json::Value>,
         shell_approval_threshold: Option<serde_json::Value>,
         approval_timeout_secs: Option<serde_json::Value>,
-        idle_timeout_secs: Option<serde_json::Value>,
         compression_ratio_threshold: Option<serde_json::Value>,
         distiller_enabled: Option<serde_json::Value>,
         distiller_model: Option<serde_json::Value>,
@@ -285,12 +280,6 @@ impl PutAgentConfigBody {
         if let Some(v) = approval_timeout_secs {
             patches.push(ConfigFieldPatch {
                 field: ConfigField::ApprovalTimeoutSecs,
-                op: value_to_patch(&v),
-            });
-        }
-        if let Some(v) = idle_timeout_secs {
-            patches.push(ConfigFieldPatch {
-                field: ConfigField::IdleTimeoutSecs,
                 op: value_to_patch(&v),
             });
         }

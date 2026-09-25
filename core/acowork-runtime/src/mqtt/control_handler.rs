@@ -18,8 +18,7 @@
 //! parse DataEnvelope → ControlCommand
 //!   ↓
 //! match command:
-//!   Intent            → push an intent into the agent loop
-//!   ActiveHeartbeat   → renew the idle watcher's heartbeat deadline
+//!   Intent → push an intent into the agent loop
 //! ```
 //!
 //! ## Scope (ADR-076 §决策 4)
@@ -36,11 +35,10 @@
 //! authenticated HTTP API. Their proto fields are *gone*, so they are not
 //! merely rejected: they cannot be expressed.
 //!
-//! What is left is two signals that are not user actions and need no user
+//! What is left is one signal that is not a user action and needs no user
 //! identity:
 //!
-//! - `Intent` — Gateway → Runtime (cron triggers, cross-agent messaging);
-//! - `ActiveHeartbeat` — a presence beacon from the Desktop.
+//! - `Intent` — Gateway → Runtime (cron triggers, cross-agent messaging).
 //!
 //! ## Performance
 //!
@@ -56,7 +54,7 @@ use prost::Message as ProstMessage;
 /// ADR-076 §决策 4: this enum holds **no user-initiated command**. All of
 /// them run over the Gateway's authenticated HTTP API
 /// (`http::session_control`), because this channel cannot carry identity.
-/// What is left are the two non-user signals.
+/// What is left is the single non-user signal.
 #[derive(Debug)]
 pub enum ControlAction {
     /// Gateway pushes an IntentReceived (cron trigger, cross-agent messaging).
@@ -65,14 +63,6 @@ pub enum ControlAction {
         action: String,
         params_json: String,
     },
-    /// Periodic presence signal from the Desktop frontend for the
-    /// currently selected agent. Carries no payload — the act of
-    /// arriving is the signal. Routes to `IdleWatcherHandle::record_heartbeat`
-    /// and never to `dispatch_inbound` (does NOT represent a user action
-    /// in the conversation sense). Crash-safe: if the frontend stops
-    /// sending, heartbeats simply stop arriving and the watcher falls
-    /// back to inbound-based deadline accounting after `heartbeat_timeout`.
-    ActiveHeartbeat,
 }
 
 /// Parse a raw MQTT payload (protobuf DataEnvelope bytes) into a ControlAction.
@@ -93,7 +83,6 @@ pub fn parse_control_payload(topic: &str, payload: &[u8]) -> Option<ControlActio
     };
 
     let action = match command.command? {
-        mqtt_proto::control_command::Command::ActiveHeartbeat(_) => ControlAction::ActiveHeartbeat,
         mqtt_proto::control_command::Command::Intent(intent) => ControlAction::IntentReceived {
             from: intent.from,
             action: intent.action,

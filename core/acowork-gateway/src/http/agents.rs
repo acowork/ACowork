@@ -136,16 +136,14 @@ pub struct AgentListResponse {
     pub builtin_avatar: Option<String>,
     pub version: String,
     /// Distributed liveness verdict: whether the Runtime's MQTT session is
-    /// reachable at the broker level (payload `online` / `sleeping` /
-    /// `degraded`). Topology independent — the same answer for local,
-    /// remote and node-hosted Runtimes, never a process/PID probe.
-    /// The Desktop MUST gate "agent is alive" on this field.
+    /// reachable at the broker level (payload `online`). Topology
+    /// independent — the same answer for local, remote and node-hosted
+    /// Runtimes, never a process/PID probe. The Desktop MUST gate
+    /// "agent is alive" on this field.
+    ///
+    /// Auto-sleep was retired in Sept 2026; the only on/off transition
+    /// is now stop / start.
     pub alive: bool,
-    /// Whether the Runtime self-reported auto-sleep (idle watcher fired)
-    /// before exiting. `alive=true, sleeping=true` means the retained
-    /// `sleeping` status is still cached; the Desktop renders an
-    /// "auto-slept at HH:MM" badge and a Start button, not a live session.
-    pub sleeping: bool,
     /// Whether the agent's SessionTask is initialized and ready to receive messages
     pub ready: bool,
     /// Whether the agent was started with the `--dev-mode` flag (Debug
@@ -179,14 +177,6 @@ pub struct AgentListResponse {
     /// sidebar sort order: newest first within each running/stopped group.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_interaction_at: Option<String>,
-    /// Wall-clock timestamp (RFC3339) the Runtime published the `sleeping`
-    /// retained status — i.e. when the auto-sleep watcher exited the process.
-    /// `None` for agents that are not currently sleeping. Lets the Desktop
-    /// distinguish "auto-slept at HH:MM" from "manually stopped" /
-    /// "crashed" — both of which would otherwise look identical
-    /// (`alive=false`, no `sleeping_at`).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub sleeping_at: Option<String>,
 }
 
 /// Agent detail response
@@ -283,10 +273,10 @@ pub async fn list_agents(
     // LWT) is the single authoritative source for "is this agent alive".
     // Take one snapshot for the whole list so every entry sees the same
     // consistent view without per-agent lock contention. `online=true`
-    // covers the `online` / `sleeping` / `degraded` payloads — all mean
-    // the Runtime's MQTT session is reachable, which is the same truth
-    // for local, remote and node-hosted Runtimes. No process/PID probing
-    // happens here: PID liveness is meaningless across host boundaries.
+    // means the Runtime's MQTT session is reachable, which is the same
+    // truth for local, remote and node-hosted Runtimes. No process/PID
+    // probing happens here: PID liveness is meaningless across host
+    // boundaries.
     let registry_snapshot: std::collections::HashMap<String, crate::mqtt::agent_registry::AgentOnlineState> =
         if let Some(ref reg) = state.agent_registry {
             reg.read().await.snapshot().into_iter().collect()
@@ -309,7 +299,6 @@ pub async fn list_agents(
             // metadata (pid/ready/dev_mode) and is populated by MQTT
             // events anyway.
             let alive = reg_state.map(|s| s.online).unwrap_or(false);
-            let sleeping = reg_state.map(|s| s.sleeping).unwrap_or(false);
             let ready = running_info.map(|r| r.ready).unwrap_or(false);
             let last_interaction_at = gw
                 .get_interaction(&info.instance_id)
@@ -329,12 +318,6 @@ pub async fn list_agents(
             let eff_display_name = overrides
                 .and_then(|ov| ov.display_name.clone())
                 .or_else(|| info.manifest.display_name.clone());
-            // `sleeping_at` comes from the same snapshot; `sleeping` and
-            // `sleeping_at` are mutually informative (a sleeping agent
-            // always carries the timestamp of its self-reported sleep).
-            let sleeping_at = reg_state
-                .and_then(|s| if s.sleeping { s.sleeping_at } else { None })
-                .map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
             AgentListResponse {
                 instance_id: info.instance_id.clone(),
                 agent_id: info.agent_id.clone(),
@@ -346,7 +329,6 @@ pub async fn list_agents(
                 builtin_avatar: eff_builtin,
                 version: info.version.clone(),
                 alive,
-                sleeping,
                 ready,
                 dev_mode: running_info.map(|r| r.dev_mode).unwrap_or(false),
                 debug_state: running_info
@@ -354,7 +336,6 @@ pub async fn list_agents(
                     .unwrap_or(crate::gateway::state::DebugState::Disabled),
                 debug_port: running_info.and_then(|r| r.debug_port),
                 last_interaction_at,
-                sleeping_at,
             }
         })
         .collect();
@@ -1597,7 +1578,7 @@ pub async fn start_agent(
     }
 
     // ADR-055 idempotent fast-path: when the Runtime is already online
-    // per the MQTT LWT registry (`acowork/agents/{id}/status = online`),
+    // per the MQTT LWT registry (`acowork/agents/{id}/status = AgentStatus{online=true}`),
     // a `control/start` round-trip to the Node is redundant — the Node
     // would reply "already running" anyway, but the HTTP request can
     // hang up to COMMAND_TIMEOUT (30s) while the Node recovers (e.g.
@@ -1605,17 +1586,18 @@ pub async fn start_agent(
     // each blocked 3-34s with zero UI feedback). Return an idempotent
     // 200 immediately instead.
     //
-    // Auto-sleep (`sleeping`) keeps the process alive but suspends the
-    // session, so a start must still reach the Node to wake it — only a
-    // live (non-sleeping) online state short-circuits.
-    //
+    // Auto-sleep (`AgentStatus.sleeping`) used to keep the process
+    // alive but suspend the session, so a start had to reach the Node to
+    // wake it. The auto-sleep subsystem was removed in Sept 2026 —
+    // `sleeping` is no longer part of the wire — so every online state
+    // is a fast-path candidate now.
     // INVARIANT: the fast-path is ONLY safe when the broker's
     // authoritative view (`agent_registry`) AND the local process
     // table (`running_agents`) agree. The original 2026-09-07 bug was
     // caused by treating `registry.is_online = true` as sufficient
     // without checking that `running_agents` already contained the
     // entry — the result was a 200 on a desynced Gateway whose UI
-    // kept showing the agent as 休眠.
+    // kept showing the agent as offline.
     //
     // Reconciliation rule (post-incident):
     //   registry online ∧ running_agents has entry   → idempotent 200.
@@ -1626,18 +1608,17 @@ pub async fn start_agent(
     //       is a structural inconsistency — fall through to the node
     //       control path so the Node can re-stamp the entry, with a
     //       structured warning logged for the operator.
-    //   registry sleeping/offline ∧ running_agents has entry → not a
+    //   registry offline ∧ running_agents has entry → not a
     //       fast-path candidate; the guard below rejects the duplicate
     //       start (stop first) until the broker view converges.
-    //   registry sleeping/offline ∧ running_agents MISSING   → not a
+    //   registry offline ∧ running_agents MISSING   → not a
     //       fast-path candidate; fall through to node control.
     if let Some(ref reg) = state.agent_registry {
         // Single read so we don't race the reconcile loop on
         // `running_agents` between the snapshot and the entry check.
         let (live_online, has_entry) = {
             let reg_guard = reg.read().await;
-            let reg_online = reg_guard.is_online(&agent_id)
-                && reg_guard.sleeping_at(&agent_id).is_none();
+            let reg_online = reg_guard.is_online(&agent_id);
             let gw_guard = state.gateway_state.read().await;
             let in_running = gw_guard.is_running(&agent_id);
             (reg_online, in_running)
@@ -1699,10 +1680,10 @@ pub async fn start_agent(
     }
 
     // Local process table has an entry the broker view does not
-    // consider live-online (registry `sleeping` / `offline`, or no
-    // registry wired): the idempotent fast-path above does not apply.
-    // Reject the duplicate start exactly like the pre-fast-path code
-    // did — a stop (or broker-view convergence) must come first.
+    // consider live-online (registry `offline`, or no registry wired):
+    // the idempotent fast-path above does not apply. Reject the
+    // duplicate start exactly like the pre-fast-path code did — a stop
+    // (or broker-view convergence) must come first.
     if state.gateway_state.read().await.is_running(&agent_id) {
         return Err(ApiError::bad_request(&format!(
             "Agent {} is already running",
@@ -1983,17 +1964,37 @@ pub async fn stop_agent(
     // realtime offline event that reaches it milliseconds later — leaving
     // the UI in the chat view until an unrelated refetch converges it.
     // Mark the registry offline synchronously (deterministic for any
-    // subsequent list read) and publish the retained plain-text status so
-    // the normal dispatch path (registry loopback + protobuf republish to
-    // Desktop subscribers) runs exactly as it would for an LWT. The LWT
-    // itself remains the fallback for crash paths and is idempotent here.
+    // subsequent list read) and publish the retained `AgentStatus{online=false}`
+    // envelope so the normal dispatch path (registry loopback → Desktop
+    // subscribers) runs exactly as it would for an LWT. The LWT itself
+    // remains the fallback for crash paths and is idempotent here.
     let status_topic = format!("acowork/agents/{instance_id}/status");
+    let node_id_owned = node_id.clone();
+    let offline_envelope = acowork_core::mqtt_proto::DataEnvelope {
+        version: 1,
+        payload: Some(
+            acowork_core::mqtt_proto::data_envelope::Payload::AgentStatus(
+                acowork_core::mqtt_proto::AgentStatus {
+                    agent_id: resolved_agent_id.clone(),
+                    online: false,
+                    instance_id: instance_id.clone(),
+                    node_id: node_id_owned,
+                },
+            ),
+        ),
+    };
+    let offline_bytes = prost::Message::encode_to_vec(&offline_envelope);
     if let Some(reg) = &state.agent_registry {
-        reg.write().await.update_from_mqtt(&status_topic, b"offline");
+        reg.write().await.update_from_mqtt(&status_topic, &offline_bytes);
     }
     if let Some(client) = state.mqtt_gateway_client.as_ref()
         && let Err(e) = client
-            .publish_text(&status_topic, "offline", crate::mqtt::MqttQoS::AtLeastOnce, true)
+            .publish_envelope(
+                &status_topic,
+                &offline_envelope,
+                crate::mqtt::MqttQoS::AtLeastOnce,
+                true,
+            )
             .await
     {
         // Non-fatal: the registry is already updated and the LWT will
@@ -2316,8 +2317,8 @@ mod tests {
     }
 
     /// Build an AppState with package `agent_id` installed as instance
-    /// `instance_id`, and the MQTT agent registry seeded with the given
-    /// status payload for that instance.
+    /// `instance_id`, and the MQTT agent registry seeded with a
+    /// `DataEnvelope<AgentStatus{online}>` payload for that instance.
     ///
     /// ADR-073: the install table and the MQTT status registry are both
     /// keyed by INSTANCE identity, so the two inputs are passed
@@ -2329,7 +2330,7 @@ mod tests {
     async fn state_with_registry_status(
         agent_id: &str,
         instance_id: &str,
-        status: &[u8],
+        online: bool,
     ) -> AppState {
         let gw = Arc::new(RwLock::new(GatewayState::new(
             "/tmp/acowork-start-test-vault",
@@ -2349,10 +2350,24 @@ mod tests {
                 },
             );
         }
+        let envelope = acowork_core::mqtt_proto::DataEnvelope {
+            version: 1,
+            payload: Some(
+                acowork_core::mqtt_proto::data_envelope::Payload::AgentStatus(
+                    acowork_core::mqtt_proto::AgentStatus {
+                        agent_id: agent_id.to_string(),
+                        online,
+                        instance_id: instance_id.to_string(),
+                        node_id: "local".to_string(),
+                    },
+                ),
+            ),
+        };
+        let payload = prost::Message::encode_to_vec(&envelope);
         let reg = crate::mqtt::agent_registry::new_shared_registry();
         reg.write().await.update_from_mqtt(
             &format!("acowork/agents/{}/status", instance_id),
-            status,
+            &payload,
         );
 
         let mut state = AppState::new(gw, Arc::new(HttpAuth::new(false)));
@@ -2369,7 +2384,7 @@ mod tests {
         let state = state_with_registry_status(
             "com.acowork.senior-engineer",
             INSTANCE_SENIOR_ENG,
-            b"online",
+            true,
         ).await;
         let result = start_agent(
             State(state),
@@ -2390,45 +2405,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn start_agent_does_not_short_circuit_when_sleeping() {
-        // Auto-sleep keeps the process alive but suspends the session —
-        // a start must still reach the Node to wake it. With
-        // node_control disabled the handler must error on the node path
-        // rather than returning the idempotent 200.
-        let state = state_with_registry_status(
-            "com.acowork.senior-engineer",
-            INSTANCE_SENIOR_ENG,
-            b"sleeping",
-        ).await;
-        let result = start_agent(
-            State(state),
-            Path(INSTANCE_SENIOR_ENG.to_string()),
-            Json(StartAgentRequest { dev_mode: false }),
-        )
-        .await;
-        match result {
-            Err(e) => {
-                assert!(
-                    e.error.contains("Node control plane"),
-                    "expected node-control path error; got: {}",
-                    e.error
-                );
-            }
-            Ok(resp) => panic!(
-                "sleeping agent must NOT short-circuit; got idempotent 200: {}",
-                resp.message
-            ),
-        }
-    }
-
-    #[tokio::test]
     async fn start_agent_not_short_circuited_when_offline() {
         // An offline agent has no online short-circuit either — the
         // node-control path must run.
         let state = state_with_registry_status(
             "com.acowork.senior-engineer",
             INSTANCE_SENIOR_ENG,
-            b"offline",
+            false,
         ).await;
         let result = start_agent(
             State(state),
@@ -2460,7 +2443,7 @@ mod tests {
         // different host entirely. This test pins that `alive` is the
         // registry verdict and is independent of `running_agents.pid`.
         let state =
-            state_with_registry_status("com.acowork.senior-engineer", INSTANCE_SENIOR_ENG, b"online")
+            state_with_registry_status("com.acowork.senior-engineer", INSTANCE_SENIOR_ENG, true)
                 .await;
         {
             let mut gw = state.gateway_state.write().await;
@@ -2607,13 +2590,11 @@ mod tests {
             builtin_avatar: Some("icon-05".to_string()),
             version: "1.0.0".to_string(),
             alive: false,
-            sleeping: false,
             ready: false,
             dev_mode: false,
             debug_state: crate::gateway::state::DebugState::Disabled,
             debug_port: None,
             last_interaction_at: None,
-            sleeping_at: None,
         };
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("com.example.weather"));
@@ -2633,8 +2614,11 @@ mod tests {
         );
         // last_interaction_at is None and skipped on serialization.
         assert!(!json.contains("last_interaction_at"));
-        // sleeping_at is None and skipped on serialization.
+        // sleeping_at was removed (auto-sleep subsystem retired Sept 2026)
+        // and must not appear in the wire format.
         assert!(!json.contains("sleeping_at"));
+        // sleeping was also removed — must not appear either.
+        assert!(!json.contains("\"sleeping\""));
         // ADR-048 follow-up: debug_state serialises as lowercase string.
         assert!(
             json.contains("\"debug_state\":\"disabled\""),
@@ -2682,13 +2666,11 @@ mod tests {
             builtin_avatar: None,
             version: "1.0.0".to_string(),
             alive,
-            sleeping: false,
             ready: false,
             dev_mode: false,
             debug_state: crate::gateway::state::DebugState::Disabled,
             debug_port: None,
             last_interaction_at: ts.map(|s| s.to_string()),
-            sleeping_at: None,
         }
     }
 
@@ -2920,8 +2902,8 @@ mod tests {
     }
 
     /// The desync reconcile path: the broker says the agent is online
-    /// (registry online && not sleeping) but `running_agents` has no
-    /// entry (the 2026-09-07 symptom). The fast-path must:
+    /// (registry online) but `running_agents` has no entry (the
+    /// 2026-09-07 symptom). The fast-path must:
     ///   1. Detect the desync.
     ///   2. Trigger `reconcile_running_agents`.
     ///   3. Return idempotent 200 with `(reconciled)` suffix —
@@ -2936,7 +2918,7 @@ mod tests {
         let state = state_with_registry_status(
             "com.acowork.architect",
             INSTANCE_ARCHITECT,
-            b"online",
+            true,
         )
         .await;
         // Sanity: registry online, no entry.
@@ -3005,7 +2987,7 @@ mod tests {
     async fn start_agent_fast_path_returns_idempotent_200_when_views_agree() {
         // Pre-condition: registry online AND entry present.
         let state =
-            state_with_registry_status("com.acowork.architect", INSTANCE_ARCHITECT, b"online")
+            state_with_registry_status("com.acowork.architect", INSTANCE_ARCHITECT, true)
                 .await;
         {
             let mut gw = state.gateway_state.write().await;

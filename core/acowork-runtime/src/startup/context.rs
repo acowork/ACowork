@@ -362,11 +362,6 @@ pub(crate) struct SessionBootContext {
     /// `AgentCore` adopts this Arc so `read_messages_since` sees the
     /// true on-disk line count.
     pub committed_lines: Arc<std::sync::atomic::AtomicUsize>,
-    /// Auto-sleep idle watcher handle, if the user's effective timeout
-    /// is non-zero. `None` means "never sleep" (the watcher was not
-    /// spawned). Phase D's `control_action_to_inbound` calls
-    /// `record_inbound()` on every user action via this handle.
-    pub idle_watcher: Option<crate::agent::idle_watcher::IdleWatcherHandle>,
 }
 
 /// Build a `SessionManagerConfig` from the boot context.

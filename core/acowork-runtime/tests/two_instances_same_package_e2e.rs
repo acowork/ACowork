@@ -200,7 +200,10 @@ fn two_runtime_instances_same_package_coexist_on_one_broker() {
         let topic_a = format!("acowork/agents/{INSTANCE_A}/status");
         let topic_b = format!("acowork/agents/{INSTANCE_B}/status");
 
-        // Each instance's topic MUST exist with payload "online".
+        // Each instance's topic MUST carry an `online=true`
+        // DataEnvelope<AgentStatus>. The wire is protobuf since the
+        // auto-sleep subsystem was retired (Sept 2026); we decode and
+        // assert on the structured field rather than raw bytes.
         let payload_a = by_topic.get(&topic_a).unwrap_or_else(|| {
             panic!(
                 "missing status for instance A on topic {topic_a}; observed topics: {:?}",
@@ -213,8 +216,26 @@ fn two_runtime_instances_same_package_coexist_on_one_broker() {
                 by_topic.keys().collect::<Vec<_>>()
             )
         });
-        assert_eq!(payload_a.as_slice(), b"online", "A status payload");
-        assert_eq!(payload_b.as_slice(), b"online", "B status payload");
+        let status_a: acowork_core::mqtt_proto::AgentStatus = {
+            let env: acowork_core::mqtt_proto::DataEnvelope =
+                prost::Message::decode(payload_a.as_slice()).expect("A status must be a DataEnvelope");
+            match env.payload {
+                Some(acowork_core::mqtt_proto::data_envelope::Payload::AgentStatus(s)) => s,
+                _ => panic!("A envelope did not carry an AgentStatus payload"),
+            }
+        };
+        let status_b: acowork_core::mqtt_proto::AgentStatus = {
+            let env: acowork_core::mqtt_proto::DataEnvelope =
+                prost::Message::decode(payload_b.as_slice()).expect("B status must be a DataEnvelope");
+            match env.payload {
+                Some(acowork_core::mqtt_proto::data_envelope::Payload::AgentStatus(s)) => s,
+                _ => panic!("B envelope did not carry an AgentStatus payload"),
+            }
+        };
+        assert!(status_a.online, "A status must report online=true");
+        assert!(status_b.online, "B status must report online=true");
+        assert_eq!(status_a.instance_id, INSTANCE_A);
+        assert_eq!(status_b.instance_id, INSTANCE_B);
 
         // The two topics MUST be distinct — i.e. neither instance's
         // status was misrouted onto the other's topic (the pre-ADR-073

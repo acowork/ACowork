@@ -3,20 +3,21 @@
  *
  * 2026-09-02 09:12 incident: during system sleep the MQTT connection
  * dropped (KeepAlive timeout) → Gateway marked the agent offline → the
- * desktop rendered it as sleeping (zzz) even though the Runtime process
- * itself stayed alive. The fix lives in `handleMessageEvent`'s
- * `agent_status` branch (chatStore.ts) which, when `online=false` arrives,
- * fires an HTTP probe of the Runtime's `/health` endpoint via the Gateway
+ * desktop rendered it as offline even though the Runtime process itself
+ * stayed alive. The fix lives in `handleMessageEvent`'s `agent_status`
+ * branch (chatStore.ts) which, when `online=false` arrives, fires an
+ * HTTP probe of the Runtime's `/health` endpoint via the Gateway
  * reverse-proxy (`/api/agents/{id}/health`). A 2xx answer overrides the
- * MQTT signal back to online so the desktop does NOT mis-render sleeping.
+ * MQTT signal back to online so the desktop does NOT mis-render offline.
  *
  * These tests pin:
  *   - online=true → no HTTP probe (avoid wasted work on every status tick)
- *   - online=false + health=alive → override back to online=true, sleeping=false
+ *   - online=false + health=alive → override back to online=true
  *   - online=false + health=dead  → stays offline (genuine shutdown)
  *   - online=false + health throws → stays offline (defensive)
- *   - sleeping flag is preserved when overridden (always reset to false
- *     because if the Runtime is alive over HTTP it isn't sleeping)
+ *
+ * Auto-sleep was retired in Sept 2026 — `sleeping` is no longer part
+ * of the wire, so the call shape is `(agentId, online)`.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
@@ -28,18 +29,14 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 const { updateCalls, mockVerifyAgentHealth, mockUpdateAgentLiveness } =
     vi.hoisted(() => {
-        const updateCalls: Array<{
-            agentId: string;
-            alive: boolean;
-            sleeping: boolean;
-        }> = [];
+        const updateCalls: Array<{ agentId: string; alive: boolean }> = [];
         const mockVerifyAgentHealth = vi.fn<
             [agentId: string, timeoutMs?: number, gatewayUrl?: string],
             Promise<boolean>
         >();
         const mockUpdateAgentLiveness = vi.fn(
-            (agentId: string, online: boolean, sleeping = false) => {
-                updateCalls.push({ agentId, alive: online, sleeping });
+            (agentId: string, online: boolean) => {
+                updateCalls.push({ agentId, alive: online });
             },
         );
         return {
@@ -113,13 +110,13 @@ describe("agent_status handler: HTTP double-check on offline events", () => {
         expect(mockVerifyAgentHealth).not.toHaveBeenCalled();
         // updateAgentLiveness must still be called once (with online=true).
         expect(mockUpdateAgentLiveness).toHaveBeenCalledTimes(1);
-        expect(mockUpdateAgentLiveness).toHaveBeenCalledWith(AGENT, true, false);
+        expect(mockUpdateAgentLiveness).toHaveBeenCalledWith(AGENT, true);
     });
 
     it("probes /health on online=false AND overrides back to online when the Runtime is alive", async () => {
         // Simulates the 09:12 incident: MQTT drops (system sleep) →
         // Gateway republishes offline → WITHOUT the fix the desktop
-        // would render sleeping. WITH the fix, the probe finds the
+        // would render offline. WITH the fix, the probe finds the
         // Runtime alive and the state is corrected back to online.
         mockVerifyAgentHealth.mockResolvedValue(true);
 
@@ -132,11 +129,7 @@ describe("agent_status handler: HTTP double-check on offline events", () => {
 
         // First call: the agent_status event itself.
         expect(mockUpdateAgentLiveness).toHaveBeenCalledTimes(1);
-        expect(mockUpdateAgentLiveness).toHaveBeenLastCalledWith(
-            AGENT,
-            false,
-            false,
-        );
+        expect(mockUpdateAgentLiveness).toHaveBeenLastCalledWith(AGENT, false);
 
         // Let the probe's promise resolve.
         await vi.waitFor(() => {
@@ -146,11 +139,7 @@ describe("agent_status handler: HTTP double-check on offline events", () => {
 
         // Second call: the override after the probe resolves.
         expect(mockUpdateAgentLiveness).toHaveBeenCalledTimes(2);
-        expect(mockUpdateAgentLiveness).toHaveBeenLastCalledWith(
-            AGENT,
-            true,
-            false,
-        );
+        expect(mockUpdateAgentLiveness).toHaveBeenLastCalledWith(AGENT, true);
     });
 
     it("stays offline when the probe finds the Runtime dead (genuine shutdown)", async () => {
@@ -173,7 +162,7 @@ describe("agent_status handler: HTTP double-check on offline events", () => {
 
         // Only the initial offline update — no override back to online.
         expect(mockUpdateAgentLiveness).toHaveBeenCalledTimes(1);
-        expect(mockUpdateAgentLiveness).toHaveBeenCalledWith(AGENT, false, false);
+        expect(mockUpdateAgentLiveness).toHaveBeenCalledWith(AGENT, false);
     });
 
     it("does not crash if the probe throws (network error, DNS, etc.)", async () => {
@@ -197,62 +186,7 @@ describe("agent_status handler: HTTP double-check on offline events", () => {
 
         // No override — only the initial offline update.
         expect(mockUpdateAgentLiveness).toHaveBeenCalledTimes(1);
-        expect(mockUpdateAgentLiveness).toHaveBeenCalledWith(AGENT, false, false);
-    });
-
-    it("preserves the sleeping flag from the MQTT event when overriding online", async () => {
-        // Older Runtime revisions publish `sleeping=true` together with
-        // `online=false`. The handler must keep that flag on the initial
-        // update, but reset it to false on the override (an alive HTTP
-        // probe means the agent is NOT sleeping — it was a transient
-        // MQTT drop).
-        mockVerifyAgentHealth.mockResolvedValue(true);
-
-        handleMessageEvent(
-            {
-                type: "agent_status",
-                instance_id: AGENT,
-                online: false,
-                sleeping: true,
-            },
-            useChatStore.setState,
-            useChatStore.getState,
-            AGENT,
-        );
-
-        // Initial: pass through sleeping=true from the event.
-        expect(mockUpdateAgentLiveness).toHaveBeenNthCalledWith(
-            1,
-            AGENT,
-            false,
-            true,
-        );
-
-        await vi.waitFor(() => {
-            expect(mockVerifyAgentHealth).toHaveBeenCalled();
-        });
-        await Promise.resolve();
-
-        // Override: sleeping=false regardless of what MQTT said.
-        expect(mockUpdateAgentLiveness).toHaveBeenNthCalledWith(
-            2,
-            AGENT,
-            true,
-            false,
-        );
-    });
-
-    it("defaults sleeping to false when the event omits it (older protobuf payload)", () => {
-        // Older protobuf branches may not include `sleeping` at all.
-        // The handler must not crash on `undefined`.
-        handleMessageEvent(
-            { type: "agent_status", instance_id: AGENT, online: false },
-            useChatStore.setState,
-            useChatStore.getState,
-            AGENT,
-        );
-
-        expect(mockUpdateAgentLiveness).toHaveBeenCalledWith(AGENT, false, false);
+        expect(mockUpdateAgentLiveness).toHaveBeenCalledWith(AGENT, false);
     });
 
     it("ignores malformed events without an instance_id", () => {

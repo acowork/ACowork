@@ -2,10 +2,10 @@
 //!
 //! Connects to the Gateway's embedded broker with:
 //! - `client_id: "agent:{agent_id}"`
-//! - Last Will: `acowork/agents/{id}/status = "offline"` (Retained, QoS 1)
+//! - Last Will: `acowork/agents/{id}/status` = `DataEnvelope{AgentStatus{online=false}}` (Retained, QoS 1)
 //!
 //! On connect, publishes:
-//! - `acowork/agents/{id}/status = "online"` (Retained)
+//! - `acowork/agents/{id}/status` = `DataEnvelope{AgentStatus{online=true}}` (Retained)
 //! - `acowork/agents/{id}/meta` (Retained) — AgentMeta protobuf
 //! - `acowork/agents/{id}/config` (Retained) — AgentConfig protobuf
 //!
@@ -23,12 +23,13 @@ use tokio::sync::{Mutex, oneshot};
 
 use acowork_core::defaults;
 use acowork_core::mqtt_proto::{
-    AgentConfig, AgentMeta, AskQuestionPayload, ChunkPayload, CompactionCancelledPayload,
-    CompactingPayload, CompactionCancelReason as ProtoCompactionCancelReason,
-    ContextUsagePayload, DataEnvelope, DonePayload, ErrorPayload, IterationLimitPausedPayload,
-    LoopDetectedPausedPayload, McpTransport as ProtoMcpTransport, NewDataAvailablePayload,
-    NodeInfo, RecordCompletePayload, SessionMessage, StoppedPayload, StreamDeltaPayload,
-    StreamLine, TodoUpdatedPayload, ToolApprovalNeededPayload, data_envelope, session_message,
+    AgentConfig, AgentMeta, AgentStatus, AskQuestionPayload, ChunkPayload,
+    CompactionCancelledPayload, CompactingPayload,
+    CompactionCancelReason as ProtoCompactionCancelReason, ContextUsagePayload, DataEnvelope,
+    DonePayload, ErrorPayload, IterationLimitPausedPayload, LoopDetectedPausedPayload,
+    McpTransport as ProtoMcpTransport, NewDataAvailablePayload, NodeInfo, RecordCompletePayload,
+    SessionMessage, StoppedPayload, StreamDeltaPayload, StreamLine, TodoUpdatedPayload,
+    ToolApprovalNeededPayload, data_envelope, session_message,
 };
 use acowork_mqtt_session::{
     ErrClass, MqttClient, MqttClientConfig, MqttClientHandler, SessionState, SessionStateRx,
@@ -36,6 +37,33 @@ use acowork_mqtt_session::{
 
 use crate::mqtt::available_cache::SharedAvailableCache;
 use acowork_core::protocol::McpTransportDef;
+
+/// Encode an `AgentStatus` envelope into bytes for the
+/// `acowork/agents/{id}/status` topic.
+///
+/// The Runtime publishes a fresh envelope on connect (online=true),
+/// re-publishes every 5 s as a presence heartbeat, and uses the same
+/// encoding for the Last Will (online=false). Callers that only need
+/// the `online` flag and the `instance_id`/`node_id` location should
+/// prefer this helper so the field set stays in sync across the three
+/// publish sites.
+pub(crate) fn encode_agent_status_payload(
+    agent_id: &str,
+    instance_id: &str,
+    node_id: &str,
+    online: bool,
+) -> Vec<u8> {
+    let status = AgentStatus {
+        agent_id: agent_id.to_string(),
+        online,
+        instance_id: instance_id.to_string(),
+        node_id: node_id.to_string(),
+    };
+    prost::Message::encode_to_vec(&DataEnvelope {
+        version: 1,
+        payload: Some(data_envelope::Payload::AgentStatus(status)),
+    })
+}
 
 /// Convert a wire-format [`ProtoMcpTransport`] (from `McpRef` over MQTT)
 /// to the on-disk [`McpTransportDef`] used by `agent_mcp.json::catalog`.
@@ -1002,10 +1030,15 @@ impl RuntimeMqttClient {
                 .zip(cfg.password)
                 .map(|(u, p)| (u.to_string(), p.to_string())),
             // Last Will: if Runtime crashes/disconnects, broker
-            // publishes "offline" retained.
+            // publishes a retained `AgentStatus{online=false}` envelope.
             last_will: Some(LastWill::new(
                 &bootstrap_data.status_topic,
-                "offline",
+                encode_agent_status_payload(
+                    &bootstrap_data.agent_id,
+                    &bootstrap_data.instance_id,
+                    bootstrap_data.node_id.as_deref().unwrap_or(""),
+                    false,
+                ),
                 QoS::AtLeastOnce,
                 true,
             )),
@@ -1149,9 +1182,19 @@ impl RuntimeMqttClient {
         client: &AsyncClient,
         data: &BootstrapData,
     ) -> Result<(), RuntimeMqttClientError> {
-        // Step 1: PUBLISH status = "online" (Retained).
+        // Step 1: PUBLISH status (Retained) — `DataEnvelope<AgentStatus>`.
         client
-            .publish(&data.status_topic, QoS::AtLeastOnce, true, "online")
+            .publish(
+                &data.status_topic,
+                QoS::AtLeastOnce,
+                true,
+                encode_agent_status_payload(
+                    &data.agent_id,
+                    &data.instance_id,
+                    data.node_id.as_deref().unwrap_or(""),
+                    true,
+                ),
+            )
             .await
             .map_err(|e| RuntimeMqttClientError::Publish(format!("status: {}", e)))?;
 
@@ -1371,10 +1414,17 @@ impl RuntimeMqttClient {
         Ok(())
     }
 
-    /// Publish agent status (online/offline) as a plain text Retained message.
+    /// Publish agent status as a Retained `DataEnvelope<AgentStatus>`
+/// message. `online=true` is the presence heartbeat; `online=false`
+/// is published by [`Self::shutdown`] before disconnect.
     pub async fn publish_status(&self, online: bool) -> Result<(), RuntimeMqttClientError> {
         let topic = format!("acowork/agents/{}/status", self.instance_id);
-        let payload = if online { "online" } else { "offline" };
+        let payload = encode_agent_status_payload(
+            &self.agent_id,
+            &self.instance_id,
+            self.bootstrap_data.node_id.as_deref().unwrap_or(""),
+            online,
+        );
         self.client()
             .await
             .publish(topic, QoS::AtLeastOnce, true, payload)
@@ -1423,18 +1473,12 @@ impl RuntimeMqttClient {
     /// reconnect path (`pub async fn connect`) handles reconnect on the
     /// next `connect()` call.
     ///
-    /// Used by the idle-watcher's auto-sleep path: after publishing
-    /// `"sleeping"` to the agent status retained topic, the watcher
-    /// invokes `disconnect()` and then exits the process.
-    ///
     /// NOTE on the Last Will: per MQTT spec a **clean** DISCONNECT must
     /// NOT trigger the Will — rumqttd honours this (its `Packet::Disconnect`
-    /// handler deletes the stored last will), so no "offline" is published
-    /// and the retained status stays `"sleeping"` until the Runtime wakes
-    /// and re-publishes "online". Subscribers must therefore treat
-    /// `sleeping → online` (not just `offline → online`) as a wake
-    /// transition — see `apps/acowork-desktop/src/lib/workspaceFsEvents.ts`
-    /// `isWakeTransition`.
+    /// handler deletes the stored last will), so no `AgentStatus{online=false}`
+    /// envelope is published and the retained status stays at whatever the
+    /// last [`Self::publish_status`] / [`Self::shutdown`] call left it as.
+    /// Crashes and dropped connections still trigger the Will.
     pub async fn disconnect(&self) -> Result<(), RuntimeMqttClientError> {
         let client = self.client().await;
         client
@@ -1536,14 +1580,14 @@ impl RuntimeMqttClient {
 }
 
 impl RuntimeMqttClient {
-    /// Graceful shutdown: publish `status = "offline"` (retained) and
-    /// disconnect.
+    /// Graceful shutdown: publish `AgentStatus{online=false}` (retained)
+    /// and disconnect.
     ///
     /// There is deliberately NO `Drop` impl that publishes: this type is
-    /// `Clone` and cheap copies are dropped all the time (e.g. the
-    /// `IdleWatcherConfig` in never-sleep mode), so a `Drop`-triggered
-    /// publish turns every one of those into a spurious retained
-    /// "offline" message — which makes the Gateway `remove_running()`
+    /// `Clone` and cheap copies are dropped all the time (for example the
+    /// `SessionContext` clone that lives on the control-loop task), so a
+    /// `Drop`-triggered publish turns every one of those into a spurious
+    /// retained "offline" message — which makes the Gateway `remove_running()`
     /// right after auto-start, dropping the ready signal that follows
     /// (Phase 5a startup report). A crash is still covered by the Last
     /// Will; callers that need a clean offline transition must call
@@ -1551,8 +1595,14 @@ impl RuntimeMqttClient {
     pub async fn shutdown(&self) {
         let client = self.client().await;
         let status_topic = format!("acowork/agents/{}/status", self.instance_id);
+        let payload = encode_agent_status_payload(
+            &self.agent_id,
+            &self.instance_id,
+            self.bootstrap_data.node_id.as_deref().unwrap_or(""),
+            false,
+        );
         let _ = client
-            .publish(status_topic, QoS::AtLeastOnce, true, "offline")
+            .publish(status_topic, QoS::AtLeastOnce, true, payload)
             .await;
         let _ = client.disconnect().await;
     }
@@ -2596,10 +2646,10 @@ mod tests {
     }
 
     /// Presence self-heal (2026-09-17 sleep/wake incident): the broker
-    /// can deliver the previous connection's Last Will ("offline",
-    /// retained) AFTER the reconnect's retained "online", clobbering
-    /// the status. The 5 s heartbeat must re-publish retained "online"
-    /// so a stale offline is overwritten within one tick.
+    /// can deliver the previous connection's Last Will (`AgentStatus{online=false}`,
+    /// retained) AFTER the reconnect's retained `online=true`, clobbering
+    /// the status. The 5 s heartbeat must re-publish retained `online=true`
+    /// so a stale offline envelope is overwritten within one tick.
     #[tokio::test]
     async fn test_status_heartbeat_reclaims_retained_online() {
         let port = 18982;
@@ -2647,14 +2697,17 @@ mod tests {
             .await
             .unwrap();
 
-        // 1) Wait for the initial retained online from bootstrap.
+        let online_payload = encode_agent_status_payload("com.test.agent", instance_id, "", true);
+        let offline_payload = encode_agent_status_payload("com.test.agent", instance_id, "", false);
+
+        // 1) Wait for the initial retained `online=true` from bootstrap.
         //    (rumqttd forwards retained publishes to live subscribers
         //    with retain=false, so match on payload, not the flag.)
         let mut got_online = false;
         for _ in 0..50 {
             match tokio::time::timeout(Duration::from_millis(500), sub_eventloop.poll()).await {
                 Ok(Ok(Event::Incoming(rumqttc::Incoming::Publish(p)))) => {
-                    if p.topic == status_topic && p.payload.as_ref() == b"online" {
+                    if p.topic == status_topic && p.payload.as_ref() == online_payload.as_slice() {
                         got_online = true;
                         break;
                     }
@@ -2662,11 +2715,11 @@ mod tests {
                 _ => continue,
             }
         }
-        assert!(got_online, "should receive the initial retained online");
+        assert!(got_online, "should receive the initial retained online envelope");
 
         // 2) Simulate the stale Last Will clobbering the retained status.
         sub_client
-            .publish(&status_topic, QoS::AtLeastOnce, true, b"offline")
+            .publish(&status_topic, QoS::AtLeastOnce, true, offline_payload.clone())
             .await
             .unwrap();
 
@@ -2676,7 +2729,7 @@ mod tests {
         for _ in 0..40 {
             match tokio::time::timeout(Duration::from_millis(500), sub_eventloop.poll()).await {
                 Ok(Ok(Event::Incoming(rumqttc::Incoming::Publish(p)))) => {
-                    if p.topic == status_topic && p.payload.as_ref() == b"online" {
+                    if p.topic == status_topic && p.payload.as_ref() == online_payload.as_slice() {
                         reclaimed = true;
                         break;
                     }

@@ -678,7 +678,6 @@ pub fn run() {
             commands::chat_mqtt::disconnect_mqtt,
             commands::chat_mqtt::force_reconnect_mqtt,
             commands::chat_mqtt::get_mqtt_status,
-            commands::chat_mqtt::mqtt_publish_control,
             // ADR-XXX: MQTT broker debug controls (status bar test buttons)
             commands::gateway::debug_mqtt_shutdown,
             commands::gateway::debug_mqtt_start,

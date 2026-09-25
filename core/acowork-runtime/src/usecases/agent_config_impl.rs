@@ -149,9 +149,6 @@ fn apply_field_patch(
         ConfigField::ApprovalTimeoutSecs => {
             cfg.approval_timeout_secs = patch_typed::<u64>(field, op);
         }
-        ConfigField::IdleTimeoutSecs => {
-            cfg.idle_timeout_secs = patch_typed::<u64>(field, op);
-        }
         ConfigField::CompressionRatioThreshold => {
             cfg.compression_ratio_threshold = patch_typed::<f64>(field, op);
         }
@@ -384,15 +381,14 @@ mod tests {
     #[test]
     fn test_distiller_wire_to_patch_translation() {
         let body = PutAgentConfigBody::from_request_fields(
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
+            None, // max_output_tokens absent -> skip
+            None, // max_iterations absent -> skip
+            None, // max_sessions absent -> skip
+            None, // temperature absent -> skip
+            None, // context_window absent -> skip
+            None, // shell_approval_threshold absent -> skip
+            None, // approval_timeout_secs absent -> skip
+            None, // compression_ratio_threshold absent -> skip
             Some(serde_json::json!(true)), // distiller_enabled
             Some(serde_json::json!({
                 "provider_id": "p",
@@ -401,11 +397,11 @@ mod tests {
             Some(serde_json::json!(30)),   // distiller_interval_minutes
             Some(serde_json::json!(null)), // distiller_accumulation_threshold -> Clear
             None,                          // distiller_idle_minutes absent -> skip
-            None,                          // memory_forgetting_* absent -> skip (4)
-            None,
-            None,
-            None,
-            None, // session_language absent -> skip
+            None,                          // memory_forgetting_enabled absent -> skip
+            None,                          // memory_forgetting_half_life_days absent -> skip
+            None,                          // memory_forgetting_dormant_threshold absent -> skip
+            None,                          // memory_forgetting_archive_days absent -> skip
+            None,                          // session_language absent -> skip
         );
 
         let fields: Vec<(ConfigField, &FieldPatch<serde_json::Value>)> =
@@ -443,15 +439,14 @@ mod tests {
     #[test]
     fn test_forgetting_wire_to_patch_translation() {
         let body = PutAgentConfigBody::from_request_fields(
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
+            None,                          // max_output_tokens absent -> skip
+            None,                          // max_iterations absent -> skip
+            None,                          // max_sessions absent -> skip
+            None,                          // temperature absent -> skip
+            None,                          // context_window absent -> skip
+            None,                          // shell_approval_threshold absent -> skip
+            None,                          // approval_timeout_secs absent -> skip
+            None,                          // compression_ratio_threshold absent -> skip
             None,                          // distiller_enabled absent
             None,                          // distiller_model absent
             None,                          // distiller_interval_minutes absent

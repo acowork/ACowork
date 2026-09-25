@@ -41,7 +41,6 @@ function seedAgent() {
                     display_name: null,
                     role: null,
                     alive: true,
-                    sleeping: false,
                     ready: true,
                     debug_state: "disabled",
                     debug_port: null,

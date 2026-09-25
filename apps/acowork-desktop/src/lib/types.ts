@@ -50,10 +50,14 @@ export interface AgentListResponse {
   avatar: string | null;
   builtin_avatar?: string;
   version: string;
-  /** Distributed liveness verdict (MQTT network signal, topology independent). */
+  /**
+   * Distributed liveness verdict (MQTT network signal, topology independent).
+   *
+   * Auto-sleep was retired in Sept 2026 — `alive` is the only runtime
+   * state on the wire now. A Runtime is either connected (`alive=true`)
+   * or not, driven exclusively by `start_agent` / `stop_agent`.
+   */
   alive: boolean;
-  /** Runtime self-reported auto-sleep (idle watcher fired). */
-  sleeping?: boolean;
   dev_mode: boolean;
   /** Whether DevMode is live right now (ADR-048 follow-up; can be enabled at runtime). */
   debug_state?: "enabled" | "disabled";
@@ -193,19 +197,16 @@ export interface AgentInfo {
   version: string;
   /**
    * Distributed liveness verdict — whether the Runtime's MQTT session is
-   * reachable at the broker level (`online` / `sleeping` / `degraded`
-   * payloads). Topology independent: the same answer for local, remote
-   * and node-hosted Runtimes. NEVER a process/PID probe. This is the
-   * single field the UI gates "agent is alive" on.
+   * reachable at the broker level (`online` payload). Topology
+   * independent: the same answer for local, remote and node-hosted
+   * Runtimes. NEVER a process/PID probe. This is the single field the
+   * UI gates "agent is alive" on.
+   *
+   * Auto-sleep was retired in Sept 2026 — there is no `sleeping` /
+   * `sleeping_at` field any more. A Runtime is either connected or
+   * not, driven exclusively by `start_agent` / `stop_agent`.
    */
   alive: boolean;
-  /**
-   * Whether the Runtime self-reported auto-sleep (idle watcher fired)
-   * before exiting. `alive=true, sleeping=true` means the retained
-   * `sleeping` status is still cached — render an "auto-slept at HH:MM"
-   * badge + Start button, not a live session.
-   */
-  sleeping: boolean;
   ready: boolean;
   dev_mode: boolean;
   /**
@@ -227,15 +228,6 @@ export interface AgentInfo {
    * for tooltips and future "last active" UI affordances.
    */
   last_interaction_at?: string | null;
-  /**
-   * RFC3339 timestamp the Runtime published the `sleeping` retained
-   * status — i.e. when the auto-sleep watcher exited the process.
-   * `null`/`undefined` for agents that are not currently sleeping.
-   * Lets the UI render an "auto-slept at HH:MM" badge distinct from
-   * "manually stopped" / "crashed" (both of which surface as
-   * running=false, connected=false).
-   */
-  sleeping_at?: string | null;
 }
 
 /** Agent detail response */

@@ -3,12 +3,21 @@
 //! These commands are called from the React frontend via `invoke()`:
 //! - `connect_mqtt` — connect to the MQTT broker
 //! - `disconnect_mqtt` — disconnect and clean up
-//! - `mqtt_publish_control` — publish a control command (protobuf-encoded)
+//! - `force_reconnect_mqtt` — force a fresh event loop after a wake
+//! - `get_mqtt_status` — read the broker session state
 //!
-//! The `connect_mqtt` message callback also decodes DevMode debug events
-//! (ADR-048 D6) published on `acowork/agents/glm-5.3_common/debug/events/#`
-//! and re-emits them on the `debug-event` Tauri channel for the frontend
-//! `debugStore`.
+//! Every user-initiated session action (chat, stop, config, lifecycle,
+//! approval, etc.) now goes through the Gateway's authenticated HTTP API
+//! (`src/lib/session-control.ts`). The MQTT control plane is empty in
+//! the Desktop direction since auto-sleep was retired in Sept 2026 —
+//! there is no `ActiveHeartbeat` to send.
+//!
+//! The `connect_mqtt` message callback decodes the agent-status topic
+//! (`acowork/agents/+/status`, protobuf `DataEnvelope<AgentStatus>`)
+//! plus DevMode debug events (ADR-048 D6) on
+//! `acowork/agents/glm-5.3_common/debug/events/#` and re-emits them on
+//! the `agent-event` / `debug-event` Tauri channels for the frontend
+//! stores.
 
 use std::sync::Arc;
 
@@ -16,8 +25,8 @@ use prost::Message;
 use tauri::Emitter;
 
 use acowork_core::mqtt_proto::{
-    self, BootstrapState, ControlCommand, DataEnvelope,
-    control_command, data_envelope, session_message,
+    BootstrapState, DataEnvelope,
+    data_envelope, session_message,
 };
 use crate::mqtt_client::{DesktopMqttClient, MqttMessage, MqttStatus};
 use crate::state::{AppState, BootstrapStateView};
@@ -111,28 +120,19 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
         });
         let _ = app_handle.emit("mqtt-event", raw_payload);
 
-        // ── Plain-text topic: `acowork/agents/+/status` ──
+        // ── Protobuf topic: `acowork/agents/+/status` ──
         //
-        // The Runtime publishes its lifecycle status as a plain text
-        // retained message ("online" / "sleeping" / "offline") — see
-        // `acowork-runtime::agent::idle_watcher` (sleeping) and
-        // `acowork-runtime::mqtt::client::publish_status` (online/offline).
-        // Without this branch the Desktop would silently lose the auto-sleep
-        // signal and keep showing the agent as alive long after the
-        // Runtime exited.
+        // The Runtime publishes its lifecycle status as a `DataEnvelope<AgentStatus>`
+        // protobuf (Sept 2026 — auto-sleep retired, the only on/off transition
+        // is now stop / start; see `acowork-runtime::mqtt::client::publish_status`).
+        // We decode the envelope and emit a flat `agent_status` event.
         if msg.topic.starts_with("acowork/agents/") && msg.topic.ends_with("/status") {
-            // Plain-text status first ("online" / "sleeping" / "offline").
-            // On parse failure we FALL THROUGH to the protobuf decode
-            // below instead of returning: the Gateway re-publishes the
-            // plain-text status as a `DataEnvelope` on this same topic
-            // (`dispatch.rs`), so a binary payload here is the expected
-            // envelope, not garbage.
-            if let Some(parsed) = parse_plaintext_agent_status(&msg.topic, &msg.payload) {
+            if let Some(parsed) = parse_agent_status_envelope(&msg.topic, &msg.payload) {
                 let event = serde_json::json!({
                     "type": "agent_status",
                     "instance_id": parsed.instance_id,
                     "online": parsed.online,
-                    "sleeping": parsed.sleeping,
+                    "node_id": parsed.node_id,
                 });
                 let _ = app_handle.emit("agent-event", event);
                 return;
@@ -408,7 +408,9 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
                 // Same shape as the plain-text branch above — schema
                 // must be identical so the React `chatStore.case
                 // "agent_status"` reducer can handle either path with
-                // one code path.
+                // one code path. `sleeping` was retired in Sept 2026
+                // alongside auto-sleep, so the wire now carries only
+                // `online` + `instance_id` + `node_id`.
                 let event = serde_json::json!({
                     "type": "agent_status",
                     // ADR-073: the envelope carries `instance_id` on the
@@ -420,7 +422,7 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
                         status.instance_id.clone()
                     },
                     "online": status.online,
-                    "sleeping": status.sleeping,
+                    "node_id": status.node_id,
                 });
                 let _ = app_handle.emit("agent-event", event);
             }
@@ -739,70 +741,6 @@ pub async fn get_mqtt_status(
     let state = client.session_state();
     Ok(mqtt_status_to_payload(&state))
 }
-/// Publish a control command to the Runtime over MQTT.
-///
-/// ADR-076 §决策 4: **the MQTT control plane carries no user-initiated
-/// traffic.** Every user-triggered session action — lifecycle (create /
-/// open / close / delete / visibility / workspace), per-session config
-/// (model / reasoning / title) and the action wave (chat / stop / continue
-/// / approval / question_answer / cancel_tool / compress) — goes over the
-/// Gateway's authenticated HTTP API instead (`src/lib/session-control.ts`),
-/// where the caller's identity can be checked against the session's owner.
-/// The matching proto fields are deleted, so those commands are not merely
-/// rejected here — they cannot be built.
-///
-/// The one command left is the presence heartbeat: no session scope, no
-/// authority, purely "this Desktop is alive".
-#[tauri::command]
-pub async fn mqtt_publish_control(
-    instance_id: String,
-    command: String,
-    payload_json: serde_json::Value,
-    state: tauri::State<'_, AppState>,
-) -> Result<(), String> {
-    let guard = state.mqtt_client.lock().await;
-    let client = guard
-        .as_ref()
-        .ok_or_else(|| "MQTT client not connected".to_string())?;
-
-    let client = client.lock().await;
-
-    tracing::info!(
-        instance_id = %instance_id,
-        command = %command,
-        "mqtt_publish_control: publishing control command"
-    );
-    // The remaining command (the heartbeat) carries no payload, but the
-    // argument stays so the frontend's call shape is unchanged.
-    tracing::trace!(payload = %payload_json, "control command payload (unused)");
-
-    // Build ControlCommand protobuf from the command name.
-    let control = build_control_command(&instance_id, &command)?;
-
-    client.publish_control_protobuf(&instance_id, control).await
-}
-
-/// Build a `ControlCommand` protobuf from a command name.
-///
-/// ADR-076 §决策 4: only `active_heartbeat` is left — the session-scoped
-/// protos this used to build are deleted from `mqtt_payload.proto`.
-///
-/// ADR-073: the identity param is the INSTANCE id (matches the control
-/// topic); the proto's `instance_id` field mirrors it on the wire.
-fn build_control_command(instance_id: &str, command: &str) -> Result<ControlCommand, String> {
-    let cmd = match command {
-        "active_heartbeat" => {
-            control_command::Command::ActiveHeartbeat(mqtt_proto::ActiveHeartbeat {})
-        }
-        other => return Err(format!("Unknown control command: {}", other)),
-    };
-
-    Ok(ControlCommand {
-        instance_id: instance_id.to_string(),
-        command: Some(cmd),
-    })
-}
-
 /// Map a proto `FsChangeKind` (encoded as i32) to the string form the
 /// frontend stores dispatch on ("created" / "modified" / "deleted").
 fn fs_change_kind_str(kind: i32) -> &'static str {
@@ -1258,58 +1196,59 @@ fn extract_instance_id_from_topic(topic: &str) -> Option<String> {
 }
 
 /// Parse the plain-text agent status payload published by the Runtime
-/// on `acowork/agents/{instance_id}/status` (retained message).
+/// Decode a `DataEnvelope<AgentStatus>` published by the Runtime on
+/// `acowork/agents/{instance_id}/status` (retained message).
 ///
 /// Returns:
-/// - `Some(...)` when the topic matches the status shape and the
-///   payload is one of the known status values (`online` / `sleeping` /
-///   `degraded` / `offline`).
-/// - `None` when the topic is not a status topic (caller should fall
-///   through to the protobuf decoder). When the topic *is* a status
-///   topic but the payload is non-UTF-8 binary (the Gateway's
-///   `DataEnvelope` re-publish — see `dispatch.rs`), this function
-///   returns `None` **silently**: the binary shape is the documented
-///   authoritative format on this topic, not garbage. Only a UTF-8
-///   payload that doesn't match a known status string is logged.
-fn parse_plaintext_agent_status(topic: &str, payload: &[u8]) -> Option<ParsedAgentStatus> {
+/// - `Some(...)` when the topic matches the status shape AND the
+///   payload decodes as a `DataEnvelope<AgentStatus>`.
+/// - `None` when the topic doesn't match (caller falls through) or
+///   when the envelope fails to decode. Decode failures are logged
+///   once-per-shape — a corrupt envelope should not flood the log,
+///   but a total absence of decoding on every retained message (the
+///   2026-09-25 WARN-spam incident caused by the legacy plaintext
+///   discriminator eating protobuf bytes) must be loud.
+///
+/// Auto-sleep was retired in Sept 2026 — there is no longer a
+/// `sleeping` field. The protobuf schema keeps `instance_id` (field
+/// 4) and `node_id` (field 5) so the wire shape is stable across
+/// version bumps.
+fn parse_agent_status_envelope(topic: &str, payload: &[u8]) -> Option<ParsedAgentStatus> {
     if !topic.starts_with("acowork/agents/") || !topic.ends_with("/status") {
         return None;
     }
-    let instance_id = extract_instance_id_from_topic(topic)?;
-    // Distinguish "binary payload from the Gateway's DataEnvelope
-    // re-publish" (silent fall-through) from "UTF-8 payload with an
-    // unknown status string" (warn — likely a protocol drift). Using
-    // `from_utf8` (not `from_utf8_lossy`) avoids spurious warnings when
-    // the payload happens to start with ASCII bytes (most protobuf
-    // field tags do).
-    let Ok(payload_str) = std::str::from_utf8(payload) else {
-        return None;
-    };
-    match payload_str.trim() {
-        // `online` / `sleeping` / `degraded` all mean the MQTT session is
-        // alive (alive=true). `degraded` additionally implies the bootstrap
-        // is still in flight — the UI shows the agent as alive but not yet
-        // ready (mirrors the Gateway `AgentRegistry` mapping).
-        "online" => Some(ParsedAgentStatus { instance_id, online: true, sleeping: false }),
-        "sleeping" => Some(ParsedAgentStatus { instance_id, online: true, sleeping: true }),
-        "degraded" => Some(ParsedAgentStatus { instance_id, online: true, sleeping: false }),
-        "offline" => Some(ParsedAgentStatus { instance_id, online: false, sleeping: false }),
-        unknown => {
+    let envelope = DataEnvelope::decode(payload).ok()?;
+    let status = match envelope.payload {
+        Some(data_envelope::Payload::AgentStatus(s)) => s,
+        _ => {
             tracing::warn!(
                 topic = %topic,
-                payload = %unknown,
-                "unknown agent status payload — ignoring"
+                "agent status topic received a DataEnvelope without an AgentStatus payload — ignoring"
             );
-            None
+            return None;
         }
-    }
+    };
+    // Prefer the envelope's instance_id; fall back to the topic so a
+    // misconfigured Runtime that forgot to set the field still surfaces
+    // a useful row in the sidebar (matches Gateway behaviour).
+    let topic_instance = extract_instance_id_from_topic(topic).unwrap_or_default();
+    let instance_id = if !status.instance_id.is_empty() {
+        status.instance_id.clone()
+    } else {
+        topic_instance
+    };
+    Some(ParsedAgentStatus {
+        instance_id,
+        online: status.online,
+        node_id: status.node_id,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ParsedAgentStatus {
     instance_id: String,
     online: bool,
-    sleeping: bool,
+    node_id: String,
 }
 
 #[cfg(test)]
@@ -1339,124 +1278,119 @@ mod tests {
         assert_eq!(extract_instance_id_from_topic("acowork/agents//sessions/x/opened"), None);
     }
 
-    /// Regression test: plain-text "sleeping" payload must surface as
-    /// `online=true, sleeping=true` so the React reducer can show the
-    /// sleeping UI even before the Gateway republishes the status as a
-    /// protobuf DataEnvelope. Before this fix the Desktop would decode
-    /// the message as protobuf, fail (not a valid DataEnvelope), and
-    /// `return` — the frontend never learned about the sleep.
+    /// Auto-sleep was retired in Sept 2026 — `sleeping` is no longer a
+    /// status value. The Runtime now publishes only `online=true` /
+    /// `online=false` via a `DataEnvelope<AgentStatus>` protobuf.
+    /// Round-trip an online envelope and verify the Desktop decoder
+    /// surfaces the structured fields.
     #[test]
-    fn parse_plaintext_sleeping_payload() {
-        let p = parse_plaintext_agent_status(
-            "acowork/agents/com.acowork.senior-engineer/status",
-            b"sleeping",
-        )
-        .expect("known status payload must parse");
-        assert_eq!(p.instance_id, "com.acowork.senior-engineer");
-        assert!(p.online);
-        assert!(p.sleeping);
-    }
-
-    #[test]
-    fn parse_plaintext_online_payload() {
-        let p = parse_plaintext_agent_status(
-            "acowork/agents/com.example.weather/status",
-            b"online",
-        )
-        .unwrap();
-        assert_eq!(p.instance_id, "com.example.weather");
-        assert!(p.online);
-        assert!(!p.sleeping);
-    }
-
-    #[test]
-    fn parse_plaintext_degraded_payload() {
-        // The Gateway AgentRegistry emits "degraded" as an alive status;
-        // the Desktop must treat it as online (alive), not sleeping.
-        let p = parse_plaintext_agent_status(
-            "acowork/agents/com.example.weather/status",
-            b"degraded",
-        )
-        .unwrap();
-        assert_eq!(p.instance_id, "com.example.weather");
-        assert!(p.online);
-        assert!(!p.sleeping);
-    }
-
-    #[test]
-    fn parse_plaintext_offline_payload() {
-        let p = parse_plaintext_agent_status(
-            "acowork/agents/com.example.weather/status",
-            b"offline",
-        )
-        .unwrap();
-        assert_eq!(p.instance_id, "com.example.weather");
-        assert!(!p.online);
-        assert!(!p.sleeping);
-    }
-
-    #[test]
-    fn parse_plaintext_unknown_status_returns_none() {
-        // Topic is a status topic, payload is garbage → None (caller
-        // drops, warning already logged).
-        assert!(parse_plaintext_agent_status(
-            "acowork/agents/com.x/status",
-            b"what is this",
-        )
-        .is_none());
-    }
-
-    #[test]
-    fn parse_plaintext_non_status_topic_returns_none() {
-        // Not a status topic → fall through to protobuf decoder.
-        assert!(parse_plaintext_agent_status(
-            "acowork/agents/com.x/sessions/s-1/meta",
-            b"online",
-        )
-        .is_none());
-    }
-
-    /// Regression test: the Gateway `dispatch.rs` re-publishes the
-    /// status as a `DataEnvelope` (protobuf bytes) on the same
-    /// `acowork/agents/{id}/status` topic right after the Runtime's
-    /// plain-text publish. Before this fix, `parse_plaintext_agent_status`
-    /// used `from_utf8_lossy`, which coerced the binary into a string
-    /// of replacement characters and emitted a spurious "unknown agent
-    /// status payload" warning for every reconnect. We must now
-    /// silently fall through.
-    #[test]
-    fn parse_plaintext_binary_payload_silent_fallthrough() {
-        // Non-UTF-8 byte sequence — typical protobuf wire format.
-        let binary = [0x08, 0x01, 0x12, 0x05, b'h', b'e', b'l', b'l', b'o', 0xff, 0xfe];
-        assert!(
-            parse_plaintext_agent_status("acowork/agents/com.acowork.x/status", &binary)
-                .is_none(),
-            "binary payload must fall through silently so the protobuf decoder can pick it up"
-        );
-    }
-
-    #[test]
-    fn parse_plaintext_protobuf_silently_falls_through() {
-        // Encode a real `acowork_core::mqtt_proto::DataEnvelope` with an
-        // `AgentStatus` payload — exactly what the Gateway publishes.
-        use acowork_core::mqtt_proto::{AgentStatus, DataEnvelope};
+    fn parse_envelope_online_payload() {
         use acowork_core::mqtt_proto::data_envelope::Payload;
+        use acowork_core::mqtt_proto::AgentStatus;
+
+        let env = DataEnvelope {
+            version: 1,
+            payload: Some(Payload::AgentStatus(AgentStatus {
+                agent_id: "com.acowork.weather".to_string(),
+                online: true,
+                instance_id: "uuid-online".to_string(),
+                node_id: "local".to_string(),
+            })),
+        };
+        let bytes = prost::Message::encode_to_vec(&env);
+        let p = parse_agent_status_envelope(
+            "acowork/agents/uuid-online/status",
+            &bytes,
+        )
+        .expect("online envelope must parse");
+        assert_eq!(p.instance_id, "uuid-online");
+        assert!(p.online);
+        assert_eq!(p.node_id, "local");
+    }
+
+    #[test]
+    fn parse_envelope_offline_payload() {
+        use acowork_core::mqtt_proto::data_envelope::Payload;
+        use acowork_core::mqtt_proto::AgentStatus;
+
+        let env = DataEnvelope {
+            version: 1,
+            payload: Some(Payload::AgentStatus(AgentStatus {
+                agent_id: "com.acowork.weather".to_string(),
+                online: false,
+                instance_id: "uuid-offline".to_string(),
+                node_id: "remote-node".to_string(),
+            })),
+        };
+        let bytes = prost::Message::encode_to_vec(&env);
+        let p = parse_agent_status_envelope(
+            "acowork/agents/uuid-offline/status",
+            &bytes,
+        )
+        .unwrap();
+        assert_eq!(p.instance_id, "uuid-offline");
+        assert!(!p.online);
+        assert_eq!(p.node_id, "remote-node");
+    }
+
+    /// Regression: a non-status topic (e.g. `acowork/agents/{id}/sessions/x/...`)
+    /// must NOT be parsed — the function short-circuits on the topic shape
+    /// before touching the payload, regardless of whether the payload
+    /// happens to decode as a valid envelope.
+    #[test]
+    fn parse_envelope_non_status_topic_returns_none() {
+        use acowork_core::mqtt_proto::data_envelope::Payload;
+        use acowork_core::mqtt_proto::AgentStatus;
 
         let env = DataEnvelope {
             version: 1,
             payload: Some(Payload::AgentStatus(AgentStatus {
                 agent_id: "com.acowork.x".to_string(),
                 online: true,
-                sleeping: false,
-                instance_id: "test-instance".to_string(),
-                node_id: "test-node".to_string(),
+                instance_id: "x".to_string(),
+                node_id: "local".to_string(),
             })),
         };
         let bytes = prost::Message::encode_to_vec(&env);
         assert!(
-            parse_plaintext_agent_status("acowork/agents/com.acowork.x/status", &bytes)
-                .is_none(),
-            "Gateway-re-published protobuf must NOT match the plaintext parser"
+            parse_agent_status_envelope("acowork/agents/x/sessions/s-1/meta", &bytes).is_none(),
+            "non-status topics must not be intercepted — let the protobuf decoder branch handle them"
+        );
+    }
+
+    /// Regression: a status-topic payload that is NOT a valid
+    /// `DataEnvelope<AgentStatus>` must return `None` without panic.
+    /// (The previous plaintext parser used `from_utf8_lossy` on a
+    /// binary blob and emitted a spurious WARN every retained
+    /// replay — the source of the 2026-09-25 WARN-spam incident.)
+    #[test]
+    fn parse_envelope_garbage_returns_none() {
+        assert!(
+            parse_agent_status_envelope(
+                "acowork/agents/x/status",
+                &[0x08, 0x01, 0xff, 0xfe],
+            )
+            .is_none()
+        );
+    }
+
+    /// Regression: a valid envelope that does NOT carry an
+    /// `AgentStatus` payload (e.g. an unrelated DataEnvelope type
+    /// accidentally published on the status topic) must return
+    /// `None` so the caller falls through.
+    #[test]
+    fn parse_envelope_wrong_payload_variant_returns_none() {
+        use acowork_core::mqtt_proto::data_envelope::Payload;
+        use acowork_core::mqtt_proto::BootstrapState;
+
+        let env = DataEnvelope {
+            version: 1,
+            payload: Some(Payload::BootstrapState(BootstrapState::default())),
+        };
+        let bytes = prost::Message::encode_to_vec(&env);
+        assert!(
+            parse_agent_status_envelope("acowork/agents/x/status", &bytes).is_none(),
+            "wrong payload variant must NOT be misreported as AgentStatus"
         );
     }
 }

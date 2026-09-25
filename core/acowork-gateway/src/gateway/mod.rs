@@ -639,11 +639,9 @@ impl Gateway {
             gw.advertise_host = advertise;
         }
 
-        // Idle-timeout decision is owned by the Runtime now (see
-        // `acowork-runtime::agent::idle_watcher`); the Gateway only
-        // observes the `sleeping` retained status that the Runtime
-        // publishes and stamps `AgentInfo.sleeping_at` for the
-        // /api/agents listing. No background checker is spawned here.
+        // Auto-sleep was retired in Sept 2026 — the Gateway no longer
+        // owns any per-agent idle watcher; the only on/off transition
+        // is Runtime start / stop driven through the MQTT status topic.
 
         tracing::info!("Gateway entering gRPC event loop (async multi-connection)");
 
