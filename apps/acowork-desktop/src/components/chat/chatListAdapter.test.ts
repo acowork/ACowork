@@ -13,7 +13,7 @@
  * fresh adapter store, push state into chatStore + chatAdapterStore,
  * and read `getSnapshot()` directly.
  */
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useChatStore } from "../../stores/chatStore";
 import {
   useChatAdapterStore,
@@ -337,6 +337,27 @@ describe("chatListAdapter v2: scrollToBottom / scrollToTop", () => {
     // Should complete without error and not change offset.
     await store.scrollToBottom();
     expect(store.getSnapshot().messageOffset).toBe(0);
+  });
+
+  it("concurrent scrollToBottom calls share ONE page load (a duplicate must not abort it)", async () => {
+    // Live repro: the arrow click and the controller's followMode-convergence
+    // effect both call scrollToBottom ~1 frame apart.  Each loadSessionMessages
+    // aborts the previous in-flight request and bumps `loadSequence` before any
+    // guard, so the second call threw away the tail page the first one was
+    // fetching — the pane then got pinned to the bottom of a MID-HISTORY
+    // window ("arrow lands in the middle, two more clicks reach the bottom").
+    seedHistoryInStore([msg("u1", ts(100)), msg("a1", ts(200))], { offset: 0, limit: 2, total: 20 });
+    const store = freshStore();
+    if (!store) throw new Error("store missing");
+    const original = useChatStore.getState().loadSessionMessages;
+    const load = vi.fn(async () => ({ offset: 18, limit: 2, total: 20 }));
+    useChatStore.setState((s) => ({ ...s, loadSessionMessages: load }));
+    try {
+      await Promise.all([store.scrollToBottom(), store.scrollToBottom()]);
+    } finally {
+      useChatStore.setState((s) => ({ ...s, loadSessionMessages: original }));
+    }
+    expect(load).toHaveBeenCalledTimes(1);
   });
 
   it("scrollToTop is no-op when already at head (offset=0)", async () => {

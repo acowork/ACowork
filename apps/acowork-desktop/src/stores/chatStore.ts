@@ -2390,8 +2390,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         let finalLimit = returnedLimit;
 
         if (replaceCache) {
-          // Jump operation: the fetched page REPLACES the cache.
-          // Cursor is exactly what the server returned.
+          // Jump / replace: the fetched page is the authoritative cursor.
           finalOffset = returnedOffset;
           finalLimit = returnedLimit;
         } else if (isInitialLoad) {
@@ -2400,6 +2399,18 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           // bleed into the freshly-loaded view.  The tracker now lives
           // in chatAdapterStore; chatStore delegates the cleanup.
           releaseAdapterSession(agentId, sessionId);
+        } else if (ss.messagesStale) {
+          // A stale cache (see `messagesStale`) is NOT a trustworthy
+          // window: its cursor was reset by clearSessionMessages and may
+          // have been bumped by out-of-band writes.  The union math below
+          // assumes the cached range and the server window are contiguous,
+          // which is false here — it would fabricate a `[0, total)` cursor
+          // over a sparse array and set hasOlder=false, permanently hiding
+          // the missing head.  Adopt the server window's cursor verbatim
+          // instead.  (Reachable e.g. after trimMessagesTo leaves a
+          // non-empty but non-authoritative head slice.)
+          finalOffset = returnedOffset;
+          finalLimit = returnedLimit;
         } else if (returnedOffset > prevOffset) {
           // Loading NEWER messages (scroll-down).  Window slid forward;
           // extend the cached range to include the newer entries the
@@ -2595,6 +2606,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         const tailOffset = Math.max(0, messageTotal - limit);
         await get().loadSessionMessages(agentId, sessionId, tailOffset, limit);
       }
+
+      // The bare tail page may fold to a LONE explore block (see
+      // expandWindowToTurnBoundary) — pull older pages until the window
+      // starts on a turn boundary.
+      await expandWindowToTurnBoundary(agentId, sessionId, limit);
     } finally {
       set((state) => updateSessionState(state, agentId, sessionId, { isLoadingMore: false }));
     }
@@ -2849,6 +2865,47 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     ]);
   },
 }));
+
+/**
+ * Keep pulling older pages until the loaded window starts on a turn
+ * boundary (its oldest raw entry is no longer part of an explore run).
+ *
+ * A page is measured in RAW entries, but the renderer folds consecutive
+ * tool_call / tool_result / thought entries into ONE explore_group block
+ * (`foldMessages`).  A single explore run can therefore span more raw
+ * entries than one page — in which case a bare tail page folds to a LONE
+ * explore block and every earlier message (notably the user message that
+ * opened the turn) stays unloaded, so the chat appears to contain only the
+ * explore block.
+ *
+ * Shared by every explicit "position the view at the tail" entry point:
+ * `ensureLatestInCache` (session open / switch-back) and the adapter's
+ * `scrollToBottom` (jump-to-latest button).  It is deliberately NOT wired
+ * into `loadSessionMessages` itself: the routine tail refreshes
+ * (`scheduleSendReconciliation`, the record_complete refresh) fire on a hot
+ * path where expanding a mid-explore-run window would spam extra HTTP.
+ */
+export async function expandWindowToTurnBoundary(
+  agentId: string,
+  sessionId: string,
+  limit: number,
+): Promise<void> {
+  const MAX_EXPAND_PAGES = 20; // ponytail: bound; a >1000-entry explore run is pathological
+  for (let i = 0; i < MAX_EXPAND_PAGES; i++) {
+    const cur = useChatStore.getState().getSessionState(agentId, sessionId);
+    const first = cur.messages[0];
+    if (!first || cur.messageOffset <= 0) break;
+    if (
+      first.type !== "tool_call" &&
+      first.type !== "tool_result" &&
+      first.type !== "thought"
+    ) {
+      break;
+    }
+    const prevOffset = Math.max(0, cur.messageOffset - limit);
+    await useChatStore.getState().loadSessionMessages(agentId, sessionId, prevOffset, limit);
+  }
+}
 
 // ── Conversation entry conversion ─────────────────────────────────────
 
@@ -3162,13 +3219,28 @@ export function handleMessageEvent(
       //
       // atTail uses the shared `isAtTail()` function (same definition as
       // chatListAdapter's buildSnapshot) so that `limit === 0` (fresh
-      // session before initial HTTP load) is also treated as at-tail.
-      // This ensures record_complete writes to messages[] even before the
-      // first HTTP response arrives - the message will be deduped by
-      // mergeMessageWindow when the HTTP response eventually lands.
+      // session before initial HTTP load) is also treated as at-tail, and
+      // the message will be deduped by mergeMessageWindow when the HTTP
+      // response eventually lands.  The write is additionally gated on a
+      // NON-STALE cache (see the `atTail` expression below): `limit === 0`
+      // because the window is genuinely empty-yet-authoritative is fine; a
+      // cache explicitly marked stale (post-clear) is not.
       {
         const ss = getSessionState(get(), agentId, sid);
-        const atTail = isAtTail(ss.messageOffset, ss.messageLimit, ss.messageTotal);
+        // Only write directly into messages[] when the cache is a
+        // contiguous, server-authoritative tail window.  `messagesStale`
+        // marks the opposite: after clearSessionMessages (session
+        // switch-away) the cache is empty and the cursor is meaningless, so
+        // appending here would bump messageLimit with offset pinned at 0 —
+        // fabricating a cursor that claims to cover the whole conversation
+        // while the array only holds the freshly streamed tail records.
+        // The next HTTP window load would then union that lie into a bogus
+        // `[0, total)` cursor (hasOlder=false) and hide the older history.
+        // While stale we simply drop the write: the switch-back reload
+        // restores the record from disk (it is already persisted).
+        const atTail =
+          isAtTail(ss.messageOffset, ss.messageLimit, ss.messageTotal) &&
+          !ss.messagesStale;
         if (atTail) {
           const lastTs = ss.messages.length > 0
             ? ss.messages[ss.messages.length - 1].timestamp

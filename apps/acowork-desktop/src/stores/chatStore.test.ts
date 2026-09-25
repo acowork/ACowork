@@ -922,14 +922,17 @@ describe("messagesStale: cache-integrity flag", () => {
     expect(ss.messagesStale).toBe(true);
   });
 
-  it("background record_complete into a cleared session keeps the cache stale (partial tail must not look authoritative)", () => {
+  it("background record_complete into a cleared (stale) session does NOT touch messages[] or the cursor", () => {
     seedSessionState([{ id: "u1", type: "user", content: "hi", timestamp: 1000 }], { total: 1 });
     useChatStore.getState().clearSessionMessages(AGENT, SESSION);
     expect(useChatStore.getState().agentStates[AGENT]!.sessionStates[SESSION]!.messagesStale).toBe(true);
 
-    // Agent finishes streaming while the user is in another session: only the
-    // completed tail record lands (the cleared user message does NOT come back
-    // — it would only be restored by an HTTP window load).
+    // Agent keeps streaming while the user is in another session.  The
+    // direct-write path is gated on a contiguous, authoritative tail window
+    // (!messagesStale), so it must NOT append here — appending would bump
+    // messageLimit with offset pinned at 0 and fabricate a cursor claiming to
+    // cover the whole conversation.  The record is already persisted on disk
+    // and comes back on the next HTTP window load.
     handleMessageEvent(
       {
         type: "record_complete",
@@ -944,11 +947,10 @@ describe("messagesStale: cache-integrity flag", () => {
     );
 
     const ss = useChatStore.getState().agentStates[AGENT]!.sessionStates[SESSION]!;
-    // The tail record IS present — this is exactly what made the old
-    // `hasMessages` guard skip the reload and hide the user message...
-    expect(ss.messages.map((m) => m.id)).toContain("assistant-1");
-    // ...but the flag still reports stale, so ChatPanel forces a full reload
-    // on the next switch-back and restores the missing history.
+    expect(ss.messages).toEqual([]);
+    expect(ss.messageTotal).toBe(0);
+    expect(ss.messageLimit).toBe(0);
+    // Still stale → ChatPanel forces a real HTTP reload on switch-back.
     expect(ss.messagesStale).toBe(true);
   });
 

@@ -78,6 +78,22 @@ import type { VirtualMessageListHandle } from "./VirtualMessageList";
  */
 const EDGE_THRESHOLD_PX = 50;
 
+/**
+ * Minimum usable scroll range (as a fraction of the viewport) the loaded
+ * window must provide.  A pane whose content is only marginally taller than
+ * the viewport has a thumb that covers ~the whole track and dies after one
+ * wheel notch — indistinguishable from "no scrollbar, cannot scroll".  Keep
+ * the window at least one full viewport taller than the pane, then stop.
+ */
+const FILL_MIN_RANGE_VIEWPORTS = 1;
+
+/**
+ * Hard cap on consecutive fill loads (pages that add no height would
+ * otherwise re-trigger forever).  Mirrors the pre-refactor
+ * MAX_ENSURE_RENDERABLE_PAGES guard from useChatListAdapter.
+ */
+const MAX_FILL_PAGES = 10;
+
 // ── Public types ───────────────────────────────────────────────────────────
 
 export interface ScrollController {
@@ -349,6 +365,10 @@ export function useScrollController(config: ScrollControllerConfig): ScrollContr
     prevScrollHeightRef.current = container.scrollHeight;
   }, [blocksLen, firstBlockId, sessionKey, cacheGeneration]);
 
+  // Counts consecutive viewport-fill loads; reset once the pane is
+  // comfortably scrollable (see the fill branch in checkEdges).
+  const fillPagesRef = useRef(0);
+
   // ── Edge-detection (shared by scroll handler + adapter events) ──
   // Reads DOM scrollTop/scrollHeight and triggers pagination when the
   // user is within EDGE_THRESHOLD_PX of either edge.  Called from:
@@ -375,6 +395,29 @@ export function useScrollController(config: ScrollControllerConfig): ScrollContr
     // ── Pagination trigger ──
     if (!a) return;
     if (a.isLoading) return;
+
+    // ── Viewport fill (restores ADR-050 C5 `ensureRenderable`) ──
+    // Runs BEFORE the edge branches: when the window is too short there is
+    // no scroll range to speak of, so "near an edge" is meaningless.  Keep
+    // pulling pages until the content is comfortably scrollable or the
+    // direction is exhausted.
+    const range = container.scrollHeight - container.clientHeight;
+    if (range < container.clientHeight * FILL_MIN_RANGE_VIEWPORTS) {
+      if (fillPagesRef.current >= MAX_FILL_PAGES) return;
+      if (a.hasNewer) {
+        fillPagesRef.current += 1;
+        void a.loadNextPage();
+        return;
+      }
+      if (a.hasOlder) {
+        fillPagesRef.current += 1;
+        void a.loadPrevPage();
+        return;
+      }
+    } else {
+      fillPagesRef.current = 0;
+    }
+
     // near-top → load older
     if (scrollTop <= EDGE_THRESHOLD_PX && a.hasOlder) {
       void a.loadPrevPage();
@@ -398,6 +441,17 @@ export function useScrollController(config: ScrollControllerConfig): ScrollContr
       checkEdges();
     });
   }, [checkEdges]);
+
+  // ── Viewport fill trigger ──
+  // checkEdges owns the fill rule (see its fill branch); this effect is what
+  // re-runs it deterministically after an explicit jump (scrollToTop /
+  // scrollToBottom / loadPageForBlockId) or a short initial page replaced
+  // the loaded window.  Without it the fill would only be driven by
+  // scroll / pageLoaded events, and a window too short to overflow the pane
+  // produces neither — the user is left with no scroll range at all.
+  useLayoutEffect(() => {
+    scheduleEdgeCheck();
+  }, [blocksLen, cacheGeneration, sessionKey, scheduleEdgeCheck]);
 
   // ── Event subscription ──
   // The controller subscribes to adapter events:

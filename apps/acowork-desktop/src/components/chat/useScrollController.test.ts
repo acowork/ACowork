@@ -913,3 +913,95 @@ describe("useScrollController: followMode auto-follow", () => {
     expect(vml.current.scrollToBottom).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("useScrollController: viewport fill", () => {
+  // Regression: after scrollToTop REPLACES the cache with only the head
+  // page, if that page folds to fewer pixels than the viewport the pane has
+  // no overflow: no scroll event ever fires, the edge checks stop, and the
+  // user is stuck (no scrollbar, wheel dead, the rest of the history
+  // unreachable).  The fill effect re-runs the edge check on every
+  // content / cache change so the next page is pulled deterministically.
+  const flushRaf = () =>
+    act(async () => {
+      await new Promise<void>((r) => requestAnimationFrame(() => r()));
+    });
+
+  it("loads the next page when the loaded window is shorter than the pane", async () => {
+    const container = {
+      scrollTop: 0,
+      scrollHeight: 300, // < clientHeight → no overflow
+      clientHeight: 600,
+    } as unknown as HTMLDivElement;
+    const loadNextPage = vi.fn(async () => {});
+    const adapter = makeMockAdapter({ hasNewer: true, hasOlder: false, loadNextPage });
+
+    renderHook(() =>
+      useScrollController({
+        containerRef: { current: container },
+        adapter,
+        vmlRef: { current: null },
+        sessionKey: "agent:sess",
+      }),
+    );
+
+    await flushRaf();
+    expect(loadNextPage).toHaveBeenCalled();
+  });
+
+  it("keeps filling when the range is only a sliver (past the edge threshold, far from a viewport)", async () => {
+    // Live repro: after scrollToTop the window held 6 folded blocks = 753px
+    // in a 600px pane.  distFromBottom (153) already exceeded
+    // EDGE_THRESHOLD_PX (50), so the edge branch stopped filling — the user
+    // was left with a 153px range: a thumb covering ~80% of the 6px track
+    // (reads as "no scrollbar"), one wheel notch and stuck.  The fill rule
+    // must keep going until the range is worth scrolling.
+    const container = {
+      scrollTop: 0,
+      scrollHeight: 753,
+      clientHeight: 600,
+    } as unknown as HTMLDivElement;
+    const loadNextPage = vi.fn(async () => {});
+    const adapter = makeMockAdapter({ hasNewer: true, hasOlder: false, loadNextPage });
+
+    renderHook(() =>
+      useScrollController({
+        containerRef: { current: container },
+        adapter,
+        vmlRef: { current: null },
+        sessionKey: "agent:sess",
+      }),
+    );
+
+    await flushRaf();
+    expect(loadNextPage).toHaveBeenCalled();
+  });
+
+  it("does not over-fetch when the loaded window already overflows the pane", async () => {
+    const container = {
+      scrollTop: 0,
+      scrollHeight: 2000, // > clientHeight → scrollable, user at top
+      clientHeight: 600,
+    } as unknown as HTMLDivElement;
+    const loadNextPage = vi.fn(async () => {});
+    const loadPrevPage = vi.fn(async () => {});
+    const adapter = makeMockAdapter({
+      hasNewer: true,
+      hasOlder: false,
+      loadNextPage,
+      loadPrevPage,
+    });
+
+    renderHook(() =>
+      useScrollController({
+        containerRef: { current: container },
+        adapter,
+        vmlRef: { current: null },
+        sessionKey: "agent:sess",
+      }),
+    );
+
+    await flushRaf();
+    expect(loadNextPage).not.toHaveBeenCalled();
+    expect(loadPrevPage).not.toHaveBeenCalled();
+  });
+});
