@@ -1,7 +1,6 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import { BUILTIN_ICON_IDS } from "../components/common/UserAvatar";
-import { clearAgentAvatarCache } from "../lib/avatar";
 import type { AgentInfo, AgentDetail, SessionInfo, SessionStatus, NodeInfo } from "../lib/types";
 import { instanceIdOf, isProcessing } from "../lib/types";
 import { getGatewayUrl } from "../lib/config";
@@ -570,13 +569,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       throw new Error("System Agent cannot be uninstalled");
     }
     try {
-      // Capture version before removal — needed to clear the avatar blob cache
-      const version = get().agents[agentId]?.meta.version;
-
       await invoke("uninstall_agent", { agentId });
-
-      // Clear avatar blob URL cache so a re-install fetches fresh bytes
-      clearAgentAvatarCache(agentId, version);
 
       // Clean up profile from localStorage (keyed by instance id, with
       // legacy package-id fallback).

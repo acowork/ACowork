@@ -12,6 +12,7 @@ import type {
 } from "../../lib/types";
 import { BUILTIN_ICONS, BUILTIN_ICON_IDS } from "../common/UserAvatar";
 import { resolveAgentAvatarUrl } from "../../lib/avatar";
+import { AuthedImage } from "../common/AuthedImage";
 import { log } from "../../lib/logger";
 import {
   CheckCircle,
@@ -790,20 +791,13 @@ function AvatarPreview({ selection, agentId }: { selection: AvatarSelection; age
     const url = resolveAgentAvatarUrl(agentId);
     return (
       <div className="flex items-center gap-3 rounded-md border border-border-outer px-3 py-2">
-        {url ? (
-          <img
-            src={url}
-            alt={selection.relativePath}
-            draggable={false}
-            className="h-16 w-16 rounded-full object-cover ring-1 ring-zinc-300/60 dark:ring-zinc-600/60"
-            onError={(e) => {
-              // Fall back to a placeholder if the file isn't readable yet.
-              (e.currentTarget as HTMLImageElement).style.display = "none";
-            }}
-          />
-        ) : (
-          <div className="h-16 w-16" />
-        )}
+        <AuthedImage
+          src={url}
+          alt={selection.relativePath}
+          className="h-16 w-16 rounded-full object-cover ring-1 ring-zinc-300/60 dark:ring-zinc-600/60"
+          // Nothing to show until the file is readable — keep the slot.
+          fallback={<div className="h-16 w-16" />}
+        />
         <div>
           <div className="text-xs font-medium text-text-secondary ">
             Local image: <span className="font-mono">{selection.relativePath}</span>

@@ -7,13 +7,13 @@ import { useChatStore } from "../../stores/chatStore";
 import { useFileEditorStore } from "../../stores/fileEditorStore";
 import { BUILTIN_ICONS, BUILTIN_ICON_IDS } from "../common/UserAvatar";
 import { AgentAvatar } from "../common/AgentAvatar";
+import { AuthedImage } from "../common/AuthedImage";
 import { getGatewayUrl } from "../../lib/config";
 import { ConfirmDialog } from "../common/ConfirmDialog";
 import { useTranslation } from "../../i18n/useTranslation";
 import { StyledInput } from "../common/StyledInput";
 import { Dropdown } from "../common/Dropdown";
 import {
-  clearAgentAvatarCache,
   fetchAvatarAssets,
   fetchAvatarConfig,
   updateAvatarConfig,
@@ -542,7 +542,6 @@ export function AgentSetupTab() {
     try {
       const cfg = await updateAvatarConfig(selectedAgentId, { avatar: relativePath, builtin_avatar: "" });
       setAvatarConfig(cfg);
-      clearAgentAvatarCache(selectedAgentId);
       await fetchAgents();
     } catch (err) {
       log.warn("[AgentSetup] Select custom avatar failed:", err);
@@ -558,7 +557,6 @@ export function AgentSetupTab() {
     try {
       const cfg = await updateAvatarConfig(selectedAgentId, { avatar: "", builtin_avatar: iconId });
       setAvatarConfig(cfg);
-      clearAgentAvatarCache(selectedAgentId);
       await fetchAgents();
     } catch (err) {
       log.warn("[AgentSetup] Select builtin avatar failed:", err);
@@ -613,7 +611,6 @@ export function AgentSetupTab() {
       ]);
       setAvatarAssets(assetsResp.assets);
       setAvatarConfig(cfg);
-      clearAgentAvatarCache(selectedAgentId);
       await fetchAgents();
     } catch (err) {
       log.warn("[AgentSetup] Delete avatar failed:", err);
@@ -745,10 +742,9 @@ export function AgentSetupTab() {
                                 : "border-transparent hover:border-zinc-300 dark:hover:border-zinc-600"
                                 }`}
                             >
-                              <img
+                              <AuthedImage
                                 src={resolveAgentAvatarFileUrl(selectedAgentId, asset.relative_path)}
                                 alt={asset.relative_path}
-                                draggable={false}
                                 className="h-full w-full cursor-pointer object-cover"
                                 onClick={() => handleSelectCustom(asset.relative_path)}
                               />

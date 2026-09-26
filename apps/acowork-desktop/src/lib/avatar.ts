@@ -7,12 +7,6 @@
  *   the browser/WebView HTTP cache when the package is re-installed.
  *   Returns `null` if the URL cannot be built.
  *
- * - `resolveAgentAvatarObjectUrl(agentId, version?)` is the cache-friendly
- *   variant: it fetches the bytes once, dedupes concurrent in-flight requests
- *   for the same key, and returns a stable `blob:` URL that the browser can
- *   render without re-hitting the Gateway. Falls back to the plain HTTP URL
- *   if the fetch fails, so callers can still render a URL.
- *
  * - `normalizeBuiltinAvatarId(value)` parses a user-authored `builtin_avatar`
  *   value from manifest.toml — accepts either "icon-05" (canonical) or bare
  *   numeric forms "5" / "05" — and returns a canonical "icon-XX" string when
@@ -109,115 +103,6 @@ export function resolveAgentAvatarUrl(
   } catch {
     return null;
   }
-}
-
-// ── In-flight + blob URL cache ──────────────────────────────────────────
-//
-// We keep two parallel structures keyed by `<agentId>\0<version>`:
-//
-// 1. `inflight`: the Promise of an in-progress fetch. Multiple components
-//    asking for the same avatar concurrently (e.g. sidebar + chat bubble
-//    + profile tab at app start) share one Promise and one network call.
-// 2. `blobUrls`: the resolved `blob:` URL once the fetch settles. Subsequent
-//    callers reuse it without touching the network.
-//
-// The browser's HTTP cache is the primary long-term cache; the blob URL is
-// only a layer above it (so we avoid re-parsing the same bytes and so the
-// `<img>` element renders synchronously from a local URL). Blob URLs are
-// released on `beforeunload` — see the window listener at the bottom.
-
-const inflight = new Map<string, Promise<string | null>>();
-const blobUrls = new Map<string, string>();
-
-function cacheKey(agentId: string, version?: string | null): string {
-  return `${agentId}\0${version ?? ""}`;
-}
-
-/**
- * Resolve a renderable URL for the agent's packaged avatar, with in-flight
- * deduplication and blob URL caching layered on top of the browser's HTTP
- * cache. Returns `null` only when no URL can be built (missing agentId or
- * broken gateway config).
- *
- * Behaviour:
- * - First call for a key kicks off a fetch and stores the Promise in
- *   `inflight`.
- * - Concurrent calls for the same key await the same Promise.
- * - On success, the resolved `blob:` URL is cached in `blobUrls` and
- *   returned to all waiters.
- * - On failure (network error, non-2xx), the cache stays clean and the
- *   plain HTTP URL (built via `resolveAgentAvatarUrl`) is returned so the
- *   browser can still try to render it directly.
- */
-export async function resolveAgentAvatarObjectUrl(
-  agentId: string,
-  version?: string | null,
-): Promise<string | null> {
-  const key = cacheKey(agentId, version);
-  const cached = blobUrls.get(key);
-  if (cached) return cached;
-
-  const pending = inflight.get(key);
-  if (pending) return pending;
-
-  const url = resolveAgentAvatarUrl(agentId, version);
-  if (!url) return Promise.resolve(null);
-
-  const promise = (async (): Promise<string | null> => {
-    try {
-      const resp = await fetch(url, { credentials: "omit" });
-      if (!resp.ok) return url; // fall back to direct URL
-      const blob = await resp.blob();
-      const objectUrl = URL.createObjectURL(blob);
-      blobUrls.set(key, objectUrl);
-      return objectUrl;
-    } catch {
-      return url; // network down → let the browser try the direct URL
-    } finally {
-      inflight.delete(key);
-    }
-  })();
-
-  inflight.set(key, promise);
-  return promise;
-}
-
-/**
- * Drop the cached blob URL for an agent. Called when the agent is uninstalled
- * so we don't keep an orphan `blob:` entry around for the rest of the session.
- */
-export function clearAgentAvatarCache(agentId: string, version?: string | null): void {
-  const key = cacheKey(agentId, version);
-  const blob = blobUrls.get(key);
-  if (blob) {
-    try {
-      URL.revokeObjectURL(blob);
-    } catch {
-      // ignore — some platforms reject revoke synchronously
-    }
-    blobUrls.delete(key);
-  }
-  inflight.delete(key);
-}
-
-// Release all blob URLs on app shutdown so the runtime can reclaim memory
-// promptly. The browser/WebView would eventually GC them, but being explicit
-// keeps memory low for long-running sessions with many installs/uninstalls.
-if (typeof window !== "undefined") {
-  const releaseAll = () => {
-    for (const url of blobUrls.values()) {
-      try {
-        URL.revokeObjectURL(url);
-      } catch {
-        // ignore
-      }
-    }
-    blobUrls.clear();
-    inflight.clear();
-  };
-  window.addEventListener("beforeunload", releaseAll);
-  // Tauri may also fire pagehide on navigation; belt-and-suspenders.
-  window.addEventListener("pagehide", releaseAll);
 }
 
 /**

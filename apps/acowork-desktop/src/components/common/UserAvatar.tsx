@@ -1,6 +1,7 @@
 import { useEffect, useMemo } from "react";
 import { useUserProfileStore } from "../../stores/userProfileStore";
 import { pickDeterministicBuiltinIconId, pickRandomBuiltinIconId, resolveUserAvatarFileUrl } from "../../lib/avatar";
+import { AuthedImage } from "./AuthedImage";
 import { BUILTIN_ICONS } from "../../lib/builtinIcons";
 import type { BoringAvatarVariant } from "../../lib/types";
 
@@ -24,15 +25,26 @@ function BuiltinIconAvatar({ iconId, size, className }: { iconId: string; size: 
 
 // ── Custom file avatar wrapper ───────────────────────────────────────────
 
-function CustomFileAvatar({ path, size, className }: { path: string; size: number; className?: string }) {
-  const url = resolveUserAvatarFileUrl(path);
+function CustomFileAvatar({
+  path,
+  size,
+  className,
+  fallbackIconId,
+}: {
+  path: string;
+  size: number;
+  className?: string;
+  fallbackIconId: string;
+}) {
+  // The bytes need the bearer token — fetched, not handed to `<img src>`
+  // (see `AuthedImage`).
   return (
-    <img
-      src={url}
+    <AuthedImage
+      src={resolveUserAvatarFileUrl(path)}
       alt="User avatar"
-      draggable={false}
       className={`rounded-full object-cover ring-1 ring-zinc-300/60 dark:ring-zinc-600/60 ${className ?? ""}`}
       style={{ width: size, height: size }}
+      fallback={<BuiltinIconAvatar iconId={fallbackIconId} size={size} className={className} />}
     />
   );
 }
@@ -88,19 +100,30 @@ export function UserAvatar({
   }, [profileIconId, setProfile]);
 
   // ADR-017: Resolution priority
-  if (avatarUrl) {
-    return <CustomFileAvatar path={avatarUrl} size={size} className={className} />;
-  }
-
-  if (builtinAvatarId && BUILTIN_ICONS[builtinAvatarId]) {
-    return <BuiltinIconAvatar iconId={builtinAvatarId} size={size} className={className} />;
-  }
-
   const iconId =
     (_icon && BUILTIN_ICONS[_icon] ? _icon : null) ??
     (profileIconId && BUILTIN_ICONS[profileIconId] ? profileIconId : null) ??
     fallbackIconId ??
     "icon-01";
+
+  if (avatarUrl) {
+    return (
+      <CustomFileAvatar
+        path={avatarUrl}
+        size={size}
+        className={className}
+        // An explicit builtin avatar outranks the derived icon when the
+        // custom file turns out to be unreadable.
+        fallbackIconId={
+          builtinAvatarId && BUILTIN_ICONS[builtinAvatarId] ? builtinAvatarId : iconId
+        }
+      />
+    );
+  }
+
+  if (builtinAvatarId && BUILTIN_ICONS[builtinAvatarId]) {
+    return <BuiltinIconAvatar iconId={builtinAvatarId} size={size} className={className} />;
+  }
 
   return <BuiltinIconAvatar iconId={iconId} size={size} className={className} />;
 }

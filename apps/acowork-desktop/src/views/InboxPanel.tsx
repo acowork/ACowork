@@ -20,7 +20,6 @@ import { chatIdOf, useUserChatStore } from "../stores/userChatStore";
 import { useTranslation } from "../i18n/useTranslation";
 import { formatAttachmentSize } from "../lib/user-chat-api";
 import { toolbarButton } from "../lib/ui-styles";
-import { cn } from "../lib/utils";
 import { MessageRow } from "./MessageAttachments";
 
 export function InboxPanel() {

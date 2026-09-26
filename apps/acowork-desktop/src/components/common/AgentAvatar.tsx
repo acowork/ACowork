@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo } from "react";
 import { BUILTIN_ICONS } from "./UserAvatar";
+import { AuthedImage } from "./AuthedImage";
 import {
   pickDeterministicBuiltinIconId,
   resolveAgentAvatarFileUrl,
@@ -107,25 +108,18 @@ function CustomAgentAvatar({
     return version ? `${base}&v=${encodeURIComponent(version)}` : base;
   }, [agentId, avatarPath, version]);
 
-  const [errored, setErrored] = useState(false);
-
-  useEffect(() => {
-    setErrored(false);
-  }, [url]);
-
-  // If the image load errored, fall back to a deterministic random builtin icon.
-  if (errored) {
-    return <DeterministicBuiltinAvatar seed={fallbackSeed} size={size} className={className} />;
-  }
-
+  // The bytes need the bearer token, so they are fetched rather than
+  // handed to `<img src>` directly (see `AuthedImage`). A failed fetch
+  // falls back to a deterministic random builtin icon.
   return (
-    <img
+    <AuthedImage
       src={url}
       alt={agentId}
-      draggable={false}
-      onError={() => setErrored(true)}
       className={`rounded-full object-cover ring-1 ring-zinc-300/60 dark:ring-zinc-600/60 ${className ?? ""}`}
       style={{ width: size, height: size }}
+      fallback={
+        <DeterministicBuiltinAvatar seed={fallbackSeed} size={size} className={className} />
+      }
     />
   );
 }

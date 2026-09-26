@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { useUserProfileStore } from "../../stores/userProfileStore";
 import { UserAvatar, BUILTIN_ICONS, BUILTIN_ICON_IDS } from "../common/UserAvatar";
+import { AuthedImage } from "../common/AuthedImage";
 import { fetchSelfProfile, updateSelfProfile } from "../../lib/selfProfile";
 import type { BackendUserProfile, AvatarAssetEntry } from "../../lib/types";
 import {
@@ -365,10 +366,9 @@ export function ProfileTab() {
                               : "border-transparent hover:border-zinc-300 dark:hover:border-zinc-600"
                               }`}
                           >
-                            <img
+                            <AuthedImage
                               src={resolveUserAvatarFileUrl(asset.relative_path)}
                               alt={asset.relative_path}
-                              draggable={false}
                               className="h-full w-full cursor-pointer object-cover"
                               onClick={() => handleSelectCustom(asset.relative_path)}
                             />
