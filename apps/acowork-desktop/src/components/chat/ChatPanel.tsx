@@ -2042,7 +2042,7 @@ export function ChatPanel() {
               <Play className="h-8 w-8" />
             </button>
           </Tooltip>
-          <p className="mt-3 text-xs text-text-tertiary ">{t("chatPanel.agentStopped")}</p>
+          <p className="mt-3 text-xs text-text-tertiary ">{t("chatPanel.agentStopped", { name: agentDisplayName ?? "" })}</p>
         </div>
       </div>
     );

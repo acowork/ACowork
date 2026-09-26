@@ -1,16 +1,10 @@
-import { type ComponentType, useEffect } from "react";
+import { type ComponentType } from "react";
 import type { NavView } from "../../lib/types";
 import { NavButton } from "../common/NavButton";
 import { OutlineSettingsIcon, FilledSettingsIcon } from "../common/SettingsIcon";
 import { OutlineChatIcon, FilledChatIcon } from "../common/ChatIcon";
-import {
-  OutlineMessagesIcon,
-  FilledMessagesIcon,
-} from "../common/MessagesIcon";
 import { AccountMenu } from "../account/AccountMenu";
 import { useSettingsStore } from "../../stores/settingsStore";
-import { useAuthStore } from "../../stores/authStore";
-import { useUserChatStore } from "../../stores/userChatStore";
 import { useTranslation } from "../../i18n/useTranslation";
 
 interface NavBarProps {
@@ -22,7 +16,6 @@ interface NavBarProps {
 
 const topNavItems: { view: NavView; icon: ComponentType<{ className?: string }>; i18nKey: string }[] = [
   { view: "chat", icon: OutlineChatIcon, i18nKey: "navBar.chat" },
-  { view: "users", icon: OutlineMessagesIcon, i18nKey: "navBar.users" },
   { view: "projects", icon: OutlineProjectsIcon, i18nKey: "navBar.projects" },
   { view: "docs", icon: OutlineDocsIcon, i18nKey: "navBar.docs" },
   { view: "extensions", icon: OutlineExtensionsIcon, i18nKey: "navBar.extensions" },
@@ -172,47 +165,10 @@ function FilledProjectsIcon({ className }: { className?: string }) {
   );
 }
 
-/** Messages icon with the inbox unread badge (ADR-076 §决策 8). */
-function MessagesNavIcon({ filled, unread }: { filled: boolean; unread: number }) {
-  const Icon = filled ? FilledMessagesIcon : OutlineMessagesIcon;
-  return (
-    <span className="relative flex items-center justify-center">
-      <Icon className="h-6 w-6" />
-      {unread > 0 && (
-        <span
-          className="absolute -right-1.5 -top-1 min-w-[14px] rounded-full px-1 text-center text-[9px] font-medium leading-[14px] text-white"
-          style={{ backgroundColor: "var(--color-accent)" }}
-        >
-          {unread > 99 ? "99+" : unread}
-        </span>
-      )}
-    </span>
-  );
-}
-
 export function NavBar({ currentView, onViewChange, onAvatarClick }: NavBarProps) {
   const { t } = useTranslation();
   const { theme, osTheme } = useSettingsStore();
   const isDark = theme === "dark" || (theme === "system" && osTheme === "dark");
-  // The user inbox only exists under `AUTH_MODE=multi_user` (ADR-076 §决策 12);
-  // under `local` its routes are not even registered, so the entry is hidden
-  // rather than shown-then-404.
-  const multiUser = useAuthStore((s) => s.mode) === "multi_user";
-  const navItems = multiUser
-    ? topNavItems
-    : topNavItems.filter((item) => item.view !== "users");
-  // Unread lives on the nav item, not inside the inbox view: a message that
-  // arrives while the user is in an agent chat has to be noticeable.
-  const unread = useUserChatStore((s) =>
-    s.chats.reduce((total, chat) => total + chat.unread_count, 0),
-  );
-
-  useEffect(() => {
-    if (!multiUser) return;
-    const store = useUserChatStore.getState();
-    void store.refreshChats();
-    return store.startPolling();
-  }, [multiUser]);
 
   return (
     <nav
@@ -225,7 +181,7 @@ export function NavBar({ currentView, onViewChange, onAvatarClick }: NavBarProps
       <AccountMenu onOpenProfile={onAvatarClick} />
 
       {/* Top navigation items */}
-      {navItems.map(({ view, icon: Icon, i18nKey }) => (
+      {topNavItems.map(({ view, icon: Icon, i18nKey }) => (
         <NavButton
           key={view}
           active={currentView === view}
@@ -236,8 +192,6 @@ export function NavBar({ currentView, onViewChange, onAvatarClick }: NavBarProps
           {currentView === view ? (
             view === "chat" ? (
               <FilledChatIcon className="h-6 w-6" />
-            ) : view === "users" ? (
-              <MessagesNavIcon filled unread={unread} />
             ) : view === "extensions" ? (
               <FilledExtensionsIcon className="h-6 w-6" />
             ) : view === "harness" ? (
@@ -250,9 +204,7 @@ export function NavBar({ currentView, onViewChange, onAvatarClick }: NavBarProps
               <FilledSettingsIcon className="h-6 w-6" />
             )
           ) : (
-            view === "users" ? (
-              <MessagesNavIcon filled={false} unread={unread} />
-            ) : view === "projects" ? (
+            view === "projects" ? (
               <OutlineProjectsIcon className="h-6 w-6" isDark={isDark} />
             ) : (
               <Icon className="h-6 w-6" />

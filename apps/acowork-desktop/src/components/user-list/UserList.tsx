@@ -6,17 +6,23 @@
  * `local` the whole account system is a no-op (§决策 12), so the group is
  * not shown.
  *
- * Admin tokens list every account (`GET /api/users`) and can manage them
- * from a row context menu (reset password / role / disable) plus a
- * header "+" create modal. Ordinary users only see themselves, matching
- * the Gateway's own authorization. Selecting a row (admin) switches
- * session listing into that user's read-only view via `?as_user=` (§决策 5).
+ * Selection semantics:
+ * - Single click (any role): opens a 1:1 inbox thread with that peer via
+ *   `useUserChatStore.openChat`. The middle panel renders
+ *   [InboxPanel](../../views/InboxPanel.tsx) once `activePeerId` is set.
+ * - Admin right-click: opens the management menu (reset password / role /
+ *   disable / view-as-user). "View as user" is the new home for the
+ *   `viewAsUserId` toggle that previously lived on single-click; moving it
+ *   keeps the inbox row click a uniform "open conversation" gesture.
+ *
+ * Row visuals mirror `AgentList`'s agent row (h-14, avatar 40, two-line
+ * `display_name / last_message_preview`, accent active state) so the two
+ * groups feel like one list.
  */
 
 import { useCallback, useEffect, useState, type MouseEvent } from "react";
-import { ChevronRight, KeyRound, MessageSquare, Plus, ShieldCheck, ShieldOff, UserX, X } from "lucide-react";
+import { ChevronRight, Eye, KeyRound, MessageSquare, Plus, ShieldCheck, ShieldOff, UserX, X } from "lucide-react";
 import { useAuthStore } from "../../stores/authStore";
-import { useLayoutStore } from "../../stores/layoutStore";
 import { useUserChatStore } from "../../stores/userChatStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { useTranslation } from "../../i18n/useTranslation";
@@ -25,11 +31,12 @@ import {
   AuthApiError,
   disableAccount,
   fetchAccounts,
+  fetchDirectory,
   resetPassword,
   setRole,
   type CreateAccountResult,
 } from "../../lib/auth-api";
-import type { UserAccount } from "../../lib/types";
+import type { DirectoryUser, UserAccount } from "../../lib/types";
 import { cn } from "../../lib/utils";
 import { UserAvatar } from "../common/UserAvatar";
 import { ConfirmDialog } from "../common/ConfirmDialog";
@@ -50,7 +57,6 @@ export function UserList() {
   const accessToken = useAuthStore((s) => s.accessToken);
   const viewAsUserId = useAuthStore((s) => s.viewAsUserId);
   const registrationOpen = useAuthStore((s) => s.registrationOpen);
-  const selectedAgentId = useAgentStore((s) => s.selectedAgentId);
 
   const [collapsed, setCollapsed] = useState(true);
   const [accounts, setAccounts] = useState<UserAccount[]>([]);
@@ -81,7 +87,28 @@ export function UserList() {
   useEffect(() => {
     if (!loggedIn) return;
     if (!isAdmin) {
-      setAccounts(self ? [self] : []);
+      // Non-admin: the full `/api/users` list is admin-only, but the
+      // `/api/users/directory` endpoint exposes just enough (id / username /
+      // display_name) for the contact picker so they can start a 1:1 chat
+      // (ADR-076 §决策 8). Without this a non-admin's sidebar shows only
+      // themselves and the inbox is unreachable.
+      //
+      // ponytail: directory entries are projected into the `UserAccount`
+      // shape with `role: 'user'` and empty profile fields so the row +
+      // `partitionAccounts` rendering path is shared with admin. The lie is
+      // harmless — non-admin viewers never show the admin badge (gated by
+      // `isAdmin` in the row), and admin viewers keep using `fetchAccounts`
+      // for the real role.
+      void (async () => {
+        const token = useAuthStore.getState().accessToken ?? "";
+        try {
+          const dir = await fetchDirectory(getGatewayUrl(), token);
+          setAccounts(dir.map(directoryRow));
+          setLoadFailed(false);
+        } catch {
+          setLoadFailed(true);
+        }
+      })();
       return;
     }
     void reload();
@@ -95,41 +122,54 @@ export function UserList() {
       ? rows.find((a) => a.user_id === viewAsUserId)?.display_name ?? viewAsUserId
       : null;
 
-  const select = (userId: string) => {
-    const next = userId === viewAsUserId || userId === self?.user_id ? null : userId;
-    useAuthStore.getState().setViewAsUserId(next);
-    if (selectedAgentId) void useAgentStore.getState().fetchSessions(selectedAgentId);
+  // Single-click gesture: open / focus the inbox thread with this peer.
+  const openThread = (account: UserAccount) => {
+    // Clear the active agent selection: AppLayout renders <ChatPanel /> when
+    // `selectedAgentId` is set and falls through to <InboxPanel /> only when
+    // it is null. Without this clear, opening a 1:1 thread while an agent
+    // is selected would set `activePeerId` underneath the unchanged ChatPanel
+    // — the user sees "nothing happens" even though the store did the work.
+    useAgentStore.getState().selectAgent(null);
+    void useUserChatStore.getState().openChat(account.user_id, account.display_name);
   };
 
-  const run = async (fn: () => Promise<void>) => {
-    setActionError(null);
+  // Admin-only: toggle the "view sessions as this user" lens.
+  const toggleViewAs = (userId: string) => {
+    const next = userId === viewAsUserId || userId === self?.user_id ? null : userId;
+    useAuthStore.getState().setViewAsUserId(next);
+  };
+
+  const run = async (fn: () => Promise<unknown>) => {
     try {
       await fn();
-      await reload();
     } catch (err) {
-      setActionError(err instanceof AuthApiError ? err.message : t("account.actionFailed"));
+      setActionError(err instanceof AuthApiError ? err.message : String(err));
     }
   };
 
   const menuItems = (account: UserAccount): ContextMenuItem<UserAccount>[] => {
     const isSelf = account.user_id === self?.user_id;
     const items: ContextMenuItem<UserAccount>[] = [];
-    if (!isSelf && !account.disabled_at) {
-      // Start a conversation (ADR-076 §决策 8): open the thread and switch the
-      // main area to the inbox. A disabled account has no inbox to deliver to,
-      // and messaging yourself is not a conversation.
+    if (isAdmin && !isSelf) {
+      items.push({
+        key: "view-as",
+        icon: <Eye size={14} />,
+        label: t("userList.viewAsUser"),
+        onClick: () => toggleViewAs(account.user_id),
+      });
+    }
+    if (!isSelf) {
       items.push({
         key: "message",
         icon: <MessageSquare size={14} />,
         label: t("messages.openChat"),
-        onClick: () => {
-          void useUserChatStore
-            .getState()
-            .openChat(account.user_id, account.display_name);
-          useLayoutStore.getState().requestNavView("users");
-        },
+        onClick: () => openThread(account),
       });
     }
+    // Non-admin viewers only get the "message" action above. The four
+    // account-management items below are admin-only endpoints and would 403
+    // for a non-admin caller (backend `require_admin` guards).
+    if (!isAdmin) return items;
     items.push(
       {
         key: "reset-password",
@@ -224,7 +264,7 @@ export function UserList() {
               <span className="truncate">{t("userList.viewingAs", { name: viewingName })}</span>
               <button
                 type="button"
-                onClick={() => select(viewAsUserId!)}
+                onClick={() => toggleViewAs(viewAsUserId!)}
                 aria-label={t("userList.clearView")}
                 title={t("userList.clearView")}
                 className="ml-auto rounded p-0.5 hover:bg-nav-item-hover"
@@ -240,40 +280,16 @@ export function UserList() {
             </div>
           )}
 
-          {rows.map((account) => {
-            const active = account.user_id === viewAsUserId;
-            return (
-              <div
-                key={account.user_id}
-                role={isAdmin ? "button" : undefined}
-                onClick={isAdmin ? () => select(account.user_id) : undefined}
-                onContextMenu={
-                  isAdmin ? (e: MouseEvent) => menu.openAt(e, account) : undefined
-                }
-                data-testid={`user-row-${account.user_id}`}
-                title={isAdmin ? t("userList.viewAsUser") : account.display_name}
-                className={cn(
-                  "flex items-center gap-2 rounded-md px-3 py-1.5 transition-colors duration-150",
-                  isAdmin && "cursor-pointer hover:bg-nav-item-hover",
-                  active && "bg-[var(--color-accent)]/15",
-                )}
-              >
-                <UserAvatar
-                  displayName={account.display_name}
-                  avatarUrl={account.avatar ?? null}
-                  builtinAvatarId={account.builtin_avatar ?? null}
-                  size={20}
-                  className="shrink-0"
-                />
-                <span className="truncate text-xs text-text-secondary">
-                  {account.display_name}
-                </span>
-                <span className="ml-auto text-[10px] text-text-tertiary">
-                  {account.role === "admin" ? t("userList.roleAdmin") : t("userList.roleUser")}
-                </span>
-              </div>
-            );
-          })}
+          {rows.map((account) => (
+            <UserRow
+              key={account.user_id}
+              account={account}
+              isAdmin={isAdmin}
+              isSelf={account.user_id === self?.user_id}
+              onOpen={() => openThread(account)}
+              onContextMenu={(e) => menu.openAt(e, account)}
+            />
+          ))}
 
           {rows.length === 0 && (
             <div className="px-3 py-2 text-[11px] text-text-tertiary">
@@ -298,9 +314,6 @@ export function UserList() {
         open={createOpen}
         onClose={() => setCreateOpen(false)}
         onCreated={(result: CreateAccountResult) => {
-          // `reload` hits the admin-only account list; a non-admin only ever
-          // sees their own row, so there is nothing to refresh for them.
-          if (isAdmin) void reload();
           if (result.invite_token) {
             setInvite({ token: result.invite_token, username: result.account.display_name });
           }
@@ -332,6 +345,126 @@ export function UserList() {
         }}
         onCancel={() => setDisableTarget(null)}
       />
+    </div>
+  );
+}
+
+/** Project a non-admin directory entry into the `UserAccount` shape so the
+ *  row + `partitionAccounts` rendering path stays shared with admin. See the
+ *  `ponytail:` comment in the loading effect for why the empty fields /
+ *  `role: 'user'` are acceptable here. */
+function directoryRow(d: DirectoryUser): UserAccount {
+  return {
+    user_id: d.user_id,
+    username: d.username,
+    display_name: d.display_name,
+    role: "user",
+    language: "",
+    timezone: "",
+    created_at: "",
+    updated_at: "",
+  };
+}
+
+/** Single sidebar row, mirroring [AgentList.tsx](../agent-list/AgentList.tsx)
+ *  agent row visuals: h-14, 40px avatar, two-line layout, accent active state.
+ *  Selects through `useUserChatStore.activePeerId` rather than `viewAsUserId`
+ *  so the inbox thread and the view-as-user lens are independent.
+ */
+function UserRow({
+  account,
+  isAdmin,
+  isSelf,
+  onOpen,
+  onContextMenu,
+}: {
+  account: UserAccount;
+  isAdmin: boolean;
+  isSelf: boolean;
+  onOpen: () => void;
+  onContextMenu: (e: MouseEvent) => void;
+}) {
+  const { t } = useTranslation();
+  const activePeerId = useUserChatStore((s) => s.activePeerId);
+  const chatPreview = useUserChatStore((s) =>
+    s.chats.find((c) => c.peer_user_id === account.user_id),
+  );
+  const active = account.user_id === activePeerId;
+  const unread = chatPreview?.unread_count ?? 0;
+  // Operator-precedence trap: written as one expression below, this reads as
+  //   (preview ?? roleAdmin-flag) ? "admin" : "user"
+  // — i.e. ANY non-empty preview string (truthy) flips every row to
+  // "管理员", and only the no-chat fallback uses the role. The fix is to
+  // parenthesise the role-based default so it only applies when `??` falls
+  // through (null / undefined preview), the way the surrounding code reads.
+  const preview =
+    chatPreview?.last_message_preview ??
+    (account.role === "admin" ? t("userList.roleAdmin") : t("userList.roleUser"));
+
+  return (
+    <div
+      role={isSelf ? undefined : "button"}
+      onClick={isSelf ? undefined : onOpen}
+      onContextMenu={isSelf ? undefined : onContextMenu}
+      data-testid={`user-row-${account.user_id}`}
+      title={account.display_name}
+      className={cn(
+        "relative flex items-center rounded-md px-3 py-2.5 transition-colors duration-150",
+        "gap-3",
+        !isSelf && "cursor-pointer hover:bg-nav-item-hover",
+        active && "bg-[var(--color-accent)]/90 text-white hover:bg-[var(--color-accent)]",
+      )}
+    >
+      <UserAvatar
+        displayName={account.display_name}
+        avatarUrl={account.avatar ?? null}
+        builtinAvatarId={account.builtin_avatar ?? null}
+        size={40}
+      />
+
+      <div className="min-w-0 flex-1 overflow-hidden">
+        <div className="flex items-center justify-between gap-2">
+          <span
+            className={cn(
+              "truncate font-medium",
+              active ? "text-white" : "text-text-secondary",
+            )}
+            style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}
+          >
+            {account.display_name}
+          </span>
+          {unread > 0 && (
+            <span
+              className={cn(
+                "shrink-0 rounded-full px-1.5 text-[10px] font-medium",
+                active ? "bg-white/20 text-white" : "bg-[var(--color-accent)] text-white",
+              )}
+            >
+              {unread > 99 ? "99+" : unread}
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-1.5">
+          <span
+            className={cn(
+              "truncate text-[11px]",
+              active ? "text-white/80" : "text-text-tertiary",
+            )}
+          >
+            {preview}
+          </span>
+          {isAdmin && account.role === "admin" && (
+            <span
+              className={cn(
+                "shrink-0 rounded px-1 text-[9px] font-medium uppercase tracking-wide",
+                active ? "bg-white/20 text-white" : "bg-nav-item-hover text-text-tertiary",
+              )}
+            >
+              {t("userList.roleAdmin")}
+            </span>
+          )}
+        </div>
+      </div>
     </div>
   );
 }

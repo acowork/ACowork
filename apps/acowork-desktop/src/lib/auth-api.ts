@@ -13,7 +13,7 @@
  * (ADR-076 §决策 12); under `local` they 404.
  */
 
-import type { AuthMode, TokenPair, UserAccount } from "./types";
+import type { AuthMode, DirectoryUser, TokenPair, UserAccount } from "./types";
 
 /** Error carrying the Gateway's HTTP status so callers can branch (401 vs 422). */
 export class AuthApiError extends Error {
@@ -151,6 +151,25 @@ export async function fetchAccounts(
   if (!resp.ok) throw new AuthApiError(resp.status, await readError(resp));
   const data = (await resp.json()) as { accounts?: UserAccount[] };
   return data.accounts ?? [];
+}
+
+/** Contact-picker source for any authenticated caller
+ *  (`GET /api/users/directory`, ADR-076 §决策 8).
+ *
+ *  Backend deliberately strips `role` / timestamps / profile — non-admin
+ *  callers get only the fields needed to name a recipient. The server
+ *  already filters out the caller themselves and disabled accounts.
+ */
+export async function fetchDirectory(
+  gatewayUrl: string,
+  accessToken: string,
+): Promise<DirectoryUser[]> {
+  const resp = await fetch(`${gatewayUrl}/api/users/directory`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!resp.ok) throw new AuthApiError(resp.status, await readError(resp));
+  const data = (await resp.json()) as { users?: DirectoryUser[] };
+  return data.users ?? [];
 }
 
 /**

@@ -548,7 +548,13 @@ impl AuthService {
         let account = UserAccount {
             user_id: uuid::Uuid::new_v4().to_string(),
             username: "admin".into(),
-            display_name: "Administrator".into(),
+            // Display name mirrors the username by default; the OnboardingFlow
+            // and the profile editor both let the operator change it before
+            // they ever see it rendered. Hardcoding "Administrator" here made
+            // the bootstrap admin appear in the account list / onboarding
+            // prefill as English on every locale — a leftover from when the
+            // backend had no locale awareness.
+            display_name: "admin".into(),
             role: Role::Admin,
             // sentinel — `is_login_capable()` returns false, so
             // /api/auth/login cannot succeed and login attempts always
@@ -1432,6 +1438,12 @@ mod tests {
         assert_eq!(list.accounts.len(), 1);
         let admin = &list.accounts[0];
         assert_eq!(admin.username, "admin");
+        // Bootstrap admin's display name mirrors the username by default —
+        // the OnboardingFlow / profile editor both let the operator
+        // localise it. Hardcoding "Administrator" here used to make the
+        // account show up as English on every locale; pin to username so
+        // a future "more friendly" hardcode doesn't sneak back in.
+        assert_eq!(admin.display_name, admin.username);
         assert_eq!(admin.role, Role::Admin);
         assert_eq!(admin.password_hash, DISABLED_PASSWORD_HASH);
         assert!(!admin.is_login_capable());

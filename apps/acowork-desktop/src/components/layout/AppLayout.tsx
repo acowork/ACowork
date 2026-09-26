@@ -5,6 +5,7 @@ import { NavBar } from "./NavBar";
 import { TitleBar } from "./TitleBar";
 import { AgentList } from "../agent-list/AgentList";
 import { ChatPanel } from "../chat/ChatPanel";
+import { InboxPanel } from "../../views/InboxPanel";
 import { RightPanel } from "../right-panel/RightPanel";
 import { RightNavBar } from "./RightNavBar";
 // FileEditorPanel is lazy-loaded: its module graph pulls in monaco-editor
@@ -44,13 +45,14 @@ import {
 import { SettingsPage } from "../settings/SettingsPage";
 import { HarnessPage } from "../harness/HarnessPage";
 import { ProjectsView } from "../../views/ProjectsView";
-import { MessagesView } from "../../views/MessagesView";
+
 import { DocsView } from "../../views/DocsView";
 import { ExtensionsView } from "../../views/ExtensionsView";
 import { MqttDebugControls } from "../debug/MqttDebugControls";
 import { Tooltip } from "../common/Tooltip";
 import { useChatStore } from "../../stores/chatStore";
 import { useLayoutStore } from "../../stores/layoutStore";
+import { useUserChatStore } from "../../stores/userChatStore";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { useSearchStore, isGlobalSearchShortcut } from "../../stores/searchStore";
 import { GlobalSearchDialog } from "../search/GlobalSearchDialog";
@@ -283,6 +285,9 @@ export function AppLayout() {
   const agents = useAgentStore((s) => s.agents);
   const selectedAgent = selectedAgentId ? (agents[selectedAgentId]?.meta ?? null) : null;
   const isDebugMode = selectedAgent?.debug_state === "enabled" && selectedAgent?.alive;
+  // Middle-panel routing: agent session wins; otherwise an open inbox thread
+  // takes the pane. An explicit empty state at the bottom handles "neither".
+  const activePeerId = useUserChatStore((s) => s.activePeerId);
   // ADR-009 §V-Q: the name is server-side (Runtime `.overrides.json`,
   // mirrored into the Gateway's list view) — no local override.
   const agentDisplayName = selectedAgent
@@ -986,8 +991,10 @@ export function AppLayout() {
               <div className="absolute inset-y-0 left-0 w-1 group-hover:bg-[var(--color-accent)]/30 group-active:bg-[var(--color-accent)]/60 transition-colors rounded-full" />
             </div>
 
-            {/* Chat panel — elastic */}
-            <ChatPanel />
+            {/* Middle panel — agent session takes priority; an open inbox
+                thread falls back to the user chat composer. Empty state is
+                handled by the panel components themselves. */}
+            {selectedAgentId ? <ChatPanel /> : activePeerId ? <InboxPanel /> : <EmptyChatPane />}
 
             {/* File editor panel — shown when files are open */}
             {hasOpenFiles && (
@@ -1045,8 +1052,9 @@ export function AppLayout() {
               </>
             )}
 
-            {/* Right panel — unified tabs, collapsible, resizable */}
-            {!rightPanelCollapsed && (
+            {/* Right panel — unified tabs, collapsible, resizable. Hidden in
+                inbox mode since user↔user chat has no agent session config. */}
+            {selectedAgentId && !rightPanelCollapsed && (
               <RightPanel width={rightWidth} onCollapse={toggleRightPanel} isDebugMode={isDebugMode} onResizeStart={handleMouseDownRight} activeTab={activeTab} onTabChange={setActiveTab} />
             )}
           </div>
@@ -1057,7 +1065,7 @@ export function AppLayout() {
             width and top/bottom padding is kept so the window chrome stays
             symmetric and switching tabs only changes the central content.
             Glass background bleeds through both branches (no explicit bg). */}
-        {currentView === "chat" && (
+        {currentView === "chat" && selectedAgentId && (
           <RightNavBar
             activeTab={activeTab}
             onTabChange={(tab) => {
@@ -1075,12 +1083,6 @@ export function AppLayout() {
         {currentView === "settings" && (
           <div className="flex flex-1 overflow-hidden rounded-xl bg-page-bg">
             <SettingsPage initialTab={settingsInitialTab} />
-          </div>
-        )}
-
-        {currentView === "users" && (
-          <div className="flex flex-1 overflow-hidden rounded-xl bg-page-bg">
-            <MessagesView />
           </div>
         )}
 
@@ -1251,4 +1253,14 @@ function formatTokenCount(n: number | null | undefined): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
   return n.toString();
+}
+
+/** Empty middle-pane state when neither an agent nor a peer is selected. */
+function EmptyChatPane() {
+  const { t } = useTranslation();
+  return (
+    <div className="flex flex-1 items-center justify-center p-8 text-center text-xs text-text-tertiary">
+      {t("chatPanel.selectAgentOrPeer")}
+    </div>
+  );
 }

@@ -108,6 +108,16 @@ pub struct ChatSummary {
     /// non-admin caller cannot read `/api/users`, so it has no other way
     /// to label a peer.
     pub peer_display_name: String,
+    /// Custom avatar path (mirrors `UserAccount.avatar`). Empty string
+    /// means "no custom avatar"; `None` means "we couldn't resolve the
+    /// peer's account" (peer account deleted). Frontend treats the
+    /// absence-of-custom-avatar the same as no avatar at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_avatar: Option<String>,
+    /// Builtin avatar icon id (mirrors `UserAccount.builtin_avatar`).
+    /// Same "missing peer" semantics as `peer_avatar`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_builtin_avatar: Option<String>,
     pub last_active_at: i64,
     pub last_message_preview: String,
     pub unread_count: u32,
@@ -196,10 +206,18 @@ async fn list_chats(
     let me = user_id.clone();
     let convos = offload(move || chat::list_for(&dir, &me)).await?;
 
-    // Resolve peer labels once for the whole page. A peer whose account is
-    // gone still has history, so the raw id is the last resort.
+    // Resolve peer presentation fields once for the whole page. A peer
+    // whose account is gone still has history, so the raw id is the
+    // last-resort label and the avatar fields stay None (frontend
+    // falls back to a deterministic builtin icon from the display
+    // name, which is the same UX the user has in `/api/users/directory`).
     let accounts = auth.load_accounts().map_err(|e| ApiError::internal(&e))?;
-    let labels: std::collections::HashMap<&str, &str> = accounts
+    struct PeerMeta<'a> {
+        label: &'a str,
+        avatar: Option<&'a str>,
+        builtin_avatar: Option<&'a str>,
+    }
+    let peers: std::collections::HashMap<&str, PeerMeta<'_>> = accounts
         .accounts
         .iter()
         .map(|a| {
@@ -208,7 +226,19 @@ async fn list_chats(
             } else {
                 a.display_name.as_str()
             };
-            (a.user_id.as_str(), label)
+            // An empty string is the wire contract for "user cleared this
+            // field"; treat it as missing so the frontend picks its
+            // deterministic fallback instead of trying to load "".
+            let avatar = a.avatar.as_deref().filter(|s| !s.is_empty());
+            let builtin_avatar = a.builtin_avatar.as_deref().filter(|s| !s.is_empty());
+            (
+                a.user_id.as_str(),
+                PeerMeta {
+                    label,
+                    avatar,
+                    builtin_avatar,
+                },
+            )
         })
         .collect();
 
@@ -217,14 +247,20 @@ async fn list_chats(
         .filter_map(|c| {
             let peer_user_id = c.peer_of(&user_id)?.to_string();
             let unread_count = c.unread_for(&user_id);
-            let peer_display_name = labels
-                .get(peer_user_id.as_str())
-                .map(|s| s.to_string())
+            let meta = peers.get(peer_user_id.as_str());
+            let peer_display_name = meta
+                .map(|m| m.label.to_string())
                 .unwrap_or_else(|| peer_user_id.clone());
+            let peer_avatar = meta.and_then(|m| m.avatar).map(str::to_string);
+            let peer_builtin_avatar = meta
+                .and_then(|m| m.builtin_avatar)
+                .map(str::to_string);
             Some(ChatSummary {
                 chat_id: c.chat_id,
                 peer_user_id,
                 peer_display_name,
+                peer_avatar,
+                peer_builtin_avatar,
                 last_active_at: c.last_active_at,
                 last_message_preview: c.last_message_preview,
                 unread_count,
@@ -546,6 +582,9 @@ mod tests {
         let router = build_router(multi_user_state(&dir));
         let admin = login(&router, "root", PWD).await;
         let mut ids = Vec::new();
+        // CreateAccountRequest doesn't accept presentation fields
+        // (ADR-076 §决策 1 keeps them on UserAccount, gated by the
+        // auth path), so we set avatars with PUT after creation.
         for name in ["alice", "bob"] {
             let resp = router
                 .clone()
@@ -569,6 +608,33 @@ mod tests {
         }
         let [alice, bob]: [String; 2] = ids.try_into().unwrap();
         assert_ne!(alice, bob);
+        // Avatar values per user — Alice has only a builtin icon, Bob
+        // has both a builtin icon AND a custom file. The chat list
+        // endpoint must surface both fields, so the per-field
+        // assertions in `send_read_and_list_across_two_accounts`
+        // catch regressions when one half of the resolution is wrong.
+        let alice_avatar = router
+            .clone()
+            .oneshot(req(
+                "PUT",
+                &format!("/api/users/{alice}"),
+                Some(r#"{"builtin_avatar":"icon-05"}"#),
+                Some(&admin),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(alice_avatar.status(), StatusCode::OK, "put alice avatar");
+        let bob_avatar = router
+            .clone()
+            .oneshot(req(
+                "PUT",
+                &format!("/api/users/{bob}"),
+                Some(r#"{"builtin_avatar":"icon-07","avatar":"assets/avatar-bob.png"}"#),
+                Some(&admin),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(bob_avatar.status(), StatusCode::OK, "put bob avatar");
         let alice_token = login(&router, "alice", PWD).await;
         let bob_token = login(&router, "bob", PWD).await;
         Fixture {
@@ -662,6 +728,17 @@ mod tests {
             list["chats"][0]["peer_display_name"], "alice",
             "peer label is resolved server-side for non-admin callers"
         );
+        // Alice's avatar fields surface to Bob's chat list — Alice has
+        // only a builtin icon, no custom file.
+        assert_eq!(
+            list["chats"][0]["peer_builtin_avatar"], "icon-05",
+            "builtin avatar is propagated so the inbox can render Alice's icon"
+        );
+        assert!(
+            list["chats"][0].get("peer_avatar").is_none()
+                || list["chats"][0]["peer_avatar"].is_null(),
+            "absent custom avatar stays absent (skip_serializing_if + missing field)"
+        );
         assert_eq!(list["chats"][0]["unread_count"], 1);
         assert_eq!(list["chats"][0]["last_message_preview"], "hello bob");
 
@@ -704,7 +781,19 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        assert_eq!(json(resp).await["chats"][0]["peer_user_id"], bob.as_str());
+        let alice_view = json(resp).await;
+        assert_eq!(alice_view["chats"][0]["peer_user_id"], bob.as_str());
+        // Bob's chat list (from Alice's view) surfaces both avatar
+        // fields — custom file *and* builtin icon — so the frontend
+        // can prefer the custom file and fall back to the icon.
+        assert_eq!(
+            alice_view["chats"][0]["peer_avatar"], "assets/avatar-bob.png",
+            "custom avatar path is propagated to chat list"
+        );
+        assert_eq!(
+            alice_view["chats"][0]["peer_builtin_avatar"], "icon-07",
+            "builtin avatar id is propagated alongside custom avatar"
+        );
     }
 
     #[tokio::test]

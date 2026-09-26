@@ -31,7 +31,7 @@ export function SetupRequiredView() {
   }, [pollUntilSetupComplete, stopSetupPoll]);
 
   return (
-    <div className="flex h-screen w-screen items-center justify-center bg-app">
+    <div className="flex h-screen w-screen items-center justify-center bg-page-bg">
       <div className="w-[28rem] max-w-[90vw] rounded-xl border border-border bg-surface px-8 py-7 text-text shadow-lg">
         <h1 className="text-lg font-semibold">
           {t("account.setupRequiredTitle", { defaultValue: "Gateway is not ready" })}

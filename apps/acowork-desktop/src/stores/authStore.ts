@@ -67,9 +67,18 @@ function clearStoredTokens(): void {
   }
 }
 
-/** Reload the webview so every store + MQTT listener reboots clean (§决策 7). */
+/** Reload the webview so every store + MQTT listener reboots clean (§决策 7).
+ *  Sets the `acowork_recovery_reload` flag so `App.tsx` skips the
+ *  SplashScreen: the Gateway process is per-machine, not per-account, so
+ *  switching accounts must not re-run `bootGateway` + the /health poll +
+ *  the 1.5s minimum-splash linger. The recovery branch already re-registers
+ *  the MQTT / fs / doc listeners that the reload destroys, which is exactly
+ *  what we need here too. Without this, every account switch flashes
+ *  "Connecting to Gateway..." for at least MIN_SPLASH_MS while the Gateway
+ *  (already up) is re-probed for no reason. */
 function reloadApp(): void {
   try {
+    sessionStorage.setItem("acowork_recovery_reload", "1");
     window.location.reload();
   } catch {
     // jsdom / non-browser environment — no reload available

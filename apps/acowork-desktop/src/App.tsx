@@ -175,7 +175,7 @@ function App() {
           // the probe settles, an `unknown` status can only mean the Gateway
           // never answered `/api/status` — that falls through below instead of
           // hanging on a blank screen.
-          <div className="flex h-screen w-screen items-center justify-center bg-app" />
+          <div className="flex h-screen w-screen items-center justify-center bg-page-bg" />
         ) : !onboardingDone ? (
           // ADR-076 §决策 7: the account comes first — under `multi_user` the
           // wizard PATCHES the signed-in account, so it must not run before

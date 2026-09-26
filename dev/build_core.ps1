@@ -1,4 +1,4 @@
-#!/usr/bin/env pwsh
+﻿#!/usr/bin/env pwsh
 # build_core.ps1 - Build Gateway + Runtime + Node Agent (debug or release mode)
 # Usage:
 #   .\dev\build_core.ps1                  Build release (default)
@@ -89,11 +89,11 @@ if ($NetworkMode -eq "local") {
 } elseif ($NetworkMode -eq "remote") {
     # Pick the address LAN peers will actually use to reach this host.
     # Preference order:
-    #   1. $env:ACOWORK_ADVERTISE_HOST — explicit operator override.
+    #   1. $env:ACOWORK_ADVERTISE_HOST 鈥?explicit operator override.
     #   2. The IPv4 of the interface that owns the default route. Virtual
     #      adapters (VMware VMnet, WSL vEthernet, Hyper-V) and APIPA
     #      (169.254.x) never own the default route, so this cannot pick a
-    #      non-LAN-reachable address by accident — the old
+    #      non-LAN-reachable address by accident 鈥?the old
     #      "first non-loopback IPv4" heuristic did (VMnet8 sorts first).
     #   3. First non-loopback, non-APIPA IPv4 (fully offline lab fallback).
     # When all probes fail the Gateway auto-detects and logs a WARN at
@@ -116,7 +116,7 @@ if ($NetworkMode -eq "local") {
             }
         } catch { $lanIp = $null }
     }
-    # Bind 0.0.0.0 unconditionally — that is the whole point of -Remote; the
+    # Bind 0.0.0.0 unconditionally 鈥?that is the whole point of -Remote; the
     # advertise host is best-effort and only appended when detected (the
     # Gateway auto-detects a good value itself, via its UDP route probe).
     $GatewayArgs = @("--addr", "0.0.0.0:19876", "--mqtt-addr", "0.0.0.0:19875")
@@ -160,22 +160,22 @@ if ($Start -or $Stop) {
     $embedProcs   = Get-Process -Name "acowork-embed"   -ErrorAction SilentlyContinue
     # The LSP Relay runs in its own process group (see
     # core/acowork-gateway/src/lifecycle/lsp_relay.rs: cmd.process_group(0)),
-    # so a Gateway shutdown does NOT cascade termination to it — we must
+    # so a Gateway shutdown does NOT cascade termination to it 鈥?we must
     # explicitly kill it to avoid leaving an orphan binding port 19878, which
     # would otherwise be attached by the new gateway via
     # attach_existing_lsp_relay() but owned by a now-dead parent.
     $lspProcs    = Get-Process -Name "acowork-lsp-relay" -ErrorAction SilentlyContinue
-    # The Node Agent is spawned by the Gateway (ADR-055 §6.11). On Windows the
+    # The Node Agent is spawned by the Gateway (ADR-055 搂6.11). On Windows the
     # Gateway's orphan cleanup is skipped (no `ps`), so a node left behind by a
-    # killed Gateway would keep running with the old broker connection — kill it
+    # killed Gateway would keep running with the old broker connection 鈥?kill it
     # explicitly to keep the stop step idempotent.
     $nodeProcs   = Get-Process -Name "acowork-node"   -ErrorAction SilentlyContinue
 
     # The ACowork Desktop app (Tauri) embeds the Gateway as a sidecar. On
     # Windows the Tauri shell does NOT cascade-kill its sidecar, so killing
-    # only the Gateway leaves the Desktop process alive — and within seconds
+    # only the Gateway leaves the Desktop process alive 鈥?and within seconds
     # Desktop will respawn a fresh Gateway, which in turn spawns Node +
-    # LSP Relay (ADR-055 §6.11). Those children hold file locks on their
+    # LSP Relay (ADR-055 搂6.11). Those children hold file locks on their
     # .exe files, so subsequent cargo builds silently fail with
     # "Access is denied" (os error 5) when trying to replace those
     # binaries. Kill the Desktop FIRST so it cannot respawn anything we
@@ -231,7 +231,7 @@ if ($Start -or $Stop) {
 
     # The PM service is a standalone process (ADR-064) spawned by the Gateway
     # supervisor. It self-exits via the ADR-018 watchdog when the Gateway dies,
-    # but on Windows the watchdog poll can lag — kill it explicitly so the stop
+    # but on Windows the watchdog poll can lag 鈥?kill it explicitly so the stop
     # step is idempotent and port 18082 is released before the next start.
     $pmProcs = Get-Process -Name "acowork-pm" -ErrorAction SilentlyContinue
     if ($pmProcs) {
@@ -264,7 +264,7 @@ if ($Start -or $Stop) {
     if ($portLine) {
         $pidFromPort = ($portLine.Line -split '\s+')[-1]
         if ($pidFromPort -match '^\d+$') {
-            Write-Host "  Port 18080 held by PID $pidFromPort — force-killing" -ForegroundColor Gray
+            Write-Host "  Port 18080 held by PID $pidFromPort 鈥?force-killing" -ForegroundColor Gray
             Stop-Process -Id $pidFromPort -Force -ErrorAction SilentlyContinue
         }
     }
@@ -286,7 +286,7 @@ if ($Start -or $Stop) {
     if ($lspPortLine) {
         $pidFromPort = ($lspPortLine.Line -split '\s+')[-1]
         if ($pidFromPort -match '^\d+$') {
-            Write-Host "  Port 19878 held by PID $pidFromPort — force-killing" -ForegroundColor Gray
+            Write-Host "  Port 19878 held by PID $pidFromPort 鈥?force-killing" -ForegroundColor Gray
             Stop-Process -Id $pidFromPort -Force -ErrorAction SilentlyContinue
         }
     }
@@ -308,7 +308,7 @@ if ($Start -or $Stop) {
     if ($pmPortLine) {
         $pidFromPort = ($pmPortLine.Line -split '\s+')[-1]
         if ($pidFromPort -match '^\d+$') {
-            Write-Host "  Port 18082 held by PID $pidFromPort — force-killing" -ForegroundColor Gray
+            Write-Host "  Port 18082 held by PID $pidFromPort 鈥?force-killing" -ForegroundColor Gray
             Stop-Process -Id $pidFromPort -Force -ErrorAction SilentlyContinue
         }
     }
@@ -330,7 +330,7 @@ if ($Start -or $Stop) {
     if ($docPortLine) {
         $pidFromPort = ($docPortLine.Line -split '\s+')[-1]
         if ($pidFromPort -match '^\d+$') {
-            Write-Host "  Port 18081 held by PID $pidFromPort — force-killing" -ForegroundColor Gray
+            Write-Host "  Port 18081 held by PID $pidFromPort 鈥?force-killing" -ForegroundColor Gray
             Stop-Process -Id $pidFromPort -Force -ErrorAction SilentlyContinue
         }
     }
@@ -446,8 +446,7 @@ try {
 #
 # See ADR-019 / core/acowork-gateway/src/lifecycle/lsp_relay.rs::spawn_lsp_relay.
 # The Gateway locates the relay as `current_exe().parent().join("acowork-lsp-relay.exe")`
-# (or without .exe on Unix), so the binary MUST sit next to acowork-gateway.exe —
-# otherwise startup fails with:
+# (or without .exe on Unix), so the binary MUST sit next to acowork-gateway.exe 鈥?# otherwise startup fails with:
 #   GatewayError::Lifecycle("acowork-lsp-relay binary not found at ...")
 $step++
 Write-Host "[$step/$totalSteps] Building LSP Relay ($Profile mode)..." -ForegroundColor Yellow
@@ -473,10 +472,10 @@ Write-Host ""
 
 # Step: Build Node Agent (standalone binary, sibling of acowork-gateway.exe)
 #
-# ADR-055 §6.11: the Gateway supervises a local Node Agent (`acowork-node`),
-# located via `current_exe().parent().join("acowork-node.exe")` — so the
+# ADR-055 搂6.11: the Gateway supervises a local Node Agent (`acowork-node`),
+# located via `current_exe().parent().join("acowork-node.exe")` 鈥?so the
 # binary MUST sit next to acowork-gateway.exe. Without it the Gateway
-# silently disables the node topology ("acowork-node binary not found — local
+# silently disables the node topology ("acowork-node binary not found 鈥?local
 # node agent disabled"), node 'local' never enrolls, and agent installs fail
 # with 503 "Node 'local' has never enrolled (offline)".
 $step++
@@ -504,7 +503,7 @@ Write-Host ""
 # Step: Build PM service (standalone binary, sibling of acowork-gateway.exe)
 #
 # ADR-064: the PM service is a standalone process (`acowork-pm`), located via
-# `current_exe().parent().join("acowork-pm.exe")` — so the binary MUST sit next
+# `current_exe().parent().join("acowork-pm.exe")` 鈥?so the binary MUST sit next
 # to acowork-gateway.exe. Without it the Gateway supervisor logs
 # "acowork-pm binary not found" and `/api/pm/*` returns 503.
 $step++
@@ -533,7 +532,7 @@ Write-Host ""
 #
 # Mirrors the PM service above: the Doc service is a standalone process
 # (`acowork-doc`), located via `current_exe().parent().join("acowork-doc.exe")`
-# — so the binary MUST sit next to acowork-gateway.exe. Without it the Gateway
+# 鈥?so the binary MUST sit next to acowork-gateway.exe. Without it the Gateway
 # supervisor logs "acowork-doc binary not found" and `/api/doc/*` returns 503
 # (document library unavailable).
 $step++
@@ -564,7 +563,7 @@ Write-Host ""
 # distributes the binary (this script for dev, the package installer for
 # release, the Tauri bundler for desktop) is responsible for placing it there.
 #
-# We only stage into the directory matching the active profile — the previous
+# We only stage into the directory matching the active profile 鈥?the previous
 # "stage to both target\release and target\debug" pattern was the source of
 # the silent stray-file bug when target\debug did not exist.
 $step++
@@ -573,7 +572,7 @@ $offlineSrc = Join-Path $WorkspaceRoot "assets\offline_providers.json"
 $embedModelsSrc = Join-Path $WorkspaceRoot "core\acowork-embed\assets\embedding_models.json"
 
 # Ensure the single profile target directory exists before any Copy-Item call.
-# Copy-Item does not auto-create missing parent directories — if target\$Profile
+# Copy-Item does not auto-create missing parent directories 鈥?if target\$Profile
 # did not exist (typical after `-Debug` on a release-only checkout), it would
 # silently create a file literally named "$Profile" inside target\ instead.
 if (-not (Test-Path $targetDir)) {
@@ -610,6 +609,108 @@ if ($env:ORT_DYLIB_PATH -and (Test-Path $env:ORT_DYLIB_PATH)) {
 Write-Host ""
 
 if ($Start) {
+    # Step: First-boot admin password setup (ADR-076 搂鍐崇瓥 12 v3).
+    #
+    # The Gateway starts in first-boot restricted mode whenever its
+    # seeded `admin` account still has the `$disabled$` placeholder
+    # hash 鈥?every /api/* returns 403 setup_required until the operator
+    # sets a real password via the in-process rpassword prompt or the
+    # `admin-setup` subcommand. The in-process prompt is unreachable
+    # from this script: Start-Process -NoNewWindow strips the new
+    # process's TTY, so can_prompt_interactively() returns false and
+    # the Gateway silently logs the setup_required warning before
+    # daemonising (see core/acowork-gateway/src/cli.rs::
+    # can_prompt_interactively + the v3 comment block above
+    # warn_first_boot_restricted). Detect that state up-front, prompt
+    # the operator once *here* (where the parent shell still has a
+    # TTY), and write the password via `admin-setup --password-file`
+    # so the daemon boots clean instead of dead-ending the Desktop at
+    # the SetupRequiredView gate.
+    $acctJsonPath = Join-Path $env:USERPROFILE ".acowork\acowork-gateway\data\accounts.json"
+    $needsSetup = $true
+    if (Test-Path -LiteralPath $acctJsonPath) {
+        try {
+            $acctJson = Get-Content -LiteralPath $acctJsonPath -Raw -ErrorAction Stop |
+                ConvertFrom-Json -ErrorAction Stop
+            $adminAcct = @($acctJson.accounts) |
+                Where-Object { $_.username -eq 'admin' } |
+                Select-Object -First 1
+            if ($adminAcct -and $adminAcct.password_hash -and $adminAcct.password_hash -ne '$disabled$') {
+                $needsSetup = $false
+            }
+        } catch {
+            # Corrupt JSON / read error 鈫?assume fresh install, prompt.
+            $needsSetup = $true
+        }
+    }
+    if ($needsSetup) {
+        # Resolve the just-built exe path now; a missing binary here
+        # usually means cargo build above failed and exited 1, but we
+        # guard defensively in case the build step was skipped.
+        $gatewayExe = Join-Path $WorkspaceRoot "target\$Profile\acowork-gateway.exe"
+        if (-not (Test-Path -LiteralPath $gatewayExe)) {
+            Write-Host "ERROR: cannot run admin-setup 鈥?gateway executable not found at: $gatewayExe" -ForegroundColor Red
+            exit 1
+        }
+        Write-Host ""
+        Write-Host "[setup] First-boot detected 鈥?admin password has not been set yet." -ForegroundColor Yellow
+        Write-Host "        Without it, the Gateway would boot in restricted mode (every /api/* returns 403)." -ForegroundColor Yellow
+        Write-Host "        This prompt only appears on a fresh install." -ForegroundColor Yellow
+        Write-Host ""
+        # Read-Host -AsSecureString masks the password on screen; the
+        # plaintext bytes only live inside BSTR land and are zeroised
+        # before we hand them to a temp file for admin-setup.
+        $secPw = Read-Host "New admin password" -AsSecureString
+        if ($null -eq $secPw -or $secPw.Length -eq 0) {
+            Write-Host "ERROR: empty password rejected (also blocked by the Gateway's password policy)." -ForegroundColor Red
+            exit 1
+        }
+        $secConfirm = Read-Host "Confirm admin password" -AsSecureString
+        # Decode both SecureStrings via BSTR round-trip, compare, then
+        # zeroise both BSTRs immediately. PowerShell variable reassign-
+        # ment does not zero memory, so we rely on the BSTR free plus
+        # admin-setup's own zeroize() of the local plaintext buffer.
+        $bstr1 = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secPw)
+        $bstr2 = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secConfirm)
+        $plain1 = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr1)
+        $plain2 = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr2)
+        [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr1)
+        [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr2)
+        $secPw = $null
+        $secConfirm = $null
+        if ($plain1 -ne $plain2) {
+            Write-Host "ERROR: passwords do not match." -ForegroundColor Red
+            exit 1
+        }
+        # Hand the password to admin-setup via a one-shot temp file.
+        # The subcommand has no --password CLI flag on purpose (would
+        # leak the secret to shell history). Random GUID name + an
+        # immediate Remove-Item in the finally block keeps the secret
+        # on disk for milliseconds; admin-setup caps the read at 1 KiB
+        # and trims trailing CR/LF.
+        $tmpPw = [System.IO.Path]::Combine(
+            [System.IO.Path]::GetTempPath(),
+            "acowork-admin-pw-$([System.Guid]::NewGuid().ToString('N')).txt"
+        )
+        $utf8NoBom = New-Object System.Text.UTF8Encoding($False)
+        try {
+            [System.IO.File]::WriteAllText($tmpPw, $plain1, $utf8NoBom)
+            Write-Host "  Setting admin password..." -ForegroundColor Gray
+            & $gatewayExe --auth-mode multi_user admin-setup --password-file $tmpPw | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                Write-Host "ERROR: admin-setup failed (exit code $LASTEXITCODE)." -ForegroundColor Red
+                Write-Host "       Likely a password-policy violation 鈥?check [multi_user].password_policy in gateway.toml." -ForegroundColor Red
+                exit 1
+            }
+            Write-Host "  Admin password set." -ForegroundColor Green
+            Write-Host ""
+        } finally {
+            Remove-Item -LiteralPath $tmpPw -Force -ErrorAction SilentlyContinue
+            $plain1 = $null
+            $plain2 = $null
+        }
+    }
+
     # Step: Start Gateway
     $step++
     $logLevel = if ($env:ACOWORK_GATEWAY_LOG_LEVEL) { $env:ACOWORK_GATEWAY_LOG_LEVEL } else { "info" }
@@ -652,3 +753,4 @@ if ($Start) {
 
 # Return to workspace root
 Set-Location $WorkspaceRoot
+

@@ -16,6 +16,7 @@ import { useState, type FormEvent } from "react";
 import { useAuthStore } from "../../stores/authStore";
 import { useTranslation } from "../../i18n/useTranslation";
 import { StyledInput } from "../common/StyledInput";
+import brandMark from "../../../../../assets/brand-mark.svg";
 
 type Mode = "password" | "invite";
 
@@ -62,11 +63,20 @@ export function LoginView() {
   };
 
   return (
-    <div className="flex h-screen w-screen items-center justify-center bg-app">
+    <div className="flex h-screen w-screen items-center justify-center bg-page-bg">
       <form
         onSubmit={submit}
         className="flex w-full max-w-xs flex-col gap-3 rounded-md border border-border-outer bg-modal-surface p-6 shadow-xl"
       >
+        {/* Brand mark — same SVG as SplashScreen / README, so the login
+            dialog visually matches the rest of the app's identity. Width
+            matches the max-w-xs (320px) dialog width minus padding. */}
+        <img
+          src={brandMark}
+          alt={t("splashScreen.altLogo")}
+          width={192}
+          className="mx-auto"
+        />
         <h1 className="text-center text-sm font-semibold text-text">
           {t(mode === "password" ? "account.loginTitle" : "account.firstLoginTitle")}
         </h1>

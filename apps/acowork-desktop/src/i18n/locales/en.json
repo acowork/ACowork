@@ -6,7 +6,6 @@
   "navBar": {
     "editProfile": "Edit Profile",
     "chat": "Chat",
-    "users": "Messages",
     "projects": "Projects",
     "docs": "Docs",
     "extensions": "Extensions",
@@ -201,7 +200,8 @@
     "modelMenuSearchAccount": "Search accounts",
     "modelMenuNoMatch": "No match",
     "modelMenuLastUsed": "last used",
-    "reasoningMenuTitle": "Reasoning effort"
+    "reasoningMenuTitle": "Reasoning effort",
+    "selectAgentOrPeer": "Select an agent or a conversation to start"
   },
   "sessionTabBar": {
     "llmReasoning": "LLM is reasoning",

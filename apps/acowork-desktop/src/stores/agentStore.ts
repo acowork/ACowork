@@ -10,6 +10,7 @@ import { useChatStore } from "./chatStore";
 import { useAuthStore } from "./authStore";
 import { useWorkspaceStore } from "./workspaceStore";
 import { useFileTreeStore } from "./fileTree";
+import { useUserChatStore } from "./userChatStore";
 import { log } from "../lib/logger";
 import { with503Retry } from "../lib/httpRetry";
 import * as sessionControl from "../lib/session-control";
@@ -465,8 +466,26 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
     set((s) => ({ nodes: s.nodes.map((n) => ({ ...n, online: false })) })),
 
   selectAgent: (id) => {
-    if (!id) return;
+    if (!id) {
+      // Clearing the active agent is a legitimate action — opening a
+      // 1:1 inbox thread from the user list relies on AppLayout
+      // falling through from <ChatPanel /> (selectedAgentId != null)
+      // to <InboxPanel /> (activePeerId != null). Abort any agent-
+      // scoped fetches that would otherwise leak back into a dead
+      // tree, then drop the selection.
+      set({ selectedAgentId: null });
+      useFileTreeStore.getState().abortAll();
+      return;
+    }
     set({ selectedAgentId: id });
+
+    // Mirror of the reverse direction in `UserList.openThread`, which clears
+    // `selectedAgentId` so AppLayout falls through to <InboxPanel />. Picking
+    // an agent while a user row is the active inbox peer would otherwise leave
+    // `activePeerId` set: the user row stays highlighted in the sidebar and
+    // AppLayout still prefers <InboxPanel /> (selectedAgentId wins, but the
+    // next time the user clears the agent the stale peer re-appears).
+    useUserChatStore.getState().closeChat();
 
     // The file-tree cache is keyed per (agent, workspace) so an old
     // agent's in-flight fetches can never contaminate the new agent's

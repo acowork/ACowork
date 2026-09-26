@@ -103,7 +103,6 @@
   "navBar": {
     "editProfile": "编辑资料",
     "chat": "聊天",
-    "users": "消息",
     "projects": "项目",
     "docs": "文档",
     "extensions": "扩展",
@@ -298,7 +297,8 @@
     "modelMenuSearchAccount": "搜索账号",
     "modelMenuNoMatch": "无匹配项",
     "modelMenuLastUsed": "上次使用",
-    "reasoningMenuTitle": "思考深度"
+    "reasoningMenuTitle": "思考深度",
+    "selectAgentOrPeer": "选择一个 Agent 或联系人开始对话"
   },
   "sessionTabBar": {
     "llmReasoning": "LLM 推理进行中",

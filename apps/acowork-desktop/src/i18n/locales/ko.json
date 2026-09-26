@@ -103,7 +103,6 @@
   "navBar": {
     "editProfile": "Edit Profile",
     "chat": "Chat",
-    "users": "메시지",
     "projects": "Projects",
     "docs": "Docs",
     "extensions": "확장",
@@ -283,7 +282,8 @@
     "modelMenuLastUsed": "마지막 사용",
     "reasoningMenuTitle": "思考深度",
     "readOnlySession": "공유된 세션이므로 읽기 전용입니다",
-    "readOnlySessionPlaceholder": "읽기 전용 세션 — 다른 계정이 공유함"
+    "readOnlySessionPlaceholder": "읽기 전용 세션 — 다른 계정이 공유함",
+    "selectAgentOrPeer": "에이전트 또는 대화를 선택해 시작하세요"
   },
   "sessionTabBar": {
     "llmReasoning": "LLM 추론 중",

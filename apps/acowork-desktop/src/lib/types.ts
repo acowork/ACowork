@@ -864,7 +864,7 @@ export interface ContextUsageInfo {
 }
 
 /** Navigation view type */
-export type NavView = "chat" | "users" | "extensions" | "harness" | "docs" | "projects" | "settings";
+export type NavView = "chat" | "extensions" | "harness" | "docs" | "projects" | "settings";
 
 /** Theme type */
 export type Theme = "light" | "dark" | "system";
@@ -1720,6 +1720,22 @@ export interface AccountListResponse {
   accounts: UserAccount[];
 }
 
+/** One row of `GET /api/users/directory` (any authenticated caller,
+ *  ADR-076 §决策 8). A deliberate projection, not `UserAccount`: a non-admin
+ *  gets the three fields needed to name a recipient and nothing else — no
+ *  role, no timestamps, no profile. Matches
+ *  `acowork_gateway::http::account_api::DirectoryEntry`. */
+export interface DirectoryUser {
+  user_id: string;
+  username: string;
+  display_name: string;
+}
+
+/** Response from `GET /api/users/directory`. */
+export interface UserDirectoryResponse {
+  users: DirectoryUser[];
+}
+
 /**
  * One row of `GET /api/users/{id}/chats` — matches
  * `acowork_gateway::http::chat_api::ChatSummary` (ADR-076 §决策 8).
@@ -1730,6 +1746,10 @@ export interface UserChatSummary {
   peer_user_id: string;
   /** Server-resolved label (`display_name` → `username` → id). */
   peer_display_name: string;
+  /** Peer's custom avatar path (mirrors `UserAccount.avatar`). */
+  peer_avatar?: string | null;
+  /** Peer's builtin avatar icon id (mirrors `UserAccount.builtin_avatar`). */
+  peer_builtin_avatar?: string | null;
   /** Unix seconds. */
   last_active_at: number;
   last_message_preview: string;

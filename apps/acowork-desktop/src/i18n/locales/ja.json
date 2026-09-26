@@ -103,7 +103,6 @@
   "navBar": {
     "editProfile": "Edit Profile",
     "chat": "Chat",
-    "users": "メッセージ",
     "projects": "Projects",
     "docs": "Docs",
     "extensions": "拡張機能",
@@ -284,7 +283,8 @@
     "modelMenuSearchAccount": "アカウントを検索",
     "modelMenuNoMatch": "一致する項目がありません",
     "modelMenuLastUsed": "前回使用",
-    "reasoningMenuTitle": "思考深度"
+    "reasoningMenuTitle": "思考深度",
+    "selectAgentOrPeer": "エージェントまたは連絡先を選んで会話を始めましょう"
   },
   "sessionTabBar": {
     "llmReasoning": "LLM推論中",

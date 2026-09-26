@@ -103,7 +103,6 @@
   "navBar": {
     "editProfile": "Edit Profile",
     "chat": "Chat",
-    "users": "訊息",
     "projects": "Projects",
     "docs": "Docs",
     "extensions": "擴充功能",
@@ -283,7 +282,8 @@
     "modelMenuLastUsed": "上次使用",
     "reasoningMenuTitle": "思考深度",
     "readOnlySession": "該會話已共享，你只有唯讀權限",
-    "readOnlySessionPlaceholder": "唯讀工作階段：由其他帳號共享"
+    "readOnlySessionPlaceholder": "唯讀工作階段：由其他帳號共享",
+    "selectAgentOrPeer": "選擇一個 Agent 或聯絡人開始對話"
   },
   "sessionTabBar": {
     "llmReasoning": "LLM 推理進行中",
