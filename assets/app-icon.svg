@@ -14,13 +14,19 @@
       <stop offset="100%" stop-color="#F0A92E"/>
     </linearGradient>
     <!-- Bite-mask: white rect reveals the dot; small black circle carves the C-notch.
-         Small circle = half the big circle's diameter (31 = 62/2),
-         cy = big cy (vertically centered, same horizontal line),
-         cx + r = big cx + big r (right edge tangent to big circle's right edge)
-         → cx = 256 + 62 − 31 = 287. -->
-    <mask id="bite" maskUnits="userSpaceOnUse" x="158" y="232" width="244" height="244">
-      <rect x="158" y="232" width="244" height="244" fill="white"/>
-      <circle cx="287" cy="317" r="31" fill="black"/>
+         Big circle: cx=256, bottom aligned with the strokes' bottom centerline
+         (cy + r = 402) AND tangent to both strokes' inner edges. The two
+         constraints solve to a unique radius:
+         left inner-edge line 0.8944x + 0.4472y = 330.44 (stroke midline
+         110,402→256,110 offset 30.5 toward center);  |0.8944·256 + 0.4472·cy
+         − 330.44| = 402 − cy  →  cy = 332.84, r = 69.16 (both legs agree,
+         symmetry). The original r=62 (bottom 379) was the same construction.
+         Small circle: keeps its relative position inside the big circle
+         (center 0.5r right of big center, vertically centered) and scales
+         with it: r = 34.58, cx = 256 + 34.58 = 290.58, cy = 332.84. -->
+    <mask id="bite" maskUnits="userSpaceOnUse" x="186.84" y="263.68" width="138.32" height="138.32">
+      <rect x="186.84" y="263.68" width="138.32" height="138.32" fill="white"/>
+      <circle cx="290.58" cy="332.84" r="34.58" fill="black"/>
     </mask>
   </defs>
   <!-- Yellow rounded square: x=0,y=0,w=512,h=512 so the icon fills the canvas edge-to-edge.
@@ -53,6 +59,6 @@
           stroke="#606060"
           stroke-width="61"
           stroke-linecap="round"/>
-    <circle cx="256" cy="317" r="62" fill="#404040" mask="url(#bite)"/>
+    <circle cx="256" cy="332.84" r="69.16" fill="#404040" mask="url(#bite)"/>
   </g>
 </svg>
