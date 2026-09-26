@@ -1060,25 +1060,36 @@ export function AppLayout() {
           </div>
         )}
 
-        {/* Right rail — 40px column. Renders the agent-config nav buttons in
-            the chat view; in other views an empty placeholder of the same
-            width and top/bottom padding is kept so the window chrome stays
-            symmetric and switching tabs only changes the central content.
-            Glass background bleeds through both branches (no explicit bg). */}
-        {currentView === "chat" && selectedAgentId && (
-          <RightNavBar
-            activeTab={activeTab}
-            onTabChange={(tab) => {
-              if (!rightPanelCollapsed && tab === activeTab) {
-                setRightPanelCollapsed(true);
-              } else {
-                setRightPanelCollapsed(false);
-                setActiveTab(tab);
-              }
-            }}
-            agentRunning={selectedAgent?.alive ?? false}
-            collapsed={rightPanelCollapsed}          />
-        )}
+        {/* Right rail — 40px column. Renders the agent-config nav buttons
+            when an agent is selected; otherwise stays as an empty
+            placeholder of the same width and padding so the window chrome
+            remains symmetric across views (mirrors the non-chat-view
+            placeholder below). Glass background bleeds through both
+            branches (no explicit bg). */}
+        {currentView === "chat" ? (
+          selectedAgentId ? (
+            <RightNavBar
+              activeTab={activeTab}
+              onTabChange={(tab) => {
+                if (!rightPanelCollapsed && tab === activeTab) {
+                  setRightPanelCollapsed(true);
+                } else {
+                  setRightPanelCollapsed(false);
+                  setActiveTab(tab);
+                }
+              }}
+              agentRunning={selectedAgent?.alive ?? false}
+              collapsed={rightPanelCollapsed}
+            />
+          ) : (
+            // User-chat / EmptyChatPane: no RightNavBar items yet (the
+            // agent-config tabs are gated on a selected agent), but keep
+            // the 40px column reserved so the chat pane doesn't bleed to
+            // the window's right edge and break visual symmetry with the
+            // other views. Matches the non-chat-view placeholder below.
+            <aside className="w-10 shrink-0 py-2 dark:border-zinc-800" aria-hidden="true" />
+          )
+        ) : null}
 
         {currentView === "settings" && (
           <div className="flex flex-1 overflow-hidden rounded-xl bg-page-bg">

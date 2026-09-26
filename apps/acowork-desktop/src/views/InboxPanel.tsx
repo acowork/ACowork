@@ -144,7 +144,7 @@ export function InboxPanel() {
             Wrapping with the rounded-xl surface lets the textarea drop its
             own border (see below) and the paperclip/send buttons collapse to
             the lighter toolbar style. */}
-        <div className="mx-4 mb-3 rounded-xl border border-chat-input-border bg-chat-input-bg shadow-[0_1px_3px_rgba(0,0,0,0.04)] dark:shadow-[0_1px_3px_rgba(0,0,0,0.4)]">
+        <div className="mx-6 mb-3 rounded-xl border border-chat-input-border bg-chat-input-bg shadow-[0_1px_3px_rgba(0,0,0,0.04)] dark:shadow-[0_1px_3px_rgba(0,0,0,0.4)]">
           {(pendingAttachments.length > 0 || uploading.length > 0) && (
             <div className="flex flex-wrap items-center gap-1.5 px-3 pt-2">
               {pendingAttachments.map((a) => (
