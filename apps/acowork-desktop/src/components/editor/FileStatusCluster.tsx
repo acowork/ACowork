@@ -15,7 +15,7 @@ export interface FileStatusClusterActiveFile {
     language?: string;
     mimeType?: string;
     mode: "edit" | "preview";
-    kind: "file" | "url" | "diff" | "log";
+    kind: "file" | "url" | "diff" | "log" | "attachment";
     url?: string;
     relPath: string;
     loading?: boolean;

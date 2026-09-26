@@ -408,6 +408,14 @@ async fn upload_attachment(
 /// Gateway's own origin would be a live script with the caller's token in
 /// reach of it. Images keep their type so the Desktop can still show them
 /// inline — `<img>` with a disposition of `attachment` renders fine.
+/// Chunk size for `Body::from_stream` reads. 64 KiB is the sweet spot
+/// for our workload: large enough that a 7.5 MB PDF still gets ~120
+/// chunks (visible progress, no per-chunk IPC overhead worth caring
+/// about), small enough that the kernel can hand us a 64 KiB slice
+/// without us holding the whole 100 MiB attachment in the request
+/// worker's heap. Aligned with the typical TCP send buffer (16 KiB × 4).
+const DOWNLOAD_CHUNK_BYTES: usize = 64 * 1024;
+
 async fn download_attachment(
     State(state): State<AppState>,
     Extension(ctx): Extension<AuthContext>,
@@ -417,12 +425,28 @@ async fn download_attachment(
     peer_in(&chat_id, &user_id)?;
 
     let dir = data_dir(&state)?;
-    let (attachment, bytes) = offload(move || chat::load_attachment(&dir, &chat_id, &attachment_id))
-        .await?
-        .ok_or_else(|| ApiError::not_found("attachment not found"))?;
+    // Metadata-only load — keeps the request worker from pinning the
+    // blob in heap. The blob is streamed straight from disk to socket
+    // below via `ReaderStream`.
+    let (attachment, blob_path) = offload(move || {
+        chat::load_attachment_meta(&dir, &chat_id, &attachment_id)
+    })
+    .await?
+    .ok_or_else(|| ApiError::not_found("attachment not found"))?;
 
-    let disposition = chat::content_disposition(&attachment.filename);
-    let mut response = Response::new(Body::from(bytes));
+    // Stream the blob through `ReaderStream`. `Body::from_stream`
+    // forces chunked transfer encoding, so hyper will not wait for the
+    // whole file before sending headers — the browser / Tauri WebView
+    // sees real `data:` chunks and can drive a progress bar from the
+    // growing `response.body`.
+    let file = tokio::fs::File::open(&blob_path)
+        .await
+        .map_err(|e| ApiError::internal(&format!("open {}: {e}", blob_path.display())))?;
+    // `ReaderStream` is re-exported by `tokio-util`, not `tokio-stream`
+    // (tokio-stream 0.1.x deliberately defers `AsyncRead`/`AsyncWrite`
+    // adapters to `tokio-util`); gated behind the `io` feature there.
+    let stream = tokio_util::io::ReaderStream::with_capacity(file, DOWNLOAD_CHUNK_BYTES);
+    let mut response = Response::new(Body::from_stream(stream));
     let headers = response.headers_mut();
     // Both values were sanitised on the way in, so these cannot fail; the
     // fallbacks keep a corrupt record from turning into a 500 on download.
@@ -431,16 +455,17 @@ async fn download_attachment(
         HeaderValue::from_str(&attachment.mime)
             .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream")),
     );
+    let disposition = chat::content_disposition(&attachment.filename);
     headers.insert(
         header::CONTENT_DISPOSITION,
         HeaderValue::from_str(&disposition)
             .unwrap_or_else(|_| HeaderValue::from_static("attachment")),
     );
-    headers.insert(
-        header::CONTENT_LENGTH,
-        HeaderValue::from_str(&attachment.size.to_string())
-            .unwrap_or_else(|_| HeaderValue::from_static("0")),
-    );
+    // No `Content-Length` — `Body::from_stream` produces a body of
+    // unknown length, and axum will reject the response at runtime if
+    // we try to pair the two. hyper falls back to chunked encoding,
+    // which is what we want anyway (lets the client start rendering
+    // the download before we've read the whole file).
     headers.insert(
         HeaderName::from_static("x-content-type-options"),
         HeaderValue::from_static("nosniff"),

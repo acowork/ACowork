@@ -151,8 +151,11 @@ export interface OpenFile {
     mode: "edit" | "preview";
     /** "file" = workspace file; "url" = external URL loaded in an iframe;
      *  "diff" / "log" = read-only virtual files from the Git Status Bar
-     *  (ADR-078 decision 7) — never saved, never dirty, no fs-watch. */
-    kind: "file" | "url" | "diff" | "log";
+     *  (ADR-078 decision 7) — never saved, never dirty, no fs-watch;
+     *  "attachment" = read-only virtual preview of an inbox chat attachment
+     *  (ADR-076 blob owned by the Gateway, not a workspace file) — also
+     *  never saved, never dirty, no fs-watch. */
+    kind: "file" | "url" | "diff" | "log" | "attachment";
     /** The URL to load (only for kind === "url") */
     url?: string;
     /** ADR-078: git diff classification for kind === "diff" virtual
@@ -227,6 +230,21 @@ interface FileEditorState {
     openPreview: (agentId: string, workspaceId: string, relPath: string) => Promise<void>;
     /** Open a file with pre-loaded content (skips Gateway fetch). Used by LSP cross-file navigation. */
     openFileWithContent: (agentId: string, workspaceId: string, relPath: string, content: string, language: string) => void;
+    /** Open a read-only virtual tab for an inbox chat attachment (ADR-076).
+     *  Content is supplied by the caller (already fetched from the chat
+     *  blob route) — no workspace, no Gateway file fetch, never dirty,
+     *  never saved. Tabs are addressed as
+     *  `attachment:${userId}:${chatId}:${attachmentId}`, so opening the
+     *  same attachment again activates the existing tab instead of
+     *  stacking duplicates. */
+    openAttachmentPreview: (opts: {
+        userId: string;
+        chatId: string;
+        attachmentId: string;
+        fileName: string;
+        content: string;
+        language: string;
+    }) => void;
     /** Open a URL in a new tab (rendered in an iframe). Does nothing if the URL is invalid. */
     openUrl: (agentId: string, url: string) => void;
     /** ADR-078: open a read-only virtual diff/log tab (Monaco DiffEditor
@@ -534,6 +552,45 @@ export const useFileEditorStore = create<FileEditorState>((set, get) => ({
             dirty: false,
             mode: "edit",
             kind: "file",
+        };
+
+        set((state) => ({
+            openFiles: [...state.openFiles, newFile],
+            activeFileId: fileId,
+        }));
+    },
+
+    openAttachmentPreview: ({ userId, chatId, attachmentId, fileName, content, language }) => {
+        const fileId = `attachment:${userId}:${chatId}:${attachmentId}`;
+        if (get().openFiles.some((f) => f.id === fileId)) {
+            // Already open, just activate — mirrors openFileWithContent.
+            set({ activeFileId: fileId });
+            return;
+        }
+
+        const newFile: OpenFile = {
+            id: fileId,
+            // Chat attachments are Gateway-owned blobs (ADR-076), not
+            // workspace files: there is no agent, no workspace root and
+            // nothing to write back to. Empty ids keep the shape happy and
+            // every `kind === "file"` gate in FileEditorPanel (save,
+            // refresh, LSP, tab context menu, fs-watch) skips the tab.
+            agentId: "",
+            workspaceId: "",
+            // Same trick as the git virtual tabs: prefix the model path so
+            // Monaco can never collide this model with a workspace file's,
+            // while the tab title stays the attachment name. The id segment
+            // keeps two same-named attachments in different chats distinct.
+            relPath: `attachment:${chatId}/${attachmentId}/${fileName}`,
+            fileName,
+            content,
+            originalContent: content,
+            loading: false,
+            saving: false,
+            language,
+            dirty: false,
+            mode: "edit",
+            kind: "attachment",
         };
 
         set((state) => ({
@@ -913,15 +970,16 @@ export const useFileEditorStore = create<FileEditorState>((set, get) => ({
 /**
  * Real workspace-relative path for an OpenFile.
  *
- * Virtual tabs (`kind === "diff" | "log"`) prefix `relPath` with the kind
- * for monaco URI disambiguation (see `openVirtualFile`), so consumers that
- * need the user-facing path — FileTree locate, banner display, tab
- * tooltip — must strip the prefix via this helper. For `file` / `url`
- * tabs `relPath` is already the workspace path.
+ * Virtual tabs (`kind === "diff" | "log" | "attachment"`) prefix `relPath`
+ * with the kind for monaco URI disambiguation (see `openVirtualFile` /
+ * `openAttachmentPreview`), so consumers that need the user-facing path —
+ * FileTree locate, banner display, tab tooltip — must strip the prefix via
+ * this helper. For `file` / `url` tabs `relPath` is already the workspace
+ * path.
  */
 export function sourceRelPath(file: Pick<OpenFile, "kind" | "relPath">): string {
-    if (file.kind === "diff" || file.kind === "log") {
-        return file.relPath.replace(/^(diff|log):/, "");
+    if (file.kind === "diff" || file.kind === "log" || file.kind === "attachment") {
+        return file.relPath.replace(/^(diff|log|attachment):/, "");
     }
     return file.relPath;
 }

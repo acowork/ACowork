@@ -186,7 +186,10 @@
     "attach": "ファイルを添付",
     "removeAttachment": "添付を削除",
     "uploading": "アップロード中",
-    "download": "ダウンロード"
+    "download": "ダウンロード",
+    "preview": "プレビュー",
+    "previewFailed": "{{name}} をプレビューできません",
+    "saving": "保存中…"
   },
   "common": {
     "me": "自分",

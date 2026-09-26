@@ -166,11 +166,20 @@ fn main() {
     }
     // ONNX runtime (platform-specific).
     if cfg!(windows) {
-        println!("cargo:rerun-if-changed={}", target_dir.join("onnxruntime.dll").display());
+        println!(
+            "cargo:rerun-if-changed={}",
+            target_dir.join("onnxruntime.dll").display()
+        );
     } else if cfg!(target_os = "macos") {
-        println!("cargo:rerun-if-changed={}", target_dir.join("libonnxruntime.dylib").display());
+        println!(
+            "cargo:rerun-if-changed={}",
+            target_dir.join("libonnxruntime.dylib").display()
+        );
     } else {
-        println!("cargo:rerun-if-changed={}", target_dir.join("libonnxruntime.so").display());
+        println!(
+            "cargo:rerun-if-changed={}",
+            target_dir.join("libonnxruntime.so").display()
+        );
     }
     // LSP config file.
     let lsp_config_path = workspace_root.join("assets").join("lsp_servers.json");

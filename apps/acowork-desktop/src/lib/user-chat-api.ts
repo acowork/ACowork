@@ -9,10 +9,18 @@
  * Every route below exists only under `AUTH_MODE=multi_user`
  * (ADR-076 §决策 12); under `local` the view that uses them is never
  * mounted.
+ *
+ * One exception to the plain-`fetch` rule: attachment *downloads* go
+ * through the Rust command in `downloadChatAttachment` (the account
+ * token comes from the Desktop's mirrored `GatewayAuth`, not this
+ * module). See that function for why.
  */
 
 import { readError } from "./auth-api";
 import { getGatewayUrl } from "./config";
+import { isTextReadablePath } from "./monacoLanguage";
+import { Channel, invoke } from "@tauri-apps/api/core";
+import { save as showSaveDialog } from "@tauri-apps/plugin-dialog";
 import type {
   ChatAttachment,
   UserChatMessage,
@@ -128,17 +136,92 @@ export function attachmentObjectUrl(
   return url;
 }
 
-/** Save an attachment to disk through the browser's download path. */
+/** Download an attachment to disk: OS save dialog, then the transfer.
+ *
+ *  The transfer happens in Rust (`download_attachment`), not here — the
+ *  bytes must never travel over the Tauri IPC as an `invoke` argument,
+ *  because a named `Uint8Array` is serialized into a JSON array of
+ *  decimal numbers. That froze the WebView main thread for seconds on a
+ *  multi-MB attachment and left the `invoke` promise unsettled (the
+ *  button spun forever). Only the URL and the chosen path cross the
+ *  bridge; Rust fetches with the account token and writes the file.
+ *
+ *  Returns `false` when the user cancelled the dialog (not an error).
+ *
+ *  `onProgress` receives the byte count already written to disk, pushed
+ *  from Rust over an IPC channel — the total comes from
+ *  `attachment.size`, so no extra round trip is needed for a bar. */
 export async function downloadChatAttachment(
   userId: string,
   chatId: string,
   attachment: ChatAttachment,
-): Promise<void> {
-  const url = await attachmentObjectUrl(userId, chatId, attachment.id);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = attachment.filename;
-  a.click();
+  onProgress?: (received: number) => void,
+): Promise<boolean> {
+  const picked = await showSaveDialog({
+    defaultPath: attachment.filename,
+    filters: [{ name: attachment.filename, extensions: [extensionOf(attachment.filename)] }],
+  });
+  if (!picked) return false;
+  const progress = new Channel<number>();
+  if (onProgress) progress.onmessage = onProgress;
+  await invoke("download_attachment", {
+    url: `${base(userId, chatId)}/files/${encodeURIComponent(attachment.id)}`,
+    path: picked,
+    onProgress: progress,
+  });
+  return true;
+}
+
+/** Extension without the dot, lowercased — used to seed the save
+ *  dialog's filter so the picker preselects the right file type. */
+function extensionOf(filename: string): string {
+  const dot = filename.lastIndexOf(".");
+  return dot >= 0 ? filename.slice(dot + 1).toLowerCase() : "";
+}
+
+/**
+ * Largest attachment we will load into Monaco for an in-app preview.
+ *
+ * A preview puts the whole body in a JS string and hands it to Monaco to
+ * tokenize on the main thread, so unlike the download path this is *not*
+ * size-independent. 8 MiB covers source files, configs and most logs while
+ * staying well inside the "no visible freeze" range; anything larger keeps
+ * the download-only affordance.
+ */
+export const PREVIEW_MAX_BYTES = 8 * 1024 * 1024;
+
+/**
+ * Whether an attachment can be previewed in-app (Monaco tab) instead of
+ * only downloaded: a text-readable extension within `PREVIEW_MAX_BYTES`.
+ *
+ * `size` is the upload-time metadata, so a file whose record is wrong may
+ * still be refused (or accepted) on the boundary — harmless either way,
+ * the preview just has to survive what it is given.
+ */
+export function canPreviewAttachment(attachment: ChatAttachment): boolean {
+  return attachment.size <= PREVIEW_MAX_BYTES && isTextReadablePath(attachment.filename);
+}
+
+/**
+ * Fetch one attachment as text, for the read-only preview tab.
+ *
+ * Goes through the same global fetch interceptor as every other call in
+ * this module (the bearer token is attached there), not through
+ * `attachmentObjectUrl` — that helper exists for `<img>` and its entries
+ * are never revoked, which is the wrong trade for a one-shot text read.
+ *
+ * The body is *not* size-checked here: callers gate on
+ * [`canPreviewAttachment`], and a caller that skips that gate gets whatever
+ * the Gateway serves.
+ */
+export async function fetchAttachmentText(
+  userId: string,
+  chatId: string,
+  attachment: ChatAttachment,
+): Promise<string> {
+  const resp = await fetch(`${base(userId, chatId)}/files/${encodeURIComponent(attachment.id)}`);
+  if (!resp.ok) throw new Error(await readError(resp));
+  return resp.text();
 }
 
 /** Human-readable size, matching how the file pickers show one. */

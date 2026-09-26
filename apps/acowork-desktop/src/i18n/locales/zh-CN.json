@@ -186,7 +186,10 @@
     "attach": "添加附件",
     "removeAttachment": "移除附件",
     "uploading": "上传中",
-    "download": "下载"
+    "download": "下载",
+    "preview": "预览",
+    "previewFailed": "无法预览 {{name}}",
+    "saving": "保存中…"
   },
   "common": {
     "me": "我",

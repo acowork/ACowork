@@ -89,7 +89,10 @@
     "attach": "Attach a file",
     "removeAttachment": "Remove attachment",
     "uploading": "Uploading",
-    "download": "Download"
+    "download": "Download",
+    "preview": "Preview",
+    "previewFailed": "Could not preview {{name}}",
+    "saving": "Saving…"
   },
   "common": {
     "me": "Me",

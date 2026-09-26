@@ -214,6 +214,27 @@ function logFile(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function attachmentFile(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "attachment:u1:chat1:att1",
+    // Inbox attachments have no workspace behind them — empty ids are what
+    // keep the panel's file-only gates from firing at a non-existent agent.
+    agentId: "",
+    workspaceId: "",
+    relPath: "attachment:chat1/att1/report.ts",
+    fileName: "report.ts",
+    content: "export const x = 1;\n",
+    originalContent: "export const x = 1;\n",
+    loading: false,
+    saving: false,
+    language: "typescript",
+    dirty: false,
+    mode: "edit",
+    kind: "attachment",
+    ...overrides,
+  };
+}
+
 beforeEach(() => {
   h.editorState.openFiles = [];
   h.editorState.activeFileId = null;
@@ -266,6 +287,55 @@ describe("FileEditorPanel virtual git tabs (ADR-078 decision 7)", () => {
     };
     expect(props.options?.renderSideBySide).toBe(true);
     await act(async => {});
+  });
+
+  it("renders a read-only Editor for an inbox attachment preview tab", async () => {
+    // Inbox chat attachments are Gateway-owned blobs, not workspace files:
+    // the tab must render read-only Monaco (never a DiffEditor, never the
+    // editable file branch) so the panel's `kind === "file"` save/refresh
+    // /LSP gates stay out of the way.
+    const file = attachmentFile();
+    h.editorState.openFiles = [file];
+    h.editorState.activeFileId = file.id;
+
+    render(<FileEditorPanel width={800} />);
+
+    await vi.waitFor(() => {
+      expect(h.MockEditor).toHaveBeenCalled();
+    });
+    const props = h.MockEditor.mock.calls.at(-1)![0] as {
+      value?: string;
+      language?: string;
+      onChange?: unknown;
+      options?: { readOnly?: boolean; lineNumbers?: string; wordWrap?: string };
+    };
+    expect(props.value).toBe("export const x = 1;\n");
+    expect(props.language).toBe("typescript");
+    expect(props.options?.readOnly).toBe(true);
+    // Code keeps its line numbers and no wrapping; only plaintext wraps.
+    expect(props.options?.lineNumbers).toBe("on");
+    expect(props.options?.wordWrap).toBe("off");
+    // No edit wiring: a read-only tab that reported changes would trip the
+    // store's dirty/save path with no workspace to save into.
+    expect(h.MockDiffEditor).not.toHaveBeenCalled();
+    await act(async () => {}); // flush the async initMonaco state update
+  });
+
+  it("wraps plaintext attachment previews instead of scrolling sideways", async () => {
+    const file = attachmentFile({ language: "plaintext", fileName: "notes.txt" });
+    h.editorState.openFiles = [file];
+    h.editorState.activeFileId = file.id;
+
+    render(<FileEditorPanel width={800} />);
+
+    await vi.waitFor(() => {
+      expect(h.MockEditor).toHaveBeenCalled();
+    });
+    const props = h.MockEditor.mock.calls.at(-1)![0] as {
+      options?: { wordWrap?: string };
+    };
+    expect(props.options?.wordWrap).toBe("on");
+    await act(async () => {}); // flush the async initMonaco state update
   });
 
   it("renders a read-only single-pane Editor for a log tab", async () => {

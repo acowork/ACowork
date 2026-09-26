@@ -109,7 +109,13 @@ futures-util = "0.3"
 
 # Stream
 futures-core = "0.3"
-tokio-stream = "0.1"
+tokio-stream = { version = "0.1", features = ["io-util"] }
+# `ReaderStream` / `StreamReader` for streaming `AsyncRead` blobs straight
+# into axum's `Body::from_stream` (e.g. user-chat attachment download).
+# We only need the `io` feature, which exposes `tokio_util::io::ReaderStream`;
+# `io-util` would also work but pulls in `tokio/rt`. `tokio-stream`'s own
+# lib.rs explicitly defers these adapters to `tokio-util`.
+tokio-util = { version = "0.7", default-features = false, features = ["io"] }
 tokio-tungstenite = "0.29"
 
 # Regex

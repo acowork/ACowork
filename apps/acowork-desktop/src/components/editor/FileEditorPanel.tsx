@@ -1716,6 +1716,33 @@ export function FileEditorPanel({ width }: { width: number }) {
                             button doesn't need the Monaco editor. */}
                         <GitVirtualNav file={activeFile} diffEditor={null} />
                     </>
+                ) : activeFile.kind === "attachment" ? (
+                    // Inbox chat attachment (ADR-076) — the body was fetched
+                    // from the chat blob route by the caller and lives only in
+                    // this tab. Strictly read-only: it is someone else's sent
+                    // file, there is no workspace to write it back to, and
+                    // `handleEditorChange` ignores edits for any non-"file"
+                    // kind, so leaving the editor editable would silently
+                    // swallow typing. Line numbers on and word wrap only for
+                    // extensionless plain text (logs, csv) — same look as a
+                    // workspace file otherwise.
+                    <Editor
+                        path={activeFile.relPath}
+                        value={activeFile.content}
+                        language={activeFile.language}
+                        theme={resolvedMonacoTheme}
+                        keepCurrentModel={false}
+                        options={{
+                            minimap: { enabled: false },
+                            fontSize: editorFontSize,
+                            lineNumbers: "on",
+                            scrollBeyondLastLine: false,
+                            readOnly: true,
+                            wordWrap: activeFile.language === "plaintext" ? "on" : "off",
+                            automaticLayout: true,
+                            padding: { top: 8 },
+                        }}
+                    />
                 ) : activeFile.mode === "preview" && activeFile.mimeType?.startsWith("image/") ? (
                     // SVG preview branch. Raster images (png/jpg/gif/webp) never
                     // reach here because `canPreview` in the tab context menu only

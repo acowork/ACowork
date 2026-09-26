@@ -186,7 +186,10 @@
     "attach": "파일 첨부",
     "removeAttachment": "첨부 삭제",
     "uploading": "업로드 중",
-    "download": "다운로드"
+    "download": "다운로드",
+    "preview": "미리보기",
+    "previewFailed": "{{name}}을(를) 미리 볼 수 없습니다",
+    "saving": "저장 중…"
   },
   "common": {
     "me": "나",

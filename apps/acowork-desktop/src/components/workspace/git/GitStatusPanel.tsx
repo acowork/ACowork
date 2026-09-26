@@ -27,6 +27,7 @@ import {
   useGitStore,
 } from "../../../stores/gitStore";
 import { useFileEditorStore } from "../../../stores/fileEditorStore";
+import { languageForPath } from "../../../lib/monacoLanguage";
 import { useTranslation } from "../../../i18n/useTranslation";
 import { useContextMenu, ContextMenu } from "../../common/ContextMenu";
 import { ConfirmDialog } from "../../common/ConfirmDialog";
@@ -55,42 +56,6 @@ const PAGINATION_BUTTON_CLASS =
 interface GitStatusPanelProps {
   agentId: string;
   workspaceId: string;
-}
-
-/** Loose extension → Monaco language mapping for virtual diff/log tabs. */
-function languageForPath(path: string): string {
-  const ext = path.split(".").pop()?.toLowerCase() ?? "";
-  const map: Record<string, string> = {
-    ts: "typescript",
-    tsx: "typescript",
-    js: "javascript",
-    jsx: "javascript",
-    json: "json",
-    md: "markdown",
-    rs: "rust",
-    py: "python",
-    go: "go",
-    java: "java",
-    c: "c",
-    h: "c",
-    cpp: "cpp",
-    hpp: "cpp",
-    css: "css",
-    scss: "scss",
-    less: "less",
-    html: "html",
-    htm: "html",
-    xml: "xml",
-    yaml: "yaml",
-    yml: "yaml",
-    sh: "shell",
-    bash: "shell",
-    zsh: "shell",
-    toml: "ini",
-    ini: "ini",
-    sql: "sql",
-  };
-  return map[ext] ?? "plaintext";
 }
 
 function statusMeta(c: GitChangeDto): { icon: React.ReactNode; color: string; labelKey: string } {

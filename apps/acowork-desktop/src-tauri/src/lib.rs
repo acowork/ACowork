@@ -686,6 +686,13 @@ pub fn run() {
             // Desktop App and Gateway share a machine (local mode); the
             // frontend hides the corresponding menu item in remote mode.
             commands::reveal::reveal_in_file_explorer,
+            // Inbox attachment download — see commands::save_attachment.
+            // Tauri's WebView doesn't honor Content-Disposition / <a
+            // download>, so the frontend shows the OS save dialog and
+            // hands this command the attachment URL plus that path; Rust
+            // performs the transfer (never the webview — see the module
+            // docs for why bytes must not travel over IPC).
+            commands::save_attachment::download_attachment,
             // OS clipboard file-path fallback for paste/upload. Returns
             // the absolute paths of any files on the clipboard so the
             // chat panel can upload files copied from the OS file manager

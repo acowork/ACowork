@@ -289,6 +289,12 @@ fn attachment_path(dir: &Path, id: &str) -> PathBuf {
     files_dir(dir).join(id)
 }
 
+/// `pub` so the download handler can stream the blob straight from disk
+/// without round-tripping the bytes through the metadata reader.
+pub fn attachment_blob_path(dir: &Path, id: &str) -> PathBuf {
+    attachment_path(dir, id)
+}
+
 fn attachment_meta_path(dir: &Path, id: &str) -> PathBuf {
     files_dir(dir).join(format!("{id}.json"))
 }
@@ -470,6 +476,33 @@ pub fn load_attachment(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(format!("{}: {e}", blob.display())),
     }
+}
+
+/// Read attachment metadata without loading the blob, returning the on-disk
+/// path so the caller can stream the bytes through `tokio::fs::File`. The
+/// download handler prefers this over `load_attachment` so a 100 MiB
+/// attachment doesn't pin 100 MiB in the request worker until the response
+/// body is built — the whole point of streaming is to let the kernel move
+/// data socket → socket without us holding it. Returns the same 404-vs-422
+/// shape as `load_attachment`.
+pub fn load_attachment_meta(
+    data_dir: &Path,
+    chat_id: &str,
+    id: &str,
+) -> Result<Option<(Attachment, PathBuf)>, String> {
+    let dir = dir_for(data_dir, chat_id).ok_or_else(|| "invalid chat_id".to_string())?;
+    if uuid::Uuid::parse_str(id).is_err() {
+        return Ok(None);
+    }
+    let meta = attachment_meta_path(&dir, id);
+    let raw = match fs::read_to_string(&meta) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("{}: {e}", meta.display())),
+    };
+    let attachment: Attachment =
+        serde_json::from_str(&raw).map_err(|e| format!("{}: {e}", meta.display()))?;
+    Ok(Some((attachment, attachment_blob_path(&dir, id))))
 }
 
 /// Whether `id` addresses an attachment of this conversation.

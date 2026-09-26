@@ -64,6 +64,12 @@ rumqttd.workspace = true
 prost.workspace = true
 sha2.workspace = true
 tokio-stream.workspace = true
+# `tokio_util::io::ReaderStream` streams a `tokio::fs::File` straight into
+# `axum::body::Body::from_stream` for the user-chat attachment download
+# route (`chat_api::download_attachment`). Lives in `tokio-util` rather
+# than `tokio-stream`; tokio-stream's own lib.rs explicitly defers to
+# tokio-util for `AsyncRead` ↔ `Stream` adapters.
+tokio-util.workspace = true
 ignore.workspace = true
 regex.workspace = true
 # Cross-platform async IP/interface change watcher (NotifyAddrChange on
