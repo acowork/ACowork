@@ -1,13 +1,14 @@
 /**
- * Self-check for the ADR-076 §决策 6 invite affordance:
+ * Self-check for the click-on-row → openChat wiring that ships user↔user
+ * inbox threading straight from the sidebar group (no separate "Messages"
+ * view).
  *
- * The Gateway allows a logged-in non-admin to create accounts only while
- * `[multi_user].registration_open` is on (and hardcodes the created role to
- * `user`). The sidebar must mirror that exactly — showing the "+" to a
- * non-admin when registration is closed would offer a button that answers 403.
- *
- * Also covers the click-on-row → openChat wiring that ships user↔user inbox
- * threading straight from the sidebar group (no separate "Messages" view).
+ * The ADR-076 §决策 6 invite affordance used to live on a banner "+" inside
+ * UserList; it now lives in the agent-list bottom "+" menu (`canInviteUser`
+ * in [AgentList.tsx](../agent-list/AgentList.tsx)), which mirrors this file's
+ * old `canInvite` rule. The visibility tests are gone from here because the
+ * DOM node they asserted against was removed; the gating logic itself is
+ * unchanged.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, act, fireEvent } from "@testing-library/react";
@@ -59,30 +60,6 @@ describe("UserList invite affordance (ADR-076 §决策 6)", () => {
       })),
     );
     useAuthStore.setState({ mode: "unknown", status: "unknown", account: null });
-  });
-
-  it("shows the create button to a non-admin while registration is open", async () => {
-    signIn("user", true);
-    await act(async () => {
-      render(<UserList />);
-    });
-    expect(screen.getByTestId("user-create-button")).toBeTruthy();
-  });
-
-  it("hides it from a non-admin while registration is closed", async () => {
-    signIn("user", false);
-    await act(async () => {
-      render(<UserList />);
-    });
-    expect(screen.queryByTestId("user-create-button")).toBeNull();
-  });
-
-  it("always shows it to an admin", async () => {
-    signIn("admin", false);
-    await act(async () => {
-      render(<UserList />);
-    });
-    expect(screen.getByTestId("user-create-button")).toBeTruthy();
   });
 
   it("clicking another user's row opens an inbox thread (self row is inert)", async () => {

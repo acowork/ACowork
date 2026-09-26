@@ -19,7 +19,8 @@ import { isProcessing, instanceIdOf, type AgentInfo, type CloneResponse, type No
 import { startAgentAndSyncUI } from "../../lib/agent-start";
 import { fetchNodes } from "../../lib/gateway-api";
 import { partitionAgentsByNode, nodeDisplayName } from "./partitionAgentsByNode";
-import { UserList } from "../user-list/UserList";
+import { UserList, type UserListHandle } from "../user-list/UserList";
+import { useAuthStore } from "../../stores/authStore";
 import {
   ContextMenu,
   useContextMenu,
@@ -95,11 +96,21 @@ export function AgentList({ width }: AgentListProps) {
   const agentMenu = useContextMenu<{ agentId: string }>();
   const [installing, setInstalling] = useState(false);
   const addMenuRef = useRef<HTMLDivElement>(null);
+  // Imported for the agent + button → "Create account" menu item. The actual
+  // CreateAccountModal stays inside <UserList>; this ref opens it.
+  const userListRef = useRef<UserListHandle>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [addMenuOpen, setAddMenuOpen] = useState(false);
   // ADR-055 §6.13.3: when installing with >1 online node, the add-menu
   // switches to a node picker (`NodeInfo[]`); `null` = default menu.
   const [installNodes, setInstallNodes] = useState<NodeInfo[] | null>(null);
+
+  // "Create account" menu item gate. Mirrors the same canInvite logic used
+  // by the old user-list banner "+" (see ADR-076 §决策 6): admins always,
+  // non-admins only while self-registration is open.
+  const selfAccount = useAuthStore((s) => s.account);
+  const registrationOpen = useAuthStore((s) => s.registrationOpen);
+  const canInviteUser = selfAccount?.role === "admin" || registrationOpen;
 
   // Track agents currently waiting for the Runtime to become ready.
   // Reading this Set is the dedup gate for `handleStart` — see guard there.
@@ -708,7 +719,7 @@ export function AgentList({ width }: AgentListProps) {
           )}
 
         {/* ADR-076 §决策 7: account group, below the agent groups. */}
-        <UserList />
+        <UserList ref={userListRef} />
       </div>
 
       <div ref={addMenuRef} className="relative p-1.5">
@@ -778,6 +789,19 @@ export function AgentList({ width }: AgentListProps) {
                   <Plus className="h-3.5 w-3.5" />
                   {t("agentList.installAgent")}
                 </button>
+                {canInviteUser && (
+                  <button
+                    onClick={() => {
+                      setAddMenuOpen(false);
+                      userListRef.current?.openCreate();
+                    }}
+                    data-testid="add-menu-create-user"
+                    className="flex w-full items-center gap-2 border-t border-border-divider px-3 py-1.5 text-xs text-text-secondary transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-700/50"
+                  >
+                    <Plus className="h-3.5 w-3.5" />
+                    {t("account.createAccount")}
+                  </button>
+                )}
               </>
             )}
           </div>

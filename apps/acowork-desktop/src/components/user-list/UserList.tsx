@@ -20,8 +20,8 @@
  * groups feel like one list.
  */
 
-import { useCallback, useEffect, useState, type MouseEvent } from "react";
-import { ChevronRight, Eye, KeyRound, MessageSquare, Plus, ShieldCheck, ShieldOff, UserX, X } from "lucide-react";
+import { useCallback, useEffect, useState, type MouseEvent, forwardRef, useImperativeHandle } from "react";
+import { ChevronRight, Eye, KeyRound, MessageSquare, ShieldCheck, ShieldOff, UserX, X } from "lucide-react";
 import { useAuthStore } from "../../stores/authStore";
 import { useUserChatStore } from "../../stores/userChatStore";
 import { useAgentStore } from "../../stores/agentStore";
@@ -49,7 +49,12 @@ import { CreateAccountModal } from "../account/CreateAccountModal";
 import { InviteTokenModal } from "../account/InviteTokenModal";
 import { partitionAccounts } from "./partitionAccounts";
 
-export function UserList() {
+export type UserListHandle = {
+  /** Open the Create-Account modal (invoked from the agent-list sidebar "+"). */
+  openCreate: () => void;
+};
+
+export const UserList = forwardRef<UserListHandle>(function UserList(_props, ref) {
   const { t } = useTranslation();
   const mode = useAuthStore((s) => s.mode);
   const status = useAuthStore((s) => s.status);
@@ -58,6 +63,10 @@ export function UserList() {
   const viewAsUserId = useAuthStore((s) => s.viewAsUserId);
   const registrationOpen = useAuthStore((s) => s.registrationOpen);
 
+  // The agent-list sidebar "+" owns the single create-menu entry point.
+  // It calls into here via the imperative ref opened at the bottom of the
+  // file (`UserListHandle.openCreate`) so the modal + invite flow stays
+  // colocated with the rest of the user state.
   const [collapsed, setCollapsed] = useState(true);
   const [accounts, setAccounts] = useState<UserAccount[]>([]);
   const [loadFailed, setLoadFailed] = useState(false);
@@ -73,6 +82,19 @@ export function UserList() {
   // §决策 6: a non-admin may create accounts only while self-registration is
   // open (the Gateway hardcodes the created role to `user`). Admins always may.
   const canInvite = isAdmin || registrationOpen;
+
+  // Sidebar "+" → "Create account" → forward into this modal. Same
+  // `canInvite` gate as the (removed) banner button so non-admins with
+  // closed registration can't bypass it via the agent-list menu.
+  useImperativeHandle(
+    ref,
+    () => ({
+      openCreate: () => {
+        if (canInvite) setCreateOpen(true);
+      },
+    }),
+    [canInvite],
+  );
 
   const reload = useCallback(async () => {
     const token = useAuthStore.getState().accessToken;
@@ -243,18 +265,6 @@ export function UserList() {
           <span className="truncate">{t("userList.title")}</span>
           <span className="ml-auto text-[10px] font-normal opacity-60">{rows.length}</span>
         </button>
-        {canInvite && (
-          <button
-            type="button"
-            onClick={() => setCreateOpen(true)}
-            aria-label={t("account.createAccount")}
-            title={t("account.createAccount")}
-            data-testid="user-create-button"
-            className="mr-2 flex h-5 w-5 shrink-0 items-center justify-center rounded text-text-tertiary hover:bg-nav-item-hover"
-          >
-            <Plus className="h-3.5 w-3.5" />
-          </button>
-        )}
       </div>
 
       {!collapsed && (
@@ -347,7 +357,7 @@ export function UserList() {
       />
     </div>
   );
-}
+});
 
 /** Project a non-admin directory entry into the `UserAccount` shape so the
  *  row + `partitionAccounts` rendering path stays shared with admin. See the
