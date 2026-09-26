@@ -95,7 +95,7 @@ export function InboxPanel() {
 
   return (
     <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
-      <header className="flex h-9 shrink-0 items-center px-4 text-xs font-semibold text-text-secondary">
+      <header className="flex h-9 shrink-0 items-center border-b border-border-divider px-4 text-xs font-semibold text-text-secondary">
         <span className="truncate">{activeLabel}</span>
       </header>
 
