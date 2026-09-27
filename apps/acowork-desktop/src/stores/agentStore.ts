@@ -240,6 +240,12 @@ interface AgentStoreState {
   nodes: NodeInfo[];
   /** Global UI state: whether the SessionPanel dropdown is open. (display-only, cleared on agent switch) */
   isSessionPanelOpen: boolean;
+  /** Agents whose `start_agent` round-trip is currently in flight.
+   *  Drives both the ChatPanel Play button spinner and the AgentList
+   *  "starting…" badge, and acts as the dedup gate inside `tryStartAgent`
+   *  so a rapid second click (button mash / right-click + big button /
+   *  double-click) never reaches the backend "already running" branch. */
+  startingAgentIds: Set<string>;
 
   // ── Agent meta actions ──
 
@@ -264,6 +270,21 @@ interface AgentStoreState {
   getAgentDetail: (agentId: string) => Promise<AgentDetail>;
   /** Poll fetchAgents until agent.ready === true (max 30×500ms = 15s). */
   waitForAgentReady: (agentId: string) => Promise<void>;
+  /** Atomic dedup gate around `startAgent` + session init + UI sync.
+   *  Rejects with `false` when the same agent is already starting — so
+   *  a button mash inside the 1-3s MQTT-online window neither reaches
+   *  the backend's "already running" branch nor stacks two
+   *  `startAgentAndSyncUI` calls. Resolves with `true` on success.
+   *  `run` (optional) chains extra work that should be covered by the
+   *  same in-flight gate — AgentList chains the full
+   *  `startAgentAndSyncUI` orchestrator so its "starting…" badge
+   *  stays on through session init, ChatPanel just runs `startAgent`.
+   *  ponytail: Set membership is O(1); if start-button fan-out grows
+   *  past ~hundreds of agents, swap for a per-agent AbortController. */
+  tryStartAgent: (
+    agentId: string,
+    opts?: { devMode?: boolean; run?: (agentId: string) => Promise<void> },
+  ) => Promise<boolean>;
 
   // ── Session actions (write to agents[agentId].*) ──
 
@@ -347,6 +368,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
   error: null,
   nodes: [],
   isSessionPanelOpen: false,
+  startingAgentIds: new Set<string>(),
 
   // ════════════════════════════════════════════════════════════════════════
   // Agent meta actions
@@ -729,6 +751,34 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       await new Promise((resolve) => setTimeout(resolve, 500));
     }
     throw new Error("Agent did not become ready within 15 seconds");
+  },
+
+  tryStartAgent: async (agentId, opts) => {
+    const devMode = opts?.devMode ?? false;
+    const run = opts?.run;
+    // Dedup gate: a second click within the 1-3s MQTT-online window
+    // would otherwise reach the backend's "already running" branch and
+    // surface as a misleading error toast — the Gateway already returns
+    // 200 idempotently for consistent state, but the prior UX was poor
+    // because the in-flight start had not yet flipped `alive`. Returning
+    // false here lets callers silently no-op a button mash.
+    if (get().startingAgentIds.has(agentId)) return false;
+    set((state) => {
+      const next = new Set(state.startingAgentIds);
+      next.add(agentId);
+      return { startingAgentIds: next };
+    });
+    try {
+      await get().startAgent(agentId, devMode);
+      if (run) await run(agentId);
+      return true;
+    } finally {
+      set((state) => {
+        const next = new Set(state.startingAgentIds);
+        next.delete(agentId);
+        return { startingAgentIds: next };
+      });
+    }
   },
 
   // ════════════════════════════════════════════════════════════════════════
@@ -1204,7 +1254,11 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
     ++fetchSessionReqId;
     // Only reset display state — per-agent storage is indexed by agentId and
     // switching agents must NOT clear it (that would cause sidebar flicker).
-    set({ isSessionPanelOpen: false });
+    // `startingAgentIds` is also display-only (it is the dedup gate; the
+    // store entry resolves once the in-flight `startAgent` settles, so a
+    // missed cleanup there would self-clear in the finally block of
+    // `tryStartAgent` regardless).
+    set({ isSessionPanelOpen: false, startingAgentIds: new Set<string>() });
   },
 }));
 

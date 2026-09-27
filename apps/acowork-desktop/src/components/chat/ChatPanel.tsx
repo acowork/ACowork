@@ -383,6 +383,14 @@ export function ChatPanel() {
   const { addToast } = useToast();
   const { selectedAgentId } = useAgentStore();
   const selectedAgent = useAgentStore((s) => selectedAgentId ? s.agents[selectedAgentId]?.meta : undefined);
+  // Ponytail bug-fix (2026-09): button mash inside the 1-3s MQTT-online
+  // window previously hit the Gateway "already running" branch and
+  // surfaced a misleading error toast. The store's `startingAgentIds`
+  // is the dedup gate; reading it reactively keeps the Play button in
+  // a disabled spinner state until the start round-trip settles.
+  const isStarting = useAgentStore((s) =>
+    selectedAgentId ? s.startingAgentIds.has(selectedAgentId) : false,
+  );
 
   // ── Chat-top scroll shadow ─────────────────────────────────────
   // Monaco-style edge shadow (see CHAT_TOP_SHADOW_THRESHOLD_PX above).
@@ -2016,12 +2024,20 @@ export function ChatPanel() {
         <div className="text-center">
           <Tooltip content={t("chatPanel.startAgent")} variant="plain">
             <button
+              disabled={isStarting}
               onClick={async () => {
                 // ADR-073: start is instance-scoped — use the instance key,
                 // not the package `agent_id` (ambiguous in multi-instance).
                 if (!selectedAgentId) return;
+                // tryStartAgent is the dedup gate: a second click inside the
+                // 1-3s MQTT-online window returns false silently instead of
+                // hitting the backend "already running" branch. The full
+                // orchestrator runs inside the in-flight window so the
+                // spinner stays on through session init.
                 try {
-                  await startAgentAndSyncUI(selectedAgentId);
+                  await useAgentStore.getState().tryStartAgent(selectedAgentId, {
+                    run: (id) => startAgentAndSyncUI(id),
+                  });
                 } catch (e) {
                   // Start failure must surface to the user, not leak as an
                   // unhandled rejection (2026-09-14: waitForAgentReady
@@ -2037,9 +2053,19 @@ export function ChatPanel() {
                   });
                 }
               }}
-              className="mx-auto flex h-20 w-20 items-center justify-center rounded-full btn-solid"
+              className={cn(
+                "mx-auto flex h-20 w-20 items-center justify-center rounded-full btn-solid",
+                isStarting && "cursor-wait opacity-70",
+              )}
             >
-              <Play className="h-8 w-8" />
+              {isStarting ? (
+                <span
+                  aria-label={t("chatPanel.startAgent")}
+                  className="h-8 w-8 animate-spin rounded-full border-2 border-current border-t-transparent"
+                />
+              ) : (
+                <Play className="h-8 w-8" />
+              )}
             </button>
           </Tooltip>
           <p className="mt-3 text-xs text-text-tertiary ">{t("chatPanel.agentStopped", { name: agentDisplayName ?? "" })}</p>

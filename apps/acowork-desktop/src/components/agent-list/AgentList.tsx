@@ -112,9 +112,12 @@ export function AgentList({ width }: AgentListProps) {
   const registrationOpen = useAuthStore((s) => s.registrationOpen);
   const canInviteUser = selfAccount?.role === "admin" || registrationOpen;
 
-  // Track agents currently waiting for the Runtime to become ready.
-  // Reading this Set is the dedup gate for `handleStart` — see guard there.
-  const [startingAgentIds, setStartingAgentIds] = useState<Set<string>>(new Set());
+  // Read the shared in-flight set from the store so the sidebar's
+  // "starting…" badge and the ChatPanel Play button spinner see the
+  // same dedup gate — see `useAgentStore.tryStartAgent`. Reading the Set
+  // directly (not via a `has(id)` selector) keeps the row's other
+  // selector subscriptions untouched.
+  const startingAgentIds = useAgentStore((s) => s.startingAgentIds);
 
   // Confirm dialog state
   const [confirmDialog, setConfirmDialog] = useState<{
@@ -290,39 +293,32 @@ export function AgentList({ width }: AgentListProps) {
   };
 
   const handleStart = async (agentId: string) => {
-    // Dedup gate: prevent rapid double-fires (e.g. user double-clicks the list
-    // item, or double-clicks and then triggers Start from the context menu).
-    if (startingAgentIds.has(agentId)) return;
-    setStartingAgentIds((prev) => new Set(prev).add(agentId));
+    // tryStartAgent is the dedup gate — a second click inside the
+    // 1-3s MQTT-online window returns false silently instead of
+    // hitting the backend "already running" branch. The full
+    // orchestrator runs inside the in-flight window so the sidebar
+    // badge stays on through session init.
     try {
-      await startAgentAndSyncUI(agentId);
+      const started = await useAgentStore.getState().tryStartAgent(agentId, {
+        run: (id) => startAgentAndSyncUI(id),
+      });
+      if (!started) return;
       addToast({ type: "success", message: t("agentList.agentStarted") });
     } catch (e: any) {
       addToast({ type: "error", message: e?.message ?? String(e) });
-    } finally {
-      setStartingAgentIds((prev) => {
-        const next = new Set(prev);
-        next.delete(agentId);
-        return next;
-      });
     }
   };
 
   const handleDebugStart = async (agentId: string) => {
-    if (startingAgentIds.has(agentId)) return;
-    setStartingAgentIds((prev) => new Set(prev).add(agentId));
     try {
-      // ADR-033: MQTT replaces WebSocket; no need to clean up wsMap.
-      await startAgentAndSyncUI(agentId, true);
+      const started = await useAgentStore.getState().tryStartAgent(agentId, {
+        devMode: true,
+        run: (id) => startAgentAndSyncUI(id, true),
+      });
+      if (!started) return;
       addToast({ type: "success", message: t("agentList.agentStartedDebug") });
     } catch (e: any) {
       addToast({ type: "error", message: e?.message ?? String(e) });
-    } finally {
-      setStartingAgentIds((prev) => {
-        const next = new Set(prev);
-        next.delete(agentId);
-        return next;
-      });
     }
   };
 
