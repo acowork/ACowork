@@ -1,6 +1,6 @@
 # ADR-076: 多用户账号系统
 
-**状态**：草案（待评审）
+**状态**：草案（业务语义有效；**实现形态已由 [ADR-084](./ADR-084-user-standalone-process.md) 取代**）
 **日期**：2026-10-15
 **决策者**：大鱼
 
@@ -10,6 +10,21 @@
 - [ADR-055](./ADR-055-remote-runtime-node-topology.md)（Node 拓扑 — Node 拥有 `install_path`，session 数据物理上落在 Node；本 ADR 不打破这点，但 session 过滤维度从 agent_id 扩到 `(instance_id, user_id)`）
 - [ADR-073](./ADR-073-agent-instance-identity-decomposition.md)（agent instance / node / user 三层身份范式 — 本文把 user 提升为与 instance、node 同级别的身份维度）
 - [ADR-059](./ADR-059-parallel-onboarding-handshake.md)（Vault Argon2id + ChaCha20-Poly1305 KDF 链 — 本 ADR 复用同一 vault 的 master key 派生 per-user 加密条目，而非新建密码体系）
+
+> **取代说明（2026-10-20）**：本 ADR 的**业务语义与数据模型仍然有效**（账号模型、session 隔离、Desktop UI、部署模式分流等决策保留）。但本 ADR 落地的**实现形态——把账号 / 用户聊天内嵌在 Gateway 进程内**——已由 [ADR-084](./ADR-084-user-standalone-process.md) **取代**：用户域（账号、凭据、角色、档案 / 头像、用户↔用户聊天）迁出为独立进程 `acowork-user`，Gateway 仅保留反代 + 鉴权闸门。
+>
+> 受影响的是**代码归属**，逐条对照：
+>
+> - **§决策 8（用户-用户聊天，Gateway 侧 conversation.json / jsonl）** → 迁入 `acowork-user`（数据与语义不变）。
+> - **§决策 1 / 2（账号模型与凭据存储）** → 数据与语义不变，存储位置迁入 `acowork-user` 数据目录。
+> - **§决策 3（HTTP 认证）** → **签发**（login / refresh）迁入 `acowork-user`；**每请求校验**留在 Gateway，并改为 Ed25519 公钥本地验签（HS256 → EdDSA）。
+> - **§决策 5 / 6（管理员角色 / 账号生命周期）** → 迁入 `acowork-user`。
+> - **§决策 12（部署模式分流）** → 语义不变；`[multi_user]` 配置归属迁入 `acowork-user`。
+> - **§6.4（core/acowork-gateway 改动清单）** → 以 ADR-084 §6 为准（用户域代码迁出，Gateway 改为 supervisor + user_proxy）。
+>
+> **不受影响、仍然有效**：§决策 4（session 隔离）、§决策 7（Desktop UI）、§决策 10（PM / Doc 反代身份注入）、§决策 11（PM 成员模型），以及 [ADR-042](./ADR-042-mqtt-user-identity-delivery.md) 身份下发。
+>
+> 实施计划见 [docs/plan/zh/user-dev-plan.md](../../plan/zh/user-dev-plan.md)。
 
 ---
 
