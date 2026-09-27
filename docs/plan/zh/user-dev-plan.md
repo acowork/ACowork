@@ -105,6 +105,18 @@ graph TB
 
 **出口**：`cargo build -p acowork-user` 产 `acowork-user(.exe)`；`cargo test -p acowork-user` 绿；`acowork-user --port 18083` 独立启动，`/health` 200，登录/收发消息可用。
 
+> **实施备注（M1 已完成，出口已实测）**
+>
+> - **状态容器形状**（与计划第 2 点的笼统描述相比固化了）：`AppState { auth_service: Option<Arc<AuthService>>, shared: Arc<RwLock<SharedState>>, auth_mode }`，`SharedState { resource_cache, data_dir, registration_open }`。`auth_service: None` 即 `local` 模式（无账号系统），`require_auth_service()` 返回 503。`SharedState::new` 启动时从磁盘加载 `user_profiles.json`（原 Gateway 行为），`registration_open` 默认 `false`（对齐 Gateway `[multi_user]` 语义）。
+> - **`auth/issuer.rs` 不是薄封装，而是 `pub use acowork_core::auth::{TokenIssuer, TokenVerifier, ...}`**。M1 阶段账号系统仍在用户服务内，它就是签发方，没有可包装的逻辑；M2 迁出后 Gateway 侧降为 verifier-only（见 M0 备注同一理由）。
+> - **单一装配点** `crate::http::build_router(&AppState) -> Router<AppState>`：合并 user domain + `/health` + `inject_identity` 层。`server.rs`、`test_support.rs` 都走它，M5 的 `user_proxy` 目标也复用，避免路由顺序/层位置漂移。`health_route()` 因此**不需要参数**（`State<AppState>` 提取器自带），只声明 `Router<AppState>` 以参与 merge。
+> - **删除了两处 Gateway 遗留，M3 接回**：(a) `mqtt_publisher_trigger` 的 5 处全局资源重发布调用，改为 `// ADR-084 M3` 占位注释；(b) `operation_store` 写入块（Gateway 里 `GatewayState::new` 从未给它赋值，本就是死代码）。`OperationAck` 仍由本地 `OperationRecord` 构造，响应形状不变。
+> - **测试随代码迁移**：新增 `src/test_support.rs`，其中 `gateway_identity_shim` 复刻 Gateway 的 `auth_middleware`（验 Bearer → 注入 `X-Auth-*`，先无条件剥除客户端自报的 `X-Auth-*`；`as_user` 仅 GET/HEAD 且仅 admin）。它插在 `inject_identity` **之前**，因此 4 个测试模块约 94 处 `req(..., Some(&token))` / `build_router(state)` 调用点**逐字未改**，而覆盖的正是真实两段式路径。这是**有意重复实现**而非抽公共 helper：M3 的真身落地后无需再拆。
+> - **两处非计划内但必需的改动**：(a) 新增直接依赖 `rand_core = { version = "0.6", features = ["getrandom"] }` —— `argon2::password_hash::rand_core::OsRng` 被 feature 门控，在 Gateway 依赖图里被别的 crate 统一开启，独立二进制必须自己声明；没有任何新 crate 进入依赖图。(b) `[dev-dependencies]` 补 `tower`（`ServiceExt::oneshot`）与 `serde_json`，与 Gateway 同款。另为 `ApiError` 补了 `Display` / `std::error::Error`（`tracing::error!(error = %e)` 需要）。
+> - **实测出口**（隔离端口 18099 + 隔离 data-dir）：`admin-setup` 播种管理员并自动生成 `auth/ed25519.key`；`--port-file` 正确；`/health` 200 且 `details` 带 `requires_setup=false` / `registration_open=false`；登录返回 **`alg=EdDSA`**（M0 契约在线生效）；无身份 `/api/users` → **401**，注入身份 → **200**，`x-auth-role: user` → **403**；建账号 → 发消息 **201** → 对方 `GET /chats` 见 `unread_count: 1`。
+> - **验证**：`cargo build/clippy -p acowork-user --all-targets -- -D warnings` 干净；`cargo test -p acowork-user` **91/91 绿**；`cargo check --workspace --all-targets` 干净；`cargo test -p acowork-gateway` **596/597**，唯一失败的 `mqtt::dispatch::tests::enroll_handshake_end_to_end` 是既有 MQTT 时序 flake（单独跑通过），与本次改动无关。
+> - **遗留待办**：(a) CLI 顶层参数未设 `global = true`，所以 `acowork-user admin-setup --data-dir X` 会静默落到默认数据目录，必须写成 `acowork-user --data-dir X admin-setup`——M2 由 supervisor 下发参数时需确认拼法，或加 `global = true`。(b) `--mqtt-host/--mqtt-port` 已解析但 M3 才接线。(c) 冒烟测试确认了文档记录的信任边界：服务无身份也接受 `X-Auth-*`，因此只能绑 loopback。
+
 ### M2 — 拉起 + 反代｜1-2d
 
 **任务**

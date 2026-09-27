@@ -15,6 +15,7 @@ members = [
     "acowork-lsp-relay",
     "acowork-pm",
     "acowork-doc",
+    "acowork-user",
 ]
 resolver = "2"
 

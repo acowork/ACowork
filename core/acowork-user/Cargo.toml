@@ -1,0 +1,81 @@
+[package]
+name = "acowork-user"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+description = "Account / user-domain service — accounts, credentials, roles, profiles/avatars and user-to-user chat, extracted from the Gateway (ADR-084)"
+
+[lib]
+name = "acowork_user"
+path = "src/lib.rs"
+
+# ADR-084: standalone process binary (spawned/supervised by the Gateway,
+# same pattern as acowork-pm / acowork-doc).
+[[bin]]
+name = "acowork-user"
+path = "src/main.rs"
+
+[dependencies]
+acowork-core.workspace = true
+
+# Async runtime
+tokio.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Error handling
+thiserror.workspace = true
+
+# Logging
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["fmt", "env-filter"] }
+
+# HTTP server
+axum.workspace = true
+tower-http.workspace = true
+
+# Streaming chat attachments (AsyncRead -> Stream)
+tokio-util.workspace = true
+
+# Date/time + UUID
+chrono.workspace = true
+uuid.workspace = true
+
+# Credentials (Argon2id password hashing, ADR-076 §决策 2)
+argon2 = "0.5"
+# `argon2::password_hash::rand_core::OsRng` is feature-gated. Inside the
+# Gateway's dep graph `getrandom` is unified in by something else; a
+# standalone binary has to ask for it explicitly.
+rand_core = { version = "0.6", features = ["getrandom"] }
+sha2.workspace = true
+
+# Refresh-family minting
+rand.workspace = true
+
+# Profile-change signal (ADR-084 §决策 4b) — same MQTT bus as the Gateway.
+acowork-mqtt-session.workspace = true
+prost.workspace = true
+rumqttc.workspace = true
+
+# Gateway health watchdog (ADR-018) + internal snapshot pulls
+reqwest.workspace = true
+
+# Configuration
+toml.workspace = true
+
+# CLI (standalone process entry)
+clap.workspace = true
+
+# Zero the plaintext admin password as soon as it is hashed
+zeroize = "1"
+
+[dev-dependencies]
+tempfile.workspace = true
+# `ServiceExt::oneshot` — driving the ported router tests (Gateway dev-dep).
+tower = { workspace = true, features = ["util"] }
+serde_json.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
