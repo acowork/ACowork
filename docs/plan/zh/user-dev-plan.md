@@ -75,6 +75,10 @@ graph TB
 4. Gateway `auth/token.rs` 的**签发部分删除**，仅保留 `TokenVerifier` 用法（或整体改调 `acowork_core::auth`）。
 5. 平移并改写单测：签验往返 / 篡改拒绝 / 过期拒绝 / kind 校验 / family 一致性。
 
+> **实施备注（M0 已完成）**：`auth/token.rs` 改为对 `acowork_core::auth` 的 re-export shim，HS256 实现删除、`hmac` 依赖从 gateway `Cargo.toml` 移除。
+> 一处**有意偏离**上文第 4 点：M0 时账号系统仍在 Gateway 内，`login` / `refresh` 仍由它签发，因此 `AuthService` 暂持 `issuer` + `verifier` 两个字段（`verifier` 由 `issuer.verifier()` 派生）。若 M0 就删掉签发，登录会立即断、M0 出口条件不成立。**M1 迁出账号后** Gateway 才降为"只持 `TokenVerifier`、从 `ed25519.pub` 载入"。
+> 密钥落盘：私钥 `{data_dir}/auth/ed25519.key`（0600，原子写），公钥 `{data_dir}/auth/ed25519.pub`（每次载入时重写，自愈缺失/陈旧副本）。
+
 **出口**：`cargo test -p acowork-core` 绿；`cargo test -p acowork-gateway --lib` 中 token 相关测试绿；`grep -rn "HS256" core/` 仅剩历史注释。
 
 ### M1 — 建 crate + 迁入用户域代码｜2-3d

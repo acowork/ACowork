@@ -2,7 +2,8 @@
 //!
 //! - [`mode`] — deployment auth-mode resolution (`local` vs `multi_user`),
 //!   the first-class config that gates the entire ADR-076 account system.
-//! - [`token`] — HS256 login-token signing / verification.
+//! - [`token`] — shared Ed25519 login-token contract
+//!   (re-export of `acowork_core::auth`, ADR-084 §决策 3).
 //! - [`revoked`] — refresh-token family revocation registry.
 //! - [`service`] — the assembled account service (login / refresh /
 //!   logout / change-password), built only under `AUTH_MODE=multi_user`.

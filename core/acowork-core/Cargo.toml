@@ -24,6 +24,11 @@ tracing-subscriber.workspace = true
 tokio = { workspace = true, features = ["rt", "macros", "io-util", "sync", "process", "time"] }
 signal-hook.workspace = true
 libc.workspace = true
+# ADR-084 §决策 3: the shared login-token contract signs with Ed25519
+# (acowork-user) and verifies with the public key (Gateway).
+ed25519-dalek.workspace = true
+base64.workspace = true
+rand.workspace = true
 
 [build-dependencies]
 prost-build = { workspace = true }

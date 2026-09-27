@@ -2,13 +2,12 @@
 //!
 //! Ties together the pieces that only make sense as a whole at login time:
 //! the account store ([`crate::account::store`]), Argon2id verification
-//! ([`crate::account::password`]), HS256 token minting ([`super::token`])
+//! ([`crate::account::password`]), Ed25519 token minting ([`super::token`])
 //! and refresh-family revocation ([`super::revoked`]).
 //!
-//! The signing secret and the revocation registry are loaded once at boot
-//! and held here; the account list is read from disk per operation (it is
-//! the authority, and a stale in-memory copy would let a revoked account
-//! log in).
+//! The signing key and the revocation registry are loaded once at boot and
+//! held here; the account list is read from disk per operation (it is the
+//! authority, and a stale in-memory copy would let a revoked account log in).
 //!
 //! **Only constructed under `AUTH_MODE=multi_user`** (ADR-076 §决策 12) —
 //! in `local` mode nothing in this module runs and `accounts.json` is
@@ -24,7 +23,9 @@ use sha2::{Digest, Sha256};
 
 use crate::account::{password, store};
 use crate::auth::revoked::RevokedFamilies;
-use crate::auth::token::{ACCESS_TTL_SECS, Claims, TokenError, TokenKind, TokenSigner};
+use crate::auth::token::{
+    ACCESS_TTL_SECS, Claims, TokenError, TokenIssuer, TokenKind, TokenVerifier,
+};
 
 /// Invite-token lifetime (ADR-076 §决策 6: "一次性 invite_token（24h 过期）").
 pub const INVITE_TTL_SECS: i64 = 24 * 3600;
@@ -206,14 +207,20 @@ impl std::error::Error for AuthError {}
 /// The account system's runtime handle (ADR-076 §决策 3).
 pub struct AuthService {
     data_dir: PathBuf,
-    pub(crate) signer: TokenSigner,
+    /// Mints tokens. Lives here only until M1 moves the account system into
+    /// `acowork-user` (ADR-084 §决策 2) — after that the Gateway holds a
+    /// [`TokenVerifier`] and no private key.
+    issuer: TokenIssuer,
+    /// Verifies tokens (the per-request path). Kept as its own field so the
+    /// M1 switch is "drop `issuer`, load this from the public-key file".
+    verifier: TokenVerifier,
     revoked: Mutex<RevokedFamilies>,
     policy: PasswordPolicy,
     bootstrap_admin: Option<BootstrapAdmin>,
 }
 
 impl AuthService {
-    /// Build the service: load (or mint) the signing secret, load the
+    /// Build the service: load (or mint) the Ed25519 signing key, load the
     /// revocation registry. `accounts.json` is *not* touched here — see
     /// [`Self::ensure_bootstrap_admin`].
     pub fn new(
@@ -224,9 +231,12 @@ impl AuthService {
         let auth_dir = data_dir.join("auth");
         std::fs::create_dir_all(&auth_dir)
             .map_err(|e| format!("failed to create {}: {e}", auth_dir.display()))?;
+        let issuer = TokenIssuer::load_or_generate(&auth_dir.join("ed25519.key"))?;
+        let verifier = issuer.verifier();
         Ok(Self {
             data_dir: data_dir.to_path_buf(),
-            signer: TokenSigner::load_or_generate(&auth_dir.join("secret"))?,
+            issuer,
+            verifier,
             revoked: Mutex::new(RevokedFamilies::load(
                 &auth_dir.join("revoked_families.txt"),
             )),
@@ -325,7 +335,7 @@ impl AuthService {
     /// refreshed first cannot outlive the victim's next attempt.
     pub fn refresh(&self, refresh_token: &str, now: i64) -> Result<TokenPair, AuthError> {
         let claims = self
-            .signer
+            .verifier
             .verify_kind(refresh_token, TokenKind::Refresh, now)
             .map_err(AuthError::Token)?;
         let family = claims.family.clone().ok_or(AuthError::Revoked)?;
@@ -367,7 +377,7 @@ impl AuthService {
     /// is a no-op success, so logout never fails on a dead session.
     pub fn logout(&self, refresh_token: &str, now: i64) -> Result<(), AuthError> {
         match self
-            .signer
+            .verifier
             .verify_kind(refresh_token, TokenKind::Refresh, now)
         {
             Ok(claims) => {
@@ -440,7 +450,7 @@ impl AuthService {
     /// `user_id → revoked_at` set consulted here (no disk I/O).
     pub fn verify_access(&self, token: &str, now: i64) -> Result<AuthPrincipal, AuthError> {
         let claims: Claims = self
-            .signer
+            .verifier
             .verify_kind(token, TokenKind::Access, now)
             .map_err(AuthError::Token)?;
         Ok(AuthPrincipal {
@@ -453,8 +463,8 @@ impl AuthService {
     fn mint(&self, user_id: &str, role: Role, now: i64) -> TokenPair {
         let family = format!("{user_id}.{}", random_hex16());
         TokenPair {
-            access_token: self.signer.sign_access(user_id, role.as_str(), now),
-            refresh_token: self.signer.sign_refresh(user_id, &family, now),
+            access_token: self.issuer.sign_access(user_id, role.as_str(), now),
+            refresh_token: self.issuer.sign_refresh(user_id, &family, now),
             token_type: "Bearer",
             expires_in: ACCESS_TTL_SECS,
         }
@@ -1335,13 +1345,14 @@ mod tests {
     }
 
     #[test]
-    fn signing_secret_survives_a_restart() {
-        let dir = tmp_dir("secret-persist");
+    fn signing_key_survives_a_restart() {
+        let dir = tmp_dir("key-persist");
         let svc = AuthService::new(&dir, PasswordPolicy::default(), None).unwrap();
         let pair = svc.mint("u-1", Role::Admin, 1_000);
 
-        // A fresh service on the same data_dir reads the persisted secret,
-        // so a token minted before the restart still verifies.
+        // A fresh service on the same data_dir reads the persisted
+        // `auth/ed25519.key`, so a token minted before the restart still
+        // verifies.
         let restarted = AuthService::new(&dir, PasswordPolicy::default(), None).unwrap();
         let principal = restarted.verify_access(&pair.access_token, 1_001).unwrap();
         assert_eq!(principal.user_id, "u-1");

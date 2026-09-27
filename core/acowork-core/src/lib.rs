@@ -16,6 +16,7 @@ pub mod account;
 pub mod addr;
 pub mod agent_instance_id;
 pub mod agent_overrides;
+pub mod auth;
 pub mod budget;
 pub mod crlf;
 pub mod defaults;
