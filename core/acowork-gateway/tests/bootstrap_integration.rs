@@ -893,7 +893,7 @@ async fn concurrent_installs_unique_ids_and_aggregate_inventory() {
 /// correct per-resource retained version, and the republished MQTT
 /// snapshots expose those versions.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn concurrent_provider_and_identity_writes_carry_correct_versions() {
+async fn concurrent_provider_writes_carry_correct_versions() {
     let port = unique_port("mutations");
     let broker = start_broker("127.0.0.1", port).expect("broker should start");
 
@@ -905,10 +905,9 @@ async fn concurrent_provider_and_identity_writes_carry_correct_versions() {
     let mut app_state = AppState::new(shared_state.clone(), Arc::new(HttpAuth::new(false)));
     app_state.operation_store = Some(operation_store.clone());
 
-    // Concurrent mutations: 2 providers + 1 identity write.
+    // Concurrent mutations: 2 providers.
     let app_for_p1 = app_state.clone();
     let app_for_p2 = app_state.clone();
-    let app_for_u = app_state.clone();
     let p1 = tokio::spawn(async move {
         acowork_gateway::http::provider_api::add_provider(
             axum::extract::State(app_for_p1),
@@ -945,44 +944,28 @@ async fn concurrent_provider_and_identity_writes_carry_correct_versions() {
         )
         .await
     });
-    let u1 = tokio::spawn(async move {
-        acowork_gateway::http::users_api::create_user(
-            axum::extract::State(app_for_u),
-            axum::Json(acowork_gateway::http::users_api::CreateUserRequest {
-                display_name: "alice".to_string(),
-                language: Some("en-US".to_string()),
-                timezone: Some("UTC".to_string()),
-                city: None,
-                country: None,
-                occupation: None,
-                communication_style: None,
-                custom: Default::default(),
-                expected_version: None,
-            }),
-        )
-        .await
-    });
-
-    let (r1, r2, r3) = tokio::join!(p1, p2, u1);
+    let (r1, r2) = tokio::join!(p1, p2);
     let (code1, ack1) = r1.expect("p1 task").expect("p1 succeeds");
     let (code2, ack2) = r2.expect("p2 task").expect("p2 succeeds");
-    let (code3, ack3) = r3.expect("u1 task").expect("u1 succeeds");
     assert_eq!(code1, axum::http::StatusCode::CREATED);
     assert_eq!(code2, axum::http::StatusCode::CREATED);
-    assert_eq!(code3, axum::http::StatusCode::CREATED);
 
-    // Per-resource versions: provider list starts at 1 → 2, 3; user
-    // profile list starts at 0 → 1.
+    // Per-resource versions: provider list starts at 1 → 2, 3.
+    //
+    // ADR-084 dropped the concurrent *identity* write this test used to
+    // make: the account store left the Gateway, so there is no Gateway-side
+    // path to bump `user_profile_list` any more. The identity channel is
+    // still asserted below (its empty shape is a documented contract), and
+    // M3 adds the snapshot-fed version of this test.
     let mut provider_versions: Vec<u64> = vec![
         ack1.resource_version.expect("p1 resource_version"),
         ack2.resource_version.expect("p2 resource_version"),
     ];
     provider_versions.sort_unstable();
     assert_eq!(provider_versions, vec![2, 3]);
-    assert_eq!(ack3.resource_version, Some(1), "user profile version");
 
-    // The operation store tracked all three mutations.
-    assert_eq!(operation_store.len(), 3);
+    // The operation store tracked both mutations.
+    assert_eq!(operation_store.len(), 2);
 
     // MQTT republish carries the merged snapshots with those versions.
     let client = GatewayMqttClient::new_publisher("127.0.0.1", port)
@@ -1024,15 +1007,15 @@ async fn concurrent_provider_and_identity_writes_carry_correct_versions() {
         Some(data_envelope::Payload::AvailableUsers(u)) => u,
         other => panic!("expected AvailableUsers, got {other:?}"),
     };
+    // ADR-084 M2 boundary: the Gateway still *publishes* the identity
+    // channel (that is `publish_user_profiles`' documented empty case) but
+    // no longer owns its contents, and the user-service projection is not
+    // wired until M3 — so no active user is expected here.
     assert!(
-        users
-            .active_user
-            .as_ref()
-            .map(|u| !u.user_id.is_empty())
-            .unwrap_or(false),
-        "active user must be set"
+        users.active_user.is_none(),
+        "identity is not Gateway-owned in M2"
     );
-    assert_eq!(users.version, 1);
+    assert_eq!(users.version, 0);
 
     drop(sub_client);
     drop(sub_client2);

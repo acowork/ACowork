@@ -64,12 +64,14 @@ fn main() {
     if let Some(Command::AdminSetup {
         password_file,
         password_stdin,
+        check,
     }) = &cli.command
     {
         let code = run_admin_setup(
             &config,
             password_file.as_deref(),
             *password_stdin,
+            *check,
         );
         std::process::exit(code);
     }
@@ -166,6 +168,7 @@ fn run_admin_setup(
     config: &UserServiceConfig,
     password_file: Option<&std::path::Path>,
     password_stdin: bool,
+    check_only: bool,
 ) -> i32 {
     if !config.is_multi_user() {
         eprintln!(
@@ -173,6 +176,24 @@ fn run_admin_setup(
             config.auth_mode
         );
         return 1;
+    }
+    if check_only {
+        // Read-only probe: report the same predicate `/health` publishes as
+        // `requires_setup`, so the Gateway's first-boot prompt cannot
+        // disagree with the restricted-mode gate it later applies.
+        //
+        // Deliberately not `AuthService::new(...)`: that *creates* `auth/` and
+        // generates the signing key, and seeding here (`ensure_bootstrap_admin`
+        // is create-once) would plant a passwordless `admin` before the
+        // service ever starts — so an operator's configured `bootstrap_admin`
+        // would silently never be applied (ADR-076 §决策 12).
+        return if acowork_user::auth::service::store_requires_setup(&config.data_dir) {
+            println!("setup required");
+            0
+        } else {
+            println!("already configured");
+            1
+        };
     }
     let svc = match AuthService::new(&config.data_dir, config.password_policy.clone(), None) {
         Ok(svc) => svc,

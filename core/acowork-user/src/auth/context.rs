@@ -24,12 +24,12 @@ use acowork_core::account::Role;
 use crate::error::ApiError;
 use crate::state::AppState;
 
-/// Authenticated user (`AuthContext.user_id` at the Gateway).
-pub const AUTH_USER_HEADER: &str = "x-auth-user";
-/// Authenticated role (`admin` / `user`).
-pub const AUTH_ROLE_HEADER: &str = "x-auth-role";
-/// Admin-only "view as user X" scope (ADR-076 §决策 4).
-pub const AUTH_AS_USER_HEADER: &str = "x-auth-as-user";
+/// The Gateway-injected identity headers (ADR-084 §决策 7).
+///
+/// Re-exported from `acowork-core` rather than re-declared: the Gateway is a
+/// separate binary, so two copies of these names could drift into a silent
+/// wire break.
+pub use acowork_core::auth::{AUTH_AS_USER_HEADER, AUTH_ROLE_HEADER, AUTH_USER_HEADER};
 
 /// Who this request is acting as.
 ///

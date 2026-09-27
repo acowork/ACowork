@@ -1,8 +1,8 @@
 //! First-boot restricted-mode middleware (ADR-076 §决策 12 v2).
 //!
-//! When the Gateway seeds a fresh install it creates a passwordless
-//! `admin` account (`password_hash = DISABLED_PASSWORD_HASH`). Until that
-//! account gets a real password, the Gateway only answers `/health` and
+//! Until a fresh install's passwordless `admin` account (seeded by
+//! `acowork-user`, `password_hash = DISABLED_PASSWORD_HASH`) gets a real
+//! password, the Gateway only answers `/health` and
 //! `/api/status` — every other `/api/*` request returns 403
 //! `{"error":"setup_required"}`. There is no HTTP path to set the first
 //! password (ADR-076 §决策 12 v2); the operator must complete setup via the
@@ -18,10 +18,12 @@
 //! gate would answer first.
 //!
 //! The middleware is a **no-op** in `AUTH_MODE=local` (no account system →
-//! nothing to restrict) and a no-op once the admin has a real password
-//! (`is_restricted()` returns `false`). Note that the second no-op is *not*
-//! free: `is_restricted()` re-reads `accounts.json`, so a `local` Gateway
-//! pays nothing per request while a `multi_user` one pays one file read.
+//! nothing to restrict) and a no-op once the admin has a real password.
+//!
+//! ADR-084: the flag no longer comes from a per-request read of
+//! `accounts.json` — that store belongs to the `acowork-user` process. It
+//! comes from the snapshot the user supervisor refreshes off the service's
+//! `/health`, so this is O(1) and I/O-free on every path.
 
 use axum::{
     extract::{Request, State},
@@ -49,11 +51,26 @@ pub async fn restricted_mode_middleware(
     next: Next,
 ) -> Response {
     // O(1) early-out: no account system = nothing to restrict.
-    if state.auth_service.is_none() {
+    if !state.auth_mode.is_multi_user() {
         return next.run(req).await;
     }
-    // O(1) early-out: operator already finished setup.
-    if !state.auth_service.as_ref().unwrap().is_restricted() {
+    // O(1) early-out, and genuinely O(1): the flag comes from the snapshot
+    // the user supervisor refreshes on its `/health` poll, so this no longer
+    // re-reads `accounts.json` per request (ADR-084 §决策 4b).
+    //
+    // `None` = the service has not reported yet. Treated as "not restricted"
+    // deliberately: during that window `auth_middleware` already answers 503
+    // for every non-public path, so there is nothing to additionally gate —
+    // and claiming `setup_required` here would send the Desktop into the
+    // first-boot wizard on a machine that is merely still starting.
+    let requires_setup = state
+        .gateway_state
+        .read()
+        .await
+        .user_snapshot
+        .as_ref()
+        .is_some_and(|s| s.requires_setup);
+    if !requires_setup {
         return next.run(req).await;
     }
     // Whitelist: /health and /api/status remain reachable so the Desktop
@@ -69,7 +86,7 @@ pub async fn restricted_mode_middleware(
             "message": "Gateway is in first-boot restricted mode. \
                         Complete admin setup on the Gateway host \
                         (TTY prompt / 'admin-setup' subcommand / \
-                        [multi_user].bootstrap_admin in gateway.toml) \
+                        bootstrap_admin in the user service config) \
                         before connecting."
         })),
     )
@@ -79,7 +96,8 @@ pub async fn restricted_mode_middleware(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::{AuthMode, AuthService, PasswordPolicy};
+    use crate::auth::AuthMode;
+    use crate::lifecycle::user_supervisor::UserSnapshot;
     use crate::gateway::state::GatewayState;
     use crate::http::routes::AppState;
     use crate::http::auth::HttpAuth;
@@ -110,15 +128,24 @@ mod tests {
         "ok"
     }
 
+    /// Build the router state for a first-boot Gateway.
+    ///
+    /// Pre-ADR-084 this seeded a passwordless account and asserted
+    /// `AuthService::is_restricted()`; the flag now arrives as the user
+    /// supervisor's `/health` snapshot, which is what we set directly.
     fn app_with_restricted(restricted: bool) -> (Router, TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let mut state = build_state(dir.path());
         if restricted {
-            let svc = AuthService::new(dir.path(), PasswordPolicy::default(), None).unwrap();
-            svc.ensure_bootstrap_admin().unwrap();
-            assert!(svc.is_restricted());
             state.auth_mode = AuthMode::MultiUser;
-            state.auth_service = Some(Arc::new(svc));
+            state
+                .gateway_state
+                .try_write()
+                .expect("fresh state")
+                .user_snapshot = Some(UserSnapshot {
+                requires_setup: true,
+                registration_open: false,
+            });
         }
         let router = Router::new()
             .route("/api/anything", get(ok_handler))
@@ -201,19 +228,19 @@ mod tests {
     #[tokio::test]
     async fn real_router_answers_403_not_401_without_a_token() {
         let dir = tempfile::tempdir().unwrap();
-        // Empty store + no toml admin → passwordless seed → restricted.
-        let svc = AuthService::new(dir.path(), PasswordPolicy::default(), None).unwrap();
-        svc.ensure_bootstrap_admin().unwrap();
-        assert!(svc.is_restricted());
-
         let mut state = build_state(dir.path());
         state.auth_mode = AuthMode::MultiUser;
-        state.auth_service = Some(Arc::new(svc));
         {
             let mut gw = state.gateway_state.try_write().expect("fresh state");
             gw.config = Some(crate::config::GatewayConfig {
                 data_dir: dir.path().to_string_lossy().to_string(),
                 ..Default::default()
+            });
+            // First-boot snapshot: a passwordless admin, as the user
+            // service reports it in `/health`.
+            gw.user_snapshot = Some(UserSnapshot {
+                requires_setup: true,
+                registration_open: false,
             });
         }
         let router = crate::http::routes::build_router(state);

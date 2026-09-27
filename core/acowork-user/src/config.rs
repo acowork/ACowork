@@ -143,8 +143,19 @@ impl UserServiceConfig {
     }
 }
 
-/// Default data directory: `$HOME/.acowork/acowork-user/`.
+/// Default data directory: `$HOME/.acowork/acowork-user/` (ADR-084 §决策 5).
+///
+/// `ACOWORK_HOME` wins when set. That variable is what the Gateway's
+/// `--home` writes into its own environment before spawning us, so a Gateway
+/// booted with `--home X` keeps the whole install — including this store —
+/// under `X` instead of reaching into the operator's real home. Without it
+/// (the normal case) this is exactly the path the ADR specifies.
 pub fn default_data_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("ACOWORK_HOME")
+        && !dir.is_empty()
+    {
+        return PathBuf::from(dir).join("acowork-user");
+    }
     std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .map(|h| PathBuf::from(h).join(".acowork").join("acowork-user"))

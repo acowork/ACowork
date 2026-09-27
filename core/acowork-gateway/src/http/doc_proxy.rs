@@ -272,59 +272,25 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let gw_state = GatewayState::new(&dir.to_string_lossy());
+        let mut gw_state = GatewayState::new(&dir.to_string_lossy());
+        // ADR-084: the gate verifies with the user service's public key and
+        // gates on the resolved mode — no account store involved.
+        gw_state.user_verifier = Some(crate::http::test_support::verifier());
         let mut st = AppState::new(
             Arc::new(RwLock::new(gw_state)),
             Arc::new(HttpAuth::new(false)),
         );
         st.auth_mode = crate::auth::AuthMode::MultiUser;
-        st.auth_service = Some(Arc::new(
-            crate::auth::AuthService::new(&dir, Default::default(), None).unwrap(),
-        ));
         st
     }
 
-    /// Seed one account (`u-alice` / password `s3cret123`) and return a valid
-    /// access token for it.
-    fn seed_and_login(state: &AppState) -> String {
-        use acowork_core::account::{AccountListFile, Role, UserAccount};
-        let svc = state.auth_service.clone().unwrap();
-        let account = UserAccount {
-            user_id: "u-alice".into(),
-            username: "alice".into(),
-            display_name: "Alice".into(),
-            role: Role::User,
-            password_hash: crate::account::password::hash_password_with(
-                "s3cret123",
-                argon2::Params::new(8, 1, 1, Some(32)).unwrap(),
-            )
-            .unwrap(),
-            password_changed_at: "t".into(),
-            password_expires_at: None,
-            language: "en".into(),
-            timezone: "UTC".into(),
-            city: None,
-            country: None,
-            occupation: None,
-            avatar: None,
-            builtin_avatar: None,
-            communication_style: None,
-            custom: Default::default(),
-            created_at: "t".into(),
-            updated_at: "t".into(),
-            last_login_at: None,
-            disabled_at: None,
-            invite_token_hash: None,
-            invite_expires_at: None,
-        };
-        svc.save_accounts(&AccountListFile {
-            version: 1,
-            accounts: vec![account],
-        })
-        .unwrap();
-        svc.login("alice", "s3cret123", crate::auth::token::now_unix())
-            .unwrap()
-            .access_token
+    /// A valid access token for `u-alice` (role `user`) — the identity these
+    /// proxy tests author their requests as.
+    ///
+    /// Was an account seed + `login` before ADR-084; the `state` parameter is
+    /// kept so every call site stays as it was.
+    fn seed_and_login(_state: &AppState) -> String {
+        crate::http::test_support::access_token("u-alice", "user")
     }
 
     /// `doc_process = None` (not started / restarting): 503 + `Retry-After: 2`.

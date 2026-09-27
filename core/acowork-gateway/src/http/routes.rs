@@ -17,7 +17,6 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::auth::AuthMode;
-use crate::auth::service::AuthService;
 use crate::gateway::state::GatewayState;
 use crate::http::auth::HttpAuth;
 use acowork_core::StructuredErrorBody;
@@ -81,10 +80,6 @@ pub struct AppState {
     /// ADR-076 §决策 12: the resolved deployment auth mode. `Local` =
     /// legacy bearer token, no account system.
     pub auth_mode: AuthMode,
-    /// ADR-076 §决策 3: the account system. `Some` only under
-    /// `AUTH_MODE=multi_user` — its presence is what enables the
-    /// `/api/auth/*` routes and the bearer middleware.
-    pub auth_service: Option<Arc<AuthService>>,
 }
 
 impl AppState {
@@ -105,7 +100,6 @@ impl AppState {
             operation_store: None,
             ip_allowlist: crate::security::IpAllowlist::default(),
             auth_mode: AuthMode::Local,
-            auth_service: None,
         }
     }
 }
@@ -258,17 +252,12 @@ pub fn build_router(state: AppState) -> Router {
         // diagnostic panel. Remote Desktops reach this over the same
         // HTTP surface as everything else (P2-1).
         .merge(crate::http::services_api::services_routes())
-        // ADR-076 §决策 6: `/api/users` is presentation-only CRUD in
-        // `local` mode; under `multi_user` the credential-aware
-        // `account_api` takes over the same paths (never both — an axum
-        // double registration of one path panics). Avatar routes are
-        // mode-independent.
-        .merge(match &state.auth_service {
-            Some(_) => crate::http::account_api::account_routes()
-                .merge(crate::http::chat_api::chat_routes()),
-            None => crate::http::users_api::users_routes(),
-        })
-        .merge(crate::http::users_api::user_avatar_routes())
+        // ADR-084: the whole user domain (accounts, profiles, avatars,
+        // user-to-user chat) now lives in the `acowork-user` process. The
+        // Gateway prose nothing here — `user_proxy` forwards the public
+        // paths verbatim, so the Desktop sees the same URLs it always did.
+        // Not-ready → 503 + `Retry-After`, same contract as `/api/pm`/`/api/doc`.
+        .merge(crate::http::user_proxy::user_proxy_routes())
         .merge(crate::http::embedding_api::embedding_routes())
         .merge(crate::embedding_providers::embedding_providers_routes())
         .merge(crate::http::fs_browse::fs_routes())
@@ -282,14 +271,6 @@ pub fn build_router(state: AppState) -> Router {
         .merge(crate::http::doc_proxy::doc_proxy_routes())
         .merge(crate::http::debug_mqtt::debug_mqtt_routes())
         .merge(crate::http::settings_api::settings_routes())
-        // ADR-076 §决策 12: the account API exists only under
-        // `AUTH_MODE=multi_user`. In `local` mode the routes are not
-        // registered at all (404), not merely gated — an unregistered
-        // route cannot be reached by a future auth-middleware mistake.
-        .merge(match &state.auth_service {
-            Some(_) => crate::http::auth_api::auth_routes(),
-            None => Router::new(),
-        })
         .with_state(state)
         // Global body-size cap. See `GLOBAL_BODY_LIMIT` for why we
         // override axum's 2 MiB default at the root of the gateway
@@ -453,16 +434,14 @@ pub async fn system_status(State(state): State<AppState>) -> Json<SystemStatusRe
         mqtt_username,
         mqtt_password,
         auth_mode: state.auth_mode.as_str(),
-        registration_open: state.auth_service.is_some()
-            && gw.config
-                .as_ref()
-                .map(|c| c.multi_user.registration_open)
-                .unwrap_or(false),
-        requires_setup: state
-            .auth_service
+        // ADR-084 §决策 4b: both flags come from the user service's
+        // `/health` snapshot, so `/api/status` no longer needs the account
+        // store (and no longer disagrees with the service's own view).
+        registration_open: gw
+            .user_snapshot
             .as_ref()
-            .map(|svc| svc.is_restricted())
-            .unwrap_or(false),
+            .is_some_and(|s| s.registration_open),
+        requires_setup: gw.user_snapshot.as_ref().is_some_and(|s| s.requires_setup),
     })
 }
 

@@ -633,31 +633,15 @@ impl AuthService {
         self.save_accounts(&list)
     }
 
-    /// Whether the Gateway is in first-boot restricted mode: a passwordless
-    /// admin account exists and no other admin has a real password.
-    /// Drives the HTTP middleware and `/api/status.requires_setup`.
+    /// Whether the Gateway is in first-boot restricted mode: nobody can log
+    /// in as an administrator yet. Drives the HTTP middleware and
+    /// `/api/status.requires_setup`.
     pub fn is_restricted(&self) -> bool {
-        let Ok(list) = self.load_accounts() else {
-            // If we can't read the store, the HTTP layer should not advertise
-            // the system as ready either.
-            return true;
-        };
-        // "Nobody can get in": there is an administrator and *every*
-        // administrator is still passwordless. The `all` half is load-bearing
-        // — `reset_password` also writes `DISABLED_PASSWORD_HASH`, so a bare
-        // `any` would flip a working Gateway into restricted mode (403 on
-        // every `/api/*`, login included) the moment an admin resets any
-        // password, including its own — which §1.3 invariant 6 defines as the
-        // normal administrator change-password flow.
-        let admins: Vec<&UserAccount> = list
-            .accounts
-            .iter()
-            .filter(|a| a.role == Role::Admin)
-            .collect();
-        !admins.is_empty()
-            && admins
-                .iter()
-                .all(|a| a.password_hash == DISABLED_PASSWORD_HASH)
+        match self.load_accounts() {
+            Ok(list) => requires_setup(&list),
+            // An unreadable store is not "ready" either.
+            Err(_) => true,
+        }
     }
 
     // ── Account CRUD (ADR-076 §决策 5 / §决策 6, `account_api.rs`) ──
@@ -912,6 +896,46 @@ impl AuthService {
     }
 }
 
+/// Does this store still need first-boot setup?
+///
+/// "Nobody can get in": **no** administrator exists, or every existing
+/// administrator is still passwordless. The `all` half is load-bearing —
+/// `reset_password` also writes `DISABLED_PASSWORD_HASH`, so a bare `any`
+/// would flip a working Gateway into restricted mode (403 on every
+/// `/api/*`, login included) the moment an admin resets any password,
+/// including its own, which §1.3 invariant 6 defines as the normal
+/// administrator change-password flow.
+///
+/// ADR-084: the empty case counts as restricted. It could not arise before —
+/// the Gateway always seeded an admin before asking — but the read-only
+/// `admin-setup --check` probe asks on a store that may not exist yet, and
+/// "there is no administrator" is exactly the state the operator must be
+/// pointed at setup for.
+pub fn requires_setup(list: &AccountListFile) -> bool {
+    let admins = list.accounts.iter().filter(|a| a.role == Role::Admin);
+    let mut any = false;
+    let mut all_passwordless = true;
+    for admin in admins {
+        any = true;
+        if admin.password_hash != DISABLED_PASSWORD_HASH {
+            all_passwordless = false;
+        }
+    }
+    !any || all_passwordless
+}
+
+/// [`requires_setup`] straight off disk, without building an [`AuthService`].
+///
+/// Read-only, not even a side effect: `AuthService::new` creates `auth/` and
+/// generates the signing key, which the `--check` probe has no business
+/// doing.
+pub fn store_requires_setup(data_dir: &Path) -> bool {
+    match store::load_accounts(data_dir) {
+        Ok(list) => requires_setup(&list),
+        Err(_) => true,
+    }
+}
+
 /// RFC 3339 timestamp for `now` (unix seconds).
 fn iso(now: i64) -> String {
     chrono::DateTime::from_timestamp(now, 0)
@@ -962,6 +986,39 @@ fn timing_decoy() -> &'static str {
 mod tests {
     use super::*;
     use argon2::Params;
+
+    /// ADR-084: the Gateway's boot probe asks this on a store that may never
+    /// have been created, and it must not create one.
+    ///
+    /// Pre-ADR-084 the "no admins at all" case was unreachable (the Gateway
+    /// always seeded before asking), and it answered `false` — i.e. a fresh
+    /// install would report "already configured", the operator would never be
+    /// prompted, and the restricted-mode gate would stay open. Both halves are
+    /// pinned here, plus the read-only property.
+    #[test]
+    fn check_probe_is_read_only_and_treats_an_empty_store_as_setup_required() {
+        let dir = tempfile::tempdir().unwrap();
+
+        assert!(
+            store_requires_setup(dir.path()),
+            "a store that does not exist yet means nobody can get in"
+        );
+        // Read-only: no `AuthService` is built, so no signing key and no store.
+        assert!(!dir.path().join("auth").exists());
+        assert!(!dir.path().join("accounts.json").exists());
+
+        // Seed the passwordless admin the boot path would create, then set a
+        // real password: a usable account is not "setup required".
+        let svc = AuthService::new(dir.path(), PasswordPolicy::default(), None).unwrap();
+        svc.ensure_bootstrap_admin().unwrap();
+        assert!(store_requires_setup(dir.path()));
+
+        let mut list = svc.load_accounts().unwrap();
+        let admin = list.accounts.first_mut().unwrap();
+        admin.password_hash = password::hash_password_with("s3cret123", weak()).unwrap();
+        svc.save_accounts(&list).unwrap();
+        assert!(!store_requires_setup(dir.path()));
+    }
 
     /// Weak Argon2 params — the real ones cost ~100 ms per call and these
     /// tests hash a dozen times.

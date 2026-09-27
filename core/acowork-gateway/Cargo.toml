@@ -43,6 +43,8 @@ tracing-appender.workspace = true
 chrono.workspace = true
 anyhow.workspace = true
 zip.workspace = true
+# Fixed seed for the token-gate test fixture (`http::test_support`).
+ed25519-dalek.workspace = true
 parking_lot.workspace = true
 toml.workspace = true
 # SQLite for one-time data migration (permissions.db + cron_entries.db → .json).

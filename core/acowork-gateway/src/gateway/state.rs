@@ -307,6 +307,24 @@ pub struct GatewayState {
     /// 未启动（`doc.enabled=false`）或尚未 ready。HTTP 反代层
     /// （`http/doc_proxy.rs`）读取 `port` 构造代理目标；doc 未就绪时返回 503。
     pub doc_process: Option<crate::lifecycle::doc_supervisor::DocProcessState>,
+    /// acowork-user 独立进程状态（supervisor 管理，ADR-084）。
+    ///
+    /// 由 `Gateway::run` 启动 user supervisor 后写入；`None` 表示进程未启动
+    /// （`user.enabled=false`）或尚未 ready。`http/user_proxy.rs` 读取 `port`
+    /// 构造代理目标，未就绪时返回 503 + `Retry-After`。
+    pub user_process: Option<crate::lifecycle::user_supervisor::UserProcessState>,
+    /// ADR-084 §决策 2：验签用的 Ed25519 公钥。
+    ///
+    /// 由 user supervisor 在用户服务 ready 后从 `{user.data_dir}/auth/ed25519.pub`
+    /// 载入。`None` = 尚未载入（multi_user 下此时必须拒绝鉴权，见
+    /// `auth_middleware`），`local` 下始终为 `None`（无账号系统）。
+    pub user_verifier: Option<std::sync::Arc<acowork_core::auth::TokenVerifier>>,
+    /// ADR-084 §决策 4b：用户服务的 `/health` 快照。
+    ///
+    /// `None` = 尚未探到（启动窗口内）。`requires_setup` 喂
+    /// `restricted_mode`，`registration_open` 喂 `/api/status`，两者都因此
+    /// 不再需要 Gateway 触碰账号存储（M3 任务 2/5）。
+    pub user_snapshot: Option<crate::lifecycle::user_supervisor::UserSnapshot>,
     /// doc MCP HTTP 端点 URL（`http://{advertise_host}:{http.port}{doc.mcp_http_path}`）。
     ///
     /// 启动时在 `doc.auto_inject_mcp` 时设置；`Some` 表示
@@ -342,6 +360,9 @@ impl GatewayState {
             pm_process: None,
             pm_mcp_url: None,
             doc_process: None,
+            user_process: None,
+            user_verifier: None,
+            user_snapshot: None,
             doc_mcp_url: None,
         }
     }

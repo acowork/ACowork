@@ -162,6 +162,12 @@ pub struct GatewayConfig {
     #[serde(default)]
     pub doc: DocConfig,
 
+    /// Account / profile / chat service (acowork-user, standalone process,
+    /// ADR-084). Supervised by the Gateway, which reverse-proxies the user
+    /// domain to it and verifies access tokens with its public key.
+    #[serde(default)]
+    pub user: UserConfig,
+
     /// Peer IP allowlist — the "who may connect to this Gateway" backstop.
     ///
     /// `allowed_node_ips` restricts which peer IPs may reach the HTTP API
@@ -367,6 +373,69 @@ impl Default for DocConfig {
             auto_inject_mcp: default_true(),
             mcp_http_path: default_doc_mcp_http_path(),
             request_ttl_hours: None,
+        }
+    }
+}
+
+/// User service config (Gateway side, ADR-084).
+///
+/// Mirrors `DocConfig`: the account / profile / chat service runs as an
+/// independent binary supervised by the Gateway, which reverse-proxies
+/// `/api/auth/*`, `/api/users/*` and `/api/user/*` (prefix preserved).
+/// This section only keeps what the Gateway needs to manage the process —
+/// the service resolves its own tuning independently.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserConfig {
+    /// Whether to spawn the `acowork-user` subprocess.
+    ///
+    /// Default `true`. `false` → the Gateway does not spawn it and every
+    /// user-domain route returns 503.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Desired listen port.
+    ///
+    /// Default `18083`. The service auto-increments on conflict (max +20);
+    /// the actual port is reported via `--port-file` and read into
+    /// `user_process` by the supervisor.
+    #[serde(default = "default_user_port")]
+    pub port: u16,
+
+    /// Optional data-directory override forwarded to the subprocess
+    /// (`--data-dir`). `None` → the service resolves
+    /// `$HOME/.acowork/acowork-user/` itself (ADR-084 §决策 5:
+    /// "默认由用户服务自解析").
+    ///
+    /// Deliberately an `Option` and never resolved here: the Gateway used to
+    /// guess the default, and under `--home` the guess and the service's own
+    /// default disagreed — so the Gateway loaded `auth/ed25519.pub` from a
+    /// directory nothing wrote to and refused every token. The running
+    /// service now reports its directory in `/health`, and that (not this
+    /// field) is what the supervisor reads the key from.
+    #[serde(default)]
+    pub data_dir: Option<PathBuf>,
+
+    /// TOML file forwarded to the service as `--config`.
+    ///
+    /// This is where an operator sets `bootstrap_admin`, `password_policy`
+    /// and `registration_open`: those knobs describe the *service's* account
+    /// system and moved with it (ADR-084 §决策 3), so
+    /// `gateway.toml`'s `[multi_user]` no longer reaches them.
+    #[serde(default)]
+    pub config: Option<PathBuf>,
+}
+
+fn default_user_port() -> u16 {
+    18083
+}
+
+impl Default for UserConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_true(),
+            port: default_user_port(),
+            data_dir: None,
+            config: None,
         }
     }
 }
@@ -845,6 +914,10 @@ impl GatewayConfig {
                 .as_ref()
                 .map(|c| c.doc.clone())
                 .unwrap_or_default(),
+            user: file_config
+                .as_ref()
+                .map(|c| c.user.clone())
+                .unwrap_or_default(),
             security: {
                 // Boot-time only (see `SecurityConfig` docs). Env override
                 // wins over TOML; never part of runtime update paths.
@@ -998,6 +1071,7 @@ impl Default for GatewayConfig {
             local_node: LocalNodeConfig::default(),
             pm: PmConfig::default(),
             doc: DocConfig::default(),
+            user: UserConfig::default(),
             security: SecurityConfig::default(),
             auth_mode: None,
             multi_user: MultiUserConfig::default(),

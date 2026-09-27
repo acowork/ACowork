@@ -81,6 +81,15 @@ pub enum Command {
         /// Read the password from stdin (for piping from a secret store).
         #[arg(long)]
         password_stdin: bool,
+
+        /// Only report whether setup is still required; set no password.
+        ///
+        /// Exit `0` = a passwordless admin exists (first boot), `1` =
+        /// already configured. Used by the Gateway's CLI to decide whether
+        /// to offer the first-boot prompt, replacing the account-store read
+        /// it used to do itself (ADR-084).
+        #[arg(long)]
+        check: bool,
     },
 }
 

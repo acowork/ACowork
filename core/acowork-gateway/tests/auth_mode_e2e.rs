@@ -227,6 +227,37 @@ fn http_get(port: u16, path: &str) -> (u16, String) {
     (code, body)
 }
 
+/// Poll `/api/status` until `pred` accepts the body, or panic.
+///
+/// Since ADR-084 the state this endpoint carries can *lag* the listen socket:
+/// `requires_setup` / `registration_open` come from the snapshot the
+/// supervisor reads off the supervised user service's `/health`, and that
+/// service is spawned asynchronously after the Gateway binds. Waiting for the
+/// socket is therefore no longer enough to observe a settled state.
+fn wait_for_status(port: u16, pred: impl Fn(&str) -> bool, what: &str) -> String {
+    let deadline = Instant::now() + BOOT_TIMEOUT;
+    let mut last = String::new();
+    while Instant::now() < deadline {
+        let (code, body) = http_get(port, "/api/status");
+        if code == 200 && pred(&body) {
+            return body;
+        }
+        last = body;
+        sleep(Duration::from_millis(100));
+    }
+    panic!("{what} was not observed within {BOOT_TIMEOUT:?}; last /api/status body:\n{last}");
+}
+
+/// Wait for a file to appear (the user service writes its store at its own
+/// boot, which the Gateway does not serialise against).
+fn wait_for_file(path: &Path, what: &str) {
+    let deadline = Instant::now() + BOOT_TIMEOUT;
+    while !path.exists() && Instant::now() < deadline {
+        sleep(Duration::from_millis(100));
+    }
+    assert!(path.exists(), "{what} did not appear at {}", path.display());
+}
+
 /// ADR-076 §决策 12 v2/v3: `multi_user` with an empty account store and no
 /// bootstrap administrator must **not** refuse to start any more (v1 did, and
 /// the failure was invisible behind `build_macos.sh`'s `> /dev/null`). It
@@ -242,11 +273,12 @@ fn multi_user_without_bootstrap_admin_serves_restricted_mode() {
     let mut gw = spawn(&home, http, mqtt, &["--auth-mode", "multi_user"]);
     gw.wait_until_serving();
 
-    let (code, body) = http_get(http, "/api/status");
-    assert_eq!(code, 200, "restricted mode must answer /api/status; body:\n{body}");
-    assert!(
-        body.contains("\"requires_setup\":true"),
-        "restricted mode must advertise the gate on /api/status; body:\n{body}"
+    let (code, _) = http_get(http, "/api/status");
+    assert_eq!(code, 200, "restricted mode must answer /api/status");
+    wait_for_status(
+        http,
+        |body| body.contains("\"requires_setup\":true"),
+        "the restricted-mode flag on /api/status",
     );
 
     let (code, body) = http_get(http, "/api/users");
@@ -260,12 +292,12 @@ fn multi_user_without_bootstrap_admin_serves_restricted_mode() {
     );
 
     // The seed *is* written this time — that is the whole point of v2/v3.
-    let accounts = gw.data_file("accounts.json");
-    assert!(
-        accounts.exists(),
-        "the passwordless admin must be seeded at {}",
-        accounts.display()
-    );
+    //
+    // ADR-084: no longer inside `{gateway.data_dir}` — the account store
+    // belongs to the user service, whose data dir `--home` moves along with
+    // everything else.
+    let accounts = gw.home.join("acowork-user").join("accounts.json");
+    wait_for_file(&accounts, "the seeded account store");
     let raw = fs::read_to_string(&accounts).expect("read accounts.json");
     assert!(
         raw.contains("\"admin\""),
@@ -289,6 +321,10 @@ fn multi_user_without_bootstrap_admin_serves_restricted_mode() {
 fn multi_user_from_config_bootstraps_an_admin_and_serves() {
     let home = temp_home("bootstrap");
     let (http, mqtt) = (free_port(), free_port());
+    // Forward slashes: `Path::display()` yields backslashes on Windows, and a
+    // lone backslash in a TOML basic string is an escape introducer, not a
+    // path separator.
+    let home_s = home.display().to_string().replace('\\', "/");
     let config = write_config(
         &home,
         &format!(
@@ -299,14 +335,25 @@ data_dir = "{home}/data"
 
 auth_mode = "multi_user"
 
-[multi_user.bootstrap_admin]
+[user]
+config = "{home}/acowork-user.toml"
+"#,
+            home = home_s
+        ),
+    );
+    // ADR-084: `[multi_user]` describes the account system, and that system
+    // now lives in the user service — so the bootstrap admin is configured in
+    // *its* file, which the supervisor forwards as `--config`.
+    fs::write(
+        home.join("acowork-user.toml"),
+        r#"
+[bootstrap_admin]
 username = "root"
 password = "s3cret123"
 display_name = "Root"
 "#,
-            home = home.display()
-        ),
-    );
+    )
+    .expect("write acowork-user.toml");
 
     let mut gw = spawn(
         &home,
@@ -316,12 +363,8 @@ display_name = "Root"
     );
     gw.wait_until_serving();
 
-    let accounts = gw.data_file("accounts.json");
-    assert!(
-        accounts.exists(),
-        "a booted multi_user Gateway must persist its account store at {}",
-        accounts.display()
-    );
+    let accounts = gw.home.join("acowork-user").join("accounts.json");
+    wait_for_file(&accounts, "the bootstrapped account store");
     let raw = fs::read_to_string(&accounts).expect("read accounts.json");
     assert!(
         raw.contains("root"),

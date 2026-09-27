@@ -3,19 +3,21 @@
 //! Provides REST + WebSocket API for Desktop App and CLI access.
 //! Shares `Arc<RwLock<GatewayState>>` with the gRPC server.
 
-pub mod account_api;
 pub mod agent_config;
 pub mod agents;
 pub mod auth;
-pub mod auth_api;
 pub mod auth_middleware;
 pub mod bootstrap_api;
 pub mod chat;
-pub mod chat_api;
 pub mod config_api;
 pub mod cron_api;
 pub mod debug_mqtt;
+// ADR-084: the user domain (`account_api` / `users_api` / `chat_api` /
+// `auth_api`) moved to the `acowork-user` crate; the Gateway only proxies it.
 pub mod doc_proxy;
+#[cfg(test)]
+pub mod test_support;
+pub mod user_proxy;
 pub mod embedding_api;
 pub mod fs_browse;
 pub mod global_resources_api;
@@ -33,6 +35,5 @@ pub mod server;
 pub mod services_api;
 pub mod settings_api;
 pub mod skills_api;
-pub mod users_api;
 pub mod vault_api;
 pub mod workspaces;

@@ -113,6 +113,25 @@ pub fn is_process_alive(_pid: u32) -> bool {
     true // fallback: assume alive if we have a PID record
 }
 
+/// Path of a sibling binary next to the running executable.
+///
+/// Every supervised standalone service is built into the same `target/`
+/// directory, so `current_exe()`'s parent is the reliable lookup — a `PATH`
+/// search would be wrong for the desktop bundle, which ships them side by
+/// side and never installs them globally. Falls back to the bare name so a
+/// `PATH` lookup can still succeed (dev setups running `cargo run`).
+pub fn sibling_binary(name: &str) -> std::path::PathBuf {
+    let file_name = if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name.to_string()
+    };
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|p| p.join(&file_name)))
+        .unwrap_or_else(|| std::path::PathBuf::from(file_name))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

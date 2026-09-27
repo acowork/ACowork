@@ -327,11 +327,13 @@ impl Cli {
         // (the enrollment token store lives under it) — captured before
         // config moves into Gateway::new.
         let data_dir = config.data_dir.clone();
+        // Captured before `config` is moved into `Gateway::new`: the
+        // `admin-setup` subcommand delegates to the owning process (ADR-084).
+        let user_data_dir = config.user.data_dir.clone();
         // ADR-076 §决策 12 v2: the `admin-setup` subcommand needs the
         // configured password policy + resolved auth mode to validate the
         // new password. Captured here so we can still build the gateway
         // (which consumes `config`).
-        let admin_setup_policy = config.multi_user.password_policy.clone();
         let admin_setup_auth_mode = config.effective_auth_mode();
         let gateway = Gateway::new(config)?;
         match self.command {
@@ -505,19 +507,17 @@ impl Cli {
                         "admin-setup requires multi_user mode (got {admin_setup_auth_mode})"
                     )));
                 }
-                let svc = crate::auth::AuthService::new(
-                    std::path::Path::new(&data_dir),
-                    admin_setup_policy.clone(),
-                    None, // never seed via CLI subcommand path
-                )
-                .map_err(|e| GatewayError::Config(format!("failed to init AuthService: {e}")))?;
+                // ADR-084: the account store belongs to `acowork-user`, so
+                // this subcommand is a thin alias for that binary's own
+                // `admin-setup` — it must not open the store here, or the
+                // Gateway would be a second writer.
                 let mut password = read_admin_password(password_file.as_deref(), password_stdin)
                     .map_err(GatewayError::Config)?;
-                svc.set_admin_password(&password)
-                    .map_err(GatewayError::Config)?;
+                let result = user_admin_setup(user_data_dir.as_deref(), &password);
                 // Zeroize the local buffer immediately — the Argon2id hash
                 // is the only durable artifact.
                 zeroize::Zeroize::zeroize(&mut password);
+                result.map_err(GatewayError::Config)?;
                 println!("Admin password set. Restart gateway to serve requests.");
                 return Ok(());
             }
@@ -631,8 +631,9 @@ fn warn_first_boot_restricted() {
                        - run 'acowork-gateway admin-setup --password-file <path>' \
                        once with a file containing the new password\n  \
                        - run 'acowork-gateway admin-setup --password-stdin < secret.txt'\n  \
-                       - edit gateway.toml: set [multi_user].bootstrap_admin = \
-                       { username = \"admin\", password = \"...\" } and restart";
+                       - set bootstrap_admin in the USER SERVICE config \
+                       (gateway.toml [user] config -> the service TOML, or the service's \
+                       own --config) and restart the Gateway";
     eprintln!(
         "Gateway is in first-boot restricted mode (admin has no password).\n\n{HOW}\n\n\
          Only /health and /api/status are reachable until setup is complete."
@@ -883,6 +884,91 @@ async fn async_main(
     gateway.run(log_reload_handle).await?;
 
     Ok(())
+}
+
+// ── acowork-user delegation (ADR-084) ───────────────────────────────────────
+//
+// The Gateway no longer opens the account store. These two helpers shell out
+// to the owning process instead, so every write to `accounts.json` happens
+// under one owner — and, for `--check`, so the boot-time prompt reads the
+// same predicate the service publishes as `requires_setup`.
+
+/// Path of the `acowork-user` binary (sibling of this executable).
+fn user_binary() -> std::path::PathBuf {
+    crate::lifecycle::process::sibling_binary("acowork-user")
+}
+
+/// A `acowork-user` invocation with the shared top-level arguments.
+///
+/// The top-level flags must precede the subcommand (`global = true` is not
+/// set on them, so `admin-setup --data-dir X` would be parsed as a
+/// subcommand argument and silently ignored).
+fn user_command(user_data_dir: Option<&std::path::Path>) -> std::process::Command {
+    let mut cmd = std::process::Command::new(user_binary());
+    cmd.args(["--auth-mode", "multi_user"]);
+    if let Some(dir) = user_data_dir {
+        cmd.arg("--data-dir").arg(dir);
+    }
+    cmd
+}
+
+/// Whether the admin account still has no password (first boot).
+///
+/// `user_data_dir` is the `[user].data_dir` override — `None` (the usual
+/// case) lets the service resolve its own default, so this can never
+/// disagree with the copy `restricted_mode` gates on.
+///
+/// `Err` when the service cannot be asked at all — the caller decides whether
+/// that is fatal (`admin-setup`) or merely means "do not prompt" (boot).
+pub fn user_setup_required(user_data_dir: Option<&std::path::Path>) -> Result<bool, String> {
+    let output = user_command(user_data_dir)
+        .args(["admin-setup", "--check"])
+        .output()
+        .map_err(|e| format!("failed to run `acowork-user admin-setup --check`: {e}"))?;
+    match output.status.code() {
+        // 0 = setup required, 1 = already configured (see the service's CLI).
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => Err(format!(
+            "`acowork-user admin-setup --check` failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )),
+    }
+}
+
+/// Set the first-boot admin password, via the owning process.
+pub fn user_admin_setup(user_data_dir: Option<&std::path::Path>, password: &str) -> Result<(), String> {
+    use std::io::Write;
+
+    let mut child = user_command(user_data_dir)
+        .args(["admin-setup", "--password-stdin"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("failed to run `acowork-user admin-setup`: {e}"))?;
+    {
+        let stdin = child
+            .stdin
+            .as_mut()
+            .ok_or_else(|| "failed to open stdin for `acowork-user admin-setup`".to_string())?;
+        stdin
+            .write_all(password.as_bytes())
+            .and_then(|()| stdin.write_all(b"
+"))
+            .map_err(|e| format!("failed to send the password to acowork-user: {e}"))?;
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("failed to wait for acowork-user: {e}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "acowork-user admin-setup failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
+    }
 }
 
 #[cfg(test)]

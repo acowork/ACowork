@@ -128,7 +128,6 @@ pub(crate) async fn start_http_server(
     // ADR-076 §决策 12: resolved deployment auth mode, and the account
     // service (`Some` only under `AUTH_MODE=multi_user`).
     auth_mode: crate::auth::AuthMode,
-    auth_service: Option<Arc<crate::auth::AuthService>>,
 ) -> Result<(), GatewayError> {
     if !http_config.enabled {
         tracing::info!("HTTP API disabled by configuration");
@@ -157,15 +156,9 @@ pub(crate) async fn start_http_server(
     app_state.auth_mode = auth_mode;
     if auth_mode.is_multi_user() {
         tracing::info!(
-            "AUTH_MODE=multi_user: account system active ({})",
-            if auth_service.is_some() {
-                "auth service ready"
-            } else {
-                "WARNING — no auth service; logins are impossible"
-            }
+            "AUTH_MODE=multi_user: account system delegated to acowork-user              (verification starts once its public key is loaded)"
         );
     }
-    app_state.auth_service = auth_service;
 
     // Prime the offline providers cache so `data_dir/offline_providers.json`
     // (written by `POST /api/models/refresh-catalog`) takes priority over the

@@ -147,10 +147,6 @@ async fn dispatch_bundled_agent_install(
 pub struct Gateway {
     config: GatewayConfig,
     state: SharedState,
-    /// ADR-076 §决策 12: the account system, `Some` only under
-    /// `AUTH_MODE=multi_user`. Built in [`Gateway::new`] so a
-    /// misconfigured multi-user deployment fails at construction.
-    auth_service: Option<Arc<crate::auth::AuthService>>,
 }
 
 impl Gateway {
@@ -219,25 +215,21 @@ impl Gateway {
                 );
             }
         }
-        let auth_service = if auth_mode.is_multi_user() {
-            let svc = crate::auth::AuthService::new(
-                std::path::Path::new(&data_dir),
-                config.multi_user.password_policy.clone(),
-                config.multi_user.bootstrap_admin.clone(),
-            )
-            .map_err(GatewayError::Config)?;
-            svc.ensure_bootstrap_admin().map_err(GatewayError::Config)?;
-            tracing::info!("AUTH_MODE=multi_user: account system enabled");
-            Some(Arc::new(svc))
+        // ADR-084: the account store is *not* opened here any more. It
+        // belongs to the `acowork-user` process, which the supervisor
+        // starts below and whose Ed25519 public key the Gateway uses to
+        // verify access tokens. Opening it here as well would make the
+        // Gateway a second writer of `accounts.json` — the exact coupling
+        // the ADR removes.
+        if auth_mode.is_multi_user() {
+            tracing::info!("AUTH_MODE=multi_user: account system delegated to acowork-user");
         } else {
             tracing::info!("AUTH_MODE=local: single-user mode (account system disabled)");
-            None
-        };
+        }
 
         let gateway = Self {
             config,
             state: Arc::new(RwLock::new(state)),
-            auth_service,
         };
 
         Ok(gateway)
@@ -245,22 +237,27 @@ impl Gateway {
 
     /// Whether the account system is in first-boot restricted mode: a
     /// passwordless admin account exists. ADR-076 §决策 12 v2.
-    /// Returns `false` in `local` mode (no account system at all).
+    ///
+    /// ADR-084: the Gateway no longer inspects the account store. It asks
+    /// the owner — `acowork-user admin-setup --check` — which reports the
+    /// *same* predicate its `/health` publishes as `requires_setup`, so the
+    /// boot-time prompt cannot disagree with the restricted-mode gate
+    /// applied minutes later. Returns `false` in `local` mode.
     pub fn is_first_boot_restricted(&self) -> bool {
-        self.auth_service
-            .as_ref()
-            .map(|svc| svc.is_restricted())
-            .unwrap_or(false)
+        if !self.config.effective_auth_mode().is_multi_user() {
+            return false;
+        }
+        crate::cli::user_setup_required(self.config.user.data_dir.as_deref()).unwrap_or(false)
     }
 
     /// Apply the first-boot admin password — used by the daemon's TTY
     /// prompt path (ADR-076 §决策 12 v2). Errors if the account system is
     /// not running (`local` mode) or the admin already has a password.
     pub fn set_admin_password(&self, password: &str) -> Result<(), String> {
-        match self.auth_service.as_ref() {
-            Some(svc) => svc.set_admin_password(password),
-            None => Err("admin-setup is unavailable in local mode".to_string()),
+        if !self.config.effective_auth_mode().is_multi_user() {
+            return Err("admin-setup is unavailable in local mode".to_string());
         }
+        crate::cli::user_admin_setup(self.config.user.data_dir.as_deref(), password)
     }
 
     /// Find the bundled agents directory.
@@ -766,6 +763,41 @@ impl Gateway {
             );
         } else {
             tracing::info!("doc supervisor disabled (doc.enabled=false)");
+        }
+
+        // acowork-user: standalone process `acowork-user`, lifecycle managed
+        // by the Gateway supervisor (spawn + `/health` poll + exponential-
+        // backoff restart). The whole user domain — `/api/auth/*`,
+        // `/api/users/*`, `/api/user/*` — is reverse-proxied to it by
+        // `http::user_proxy`, and its Ed25519 public key is what the Gateway
+        // verifies access tokens with (ADR-084 §决策 1/2/5).
+        //
+        // Non-fatal: if the service cannot start, the Gateway keeps running
+        // and those routes return 503 + `Retry-After` rather than 500.
+        if self.config.user.enabled {
+            let user_bin = crate::lifecycle::process::sibling_binary("acowork-user");
+            let supervisor_cfg = crate::lifecycle::user_supervisor::UserSupervisorConfig {
+                user_bin,
+                port: self.config.user.port,
+                port_file: data_dir_path.join("user.port"),
+                log_dir: data_dir_path.join("logs"),
+                gateway_health_url: format!("http://127.0.0.1:{}/health", http_config.port),
+                data_dir: self.config.user.data_dir.clone(),
+                config: self.config.user.config.clone(),
+                auth_mode: self.config.effective_auth_mode().as_str(),
+                mqtt_port: self.config.mqtt.port,
+            };
+            crate::lifecycle::user_supervisor::start_user_supervisor(
+                supervisor_cfg,
+                shared_state.clone(),
+            );
+            tracing::info!(
+                port = self.config.user.port,
+                enabled = true,
+                "user supervisor started (ADR-084)"
+            );
+        } else {
+            tracing::info!("user supervisor disabled (user.enabled=false)");
         }
 
         // doc_mcp_url: MCP endpoint exposed via the Gateway reverse proxy
@@ -1337,9 +1369,9 @@ impl Gateway {
         // handlers (open records) and the MQTT dispatch layer
         // (transition them on NodeEvent correlation).
         let http_operation_store = operation_store_shared.clone();
-        // ADR-076 §决策 12: hand the (already built) account service and
-        // the resolved mode to the HTTP layer.
-        let http_auth_service = self.auth_service.clone();
+        // ADR-084: the HTTP layer resolves whether the account system is on
+        // from the mode alone — the account service itself now lives behind
+        // the user proxy, and its public key arrives via the supervisor.
         let http_auth_mode = self.config.effective_auth_mode();
         let http_handle = tokio::spawn(async move {
             if let Err(e) = crate::http::server::start_http_server(
@@ -1358,7 +1390,6 @@ impl Gateway {
                 Some(http_operation_store),
                 http_auth,
                 http_auth_mode,
-                http_auth_service,
             )
             .await
             {
@@ -1888,6 +1919,7 @@ mod tests {
             local_node: crate::config::LocalNodeConfig::default(),
             pm: crate::config::PmConfig::default(),
             doc: crate::config::DocConfig::default(),
+            user: crate::config::UserConfig::default(),
             security: crate::config::SecurityConfig::default(),
             auth_mode: None,
             multi_user: crate::config::MultiUserConfig::default(),

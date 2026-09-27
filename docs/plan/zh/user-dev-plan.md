@@ -137,6 +137,22 @@ graph TB
 
 **出口**：Desktop 登录 → token → 拉 `/api/users` → 收发用户聊天，全部经 Gateway 正常；杀掉用户服务进程 → Desktop 收到 503 并可重试。
 
+> **实施备注（M2 已完成，出口已实测；M2/M3 合并落地）**
+>
+> M2 的出口条件要求 Gateway 能验签，而 M2 第 5 点又要删掉 `AuthService` 初始化 —— 删完 Gateway 就没有验签能力，鉴权是断的。因此 **M2 与 M3 的闸门改造合并执行**（否则 Gateway 会短暂成为 `accounts.json` 的第二个写者，正是 ADR-084 要禁掉的）。落地分三批：**A1** config + state + supervisor + proxy；**A2** 闸门（验签 / 受限模式 / `/api/status`）；**A3** 切换路由 + 拆除 + 委托 CLI。
+>
+> - **数据目录不由 Gateway 解析**（偏离计划第 1 点 `UserSupervisorConfig { ... data_dir ... }` 的写法）。ADR-084 §决策 5 写的是"默认由用户服务自解析"，Gateway 侧只在 `[user].data_dir` 显式配置时下发 `--data-dir`。计划原写法让 Gateway 猜一个默认值，而该默认在 `--home` 下与服务自身解析的结果不同（`project_root().parent()` vs `$HOME`），后果是 Gateway 去一个没人写的目录读 `auth/ed25519.pub` → **每个 token 都被拒**。改为：服务在 `/health` 的 `details.data_dir` 里回报自己的目录，supervisor 从那里取公钥（ADR-084 第 190 行的"或经 supervisor 传入"）。配套：`acowork-user` 的 `default_data_dir` 让 `ACOWORK_HOME` 优先，好在 `--home X` 下把用户域存储也收进 `X`，否则 e2e 会去动开发者真实的 `~/.acowork/acowork-user`。
+> - **新增 `[user].config`**（计划未列）：`[multi_user]` 的 `password_policy` / `bootstrap_admin` / `registration_open` 按计划 M1 第 6 点已迁入用户服务配置，但 Gateway 监管启动时没有任何路径把它们送过去 —— 等于 `bootstrap_admin` 这条 ADR-076 §决策 12 的官方首启路径被静默废掉。现在 `[user].config = "<path>"` 原样转发 `--config`；同时 `cli.rs` 首启提示与 `restricted_mode` 的 403 文案里"编辑 gateway.toml 的 `[multi_user].bootstrap_admin`"已改为指向用户服务配置（原文案此时已是假话）。
+> - **两个实测出来的真 bug**（计划未预见，均由 e2e 捕获）：
+>   1. Gateway 首启探测 `acowork-user admin-setup --check` 会**播种**（`AuthService::new` 建 `auth/` 并生成签名密钥 + `ensure_bootstrap_admin` 建无密码 admin）。它跑在服务启动之前，于是操作者配置的 `bootstrap_admin` 永远不会被应用（`ensure_bootstrap_admin` 是 create-once）。改为 `--check` 只做只读判定：新增 `auth::service::store_requires_setup(&Path)`，不构造 `AuthService`。
+>   2. `is_restricted()` 在**空库**时返回 `false`（"有管理员且全部无密码"在零管理员时为假）。ADR-084 之前不可达（Gateway 总是先播种再问），只读探测把它暴露出来：全新安装会报"已配置"，既不提示也不进受限模式。改为"没有管理员也算需要 setup"。
+> - **单测代价**：Gateway 侧删掉的 4 个模块里有 28 个测试靠 `seed_and_login` 走 `AuthService`。新增 `http/test_support.rs`（固定 Ed25519 密钥 fixture，同时供 `doc_proxy` / `pm_proxy` 复用），`seed_and_login` 改为签一个测试 token —— **23 个调用点逐字未改**。
+> - **`tests/auth_mode_e2e.rs` 的 3 处改动**：(a) `requires_setup` 现在来自 supervisor 的 `/health` 快照，是异步到达的，故加 `wait_for_status` 轮询；(b) `accounts.json` 断言路径改为 `<home>/acowork-user/`（`--home` 现在会带走它）；(c) `bootstrap_admin` 改写在用户服务的 TOML 里。另外顺手修了该文件一个**既有的 Windows-only 失败**：`gateway.toml` 里用 `Path::display()` 拼出的 `"C:\Users\..."` 是非法 TOML（`\U` 是 unicode 转义），改为正斜杠。
+> - **实测出口**（隔离 `--home` + 隔离端口，脚本跑完即删）：`admin-setup` 委托建库 → 经 Gateway 登录（EdDSA token）→ `GET /api/users` → 建 alice → alice 登录 → admin 发消息 → alice 侧 `unread_count: 1` 且 `peer_display_name` 正确（证明 `X-Auth-*` 注入生效）→ 杀 `acowork-user` → `503` + `retry-after: 2`。
+> - **回归**：`cargo clippy -p acowork-gateway -p acowork-user -p acowork-core --all-targets -- -D warnings` 干净；`cargo test -p acowork-gateway` 579 + 全部集成测试绿（起含 `auth_mode_e2e` 4/4）；`-p acowork-user` 106 绿；`-p acowork-core` 233 绿；`cargo check --workspace --all-targets` 干净。
+> - **已知遗留**：`cargo test -p acowork-gateway` 单独跑时，被监管的 `acowork-user.exe` 不保证是新的（Cargo 不为别的包构建 bin）——只有 workspace 级 `cargo test` 或先 `cargo build -p acowork-user` 才会重建；`doc_supervisor_integration` 对 `acowork-doc.exe` 有同样的既有假设。另外每条 e2e 用例都会留下存活至多 300s 的用户服务进程（ADR-018 watchdog），会占 18083+ 端口，并锁住 `target/debug/acowork-user.exe`。
+
+
 ### M3 — 闸门改造（验签 / 受限模式 / 档案快照）｜1-2d
 
 **任务**

@@ -19,6 +19,9 @@ use axum::{
 };
 
 use acowork_core::account::Role;
+use acowork_core::auth::TokenKind;
+
+use crate::auth::AuthPrincipal;
 use serde_json::json;
 
 use crate::auth::token::now_unix;
@@ -49,6 +52,12 @@ impl AuthContext {
         matches!(self.role, Role::Admin)
     }
 }
+
+/// Trusted-identity headers injected for the user service (ADR-084 §决策 7).
+///
+/// The wire contract lives in `acowork-core` so this side and the service
+/// cannot drift apart.
+pub use acowork_core::auth::{AUTH_AS_USER_HEADER, AUTH_ROLE_HEADER, AUTH_USER_HEADER};
 
 /// The Gateway-owned session-scope header consumed by the Runtime
 /// (ADR-076 §决策 4).
@@ -129,13 +138,13 @@ pub async fn auth_middleware(
     next: Next,
 ) -> Response {
     // Local mode: no account system, nothing to enforce.
-    let Some(auth) = state.auth_service.clone() else {
+    if !state.auth_mode.is_multi_user() {
         // The account system is off, so no identity may be asserted. Drop
         // any client-supplied scope header rather than letting it reach
         // the Runtime unvetted (ADR-076 §决策 4).
         req.headers_mut().remove(USER_SCOPE_HEADER);
         return next.run(req).await;
-    };
+    }
 
     // Never forward a client-asserted identity: the header is re-derived
     // from the verified token below, and only for authenticated callers.
@@ -146,6 +155,20 @@ pub async fn auth_middleware(
     if req.method() == Method::OPTIONS || is_public_path(req.uri().path()) {
         return next.run(req).await;
     }
+
+    // ADR-084 §决策 2: the account system lives in the user service now, so
+    // the Gateway verifies with the Ed25519 public key that service publishes
+    // and never touches the account store. The supervisor loads it once the
+    // service is ready; until then nothing can be verified, and the only safe
+    // answer is "not ready" — answering 401 would tell a client with a
+    // perfectly good token that it is bad, and letting the request through
+    // would authenticate nobody.
+    let verifier = state.gateway_state.read().await.user_verifier.clone();
+    let Some(verifier) = verifier else {
+        return service_unavailable(
+            "the user service is not ready yet; authentication is unavailable",
+        );
+    };
 
     let token = req
         .headers()
@@ -159,11 +182,14 @@ pub async fn auth_middleware(
         return unauthorized("missing bearer token");
     };
 
-    let principal = match auth.verify_access(token, now_unix()) {
-        Ok(p) => p,
-        Err(crate::auth::AuthError::Token(e)) => {
-            return unauthorized(&e.to_string());
-        }
+    // Same claims -> identity mapping `AuthService::verify_access` performed
+    // before the extraction (ADR-084 §决策 2): an unknown role claim is the
+    // least-privileged `user`.
+    let principal = match verifier.verify_kind(token, TokenKind::Access, now_unix()) {
+        Ok(claims) => AuthPrincipal {
+            user_id: claims.sub,
+            role: Role::from_claim(claims.role.as_deref().unwrap_or("user")),
+        },
         Err(e) => return unauthorized(&e.to_string()),
     };
 
@@ -219,6 +245,21 @@ pub async fn auth_middleware(
 
     req.extensions_mut().insert(ctx);
     next.run(req).await
+}
+
+/// The `/api/*` contract for "the user service is not up yet": 503 with
+/// `Retry-After`, matching what `user_proxy` returns so the Desktop's
+/// `with503Retry` handles both the same way.
+fn service_unavailable(message: &str) -> Response {
+    let mut response = (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({ "error": "user service not ready", "message": message })),
+    )
+        .into_response();
+    response
+        .headers_mut()
+        .insert(header::RETRY_AFTER, HeaderValue::from_static("2"));
+    response
 }
 
 fn unauthorized(message: &str) -> Response {
@@ -332,34 +373,21 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
-        let svc = Arc::new(
-            crate::auth::AuthService::new(
-                &dir,
-                Default::default(),
-                Some(crate::auth::BootstrapAdmin {
-                    username: "root".into(),
-                    password: "Rootpass1".into(),
-                    display_name: None,
-                }),
-            )
-            .unwrap(),
-        );
-        svc.ensure_bootstrap_admin().unwrap();
-        let admin_token = svc
-            .login("root", "Rootpass1", crate::auth::token::now_unix())
-            .unwrap()
-            .access_token;
+        // ADR-084: no account store in the Gateway — a token minted with
+        // the fixture key is what the gate now verifies.
+        let admin_token = crate::http::test_support::access_token("root", "admin");
 
         let state = |multi: bool| {
+            let mut gw = crate::gateway::state::GatewayState::new(&dir.to_string_lossy());
+            if multi {
+                gw.user_verifier = Some(crate::http::test_support::verifier());
+            }
             let mut st = crate::http::routes::AppState::new(
-                Arc::new(tokio::sync::RwLock::new(
-                    crate::gateway::state::GatewayState::new(&dir.to_string_lossy()),
-                )),
+                Arc::new(tokio::sync::RwLock::new(gw)),
                 Arc::new(crate::http::auth::HttpAuth::new(false)),
             );
             if multi {
                 st.auth_mode = crate::auth::AuthMode::MultiUser;
-                st.auth_service = Some(svc.clone());
             }
             st
         };
