@@ -83,10 +83,6 @@ fn search_list_path(data_dir: &Path) -> std::path::PathBuf {
     data_dir.join("search_list.json")
 }
 
-fn user_profile_list_path(data_dir: &Path) -> std::path::PathBuf {
-    data_dir.join("user_profiles.json")
-}
-
 fn embedding_models_path(data_dir: &Path) -> std::path::PathBuf {
     data_dir.join("embedding_models.json")
 }
@@ -96,11 +92,15 @@ fn embedding_models_path(data_dir: &Path) -> std::path::PathBuf {
 /// Load the resource cache from disk at Gateway startup.
 ///
 /// Returns empty lists with version 0 if files don't exist.
+///
+/// `user_profile_list` is deliberately **not** in this list: since ADR-084
+/// §决策 4b `user_profiles.json` belongs to `acowork-user`, so the Gateway
+/// starts empty and fills the cache from a pull
+/// ([`crate::lifecycle::user_profile_sync::refresh`]).
 pub fn load_resource_cache(data_dir: &Path) -> ResourceCache {
     let provider_list = load_provider_list(data_dir);
     let mcp_list = load_mcp_list(data_dir);
     let search_list = load_search_list(data_dir);
-    let user_profile_list = load_user_profile_list(data_dir);
     let embedding_models = load_embedding_models(data_dir);
     tracing::info!(
         provider_count = provider_list.providers.len(),
@@ -109,8 +109,6 @@ pub fn load_resource_cache(data_dir: &Path) -> ResourceCache {
         mcp_version = mcp_list.version,
         search_count = search_list.providers.len(),
         search_version = search_list.version,
-        user_profile_count = user_profile_list.users.len(),
-        user_profile_version = user_profile_list.version,
         embedding_model_count = embedding_models.models.len(),
         embedding_models_version = embedding_models.version,
         "Resource cache loaded"
@@ -119,7 +117,10 @@ pub fn load_resource_cache(data_dir: &Path) -> ResourceCache {
         provider_list,
         mcp_list,
         search_list,
-        user_profile_list,
+        user_profile_list: UserProfileListFile {
+            version: 0,
+            users: Vec::new(),
+        },
         embedding_models,
     }
 }
@@ -211,43 +212,6 @@ fn load_search_list(data_dir: &Path) -> SearchListFile {
     }
 }
 
-fn load_user_profile_list(data_dir: &Path) -> UserProfileListFile {
-    let path = user_profile_list_path(data_dir);
-    match std::fs::read_to_string(&path) {
-        Ok(raw) => match serde_json::from_str(&raw) {
-            Ok(list) => list,
-            Err(e) => {
-                tracing::warn!(
-                    path = %path.display(),
-                    error = %e,
-                    "Failed to parse user_profiles.json, using empty list"
-                );
-                UserProfileListFile {
-                    version: 0,
-                    users: Vec::new(),
-                }
-            }
-        },
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            tracing::info!("user_profiles.json not found, initializing empty");
-            UserProfileListFile {
-                version: 0,
-                users: Vec::new(),
-            }
-        }
-        Err(e) => {
-            tracing::warn!(
-                path = %path.display(),
-                error = %e,
-                "Failed to read user_profiles.json, using empty list"
-            );
-            UserProfileListFile {
-                version: 0,
-                users: Vec::new(),
-            }
-        }
-    }
-}
 
 fn load_embedding_models(data_dir: &Path) -> EmbeddingModelsFile {
     let path = embedding_models_path(data_dir);
@@ -427,19 +391,6 @@ pub fn save_search_list(data_dir: &Path, list: &SearchListFile) -> Result<(), St
     Ok(())
 }
 
-/// Save the user profile list to disk.
-pub fn save_user_profile_list(data_dir: &Path, list: &UserProfileListFile) -> Result<(), String> {
-    let json = serde_json::to_string_pretty(list)
-        .map_err(|e| format!("Failed to serialize user profile list: {}", e))?;
-    std::fs::write(user_profile_list_path(data_dir), &json)
-        .map_err(|e| format!("Failed to write user_profiles.json: {}", e))?;
-    tracing::info!(
-        version = list.version,
-        count = list.users.len(),
-        "User profile list saved"
-    );
-    Ok(())
-}
 
 /// Save the embedding models list to disk.
 pub fn save_embedding_models(data_dir: &Path, list: &EmbeddingModelsFile) -> Result<(), String> {
@@ -699,22 +650,6 @@ pub fn rebuild_and_save_search_cache(
     gw.resource_cache.search_list = new_list;
 }
 
-/// Rebuild user_profiles.json with a bumped version and save to disk.
-///
-/// Called by users_api.rs handlers after create/update/activate.
-/// The caller updates the users Vec before calling this function.
-pub fn rebuild_and_save_user_profile_cache(
-    gw: &mut crate::gateway::state::GatewayState,
-    data_dir: &Path,
-) {
-    let new_version = gw.resource_cache.user_profile_list.version.wrapping_add(1);
-    gw.resource_cache.user_profile_list.version = new_version;
-    let list = gw.resource_cache.user_profile_list.clone();
-
-    if let Err(e) = save_user_profile_list(data_dir, &list) {
-        tracing::error!(error = %e, "Failed to save user_profiles.json after profile change");
-    }
-}
 
 /// Build search key vault from Vault entries.
 ///

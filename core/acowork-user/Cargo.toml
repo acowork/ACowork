@@ -58,6 +58,8 @@ rand.workspace = true
 
 # Profile-change signal (ADR-084 §决策 4b) — same MQTT bus as the Gateway.
 acowork-mqtt-session.workspace = true
+# `MqttClientHandler` impls (the trait is `#[async_trait]`).
+async-trait.workspace = true
 prost.workspace = true
 rumqttc.workspace = true
 

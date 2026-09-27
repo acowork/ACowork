@@ -66,6 +66,11 @@ pub struct UserSnapshot {
     pub requires_setup: bool,
     /// `[multi_user].registration_open` — whether non-admins may self-register.
     pub registration_open: bool,
+    /// Live `user_profiles.json` version. The supervisor compares it against
+    /// the cached snapshot on every `/health` poll and pulls when it moved —
+    /// the healing path for a missed MQTT signal
+    /// ([`crate::lifecycle::user_profile_sync`]).
+    pub profile_version: u64,
 }
 
 /// Supervisor config (spawn parameters for acowork-user).
@@ -183,6 +188,10 @@ async fn spawn_and_monitor(cfg: &UserSupervisorConfig, state: &SharedState) {
             .get("registration_open")
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
+        profile_version: details
+            .get("user_profile_version")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0),
     };
 
     // Publish the public key before advertising readiness: the proxy routes
@@ -214,6 +223,12 @@ async fn spawn_and_monitor(cfg: &UserSupervisorConfig, state: &SharedState) {
     }
     tracing::info!(pid, port, "user service ready");
 
+    // ADR-084 §决策 4b: prime the profile snapshot. The Gateway's cache starts
+    // empty, so without this the retained `last_user_profile` a Runtime
+    // subscribes to would stay blank until the next mutation. Must run after
+    // the state write above (it reads `user_process` to find the port).
+    crate::lifecycle::user_profile_sync::refresh(state).await;
+
     // Monitor loop: `child.wait()` for exit, `/health` poll for stuck.
     let mut child = child;
     let mut last_healthy = Instant::now();
@@ -223,8 +238,21 @@ async fn spawn_and_monitor(cfg: &UserSupervisorConfig, state: &SharedState) {
                 match fetch_snapshot(port).await {
                     Some(s) => {
                         last_healthy = Instant::now();
-                        let mut gw = state.write().await;
-                        gw.user_snapshot = Some(s);
+                        let version_moved = {
+                            let mut gw = state.write().await;
+                            // Both the gate state and the profile version ride
+                            // this poll: no extra round trip, no I/O on the
+                            // request path (ADR-084 §决策 4b).
+                            let moved = gw.resource_cache.user_profile_list.version
+                                != s.profile_version;
+                            gw.user_snapshot = Some(s);
+                            moved
+                        };
+                        if version_moved {
+                            // The MQTT signal is the fast path; this is what
+                            // makes correctness independent of the broker.
+                            crate::lifecycle::user_profile_sync::refresh(state).await;
+                        }
                     }
                     None if last_healthy.elapsed() > supervisor_defaults::HEARTBEAT_TIMEOUT => {
                         tracing::warn!(
@@ -329,6 +357,10 @@ async fn fetch_snapshot(port: u16) -> Option<UserSnapshot> {
             .get("registration_open")
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
+        profile_version: details
+            .get("user_profile_version")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0),
     })
 }
 
@@ -363,8 +395,8 @@ async fn check_health(port: u16) -> bool {
     }
 }
 
-/// Shared HTTP client for supervisor probes.
-fn http_client() -> &'static reqwest::Client {
+/// Shared HTTP client for supervisor probes (and the profile-snapshot pull).
+pub(crate) fn http_client() -> &'static reqwest::Client {
     static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
     CLIENT.get_or_init(|| {
         reqwest::Client::builder()

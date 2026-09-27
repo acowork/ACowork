@@ -22,13 +22,14 @@ pub fn health_route() -> axum::Router<AppState> {
         axum::routing::get(move |State(state): State<AppState>| {
             let state = state.clone();
             async move {
-                let (data_dir, auth, auth_mode, registration_open) = {
+                let (data_dir, auth, auth_mode, registration_open, profile_version) = {
                     let shared = state.shared.read().await;
                     (
                         shared.data_dir.clone(),
                         state.auth_service.clone(),
                         state.auth_mode.as_str(),
                         shared.registration_open,
+                        shared.resource_cache.user_profile_list.version,
                     )
                 };
                 // Restricted mode = no way in yet: an admin exists but every
@@ -45,6 +46,12 @@ pub fn health_route() -> axum::Router<AppState> {
                         "auth_mode": auth_mode,
                         "requires_setup": requires_setup,
                         "registration_open": registration_open,
+                        // Lets the Gateway notice a profile change on the poll
+                        // it already performs. The MQTT signal
+                        // (`acowork/user/profiles/changed`) is the fast path;
+                        // this is the one that survives a broker that refuses
+                        // our client (see `mqtt_publisher`).
+                        "user_profile_version": profile_version,
                     })),
                 })
             }

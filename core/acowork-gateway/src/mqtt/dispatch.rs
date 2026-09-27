@@ -913,6 +913,17 @@ pub fn handle_plaintext_message(topic: &str, payload: &[u8], ctx: &DispatchConte
                 }
             }
         });
+    } else if topic == acowork_core::mqtt_proto::USER_PROFILES_CHANGED_TOPIC {
+        // ADR-084 §决策 4b: the user service owns `user_profiles.json`; this
+        // tells us our cached copy (and the `last_user_profile` the Runtimes
+        // hold, ADR-042) is behind. Pull + republish in the background: this
+        // handler runs on the MQTT poll loop and must not await HTTP.
+        let state = ctx.state.clone();
+        let version = String::from_utf8_lossy(payload).trim().to_string();
+        tokio::spawn(async move {
+            tracing::debug!(version, "user profile change signal received");
+            crate::lifecycle::user_profile_sync::refresh(&state).await;
+        });
     }
 }
 

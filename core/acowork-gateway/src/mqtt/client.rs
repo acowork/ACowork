@@ -16,6 +16,7 @@ use tokio::sync::Mutex;
 
 use acowork_core::defaults;
 use acowork_core::mqtt_proto::DataEnvelope;
+use acowork_core::mqtt_proto::USER_PROFILES_CHANGED_TOPIC;
 use acowork_mqtt_session::{
     MqttClient, MqttClientConfig, MqttClientError, MqttClientHandler,
 };
@@ -71,6 +72,12 @@ const PERSISTENT_SUBSCRIPTIONS: &[(&str, QoS)] = &[
     // SubsystemReadinessRegistry on receipt, and demotes it on an empty
     // retained payload (Node shutdown / LWT / disconnect clear).
     ("acowork/nodes/+/ready", QoS::AtLeastOnce),
+    // ADR-084 §决策 4b: the user service publishes this after every account /
+    // profile mutation; the Gateway re-pulls `GET /internal/user-profiles` and
+    // republishes global resources (`last_user_profile`, ADR-042). Non-retained
+    // on purpose — it is a nudge, not a value, so a signal missed while the
+    // Gateway was down costs nothing: the startup pull below covers it.
+    (USER_PROFILES_CHANGED_TOPIC, QoS::AtLeastOnce),
 ];
 
 /// Callback type for receiving non-global MQTT messages (e.g. agent http_port).

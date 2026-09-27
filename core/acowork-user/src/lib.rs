@@ -51,6 +51,7 @@ pub mod config;
 pub mod error;
 pub mod health;
 pub mod http;
+pub mod mqtt_publisher;
 pub mod profiles;
 pub mod server;
 pub mod state;

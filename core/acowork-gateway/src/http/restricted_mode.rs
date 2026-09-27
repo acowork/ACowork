@@ -145,6 +145,7 @@ mod tests {
                 .user_snapshot = Some(UserSnapshot {
                 requires_setup: true,
                 registration_open: false,
+                ..Default::default()
             });
         }
         let router = Router::new()
@@ -241,6 +242,7 @@ mod tests {
             gw.user_snapshot = Some(UserSnapshot {
                 requires_setup: true,
                 registration_open: false,
+                ..Default::default()
             });
         }
         let router = crate::http::routes::build_router(state);

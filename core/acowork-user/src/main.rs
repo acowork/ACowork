@@ -108,6 +108,11 @@ fn main() {
         });
 
     runtime.block_on(async move {
+        // Profile-change signal (ADR-084 §决策 4b). Best-effort: a broker that
+        // is not up yet is fine (the client reconnects), and a total failure
+        // only delays the Gateway's view until its next pull.
+        acowork_user::mqtt_publisher::init(&cli.mqtt_host, cli.mqtt_port).await;
+
         if let Some(ref url) = cli.gateway_health_url {
             spawn_gateway_health_watchdog(
                 url.clone(),

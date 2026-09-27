@@ -79,6 +79,10 @@ pub fn rebuild_and_save_user_profile_cache(state: &mut SharedState) {
         // is lost, and the next mutation rewrites the whole file.
         tracing::error!(error = %e, "failed to save user_profiles.json after profile change");
     }
+    // Single write path → single place that must tell the Gateway
+    // (ADR-084 §决策 4b). Fire-and-forget: a down broker must not fail a
+    // user-visible write, and the Gateway heals on its next pull.
+    crate::mqtt_publisher::notify_profiles_changed(snapshot.version);
 }
 
 #[cfg(test)]

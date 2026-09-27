@@ -10,6 +10,23 @@
 pub mod mqtt_proto {
     #![allow(clippy::large_enum_variant)]
     include!(concat!(env!("OUT_DIR"), "/acowork.mqtt.v1.rs"));
+
+    /// Profile/account-change signal published by `acowork-user`
+    /// (ADR-084 §决策 4b).
+    ///
+    /// QoS 1, **non-retained**, plain-text payload: the profile-list version
+    /// the change produced. The signal deliberately carries no data —
+    /// `user_profiles.json` is owned by `acowork-user`, so the Gateway's only
+    /// correct response is to re-pull `GET /internal/user-profiles`, and a
+    /// richer payload would just be a second copy of the truth to keep in
+    /// sync. Non-retained because it is a *nudge*, not a value: a missed one
+    /// is healed by the next mutation and by the Gateway's startup pull.
+    ///
+    /// Defined in the shared contract crate, not in either process: the
+    /// topic string is a wire contract between two binaries, and a one-sided
+    /// rename would break profile refresh **silently** (Runtimes keep a stale
+    /// `last_user_profile`) instead of failing a build.
+    pub const USER_PROFILES_CHANGED_TOPIC: &str = "acowork/user/profiles/changed";
 }
 
 pub mod account;

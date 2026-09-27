@@ -166,6 +166,18 @@ graph TB
 
 **出口**：`multi_user` e2e 全绿；受限模式回归用例（走真实 `build_router`，403 而非 401）；改档案后 Runtime 收到的 `last_user_profile` 及时更新。
 
+> **实施备注（M3 已完成，出口已实测）**
+>
+> 信号通道按 ADR 走 MQTT（`acowork/user/profiles/changed`，QoS 1 非保留，payload = 版本号明文，topic 常量放 `acowork-core` 供两侧共享），但 **额外** 用 supervisor 已有的 2s `/health` 轮询对帐 `user_profile_version` 作兜底。原因是实测出来的：`mqtt.auth_enabled: true` 时 broker 的 `check_connect_auth` 只放行 `node:*` / `agent:*` / `gateway:publisher` / Desktop，`user:service` 会被拒 —— 信号会**静默失效**，`last_user_profile` 就此永久陈旧（doc 的 `doc:service` 有同样的既有隐患）。轮询让正确性不依赖 broker，MQTT 只承担低延迟快路径。轮询复用既有请求，不新增 I/O。
+>
+> - **`/internal/user-profiles` 必须列入 `is_public_path`**：Gateway 是用"拉"的方式取快照，它没有身份可报（与 `/health` 同理）。第一版漏了这条，真实 `multi_user` 服务返 **401**，Gateway 永远拉不到快照 —— 而单测因为用了 `local` 模式（那里 identity 中间件是 no-op）**假绿**通过。已修，并把该测试改成 `multi_user` 断言、注释写明为什么不能用 `local`。
+> - `resource_cache.user_profile_list` 不再读本地 `user_profiles.json`：启动为空，由拉取填充（`load_resource_cache` 保留其余列表的磁盘加载）。顺带删除已成死代码的 `user_profile_list_path` / `load_user_profile_list` / `save_user_profile_list` / `rebuild_and_save_user_profile_cache` —— Gateway 侧不再有任何用户档案写入路径。
+> - **实测出口证据**（隔离 `--home` + 隔离端口，脚本跑完即删）：(a) `admin-setup` 后 `/api/status` 的 `requires_setup` 由 `true` 翻成 `false`，**gateway 未重启**（2s 轮询生效）；(b) 建 alice 后 dispatch 记 `user profile change signal received version="5"`、紧接 `user profile snapshot refreshed version=5 users=2`，**同一毫秒** → 走的是 MQTT 快路径而非轮询；(c) 直接 `GET http://127.0.0.1:{user_port}/internal/user-profiles` 返回 `{"version":5,"users":[admin,Alice]}`。
+> - **新增测试**：user `/internal/user-profiles` 路由契约（multi_user）；`user_profile_sync` 的 topic 契约、无服务 no-op、对真实 HTTP server 的"拉取→替换缓存→同版本不重复"，另加 `mqtt_publisher` 的 topic/明文 payload 两条。回归：`cargo test -p acowork-gateway`（582 lib + 全部集成）与 `-p acowork-user`（95）全绿，`clippy -D warnings` 三个 crate 干净。
+> - **未覆盖**：MQTT 快路径与轮询兜底之间没有强一致/去重语义（信号重复时靠版本号幂等跳过），以及 `mqtt.auth_enabled` 下 `user:service` 被拒这件事本身没修（只兜底）。真要修，得让 broker 认 `user:service`（复用 `publisher_token`）并把 token 传进服务 —— 属于 ADR-084 §9 的未决项，留到那一步一起定。
+> - **顺带发现两条待修**（已记入 M4）：`--home` 是顶层参数，`acowork-gateway admin-setup --home X` 会报 `unexpected argument`（必须 `--home X admin-setup`），与 `acowork-user` 的同一个坑，用 clap `global = true` 一并解决；`admin-setup` 输出的 `Restart gateway to serve requests` 现在已不准确（2s 轮询会让它自动生效，无需重启）。
+
+
 ### M4 — 统一 local 模式 + 拆除 + lint｜1-2d
 
 **任务**

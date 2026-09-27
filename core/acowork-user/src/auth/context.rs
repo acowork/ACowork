@@ -91,10 +91,19 @@ fn header_str<'a>(headers: &'a axum::http::HeaderMap, name: &str) -> Option<&'a 
 /// *before* it can log in, plus `/health` for the supervisor probe. Logout is
 /// included because a client holding an expired access token must still be
 /// able to drop a dead session.
+///
+/// `/internal/user-profiles` is here for the same reason `/health` is: the
+/// caller is the Gateway's supervisor *on this host*, not a client, and it
+/// asks by **pulling** (ADR-084 §决策 4b) — so it has no identity to present
+/// and no token it could have minted. Nothing is exposed that a client could
+/// not already read through `GET /api/users` (which the Gateway does
+/// authenticate), and the service binds loopback only, so the reachable set is
+/// the Gateway and any process already at the OS user's privilege level.
 pub(crate) fn is_public_path(path: &str) -> bool {
     matches!(
         path,
         "/health"
+            | "/internal/user-profiles"
             | "/api/auth/login"
             | "/api/auth/refresh"
             | "/api/auth/logout"
@@ -204,6 +213,7 @@ mod tests {
     fn public_paths_are_the_pre_login_surface() {
         for p in [
             "/health",
+            "/internal/user-profiles",
             "/api/auth/login",
             "/api/auth/refresh",
             "/api/auth/logout",
