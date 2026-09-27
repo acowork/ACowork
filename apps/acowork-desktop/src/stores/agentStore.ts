@@ -441,8 +441,9 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       });
 
       // Trigger atomic session activation for the selected agent.
-      // Backend guarantees /latest-session always returns a session_id
-      // for every running agent.
+      // `/latest-session` 404s when the agent-wide newest session belongs
+      // to another account (ADR-076); `selectAgent` handles that with a
+      // fallback to the account's own list.
       const current = get();
       if (current.selectedAgentId) {
         current.selectAgent(current.selectedAgentId);
@@ -535,18 +536,45 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
     // 在 selectedAgentId 变化 + running && ready 时自动触发。
     const chat = useChatStore.getState();
     if (!chat.agentStates[id]?.activeSessionId) {
-      get().fetchLatestSession(id).then(async (latest) => {
-        if (!latest?.session_id) return;
+      void (async () => {
+        const latest = await get().fetchLatestSession(id);
+        let target = latest?.session_id ?? null;
+
+        if (!target) {
+          // ADR-076 §决策 4: `/latest-session` answers from an agent-wide
+          // cache, so it 404s as soon as the agent's newest session belongs
+          // to another account — a private session is neither readable nor
+          // writable for a non-owner, so the Runtime refuses to name it
+          // rather than leak the id. Retrying cannot fix that, the call is
+          // wrong (not early).
+          //
+          // Fall back to this account's own scope-filtered list — the same
+          // rule `initSessionForAgent` (lib/agent-start.ts) already applies.
+          // If the account has no rows it gets a fresh untitled session;
+          // activation then rides the `session_created` MQTT event, so there
+          // is nothing to open here. Without this fallback the chat panel
+          // sits on "Loading session…" forever whenever the agent-wide latest
+          // session is not ours (multi-user, e.g. right after an account
+          // switch).
+          await get().fetchSessions(id);
+          // `fetchSessions` sorts by `created_at` desc → [0] is newest.
+          target = get().agents[id]?.sessions[0]?.session_id ?? null;
+          if (!target) {
+            await get().createSession(id);
+            return;
+          }
+        }
+
         // ADR-038: opening from the agent sidebar is a "first-open" scenario,
         // so we use the full openSession (UI + MQTT + load) instead of the
         // strict setActiveTab.
         // ADR-047: openSession now internally calls loadSession (config + state).
-        await chat.openSession(id, latest.session_id);
+        await chat.openSession(id, target);
         // Populate the sessions array so the session tab bar and panel
         // display the correct title instead of "Untitled" until the user
         // manually opens the session list (which triggers fetchSessions).
-        get().fetchSessions(id);
-      });
+        void get().fetchSessions(id);
+      })();
     }
   },
 
