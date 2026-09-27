@@ -981,7 +981,7 @@ impl SessionManager {
     ) -> SessionState {
         let mut initial_model = conversation.as_ref().and_then(|c| c.model());
         let mut initial_provider = conversation.as_ref().and_then(|c| c.provider());
-        let initial_account = conversation.as_ref().and_then(|c| c.account_id());
+        let mut initial_account = conversation.as_ref().and_then(|c| c.account_id());
 
         // Fall back to Runtime-internal default when the session has no
         // explicit model/provider (new agent, first session ever created).
@@ -1002,6 +1002,35 @@ impl SessionManager {
             }
             initial_model = fallback_model;
             initial_provider = fallback_provider;
+        }
+
+        // Same fallback chain for the multi-account pick: when the new
+        // session has no explicit account_id, inherit the most recently
+        // active session's pick so the model-menu highlight + right-panel
+        // alias row reflect the operator's last choice immediately, rather
+        // than staying blank until the user re-picks. No fallback is
+        // forced for never-picked cases (current_account_id returns None
+        // then) — single-account providers and operators who never picked
+        // an account continue to start with no pick, matching pre-change
+        // behaviour.
+        if initial_account.is_none()
+            && let Some(fallback_account) = self.current_account_id()
+        {
+            // Persist the inherited value to JSONL when a conversation
+            // exists (production `create_frontend_session` path), so
+            // the next resume keeps it. The cold-start
+            // `create_session()` path has no conversation to persist
+            // to — that's fine, the in-memory SessionState +
+            // SessionRuntimeSnapshot carry the value (the snapshot is
+            // the runtime mirror the frontend reads), and the session
+            // will get a conv attached on the first user message
+            // anyway.
+            if let Some(conv) = &conversation
+                && conv.account_id().is_none()
+            {
+                conv.update_account_id(&fallback_account);
+            }
+            initial_account = Some(fallback_account);
         }
 
         // Resume path: rebuild HistoryManager from the JSONL log so the LLM
@@ -1234,6 +1263,7 @@ impl SessionManager {
             if let Ok(mut snap) = session_state.snapshot.write() {
                 snap.model = model_name;
                 snap.provider = provider_name;
+                snap.account_id = session_state.account_id().map(|s| s.to_string());
                 snap.context_usage = context_usage;
                 // session_id is set by the caller after
                 // build_initial_session_state returns.
@@ -2469,6 +2499,13 @@ After installation, ask the user to re-enable the MCP server.",
             if let Some(ref provider) = provider {
                 snap.provider = Some(provider.clone());
             }
+            // Mirror the multi-account pick alongside model/provider so
+            // `current_account_id()`'s Level-2 lookup sees the freshly
+            // switched value immediately (same one-emit-cycle window as
+            // the model/provider mirror above).
+            if let Some(ref account) = account_id {
+                snap.account_id = Some(account.clone());
+            }
         }
 
         Ok(())
@@ -3020,6 +3057,59 @@ After installation, ask the user to re-enable the MCP server.",
             .and_then(|p| p.models.first())
             .map(|m| m.id.clone());
         (model, provider)
+    }
+
+    /// Resolve the account_id the next newly-created session should inherit.
+    ///
+    /// Mirrors [`current_model_and_provider`]'s two-level resolution for
+    /// the multi-account (`account_id`) counterpart so a brand-new session
+    /// inherits the most recently active session's account pick — same as
+    /// it already inherits `model` and `provider`.
+    ///   1. [`ConversationSession`] meta via the `session_configs` map
+    ///      (canonical, written synchronously by `apply_config`).
+    ///   2. The per-session [`SessionRuntimeSnapshot`] mirror —
+    ///      refreshed synchronously by `route_model_switch`, lags one
+    ///      emit cycle otherwise. Used as the fallback when
+    ///      `session_configs` is `None` (tests, single-session mode).
+    ///
+    /// Returns `None` (no inheritance) when no other session has an
+    /// explicit account pick — the runtime's LLM path already falls back
+    /// to the provider's first account via the vault resolver in that
+    /// case. Inventing a default here would silently overrule the
+    /// operator's "no preference" choice.
+    pub fn current_account_id(&self) -> Option<String> {
+        // Level 1: ConversationSession meta.
+        let from_conv = {
+            let configs_guard = self.session_configs.read().ok();
+            match configs_guard.as_deref() {
+                Some(configs) => self
+                    .sessions
+                    .values()
+                    .filter_map(|handle| {
+                        let conv = configs.get(&handle.session_id)?;
+                        let account = conv.account_id();
+                        let ts = *handle.last_active_at.lock().ok()?;
+                        Some((ts, account))
+                    })
+                    .max_by_key(|(ts, _)| *ts)
+                    .and_then(|(_, a)| a),
+                None => None,
+            }
+        };
+        if from_conv.is_some() {
+            return from_conv;
+        }
+        // Level 2: SessionRuntimeSnapshot mirror.
+        self.sessions
+            .values()
+            .filter_map(|handle| {
+                let snap = handle.snapshot.read().ok()?;
+                let account = snap.account_id.clone();
+                let ts = *handle.last_active_at.lock().ok()?;
+                Some((ts, account))
+            })
+            .max_by_key(|(ts, _)| *ts)
+            .and_then(|(_, a)| a)
     }
 
     /// Reap completed sessions (remove handles for tasks that have finished).
@@ -4390,6 +4480,7 @@ mod tests {
                     status: r#""idle""#.to_string(),
                     model: None,
                     provider: None,
+                    account_id: None,
                     ratio: None,
                     todos_json: None,
                     context_usage: None,
@@ -4713,6 +4804,168 @@ mod tests {
             .expect("s2 snapshot exists");
         assert_eq!(s2_snap.model.as_deref(), Some("model-A"));
         assert_eq!(s2_snap.provider.as_deref(), Some("provider-X"));
+    }
+
+    // ── Multi-account pick inheritance regression (ADR-012) ────────
+    //
+    // Bug history: `current_model_and_provider()` was inherited on
+    // new-session creation, but the multi-account `account_id` was
+    // not — a brand-new session started with `account_id = None`,
+    // so the model-select menu showed no active alias highlight and
+    // the right-panel session-status card had no alias row until
+    // the operator manually re-picked an account. Mirror the same
+    // inheritance chain for `account_id` via
+    // `SessionManager::current_account_id()`.
+    #[tokio::test]
+    async fn account_pick_inherits_for_new_sessions() {
+        // Helper: read the runtime-mirrored `account_id` for a session via
+        // its SessionRuntimeSnapshot. Mirrors the production read path
+        // the model-switch test pins (`snapshot_session_state`), and
+        // matches what `current_account_id()` consults when
+        // `session_configs` is `None` (the test config). The
+        // authoritative value lives in `ConversationSession::account_id`
+        // in production but is mirrored here by `route_model_switch`
+        // (synchronous) and `ConversationSession::update_account_id`
+        // (inheritance path on new-session creation).
+        let read_account = |manager: &SessionManager, sid: &str| -> Option<String> {
+            manager
+                .snapshot_session_state(sid)
+                .and_then(|s| s.account_id)
+        };
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let config = crate::config::RuntimeConfig {
+            work_dir: dir.path().to_string_lossy().to_string(),
+            ..Default::default()
+        };
+        let manifest = acowork_core::AgentManifest::from_toml(
+            r#"
+            agent_id = "com.test.account_inherit"
+            version = "1.0.0"
+            name = "Test account inherit"
+            description = "Pin account_id inheritance for new sessions"
+            author = "test"
+            runtime_version = "0.1.0"
+
+            [llm]
+            provider = "mock"
+            model = "test-model"
+            "#,
+        )
+        .unwrap();
+        let provider = Arc::new(acowork_core::providers::mock::MockProvider::single_text(
+            "test",
+        ));
+        let core = Arc::new(AgentCore::new(
+            config,
+            manifest,
+            provider,
+            Vec::<crate::agent::agent_core::BuiltinToolEntry>::new(),
+        ));
+        let resolver = Arc::new(std::sync::RwLock::new(WorkspaceResolver::new_for_test(
+            Vec::new(),
+        )));
+        let mut manager = SessionManager::new(core, SessionManagerConfig::default());
+        manager.set_resolver(resolver);
+
+        // s1 picks a multi-account slot for provider-X.
+        let s1 = manager.create_session().await.unwrap();
+        manager
+            .route_model_switch(
+                &s1,
+                "model-A".to_string(),
+                Some("provider-X".to_string()),
+                Some("acct-1".to_string()),
+            )
+            .unwrap();
+
+        // Sanity: s1's snapshot mirror carries the account_id written
+        // by `route_model_switch` (synchronous mirror path). This is
+        // what `current_account_id()`'s Level-2 lookup consults when
+        // `session_configs` is None.
+        assert_eq!(
+            read_account(&manager, &s1).as_deref(),
+            Some("acct-1"),
+        );
+
+        // current_account_id() — the resolver consulted by
+        // `build_initial_session_state` for the NEXT session —
+        // returns the most recently active session's pick.  Pin this
+        // BEFORE s2 lands in `self.sessions`: `build_initial_session_state`
+        // runs *before* `sessions.insert`, so the resolver never sees
+        // the freshly created session in its input set. If we called
+        // it after `create_session()`, s2's empty snapshot would win
+        // the max_by_key tie-break.
+        assert_eq!(
+            manager.current_account_id().as_deref(),
+            Some("acct-1"),
+        );
+
+        // A brand-new session inherits the picked account_id. Its
+        // runtime snapshot mirror must reflect it so the model-select
+        // menu highlight and the right-panel alias row agree from the
+        // very first frame.
+        let s2 = manager.create_session().await.unwrap();
+        let s2_snap = manager
+            .snapshot_session_state(&s2)
+            .expect("s2 snapshot exists");
+        assert_eq!(s2_snap.model.as_deref(), Some("model-A"));
+        assert_eq!(s2_snap.provider.as_deref(), Some("provider-X"));
+        assert_eq!(
+            read_account(&manager, &s2).as_deref(),
+            Some("acct-1"),
+            "inherited account_id must be mirrored into the runtime \
+             snapshot so it reaches the frontend via the session_state \
+             push on first emit",
+        );
+
+        // Negative case: a session created in an empty runtime (no
+        // prior active session to inherit from) keeps account_id =
+        // None — single-account providers and never-picked operators
+        // must not be silently overridden.
+        let dir2 = tempfile::TempDir::new().unwrap();
+        let config2 = crate::config::RuntimeConfig {
+            work_dir: dir2.path().to_string_lossy().to_string(),
+            ..Default::default()
+        };
+        let manifest2 = acowork_core::AgentManifest::from_toml(
+            r#"
+            agent_id = "com.test.account_inherit_negative"
+            version = "1.0.0"
+            name = "Test no inherit"
+            description = "No account inheritance when no prior pick"
+            author = "test"
+            runtime_version = "0.1.0"
+
+            [llm]
+            provider = "mock"
+            model = "test-model"
+            "#,
+        )
+        .unwrap();
+        let provider2 = Arc::new(acowork_core::providers::mock::MockProvider::single_text(
+            "test",
+        ));
+        let core2 = Arc::new(AgentCore::new(
+            config2,
+            manifest2,
+            provider2,
+            Vec::<crate::agent::agent_core::BuiltinToolEntry>::new(),
+        ));
+        let resolver2 = Arc::new(std::sync::RwLock::new(WorkspaceResolver::new_for_test(
+            Vec::new(),
+        )));
+        let mut manager2 = SessionManager::new(core2, SessionManagerConfig::default());
+        manager2.set_resolver(resolver2);
+
+        assert_eq!(manager2.current_account_id(), None);
+
+        let s_fresh = manager2.create_session().await.unwrap();
+        assert_eq!(
+            read_account(&manager2, &s_fresh),
+            None,
+            "fresh runtime with no prior pick must not invent an account_id",
+        );
     }
 
     // ── Delete-latest regression (orphan meta / stale latest marker) ──

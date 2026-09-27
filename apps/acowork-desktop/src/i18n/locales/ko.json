@@ -769,6 +769,7 @@
     "exitingDebug": "디버그 종료 중...",
     "labelModel": "모델",
     "labelProvider": "공급자",
+    "labelApiKeyAlias": "API 키 별칭",
     "labelCharactersPerToken": "글자/토큰",
     "labelThinkingLevel": "사고 깊이",
     "labelTemperature": "온도",

@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { useChatStore } from "../../stores/chatStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { useDebugStore } from "../../stores/debugStore";
-import type { ChatMessage, SessionStatus } from "../../lib/types";
+import type { ChatMessage, ProviderAccount, SessionStatus } from "../../lib/types";
 import { getProcessingPhase } from "../../lib/types";
 import { cn, formatPercent } from "../../lib/utils";
 import { log } from "../../lib/logger";
@@ -93,6 +93,33 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
     if (!agent?.activeSessionId) return null;
     return agent.sessionStates[agent.activeSessionId]?.provider ?? null;
   });
+  // Multi-account pick: `providerAccountId` of the currently-active
+  // session. ADR-012. The Runtime mirrors this onto the per-session
+  // `sessionStates[sid].providerAccountId` field (MQTT session_config +
+  // pull-repair from `GET /sessions/{sid}/config`), so this stays in
+  // sync as the user switches apikeys from the input-box model menu.
+  const sessionProviderAccountId = useChatStore((s) => {
+    if (!selectedAgentId) return null;
+    const agent = s.agentStates[selectedAgentId];
+    if (!agent?.activeSessionId) return null;
+    return agent.sessionStates[agent.activeSessionId]?.providerAccountId ?? null;
+  });
+  // Shared across the desktop — `loadModels` in ChatPanel populates
+  // this map from `invoke('list_keys')`. Reading here avoids a second
+  // IPC roundtrip; the list is refreshed whenever the input-box menu
+  // opens, which is the same trigger that affects what the session-
+  // status card should display.
+  const providerAccounts = useChatStore((s) => s.providerAccounts);
+  // Multi-account alias resolution for the right-panel session-status
+  // card. Mirrors the gating the input-box model menu uses
+  // (`accounts.length > 1`): only show an alias row when the provider
+  // has more than one account — single-account providers don't need the
+  // extra row, and showing it would clutter every existing session.
+  const sessionProviderAlias = resolveSessionProviderAlias(
+    sessionProvider,
+    sessionProviderAccountId,
+    providerAccounts,
+  );
   // ADR-066 §6: only Anthropic-protocol providers surface
   // `cache_creation_input_tokens` (the cache-write counter); OpenAI
   // Chat Completions and OpenAI-compatible providers never do. We use
@@ -859,6 +886,17 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
               {sessionProvider && (
                 <StatRow label={t("rightPanel.labelProvider")} value={sessionProvider} />
               )}
+              {/* Multi-account alias row — only when the current provider
+                  actually has more than one account. Single-account
+                  providers hide this row so existing sessions don't gain
+                  a redundant line. The alias is what the model-menu
+                  highlights as the session's apikey pick. */}
+              {sessionProviderAlias && (
+                <StatRow
+                  label={t("rightPanel.labelApiKeyAlias")}
+                  value={sessionProviderAlias}
+                />
+              )}
               {reasoningEffort != null && (
                 <StatRow label={t("rightPanel.labelThinkingLevel")} value={reasoningEffort.charAt(0).toUpperCase() + reasoningEffort.slice(1)} />
               )}
@@ -1069,4 +1107,31 @@ function StatRow({ label, value }: { label: string; value?: string }) {
       </span>
     </div>
   );
+}
+
+/**
+ * Resolve the apikey alias to show in the right-panel Session Status
+ * card for the active session. Returns `null` when:
+ *   - the session has no provider or no account pick yet
+ *   - the provider has fewer than two accounts (single-account
+ *     providers don't need the row)
+ *   - the picked account_id isn't in the vault (e.g. it was deleted
+ *     after the session started; UI degrades silently rather than
+ *     surfacing a stale alias)
+ *
+ * Mirrors the gating the input-box model menu uses
+ * (`accounts.length > 1`): an alias is only worth showing when the
+ * operator has a choice to make. Exported (not just `function`) so the
+ * unit test can exercise every branch without spinning up the full
+ * panel.
+ */
+export function resolveSessionProviderAlias(
+  provider: string | null,
+  providerAccountId: string | null,
+  providerAccounts: Record<string, ProviderAccount[]>,
+): string | null {
+  if (!provider || !providerAccountId) return null;
+  const accounts = providerAccounts[provider] ?? [];
+  if (accounts.length <= 1) return null;
+  return accounts.find((a) => a.accountId === providerAccountId)?.alias ?? null;
 }

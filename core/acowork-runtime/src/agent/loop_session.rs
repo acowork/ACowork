@@ -258,6 +258,7 @@ impl super::loop_::AgentLoop {
                 // lag by one emit cycle.
                 guard.model = self.session.model().map(|s| s.to_string());
                 guard.provider = self.session.provider().map(|s| s.to_string());
+                guard.account_id = self.session.account_id().map(|s| s.to_string());
                 guard.ratio = self.session.model_ratio();
                 guard.todos_json = todos_json;
                 // Only overwrite context_usage if we successfully computed a
