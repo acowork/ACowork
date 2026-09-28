@@ -976,7 +976,15 @@ export function AppLayout() {
 
         {/* Content area based on current view */}
         {currentView === "chat" && (
-          <div className="flex flex-1 overflow-hidden rounded-xl bg-page-bg">
+          // Chat-view capsule container — transparent so the OS-native
+          // vibrancy layer (set by `set_window_effect` in src-tauri) and
+          // the CSS-layer glass tint (this file's `glassBg`) show through.
+          // The four capsule panels (AgentList / ChatPanel / FileEditorPanel
+          // / RightPanel) carry their own borders, which is what now
+          // outlines them as floating surfaces. The non-chat view branches
+          // below (settings/harness/pm/docs/extensions) keep their
+          // solid `bg-page-bg` deliberately.
+          <div className="flex flex-1 overflow-hidden rounded-xl">
             {/* Agent list — resizable */}
             <AgentList width={sidebarWidth} />
 
