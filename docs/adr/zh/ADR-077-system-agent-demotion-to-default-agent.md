@@ -1,8 +1,8 @@
 ---
 # ADR-077: System Agent 降级为预装 default 普通 Agent — 移除 Gateway 特权内置路径
 
-**状态**：草案
-**日期**：2026-09-13
+**状态**：已决策
+**日期**：2026-09-13（定稿 2026-11-12）
 **决策者**：大鱼
 
 **前置**：
@@ -208,12 +208,12 @@ ADR-075 D6 与 [gateway/state.rs](../../../core/acowork-gateway/src/gateway/stat
 
 ## 6. 待确认（实施前定稿）
 
-| # | 问题 | 倾向 |
+| # | 问题 | 决策 |
 |---|---|---|
-| Q1 | `manifest.toml` 的 `system = true` 标记保留还是删除 | 保留为描述性元数据（标识 bundled），实施时确认无消费方 |
-| Q2 | `sort_pins_system_agent_first`（list 排序）保留还是删除 | 保留为 UX 偏好并加注释说明"这是展示排序，不是特权" |
-| Q3 | System Agent 是否仍注册为 Optional 子系统 | 不注册：其 readiness 由自身 Runtime `ready` retained 表达，Desktop 走常规 agent status 路径 |
-| Q4 | onboarding 是否默认勾选安装 System Agent | 默认勾选（多数用户需要 identity 记忆），但可取消；需持久化"用户上次卸了它则不自动勾选" |
+| Q1 | `manifest.toml` 的 `system = true` 标记保留还是删除 | **删除**。该字段除作为 Gateway 特权路径的语义锚点外无消费方，移除 System Agent 特权后该字段成为无主元数据，删掉即可 |
+| Q2 | `sort_pins_system_agent_first`（list 排序）保留还是删除 | **删除**。System Agent 走与普通 agent 一致的 list 排序（按 installed_at / name），不再享有展示上的特权位次 |
+| Q3 | System Agent 是否仍注册为 Optional 子系统 | **不注册**。其 readiness 由自身 Runtime `acowork/agents/{agent_id}/ready` retained 表达，Desktop 走常规 agent status 路径消费，不进 BootstrapState |
+| Q4 | onboarding 是否默认勾选安装 System Agent | **默认勾选**（多数用户需要 identity 记忆），但可取消；需持久化"用户上次卸了它则不自动勾选" |
 
 ---
 
