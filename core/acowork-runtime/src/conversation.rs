@@ -2116,11 +2116,17 @@ fn session_meta_registry() -> &'static Mutex<HashMap<PathBuf, Arc<dyn SessionMet
 /// `private.sqlite` for the workspace owning `conversations_dir`
 /// (`…/conversations` -> `…/memory/private.sqlite`).
 fn session_meta_db_path(conversations_dir: &Path) -> PathBuf {
-    conversations_dir
-        .parent()
-        .unwrap_or(conversations_dir)
-        .join("memory")
-        .join("private.sqlite")
+    let workspace = conversations_dir.parent().unwrap_or(conversations_dir);
+    // Caller contract: the *workspace's* conversations dir. Hand in a doubled
+    // path (`…/conversations/conversations`, what `POST /sessions/{sid}/open`
+    // used to do) and the store lands *inside* the log dir as
+    // `…/conversations/memory/private.sqlite` — a second, empty DB.
+    debug_assert!(
+        !workspace.ends_with("conversations"),
+        "session-meta store must not live inside the conversations dir: {}",
+        workspace.join("memory").join("private.sqlite").display()
+    );
+    workspace.join("memory").join("private.sqlite")
 }
 
 /// Install the session-meta backend for a workspace (ADR-082 §4 step 3).
@@ -3355,6 +3361,23 @@ mod tests {
             .map(|(sid, _)| sid)
             .collect();
         assert_eq!(ids, vec!["s-keep".to_string()]);
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "must not live inside")]
+    fn doubled_conversations_dir_trips_the_session_meta_guard() {
+        // ADR-076 regression: `POST /sessions/{sid}/open` passed an already
+        // joined `…/conversations` dir to a helper that joined it again, so
+        // the store opened (and filled) `…/conversations/memory/private.sqlite`
+        // — a second, empty DB next to the JSONL logs.
+        let temp_dir = TempDir::new().unwrap();
+        let conv = temp_dir.path().join("conversations");
+        assert_eq!(
+            session_meta_db_path(&conv),
+            temp_dir.path().join("memory").join("private.sqlite")
+        );
+        session_meta_db_path(&conv.join("conversations"));
     }
 
     #[test]

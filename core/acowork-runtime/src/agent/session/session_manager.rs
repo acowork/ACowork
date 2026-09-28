@@ -1714,13 +1714,17 @@ impl SessionManager {
     /// when the meta file is missing or unreadable.
     /// Used by the `open_session` handler to populate the
     /// [`crate::acowork_core::mqtt_proto::SessionOpened`] ack payload.
+    ///
+    /// `conversations_dir` is the workspace's `…/conversations` directory
+    /// (already joined) — every `conversation::*` meta helper takes that, and
+    /// so does the `open_session` handler. Joining it here as well is what
+    /// used to make the meta store open at `…/conversations/memory/private.sqlite`.
     pub fn session_metadata_summary(
         &self,
         session_id: &str,
-        work_dir: &Path,
+        conversations_dir: &Path,
     ) -> (Option<String>, Option<String>, Option<String>) {
-        let meta_dir = work_dir.join("conversations");
-        match read_session_meta(&meta_dir, session_id) {
+        match read_session_meta(conversations_dir, session_id) {
             Ok(meta) => (meta.model, meta.provider, Some(meta.last_active_at)),
             Err(_) => (None, None, None),
         }
