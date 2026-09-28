@@ -1,5 +1,7 @@
 //! Agent management commands
 
+use std::io::Read;
+
 use tauri::{Manager, State};
 
 use crate::gateway_client::{
@@ -19,6 +21,45 @@ const INSTALL_MAX_ATTEMPTS: usize = 5;
 /// Time budget for waiting on the bootstrap phase to reach READY
 /// between install retries (ADR-059 §5.1).
 const INSTALL_BOOTSTRAP_WAIT_SECS: u64 = 30;
+
+/// Per-call install wait budget. The Gateway inventory only flips after
+/// the Node's retained `InstalledAgentInfo` aggregates (ADR-059 §6), so
+/// the command should outlive typical Node-side install latency
+/// (download + signature verify + extract + retained publish).
+const INSTALL_WAIT_SECS: u64 = 180;
+
+/// Extract the `agent_id` from a `.agent` package's embedded
+/// `manifest.toml`. We do not trust the filename — OnboardingFlow §725
+/// calls out the same hazard (the Gateway inventory and the Node's
+/// install table key on the manifest id, not the filename), and the
+/// generic AgentList installer hits the same bug if we silently use the
+/// filename here. A non-MVP path: install the package from anywhere
+/// (including a renamed `.agent`) and `wait_agent_installed` still
+/// polls the right id.
+fn read_agent_id_from_package(package_bytes: &[u8]) -> Result<String, String> {
+    let reader = std::io::Cursor::new(package_bytes);
+    let mut archive = zip::ZipArchive::new(reader)
+        .map_err(|e| format!("Failed to read .agent package as ZIP: {}", e))?;
+    let mut manifest_file = archive
+        .by_name("manifest.toml")
+        .map_err(|e| format!("manifest.toml not found in package: {}", e))?;
+    let mut manifest_str = String::new();
+    manifest_file
+        .read_to_string(&mut manifest_str)
+        .map_err(|e| format!("Failed to read manifest.toml: {}", e))?;
+    let value: toml::Value = toml::from_str(&manifest_str)
+        .map_err(|e| format!("manifest.toml is not valid TOML: {}", e))?;
+    let agent_id = value
+        .get("agent_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "manifest.toml has no `agent_id` field".to_string())?
+        .trim()
+        .to_string();
+    if agent_id.is_empty() {
+        return Err("manifest.toml `agent_id` is empty".to_string());
+    }
+    Ok(agent_id)
+}
 
 /// Decide whether an `install_agent` failure is retryable.
 ///
@@ -174,10 +215,22 @@ pub async fn install_agent(
         return Err("Package file is empty".to_string());
     }
 
+    // ADR-059 §6: install is asynchronous. The Gateway answers 202 with
+    // an OperationAck, then the Node downloads / extracts / publishes
+    // the retained install in the background. We resolve the
+    // `agent_id` from manifest.toml and then poll the Gateway inventory
+    // until the agent appears — that 200 is the authoritative
+    // "installed" signal. Without this wait the caller (AgentList,
+    // OnboardingFlow) would race the Node install and toast success on
+    // the 202 ACK alone, leaving the agent missing from the inventory
+    // (the bug surfaced as the "toast says success but agent is not
+    // installed" issue).
+    let agent_id = read_agent_id_from_package(&package_bytes)?;
+
     // Clone the captured Tauri `State` outside the closure so the retry
     // wrapper can borrow `state` while the `move` closure owns its copy.
     let state_for_op = state.clone();
-    install_with_retry(&state, "INSTALL_AGENT", move || {
+    let ack = install_with_retry(&state, "INSTALL_AGENT", move || {
         let state = state_for_op.clone();
         let package_bytes = package_bytes.clone();
         let node_id = node_id.clone();
@@ -189,7 +242,26 @@ pub async fn install_agent(
                 .await
         }
     })
-    .await
+    .await?;
+
+    // Wait until the install actually lands in the Gateway inventory.
+    // Any error here surfaces as a Tauri error → invoke() throws on the
+    // frontend → AgentList's catch block shows the toast.
+    let client = state.gateway.read().await;
+    client
+        .wait_for_agent_installed(
+            &agent_id,
+            std::time::Duration::from_secs(INSTALL_WAIT_SECS),
+        )
+        .await
+        .map_err(|e| {
+            format!(
+                "Install submitted (operation {}) but did not complete within {}s: {}",
+                ack.operation_id, INSTALL_WAIT_SECS, e
+            )
+        })?;
+
+    Ok(ack)
 }
 
 #[tauri::command]
@@ -226,10 +298,22 @@ pub async fn install_bundled_agent(
         resource_name
     );
 
+    // Resolve the agent_id up front so we can both submit the install
+    // and verify the post-install inventory appearance against the same
+    // canonical identifier (filename-independent — see
+    // `read_agent_id_from_package`).
+    let agent_id = read_agent_id_from_package(&package_bytes)?;
+    tracing::info!(
+        "[INSTALL_BUNDLED] Resolved agent_id={} for {}",
+        agent_id,
+        resource_name
+    );
+
     let state_for_op = state.clone();
-    install_with_retry(&state, "INSTALL_BUNDLED", move || {
+    let ack = install_with_retry(&state, "INSTALL_BUNDLED", move || {
         // See INSTALL_AGENT — the retry wrapper borrows `state` while this
-        // closure owns its pre-cloned copy.
+        // closure owns its pre-cloned copy. `install_with_retry` is `FnMut`,
+        // so we re-clone the bytes on every attempt instead of moving.
         let state = state_for_op.clone();
         let package_bytes = package_bytes.clone();
         let dev_mode = dev_mode.unwrap_or(true);
@@ -238,7 +322,27 @@ pub async fn install_bundled_agent(
             client.install_agent(&package_bytes, dev_mode, None).await
         }
     })
-    .await
+    .await?;
+
+    // See INSTALL_AGENT: wait for the install to land in the Gateway
+    // inventory. The bundled packages ship with a canonical agent id
+    // that we resolve from the package's manifest.toml (filename
+    // independence, same rationale as `read_agent_id_from_package`).
+    let client = state.gateway.read().await;
+    client
+        .wait_for_agent_installed(
+            &agent_id,
+            std::time::Duration::from_secs(INSTALL_WAIT_SECS),
+        )
+        .await
+        .map_err(|e| {
+            format!(
+                "Install of {} submitted (operation {}) but did not complete within {}s: {}",
+                resource_name, ack.operation_id, INSTALL_WAIT_SECS, e
+            )
+        })?;
+
+    Ok(ack)
 }
 
 /// Wait until the agent appears in the Gateway inventory.

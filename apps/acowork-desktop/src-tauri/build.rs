@@ -2,8 +2,8 @@
 //!
 //! Before invoking `tauri_build::build()`, this script copies the core
 //! workspace binaries (gateway, runtime, embed, pm, node, lsp-relay,
-//! doc) and the ONNX runtime DLL into a `bin/` staging directory inside
-//! `src-tauri/`. This allows `tauri.conf.json` to reference a fixed local
+//! doc, user) and the ONNX runtime DLL into a `bin/` staging directory
+//! inside `src-tauri/`. This allows `tauri.conf.json` to reference a fixed local
 //! path instead of fragile `target/{profile}/` glob patterns that break
 //! on a fresh clone.
 //!
@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 /// Binaries to copy from the workspace target directory.
 ///
 /// Must include every binary that the Gateway spawns as a sibling
-/// (node, lsp-relay, doc) and every binary the Desktop bundles as a
+/// (node, lsp-relay, doc, user) and every binary the Desktop bundles as a
 /// `bin/*` resource — otherwise the reverse copy performed by
 /// `tauri_build::build()` (resources → target/{profile}) resurrects
 /// stale binaries from `src-tauri/bin/` over the fresh workspace build.
@@ -42,6 +42,7 @@ const BINARIES: &[&str] = &[
     "acowork-node",
     "acowork-lsp-relay",
     "acowork-doc",
+    "acowork-user",
 ];
 
 /// Stage one workspace artifact into `bin/` for release packaging, or clear
@@ -79,7 +80,16 @@ fn main() {
     // Dev builds must never stage workspace binaries into `bin/` — the
     // reverse copy of `tauri_build::build()` would collide with the live
     // Gateway / Node / ... executables (see module docs for details).
-    let is_dev = tauri_build::is_dev();
+    //
+    // We deliberately avoid `tauri_build::is_dev()` here: it relies on
+    // `DEP_TAURI_DEV` being propagated via Tauri's `links` mechanism,
+    // and that propagation does not always reach the build script in
+    // workspace contexts — in particular `cargo check` against this
+    // crate can observe `is_dev() == false` even though the profile is
+    // clearly debug. `PROFILE` (set by Cargo to `debug` or `release`
+    // for every build script invocation) is the authoritative source.
+    let profile = std::env::var("PROFILE").unwrap_or_else(|_| "debug".to_string());
+    let is_dev = profile != "release";
 
     // 2. Create the staging directory.
     std::fs::create_dir_all(&bin_dir).expect("Failed to create bin/ staging directory");

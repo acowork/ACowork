@@ -3,7 +3,7 @@
 //! Under `AUTH_MODE=multi_user`, every `/api/*` request must carry
 //! `Authorization: Bearer <access_token>`; the verified identity is
 //! injected as [`AuthContext`] for downstream handlers. Under
-//! `AUTH_MODE=local` no `AuthService` exists and this middleware is a
+//! `AUTH_MODE=local` there is no account system and this middleware is a
 //! pass-through — the legacy bearer token keeps doing whatever it did
 //! (ADR-076 §决策 12: local is a no-op for the account system).
 //!
@@ -21,7 +21,6 @@ use axum::{
 use acowork_core::account::Role;
 use acowork_core::auth::TokenKind;
 
-use crate::auth::AuthPrincipal;
 use serde_json::json;
 
 use crate::auth::token::now_unix;
@@ -156,6 +155,37 @@ pub async fn auth_middleware(
         return next.run(req).await;
     }
 
+    // ADR-055 Phase 5a machine identity: a Node presenting a valid
+    // `X-ACowork-Node-Token` is a trusted internal actor. The middleware
+    // accepts it here instead of forcing the Node to obtain a
+    // user-level Bearer token (which it has no use for), and the
+    // per-route `node_tokens.any_token_matches` check still applies as
+    // a defense-in-depth gate at the route entry. The check is
+    // opt-in: when `mqtt.auth_enabled` is false the Gateway has no
+    // node-token store to consult, so the header is simply ignored.
+    if let Some(node_token) = req
+        .headers()
+        .get("X-ACowork-Node-Token")
+        .and_then(|v| v.to_str().ok())
+    {
+        let broker_auth = state.gateway_state.read().await.mqtt_broker_auth.clone();
+        let authorized = broker_auth
+            .as_ref()
+            .map(|auth| {
+                auth.node_tokens
+                    .lock()
+                    .map(|store| store.any_token_matches(node_token))
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false);
+        if authorized {
+            return next.run(req).await;
+        }
+        // Header was supplied but the token is unknown — fall through to
+        // the user-token path so a misconfigured Node still gets a
+        // meaningful 401 rather than a silent bypass.
+    }
+
     // ADR-084 §决策 2: the account system lives in the user service now, so
     // the Gateway verifies with the Ed25519 public key that service publishes
     // and never touches the account store. The supervisor loads it once the
@@ -183,13 +213,13 @@ pub async fn auth_middleware(
     };
 
     // Same claims -> identity mapping `AuthService::verify_access` performed
-    // before the extraction (ADR-084 §决策 2): an unknown role claim is the
-    // least-privileged `user`.
-    let principal = match verifier.verify_kind(token, TokenKind::Access, now_unix()) {
-        Ok(claims) => AuthPrincipal {
-            user_id: claims.sub,
-            role: Role::from_claim(claims.role.as_deref().unwrap_or("user")),
-        },
+    // in the Gateway before the extraction (ADR-084 §决策 2): an unknown role
+    // claim is the least-privileged `user`.
+    let (user_id, role) = match verifier.verify_kind(token, TokenKind::Access, now_unix()) {
+        Ok(claims) => (
+            claims.sub,
+            Role::from_claim(claims.role.as_deref().unwrap_or("user")),
+        ),
         Err(e) => return unauthorized(&e.to_string()),
     };
 
@@ -215,7 +245,7 @@ pub async fn auth_middleware(
             )
                 .into_response();
         }
-        if !principal.is_admin() || !is_valid_scope_id(u) {
+        if !matches!(role, Role::Admin) || !is_valid_scope_id(u) {
             return (
                 StatusCode::FORBIDDEN,
                 Json(json!({
@@ -228,8 +258,8 @@ pub async fn auth_middleware(
     }
 
     let ctx = AuthContext {
-        user_id: principal.user_id,
-        role: principal.role,
+        user_id,
+        role,
         as_user,
     };
 
