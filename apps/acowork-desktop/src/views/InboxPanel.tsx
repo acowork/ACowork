@@ -93,7 +93,7 @@ export function InboxPanel() {
   const chatId = chatIdOf(activePeerId, self.user_id);
 
   return (
-    <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+    <div className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-border-outer bg-chat-body">
       <header className="flex h-9 shrink-0 items-center border-b border-border-divider px-4 text-xs font-semibold text-text-secondary">
         <span className="truncate">{activeLabel}</span>
       </header>
