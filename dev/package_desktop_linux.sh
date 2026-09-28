@@ -114,5 +114,21 @@ else
     echo -e "${YELLOW}      Without it, /api/doc/* returns 503 (Doc unavailable).${NC}"
 fi
 
+# Bundle User service binary (sibling of acowork-gateway, ADR-084).
+# Mirrors the Doc service above: the Gateway supervisor locates it via
+# `current_exe().parent().join("acowork-user")`; without this copy the User
+# supervisor logs "acowork-user binary not found" and every user-domain route
+# (`/api/auth/*`, `/api/users/*`, `/api/user/*`) returns 503 (accounts,
+# profiles and user chat unavailable).
+USER_BIN="$WORKSPACE_ROOT/target/release/acowork-user"
+if [ -f "$USER_BIN" ]; then
+    cp "$USER_BIN" "$BIN_DIR/acowork-user"
+    echo -e "${GREEN}Bundled User service binary: $USER_BIN${NC}"
+else
+    echo -e "${YELLOW}WARN: acowork-user not found at $USER_BIN.${NC}"
+    echo -e "${YELLOW}      Run ./dev/build_core.sh (release) first.${NC}"
+    echo -e "${YELLOW}      Without it, /api/auth/*, /api/users/* and /api/user/* return 503.${NC}"
+fi
+
 cd "$DESKTOP_DIR"
 npm run tauri build

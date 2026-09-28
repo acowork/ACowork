@@ -515,14 +515,14 @@ class Gateway:
                 self.proc.kill()
             log("INFO", "Gateway stopped")
         self.proc = None
-        # Reap the local node + embed model runner the Gateway spawned
-        # for THIS instance. On Linux / macOS the smoke harness uses
-        # `pgrep`; on Windows that command does not exist, so we use
-        # psutil to enumerate processes by image name and filter on
+        # Reap the local node + embed model runner + user service the
+        # Gateway spawned for THIS instance. On Linux / macOS the smoke
+        # harness uses `pgrep`; on Windows that command does not exist, so
+        # we use psutil to enumerate processes by image name and filter on
         # command line. SIGTERM is also unrecognised on Windows, so the
         # terminate call falls back to SIGKILL when SIGTERM fails.
         home_str = str(self.home)
-        for pat in ("acowork-node", "acowork-embed"):
+        for pat in ("acowork-node", "acowork-embed", "acowork-user"):
             for pid in _find_child_pids(pat, home_str):
                 try:
                     os.kill(pid, signal.SIGTERM)
@@ -532,8 +532,8 @@ class Gateway:
 
 
 def _find_child_pids(pattern, home_str):
-    """Return PIDs of acowork-node / acowork-embed children whose
-    command line contains `home_str` (the per-instance ACOWORK_HOME
+    """Return PIDs of acowork-node / acowork-embed / acowork-user children
+    whose command line contains `home_str` (the per-instance ACOWORK_HOME
     or ACOWORK_NODE_HOME). Uses psutil so the script works on both
     Linux / macOS (where the smoke harness is CI-hosted) and Windows
     (where this e2e is normally debugged)."""

@@ -690,10 +690,30 @@ struct ChildGuard(std::process::Child);
 
 impl Drop for ChildGuard {
     fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        kill_tree(&mut self.0);
     }
 }
+
+/// Kill the child **and every process it spawned**.
+///
+/// `Child::kill()` is TerminateProcess on Windows: it reaps only the direct
+/// child, so the services that child hosted (embed / node / doc / pm / user)
+/// survive until their ADR-018 watchdog notices the Gateway is gone (5 min),
+/// holding their ports and — on Windows — a lock on `acowork-*.exe` that
+/// fails the next `cargo build`. `taskkill /T` reaps the tree with it.
+///
+/// Only ever our own child — never a pattern match on process names. Unix
+/// needs no equivalent here: the watchdog is the designed backstop and a
+/// running binary does not lock its own path there.
+fn kill_tree(child: &mut std::process::Child) {
+    #[cfg(windows)]
+    let _ = std::process::Command::new("taskkill")
+        .args(["/PID", &child.id().to_string(), "/T", "/F"])
+        .output();
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn node_control_rejects_invalid_instance_id_before_spawn() {

@@ -156,11 +156,18 @@ impl LspPool {
     ) -> anyhow::Result<Arc<LspProcessEntry>> {
         let mut cmd = Command::new(command);
         cmd.args(args);
+        // Pooled servers outlive WebSocket sessions by design, but they
+        // must not outlive the relay process itself. Without `kill_on_drop`,
+        // dropping the wait task's `Child` on runtime shutdown leaks the
+        // server as an orphan — and on Windows it also blocks shutdown
+        // until the child exits, because dropping the handle unregisters
+        // the process wait and only returns once it completes.
         let mut child = cmd
             .current_dir(workspace_root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            .kill_on_drop(true)
             .spawn()?;
 
         let pid = child.id().unwrap_or(0);

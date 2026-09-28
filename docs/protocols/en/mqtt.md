@@ -938,6 +938,8 @@ client.publish(
 | Client | Client ID | Purpose |
 |--------|-----------|---------|
 | Gateway Publisher | `gateway:publisher` | Uniquely identifies Gateway's MQTT client (only PUBLISHes `acowork/global/#` Retained) |
+| User Service | `user:service` | Publisher of the standalone `acowork-user` process (only PUBLISHes `acowork/user/profiles/changed`); CONNECT password = the Gateway publisher token (injected by the user supervisor via `--mqtt-password`, ADR-084 § Decision 4b) |
+| Doc Service | `doc:service` | Publisher of the standalone `acowork-doc` process (only PUBLISHes `acowork/doc/tree/changed`); CONNECT password = the Gateway publisher token (injected by the doc supervisor via `--mqtt-password`, ADR-084 § Decision 4b) |
 | Runtime | `agent:{agent_id}` | Business entity, one per Runtime; from Phase 5a onward, CONNECT password = host Node's node_token (see §8.7) |
 | Desktop | `user:{user_id}:desktop:{pid}` | Distinguishes in multi-user scenarios (`{pid}` = process PID, for multiple desktop instances per user); from Phase 5a onward, CONNECT password = `http_token` (see §8.7) |
 | Node Agent | `node:{node_id}` | Node identity (ADR-055 §6.2); CONNECT password = node_token, or valid enrollment token on first access (see §8.7) |
@@ -962,6 +964,8 @@ Default `mqtt.auth_enabled = false` (anonymous, keeping single-machine status); 
 | `node:{node_id}` | == that node's issued node_token; or == a valid and unconsumed enrollment token (first-access path) |
 | `agent:{agent_id}` | == **any** registered node_token (first-tier simplification: does not validate agent→node ownership, noted in ADR-055) |
 | `gateway:publisher` | == Gateway internal publisher token (generated at startup) |
+| `user:service` | == Gateway internal publisher token (injected by the user supervisor via `--mqtt-password`, ADR-084 § Decision 4b) |
+| `doc:service` | == Gateway internal publisher token (injected by the doc supervisor via `--mqtt-password`, ADR-084 § Decision 4b) |
 | `user:{uid}:desktop:{pid}` | == `http_token` (HttpAuth generates when auth_enabled) |
 | Other | Reject (CONNACK 5 / disconnect) |
 

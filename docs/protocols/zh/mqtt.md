@@ -987,6 +987,8 @@ client.publish(
 | 客户端 | Client ID | 用途 |
 |--------|-----------|------|
 | Gateway Publisher | `gateway:publisher` | 唯一标识 Gateway 的 MQTT 客户端（仅发 `acowork/global/#` Retained） |
+| 用户服务 | `user:service` | `acowork-user` 独立进程的 publisher（仅发 `acowork/user/profiles/changed`）；CONNECT 密码 = Gateway publisher token（由 user supervisor 经 `--mqtt-password` 注入，ADR-084 §决策 4b） |
+| 文档服务 | `doc:service` | `acowork-doc` 独立进程的 publisher（仅发 `acowork/doc/tree/changed`）；CONNECT 密码 = Gateway publisher token（由 doc supervisor 经 `--mqtt-password` 注入，ADR-084 §决策 4b） |
 | Runtime | `agent:{agent_id}` | 业务主体，每个 Runtime 一个；Phase 5a 起 CONNECT 密码 = 宿主 Node 的 node_token（见 §8.7） |
 | Desktop | `user:{user_id}:desktop:{pid}` | 多用户场景区分（`{pid}` = 进程 PID，用于同 user 多 desktop 实例）；Phase 5a 起 CONNECT 密码 = `http_token`（见 §8.7） |
 | Node Agent | `node:{node_id}` | 节点身份（ADR-055 §6.2）；CONNECT 密码 = node_token，或首次接入时有效的 enrollment token（见 §8.7） |
@@ -1011,6 +1013,8 @@ client.publish(
 | `node:{node_id}` | == 该节点已签发的 node_token；或 == 一个有效且未消费的 enrollment token（首次接入路径） |
 | `agent:{agent_id}` | == **任一**已注册 node_token（第一档简化：不校验 agent→node 归属，ADR-055 注明） |
 | `gateway:publisher` | == Gateway 内部 publisher token（启动时生成） |
+| `user:service` | == Gateway 内部 publisher token（启动时生成；由 user supervisor 经 `--mqtt-password` 注入，ADR-084 §决策 4b） |
+| `doc:service` | == Gateway 内部 publisher token（启动时生成；由 doc supervisor 经 `--mqtt-password` 注入，ADR-084 §决策 4b） |
 | `user:{uid}:desktop:{pid}` | == `http_token`（auth_enabled 时 HttpAuth 已生成） |
 | 其他 | 拒绝（CONNACK 5 / 断开） |
 

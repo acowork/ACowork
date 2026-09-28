@@ -1303,14 +1303,30 @@ impl RuntimeGitQueryService {
         // front so a malformed ref surfaces here (clean 4xx) rather
         // than buried inside `git show <rev>:<path>` stderr (which
         // `read_blob` silently maps to `Missing`).
+        //
+        // `:` is git's index-stage shorthand — `git show :<path>` reads
+        // the staged blob. It is not a commit-ish, so the canonical-SHA
+        // step (`rev-parse "<head_ref>^{commit}"`) and the file-history
+        // predecessor lookup both reject it. The index blob is reachable
+        // through `read_blob` with `rev=""` (formatted as `:path` — see
+        // its doc comment); `head_rev` is `None` because the index has
+        // no canonical SHA to surface to the UI.
         let requested_base_rev = rev_parse_commit(&self.git_bin, repo_root, base_ref).await?;
-        let head_rev = rev_parse_commit(&self.git_bin, repo_root, head_ref).await?;
+        let head_rev: Option<String> = if head_ref == ":" {
+            None
+        } else {
+            Some(rev_parse_commit(&self.git_bin, repo_root, head_ref).await?)
+        };
         // Promote the caller-requested base (usually `<head>^`) to the
         // file-history predecessor of `head_ref` on `path`. This is the
         // authoritative "what did this file look like right before
         // head_ref's edit" answer — and matches the row above head in
         // the diff banner's `CommitPicker` (`git log -- <path>`).
-        let (effective_base_ref, base_rev) =
+        // Skipped for `:` — there is no file-history predecessor of an
+        // index ref; the caller's `base_ref` stands verbatim.
+        let (effective_base_ref, base_rev) = if head_ref == ":" {
+            (base_ref.to_string(), requested_base_rev)
+        } else {
             match file_history_prev(&self.git_bin, repo_root, head_ref, repo_rel).await? {
                 // File-history had a predecessor. Use it as the actual base
                 // ref so `read_blob` reads the same blob the banner label
@@ -1326,17 +1342,19 @@ impl RuntimeGitQueryService {
                 // base_ref verbatim — preserves the existing first-parent
                 // semantics for file-introducing commits.
                 None => (base_ref.to_string(), requested_base_rev),
-            };
+            }
+        };
         let original = match read_blob(&self.git_bin, repo_root, &effective_base_ref, repo_rel)
             .await?
         {
-            BlobRead::Missing => return Ok(binary_diff_response(Some(base_rev), Some(head_rev))),
-            BlobRead::TooLarge => return Ok(binary_diff_response(Some(base_rev), Some(head_rev))),
+            BlobRead::Missing => return Ok(binary_diff_response(Some(base_rev), head_rev.clone())),
+            BlobRead::TooLarge => return Ok(binary_diff_response(Some(base_rev), head_rev.clone())),
             BlobRead::Ok(bytes) => bytes,
         };
-        let modified = match read_blob(&self.git_bin, repo_root, head_ref, repo_rel).await? {
+        let modified_for_blob = if head_ref == ":" { "" } else { head_ref };
+        let modified = match read_blob(&self.git_bin, repo_root, modified_for_blob, repo_rel).await? {
             BlobRead::Missing => Vec::new(),
-            BlobRead::TooLarge => return Ok(binary_diff_response(Some(base_rev), Some(head_rev))),
+            BlobRead::TooLarge => return Ok(binary_diff_response(Some(base_rev), head_rev)),
             BlobRead::Ok(bytes) => bytes,
         };
         Ok(assemble_diff(
@@ -1345,7 +1363,7 @@ impl RuntimeGitQueryService {
             false,
             false,
             Some(base_rev),
-            Some(head_rev),
+            head_rev,
         ))
     }
 }

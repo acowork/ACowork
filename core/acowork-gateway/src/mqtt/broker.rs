@@ -74,8 +74,10 @@ pub struct ConnectAuthContext<'a> {
 ///   token (Phase 5a simplification: agent→node ownership is NOT
 ///   verified — the Node only injects its own token when spawning
 ///   Runtimes; strict per-agent ACLs are deferred to Phase 5b).
-/// - `gateway:publisher` — Gateway's internal publisher, password =
-///   the startup-generated publisher token.
+/// - `gateway:publisher`, `user:service`, `doc:service` — internal
+///   publishers (Gateway / user service / doc service), password =
+///   the startup-generated publisher token. The user/doc supervisors
+///   forward the token to the services they spawn (ADR-084 §决策 4b).
 /// - `user:{name}:desktop:{id}` — Desktop, password = the HTTP bearer
 ///   token (HttpAuth; available when `http.auth_enabled` is on).
 ///
@@ -109,7 +111,25 @@ pub fn check_connect_auth(
     if client_id.starts_with("agent:") {
         return ctx.node_tokens.any_token_matches(password);
     }
-    if client_id == "gateway:publisher" {
+    // Internal publishers share the startup-generated token: the
+    // Gateway's own publisher plus the user/doc service publishers
+    // (the supervisors hand them the token at spawn time, ADR-084
+    // §决策 4b).
+    if client_id == "gateway:publisher"
+        // ADR-084 §决策 4b: structural — `user:service` / `doc:service`,
+        // optionally followed by a `:pid` suffix the supervisor-spawned
+        // publisher appends to dodge `Duplicate client_id` on internal
+        // reconnect. A bare `user:serviceevil` / `doc:serviceevil`
+        // (no colon after `service`) must NOT match — it would otherwise
+        // reach the publisher token check, which still requires the
+        // correct token to pass, but the structural form keeps the
+        // prefix-match contract tight and consistent with the
+        // `user:*:desktop:*` branch below.
+        || client_id == "user:service"
+        || client_id.starts_with("user:service:")
+        || client_id == "doc:service"
+        || client_id.starts_with("doc:service:")
+    {
         return match ctx.publisher_token {
             Some(expected) => constant_time_eq(expected.as_bytes(), password.as_bytes()),
             None => false,
@@ -507,6 +527,61 @@ mod tests {
         // No publisher token configured → reject.
         let ctx = test_ctx(true, &enrollment, &node_tokens, None, Some("h"));
         assert!(!check_connect_auth("gateway:publisher", "", "pub-tok", &ctx));
+    }
+
+    #[test]
+    fn internal_service_publishers_accept_publisher_token() {
+        // ADR-084 §决策 4b: `user:service` / `doc:service` reuse the
+        // startup-generated publisher token (the supervisor forwards it
+        // when `mqtt.auth_enabled` is on) — without this the broker
+        // would refuse their CONNECT and profile/tree signals stop.
+        let enrollment = empty_enrollment();
+        let node_tokens = empty_node_tokens();
+        let ctx = test_ctx(true, &enrollment, &node_tokens, Some("pub-tok"), Some("h"));
+        assert!(check_connect_auth("user:service", "", "pub-tok", &ctx));
+        assert!(check_connect_auth("doc:service", "", "pub-tok", &ctx));
+        assert!(!check_connect_auth("user:service", "", "wrong", &ctx));
+        assert!(!check_connect_auth("doc:service", "", "wrong", &ctx));
+        // Per-process suffixes (user:service:{pid}, doc:service:{pid})
+        // must still authenticate — the supervisor-spawned publisher
+        // appends a process-unique suffix to avoid `Duplicate client_id`
+        // on internal reconnect (see acowork-user / acowork-doc
+        // `mqtt_publisher::client_id`); the broker keeps matching on
+        // prefix and the same publisher token is shared.
+        assert!(
+            check_connect_auth("user:service:1234", "", "pub-tok", &ctx),
+            "user:service:<pid> must still pass prefix match"
+        );
+        assert!(
+            check_connect_auth("doc:service:1234", "", "pub-tok", &ctx),
+            "doc:service:<pid> must still pass prefix match"
+        );
+        assert!(!check_connect_auth("user:service:1234", "", "wrong", &ctx));
+        assert!(!check_connect_auth("doc:service:1234", "", "wrong", &ctx));
+        // Prefix collisions: a `user:` desktop id must not be admitted
+        // via the publisher prefix path — desktop ids fall through to
+        // the `user:...:desktop:...` branch below.
+        assert!(!check_connect_auth("user:evil", "", "pub-tok", &ctx));
+        assert!(!check_connect_auth("doc:evil", "", "pub-tok", &ctx));
+        // Structural prefix: a bare `user:serviceevil` / `doc:serviceevil`
+        // (no colon after `service`) must NOT match the internal-publisher
+        // branch — the broker requires a `:pid` suffix (or exact match)
+        // so a malicious or buggy client cannot slip a near-collision
+        // through. The publisher token check would still gate the
+        // outcome, but the structural form here rejects it earlier and
+        // consistently with the `user:*:desktop:*` shape below.
+        assert!(
+            !check_connect_auth("user:serviceevil", "", "pub-tok", &ctx),
+            "user:serviceevil must not match the internal-publisher prefix"
+        );
+        assert!(
+            !check_connect_auth("doc:serviceevil", "", "pub-tok", &ctx),
+            "doc:serviceevil must not match the internal-publisher prefix"
+        );
+        // No publisher token configured → reject.
+        let ctx = test_ctx(true, &enrollment, &node_tokens, None, Some("h"));
+        assert!(!check_connect_auth("user:service", "", "pub-tok", &ctx));
+        assert!(!check_connect_auth("doc:service", "", "pub-tok", &ctx));
     }
 
     #[test]

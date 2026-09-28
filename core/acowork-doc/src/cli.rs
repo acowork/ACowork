@@ -47,6 +47,15 @@ pub struct Cli {
     #[arg(long, default_value_t = 19875)]
     pub mqtt_port: u16,
 
+    /// MQTT broker CONNECT password: the Gateway's internal publisher
+    /// token, forwarded by the supervisor only when `mqtt.auth_enabled`
+    /// is on (the broker admits any `doc:service:*` client id with it,
+    /// ADR-084 §决策 4b — see `mqtt_publisher::client_id`). Standalone
+    /// mode can set it manually; env `ACOWORK_MQTT_PASSWORD` as
+    /// fallback.
+    #[arg(long, env = "ACOWORK_MQTT_PASSWORD")]
+    pub mqtt_password: Option<String>,
+
     /// Override for update-request TTL (hours) forwarded by the Gateway.
     #[arg(long)]
     pub request_ttl_hours: Option<u32>,

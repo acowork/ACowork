@@ -109,6 +109,7 @@ fn start_supervisor(port: u16) -> (Arc<RwLock<GatewayState>>, tempfile::TempDir)
         data_dir: Some(tmp.path().join("data")),
         request_ttl_hours: None,
         mqtt_port: 19875,
+        mqtt_password: None,
     };
     acowork_gateway::lifecycle::doc_supervisor::start_doc_supervisor(cfg, state.clone());
     (state, tmp)

@@ -24,10 +24,6 @@ acowork-sign.workspace = true
 acowork-vault.workspace = true
 acowork-memory.workspace = true
 secrecy.workspace = true
-# Argon2id password hashing for user accounts (ADR-076 §决策 1). Same KDF
-# family as acowork-vault; kept as its own dep so the account store can hash
-# without going through the Vault's master-key path.
-argon2 = "0.5"
 tokio.workspace = true
 async-trait.workspace = true
 base64.workspace = true
@@ -64,12 +60,6 @@ rumqttd.workspace = true
 prost.workspace = true
 sha2.workspace = true
 tokio-stream.workspace = true
-# `tokio_util::io::ReaderStream` streams a `tokio::fs::File` straight into
-# `axum::body::Body::from_stream` for the user-chat attachment download
-# route (`chat_api::download_attachment`). Lives in `tokio-util` rather
-# than `tokio-stream`; tokio-stream's own lib.rs explicitly defers to
-# tokio-util for `AsyncRead` ↔ `Stream` adapters.
-tokio-util.workspace = true
 ignore.workspace = true
 regex.workspace = true
 # Cross-platform async IP/interface change watcher (NotifyAddrChange on

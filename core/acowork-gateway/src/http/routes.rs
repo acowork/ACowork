@@ -284,7 +284,6 @@ pub fn build_router(state: AppState) -> Router {
         // ADR-076 §决策 3: bearer-token gate. Placed inside CORS (so a
         // 401 still carries `Access-Control-Allow-Origin`) and outside
         // every route (so no handler can be added without passing it).
-        // A no-op when `auth_service` is `None` (local mode).
         .layer(middleware::from_fn_with_state(
             auth_layer_state.clone(),
             crate::http::auth_middleware::auth_middleware,
@@ -295,7 +294,6 @@ pub fn build_router(state: AppState) -> Router {
         // 403 `setup_required` before the token check can turn it into a
         // 401 `missing bearer token`. The two errors must not be
         // confusable, and 403 is the more informative answer here.
-        // No-op when `auth_service` is `None` (local mode).
         .layer(middleware::from_fn_with_state(
             auth_layer_state.clone(),
             crate::http::restricted_mode::restricted_mode_middleware,

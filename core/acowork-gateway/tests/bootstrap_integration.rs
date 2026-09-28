@@ -1091,6 +1091,12 @@ async fn reconnect_observes_new_instance_and_old_operation_is_uncertain() {
     for id in ["vault", "mqtt", "publisher", "node.local", "system_agent"] {
         surface_a.registry.register(id, ReadinessKind::Required).mark_ready(None);
     }
+    // Fold the registrations into the snapshot before the publisher
+    // starts: the listener observes readiness events asynchronously, so
+    // an intermediate BOOTING publish could otherwise race the READY
+    // one and become the first retained payload (same fix as the
+    // cold-start test).
+    surface_a.orchestrator.recompute();
     let _bp_a = BootstrapPublisher::start(BootstrapPublisherOptions {
         client: &surface_a.gw_client,
         orchestrator: surface_a.orchestrator.clone(),
@@ -1117,7 +1123,10 @@ async fn reconnect_observes_new_instance_and_old_operation_is_uncertain() {
     drop(_bp_a);
     drop(surface_a);
     let surface_b = build_surface(port, "instance-B").await;
-    surface_b.registry.register("vault", ReadinessKind::Required); // still booting
+    // No subsystem registers before the Desktop observes B's v1 BOOTING:
+    // a readiness event would bump the version past 1, and the
+    // cross-instance baseline switch keys on version 1 (see
+    // `DesktopView::apply`).
     let _bp_b = BootstrapPublisher::start(BootstrapPublisherOptions {
         client: &surface_b.gw_client,
         orchestrator: surface_b.orchestrator.clone(),
@@ -1198,6 +1207,12 @@ async fn cross_generation_restart_does_not_prematurely_ready() {
     for id in ["vault", "mqtt", "publisher", "node.local", "system_agent"] {
         surface_a.registry.register(id, ReadinessKind::Required).mark_ready(None);
     }
+    // Fold the registrations into the snapshot before the publisher
+    // starts: the listener observes readiness events asynchronously, so
+    // an intermediate BOOTING publish could otherwise race the READY
+    // one and become the first retained payload (same fix as the
+    // cold-start test).
+    surface_a.orchestrator.recompute();
     let _bp_a = BootstrapPublisher::start(BootstrapPublisherOptions {
         client: &surface_a.gw_client,
         orchestrator: surface_a.orchestrator.clone(),
@@ -1229,10 +1244,12 @@ async fn cross_generation_restart_does_not_prematurely_ready() {
         .expect("clear retained bootstrap");
     drop(cleaner);
 
-    // Generation B starts; subsystems register but are NOT ready.
+    // Generation B starts. No subsystem registers before the Desktop
+    // observes B's v1 BOOTING: a readiness event would bump the version
+    // past 1, and the cross-instance baseline switch keys on version 1
+    // (see `DesktopView::apply`). They register below, once the v1
+    // baseline has been switched.
     let surface_b = build_surface(port, "instance-B").await;
-    surface_b.registry.register("vault", ReadinessKind::Required);
-    surface_b.registry.register("system_agent", ReadinessKind::Required);
     let _bp_b = BootstrapPublisher::start(BootstrapPublisherOptions {
         client: &surface_b.gw_client,
         orchestrator: surface_b.orchestrator.clone(),

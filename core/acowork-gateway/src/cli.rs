@@ -60,7 +60,7 @@ pub struct Cli {
     pub packages_dir: Option<String>,
 
     /// Config file path
-    #[arg(long, env = "ACOWORK_GATEWAY_CONFIG")]
+    #[arg(long, global = true, env = "ACOWORK_GATEWAY_CONFIG")]
     pub config_path: Option<String>,
 
     /// Gateway home (application root) directory.
@@ -74,6 +74,7 @@ pub struct Cli {
     /// `--work-dir` is an alias with identical semantics.
     #[arg(
         long,
+        global = true,
         visible_alias = "work-dir",
         env = "ACOWORK_HOME"
     )]
@@ -138,6 +139,7 @@ pub struct Cli {
     /// subnet. TOML counterpart: `auth_mode = "local"`.
     #[arg(
         long,
+        global = true,
         value_name = "local|multi_user",
         env = "ACOWORK_GATEWAY_AUTH_MODE"
     )]
@@ -229,9 +231,11 @@ pub enum Commands {
 
     /// First-boot admin password setup (ADR-076 §决策 12 v2).
     ///
-    /// Sets the password of the passwordless `admin` account that the
-    /// Gateway seeds on a fresh install. Does NOT start the Gateway.
-    /// For interactive TTY startup use the daemon's prompt instead.
+    /// Sets the password of the passwordless `admin` account. The account
+    /// store belongs to the `acowork-user` process (ADR-084), so this is a
+    /// delegate: it spawns that binary's own `admin-setup` and exits. Does
+    /// NOT start the Gateway. For interactive TTY startup use the daemon's
+    /// prompt instead.
     AdminSetup {
         /// Read password from this file (first line, trimmed).
         /// Useful for systemd `EnvironmentFile=` / k8s `Secret` mounts.
@@ -518,7 +522,10 @@ impl Cli {
                 // is the only durable artifact.
                 zeroize::Zeroize::zeroize(&mut password);
                 result.map_err(GatewayError::Config)?;
-                println!("Admin password set. Restart gateway to serve requests.");
+                // No restart needed since ADR-084: the Gateway polls the
+                // user service `/health` every 2s, so the first-boot gate
+                // and `/api/status` clear themselves within that window.
+                println!("Admin password set. A running gateway picks it up within a few seconds.");
                 return Ok(());
             }
             None => {

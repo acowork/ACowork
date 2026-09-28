@@ -225,8 +225,20 @@ async fn post_install_runs_script_and_returns_output() {
         let install_dir = dir.path().join("lsp_install");
         std::fs::create_dir_all(&install_dir).expect("mkdir lsp_install");
 
-        let mock_script = "#!/bin/bash\necho 'mock install success'\nexit 0\n";
-        std::fs::write(install_dir.join("rust.sh"), mock_script).expect("write mock script");
+        // `lsp_install_run` resolves the script filename with a
+        // platform-specific extension (.ps1 on Windows, .sh elsewhere).
+        // Write the mock with the matching extension so the lookup
+        // resolves to the fixture — otherwise it falls through to the
+        // repository's real scripts under assets/lsp_install/.
+        let (script_name, mock_script) = if cfg!(windows) {
+            (
+                "rust.ps1",
+                "[Console]::Out.WriteLine('mock install success')\r\nexit 0\r\n",
+            )
+        } else {
+            ("rust.sh", "#!/bin/bash\necho 'mock install success'\nexit 0\n")
+        };
+        std::fs::write(install_dir.join(script_name), mock_script).expect("write mock script");
 
         // SAFETY: No other test in this file uses ACOWORK_LSP_CONFIG_DIR
         // at the same time because both success and failure paths are
@@ -270,8 +282,12 @@ async fn post_install_runs_script_and_returns_output() {
         let install_dir = dir.path().join("lsp_install");
         std::fs::create_dir_all(&install_dir).expect("mkdir");
 
-        let mock_script = "#!/bin/bash\necho 'install failed'\nexit 1\n";
-        std::fs::write(install_dir.join("rust.sh"), mock_script).expect("write script");
+        let (script_name, mock_script) = if cfg!(windows) {
+            ("rust.ps1", "[Console]::Out.WriteLine('install failed')\r\nexit 1\r\n")
+        } else {
+            ("rust.sh", "#!/bin/bash\necho 'install failed'\nexit 1\n")
+        };
+        std::fs::write(install_dir.join(script_name), mock_script).expect("write script");
 
         unsafe {
             std::env::set_var("ACOWORK_LSP_CONFIG_DIR", dir.path());
@@ -355,27 +371,49 @@ async fn events_endpoint_delivers_state_event() {
 #[tokio::test]
 async fn lsp_websocket_relay_with_real_lsp_server() {
     // This test connects via WebSocket to the LSP relay endpoint.
-    // It requires an LSP server to be installed. We check for
-    // rust-analyzer first; if not found, we skip the test.
-    let rust_analyzer = std::process::Command::new("which")
-        .arg("rust-analyzer")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .is_some();
+    // It requires an LSP server to be installed. Probe by actually
+    // running rust-analyzer: `which` is not reliably available on
+    // Windows, and a rustup proxy that exists but cannot run would pass
+    // a mere existence check and then fail at relay time. The probe is
+    // bounded so a broken proxy cannot hang the test binary.
+    let rust_analyzer = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        tokio::process::Command::new("rust-analyzer")
+            .arg("--version")
+            .output(),
+    )
+    .await
+    .map(|r| r.map(|o| o.status.success()).unwrap_or(false))
+    .unwrap_or(false);
 
     if !rust_analyzer {
-        eprintln!("skipping lsp_websocket_relay_with_real_lsp_server: rust-analyzer not on PATH");
+        eprintln!(
+            "skipping lsp_websocket_relay_with_real_lsp_server: rust-analyzer not runnable"
+        );
         return;
     }
 
     let server = TestServer::start().await;
 
-    // Connect via WebSocket
-    let ws_url = server.ws_url("/lsp/rust?workspace_root=/tmp");
-    let (mut ws, _response) = tokio_tungstenite::connect_async(&ws_url)
-        .await
-        .expect("WebSocket connect failed");
+    // The relay passes the workspace root to the pooled server as its
+    // working directory, so it must exist on this platform — a POSIX
+    // "/tmp" maps to "D:\tmp" on Windows, which only works by accident
+    // when that directory happens to exist.
+    let workspace_root = std::env::temp_dir().to_string_lossy().replace('\\', "/");
+    let ws_url = server.ws_url(&format!(
+        "/lsp/rust?workspace_root={}",
+        workspace_root.replace(' ', "%20")
+    ));
+
+    // `connect_async` has no built-in timeout; bound it so a relay that
+    // never completes the upgrade cannot hang the whole test binary.
+    let (mut ws, _response) = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        tokio_tungstenite::connect_async(&ws_url),
+    )
+    .await
+    .expect("WebSocket connect timed out")
+    .expect("WebSocket connect failed");
 
     // Send an LSP initialize request
     let init_request = r#"{"jsonrpc":"2.0","method":"initialize","id":1,"params":{"capabilities":{},"processId":null,"rootUri":null}}"#;
@@ -409,6 +447,10 @@ async fn lsp_websocket_relay_with_real_lsp_server() {
         received_response,
         "expected InitializeResult with capabilities from rust-analyzer"
     );
+
+    // Close the socket so the relay's recv loop ends deterministically
+    // before the server is asked to shut down.
+    let _ = ws.close(None).await;
 
     let _ = server.shutdown_tx.send(());
 }

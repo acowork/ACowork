@@ -102,6 +102,22 @@ if (Test-Path $DocBin) {
     Write-Host "      Without it, /api/doc/* returns 503 (Doc unavailable)." -ForegroundColor Yellow
 }
 
+# Bundle User service binary (sibling of acowork-gateway.exe, ADR-084).
+# Mirrors the Doc service above: the Gateway supervisor locates it via
+# `current_exe().parent().join("acowork-user.exe")`; without this copy the User
+# supervisor logs "acowork-user binary not found" and every user-domain route
+# (`/api/auth/*`, `/api/users/*`, `/api/user/*`) returns 503 (accounts,
+# profiles and user chat unavailable).
+$UserBin = Join-Path $WorkspaceRoot "target\release\acowork-user.exe"
+if (Test-Path $UserBin) {
+    Copy-Item -Path $UserBin -Destination (Join-Path $BinDir "acowork-user.exe") -Force
+    Write-Host "Bundled User service binary: $UserBin" -ForegroundColor Green
+} else {
+    Write-Host "WARN: acowork-user.exe not found at $UserBin." -ForegroundColor Yellow
+    Write-Host "      Run .\dev\build_core.ps1 (release) first." -ForegroundColor Yellow
+    Write-Host "      Without it, /api/auth/*, /api/users/* and /api/user/* return 503." -ForegroundColor Yellow
+}
+
 Push-Location $DesktopDir
 try {
     npm run tauri build

@@ -39,19 +39,26 @@ use acowork_mqtt_session::{MqttClient, MqttClientConfig, MqttClientError, MqttCl
 /// Gateway, so no instance id in the path — unlike agent topics).
 pub const DOC_TREE_CHANGED_TOPIC: &str = "acowork/doc/tree/changed";
 
-/// Broker client id (protocol §8.5 colon convention, `gateway:publisher`
-/// style). Phase 1 ACL is permissive; kept stable so a restart kicks
-/// the stale session instead of piling up ghosts.
-const CLIENT_ID: &str = "doc:service";
+/// Broker client id. The shared prefix `doc:service` is matched by
+/// the Gateway broker allowlist (ADR-084 §决策 4b, `starts_with`).
+/// The per-process suffix avoids `Duplicate client_id, dropping previous`
+/// on internal reconnect — see [`acowork-user`'s `client_id`] for the
+/// same pattern. The doc process is single-instance per Gateway today
+/// but the suffix keeps the contract uniform if a future spawns more.
+fn client_id() -> String {
+    format!("doc:service:{}", std::process::id())
+}
 
 static PUBLISHER: OnceLock<Arc<DocMqttPublisher>> = OnceLock::new();
 
 /// Initialise the global publisher. Called once from `main`; a broker
 /// that is not up yet is fine — [`MqttClient::connect`] only spawns the
 /// poll task (auto-reconnect inside), it does not wait for CONNACK.
+/// `password` is the Gateway publisher token when `mqtt.auth_enabled`
+/// is on (ADR-084 §决策 4b); `None` connects without credentials.
 /// Never returns an error that should kill the doc process.
-pub async fn init(host: &str, port: u16) {
-    match DocMqttPublisher::connect(host.to_string(), port).await {
+pub async fn init(host: &str, port: u16, password: Option<String>) {
+    match DocMqttPublisher::connect(host.to_string(), port, password).await {
         Ok(publisher) => {
             let _ = PUBLISHER.set(Arc::new(publisher));
             tracing::info!(host, port, "doc MQTT publisher ready");
@@ -83,8 +90,17 @@ pub struct DocMqttPublisher {
 }
 
 impl DocMqttPublisher {
-    pub async fn connect(host: String, port: u16) -> Result<Self, MqttClientError> {
-        let config = MqttClientConfig::new(CLIENT_ID, host, port);
+    pub async fn connect(
+        host: String,
+        port: u16,
+        password: Option<String>,
+    ) -> Result<Self, MqttClientError> {
+        let mut config = MqttClientConfig::new(client_id(), host, port);
+        // With `mqtt.auth_enabled` on, the broker only admits
+        // `doc:service:*` (any per-process id with this prefix) with
+        // the Gateway's publisher token; the supervisor forwards it
+        // at spawn time (ADR-084 §决策 4b).
+        config.credentials = password.map(|p| (client_id(), p));
         let client = MqttClient::connect(config, DocNoopHandler, None).await?;
         Ok(Self { client })
     }

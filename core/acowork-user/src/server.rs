@@ -90,3 +90,57 @@ impl UserService {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    //! The service trusts `X-Auth-*` headers (ADR-084 §决策 7): the only
+    //! thing standing between a forged peer and impersonation is
+    //! `bind.ip()` being loopback. Pin both branches — the reject path
+    //! is the interesting one (a silent loopback failure would defeat the
+    //! whole trust model).
+    use super::*;
+
+    fn test_config() -> UserServiceConfig {
+        // Throwaway data dir under temp keeps the constructor happy without
+        // touching the operator's real `~/.acowork/acowork-user`.
+        let dir = std::env::temp_dir().join(format!(
+            "acowork-user-loopback-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        UserServiceConfig {
+            data_dir: dir,
+            ..UserServiceConfig::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn serve_rejects_non_loopback_bind() {
+        let svc = Arc::new(UserService::new(test_config(), None));
+        let non_loopback: SocketAddr = "0.0.0.0:0".parse().unwrap();
+        let err = svc
+            .serve(non_loopback)
+            .await
+            .expect_err("non-loopback bind must be rejected (ADR-084 §决策 7)");
+        let msg = format!("{err}");
+        assert!(
+            msg.to_lowercase().contains("loopback"),
+            "rejection must explain the loopback requirement; got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn serve_accepts_loopback_bind() {
+        let svc = Arc::new(UserService::new(test_config(), None));
+        let actual = svc
+            .serve("127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("loopback bind must succeed");
+        assert_eq!(actual.ip().to_string(), "127.0.0.1");
+        assert!(actual.port() != 0, "ephemeral port must be resolved");
+    }
+}
+

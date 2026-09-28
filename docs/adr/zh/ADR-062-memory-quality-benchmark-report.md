@@ -187,6 +187,8 @@ auto_inject min_score=None    → 1 result, score 0.6437
 - benchmark 复测：新增 keyword 专项查询集（基于"仅靠 keywords 命中"的查询），P@5 / Recall@5 验证打开 vs 关闭的差值。
 - Manifest `[memory.quality].keyword_index = true/false` 双向生效。
 
+> 📝 **2026-09 后续验收事实补注**：验收条件中 "仅靠 keywords 命中" 隐含了 "BM25 唯一性" 假设——`hybrid` 检索路径下、`vector` 分支在任何 query embedding 上都报 cosine ≠ 0（`DeterministicEmbedding` 是确定性 hash），所以 "只靠 text 拒命" 不能严格成立。memory_m5_bench 以 `hit_rate` 为 饱和指标时 both before/after 都为 1.0；实际能区分 keyword_index 效果的是 MRR（0.7917 → 0.9375）；现测试断言已改为 `after.mrr > before.mrr`，保留 p5/r5/mrr 回归护栏。本节计划验收中 `单元测试 / keyword_index=false` 仍然有效（决定 BM25 索引能否拒绝命中），但 "benchmark 必须验证 hit@5 开/关差值" 一项变为以 MRR 作为实质度量——待 M5 harness 进一步在真实语料下补入“vector signal 去除”隔离开关。
+
 ### 6.2.1 Keyword 质量门（M5 必做前置）
 
 **问题**：当前 keyword 唯一来源是 LLM（`memory_store` 工具调用参数，[memory_store.rs:271-276](core/acowork-runtime/src/tools/builtin/memory_store.rs#L271-L276)），零清洗/限长/去重/停用词过滤。[05-memory.md §3.3](../design/zh/05-memory.md) 原本设计 Runtime 从 `memory_hint.e` 提取作为**确定性主源** + LLM 可选补充（"LLM 甚至可以不填"），但 v3.10 简化（[05-memory.md:144,1151](../design/zh/05-memory.md#L1151)）把 Runtime 链路删了，**未同步更新设计文档**——这是 §6.2 直接折入 `object` 的潜在放大风险（garbage keywords → 放大进 BM25 → 检索污染；与 ADR-062 §1 已对 `confidence`/`importance` 警告的同类 LLM 锚定问题）。

@@ -63,6 +63,11 @@ pub struct DocSupervisorConfig {
     /// (always loopback: doc is spawned on this host, next to the
     /// broker — host is fixed to 127.0.0.1).
     pub mqtt_port: u16,
+    /// Broker CONNECT password forwarded via `--mqtt-password` when
+    /// `mqtt.auth_enabled` is on: the Gateway's internal publisher token,
+    /// which the broker admits `doc:service` with (ADR-084 §决策 4b).
+    /// `None` (auth off, the default) forwards nothing.
+    pub mqtt_password: Option<String>,
 }
 
 /// Spawn the doc supervisor task. Non-fatal: if doc cannot start, the
@@ -223,6 +228,12 @@ async fn spawn_doc(cfg: &DocSupervisorConfig) -> Result<(tokio::process::Child, 
         .arg(cfg.mqtt_port.to_string())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::from(log_file));
+
+    // ADR-084 §决策 4b: with broker auth on the broker refuses a
+    // credential-less `doc:service`; forward the internal token.
+    if let Some(password) = &cfg.mqtt_password {
+        cmd.arg("--mqtt-password").arg(password);
+    }
 
     // Optional overrides from the Gateway `[doc]` section.
     if let Some(dir) = &cfg.data_dir {

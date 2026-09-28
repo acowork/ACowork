@@ -130,10 +130,10 @@ if ($NetworkMode -eq "local") {
 
 $targetDir = Join-Path $WorkspaceRoot "target\$Profile"
 # Step count:
-#   -Start : Stop, Gateway, Runtime, Embed, LSP Relay, Node Agent, PM, Doc, Copy resources, Start (10)
-#   -Stop  : Stop, Gateway, Runtime, Embed, LSP Relay, Node Agent, PM, Doc, Copy resources      (9)
-#   else   :            Gateway, Runtime, Embed, LSP Relay, Node Agent, PM, Doc, Copy resources (8)
-$totalSteps = if ($Start) { 10 } elseif ($Stop) { 9 } else { 8 }
+#   -Start : Stop, Gateway, Runtime, Embed, LSP Relay, Node Agent, PM, Doc, User, Copy resources, Start (11)
+#   -Stop  : Stop, Gateway, Runtime, Embed, LSP Relay, Node Agent, PM, Doc, User, Copy resources      (10)
+#   else   :            Gateway, Runtime, Embed, LSP Relay, Node Agent, PM, Doc, User, Copy resources (9)
+$totalSteps = if ($Start) { 11 } elseif ($Stop) { 10 } else { 9 }
 
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host "ACowork Core Build Script" -ForegroundColor Cyan
@@ -153,7 +153,7 @@ $step = 0
 if ($Start -or $Stop) {
     # Step: Stop running processes
     $step++
-    Write-Host "[$step/$totalSteps] Stopping running Desktop, Gateway, Runtime, Embed, LSP Relay, Node Agent, PM, and Doc processes..." -ForegroundColor Yellow
+    Write-Host "[$step/$totalSteps] Stopping running Desktop, Gateway, Runtime, Embed, LSP Relay, Node Agent, PM, Doc, and User processes..." -ForegroundColor Yellow
 
     $gatewayProcs = Get-Process -Name "acowork-gateway" -ErrorAction SilentlyContinue
     $runtimeProcs = Get-Process -Name "acowork-runtime" -ErrorAction SilentlyContinue
@@ -256,6 +256,20 @@ if ($Start -or $Stop) {
         Write-Host "  No Doc process running." -ForegroundColor Gray
     }
 
+    # The User service mirrors the PM/Doc pattern (ADR-084): a standalone
+    # process (`acowork-user`) spawned by the Gateway supervisor and listening
+    # on port 18083 by default. The ADR-018 watchdog self-exit lags on Windows,
+    # so kill it explicitly to keep the stop step idempotent and to release
+    # 18083 before the next start.
+    $userProcs = Get-Process -Name "acowork-user" -ErrorAction SilentlyContinue
+    if ($userProcs) {
+        Write-Host "  Found User processes: $($userProcs.Id -join ', ')" -ForegroundColor Gray
+        Stop-Process -Name "acowork-user" -Force -ErrorAction SilentlyContinue
+        Write-Host "  User stopped." -ForegroundColor Green
+    } else {
+        Write-Host "  No User process running." -ForegroundColor Gray
+    }
+
     # Ensure embed port 18080 is released before starting a new gateway.
     # Stop-Process may not have released the port yet; the new gateway
     # spawns its own embed immediately and if the old one is still
@@ -343,6 +357,29 @@ if ($Start -or $Stop) {
     }
     if ($docPortWaited -ge 6) {
         Write-Host "  WARNING: Port 18081 still in use after 3s" -ForegroundColor Red
+    }
+
+    # Ensure User port 18083 is released (ADR-084 standalone process). Same
+    # rationale as the PM/Doc port blocks above: a stale user service from a
+    # killed Gateway would hold the default port and shift the new one to
+    # 18084+.
+    $userPortLine = netstat -ano 2>$null | Select-String ":18083\s" | Select-Object -First 1
+    if ($userPortLine) {
+        $pidFromPort = ($userPortLine.Line -split '\s+')[-1]
+        if ($pidFromPort -match '^\d+$') {
+            Write-Host "  Port 18083 held by PID $pidFromPort - force-killing" -ForegroundColor Gray
+            Stop-Process -Id $pidFromPort -Force -ErrorAction SilentlyContinue
+        }
+    }
+    $userPortWaited = 0
+    while ($userPortWaited -lt 6) {
+        $stillUp = netstat -ano 2>$null | Select-String ":18083\s"
+        if (-not $stillUp) { break }
+        Start-Sleep -Milliseconds 500
+        $userPortWaited++
+    }
+    if ($userPortWaited -ge 6) {
+        Write-Host "  WARNING: Port 18083 still in use after 3s" -ForegroundColor Red
     }
 
     Write-Host ""
@@ -557,6 +594,36 @@ try {
 
 Write-Host ""
 
+# Step: Build User service (standalone binary, sibling of acowork-gateway.exe)
+#
+# ADR-084: the user domain (accounts, roles, profiles, user-to-user chat) is a
+# standalone process (`acowork-user`), located via
+# `current_exe().parent().join("acowork-user.exe")` - so the binary MUST sit
+# next to acowork-gateway.exe. Without it the Gateway supervisor logs
+# "acowork-user binary not found" and every user-domain route (`/api/auth/*`,
+# `/api/users/*`, `/api/user/*`) returns 503.
+$step++
+Write-Host "[$step/$totalSteps] Building User service ($Profile mode)..." -ForegroundColor Yellow
+try {
+    $cargoArgs = @("build")
+    if ($Profile -eq "release") { $cargoArgs += "--release" }
+    $cargoArgs += @("-p", "acowork-user")
+    & cmd /c "cargo $($cargoArgs -join ' ')" 2>&1 | ForEach-Object {
+        if ($_ -match "error" -or $_ -match "Compiling") {
+            Write-Host "  $_" -ForegroundColor Gray
+        }
+    }
+    if ($LASTEXITCODE -ne 0) {
+        throw "cargo build failed with exit code $LASTEXITCODE"
+    }
+    Write-Host "  User service build completed." -ForegroundColor Green
+} catch {
+    Write-Host "  User service build failed: $_" -ForegroundColor Red
+    exit 1
+}
+
+Write-Host ""
+
 # Step: Copy offline_providers.json + embedding_models.json from assets to target dir
 #
 # The gateway (and embed) read embedding_models.json from `{exe_dir}/`. Whoever
@@ -626,7 +693,11 @@ if ($Start) {
     # TTY), and write the password via `admin-setup --password-file`
     # so the daemon boots clean instead of dead-ending the Desktop at
     # the SetupRequiredView gate.
-    $acctJsonPath = Join-Path $env:USERPROFILE ".acowork\acowork-gateway\data\accounts.json"
+    # ADR-084: the account store moved to the user service's data dir
+    # (`~/.acowork/acowork-user/accounts.json`); the old gateway path no
+    # longer exists on fresh installs, so reading it would report
+    # "setup required" forever.
+    $acctJsonPath = Join-Path $env:USERPROFILE ".acowork\acowork-user\accounts.json"
     $needsSetup = $true
     if (Test-Path -LiteralPath $acctJsonPath) {
         try {

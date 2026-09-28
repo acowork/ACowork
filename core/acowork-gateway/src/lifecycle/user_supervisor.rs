@@ -108,6 +108,11 @@ pub struct UserSupervisorConfig {
     /// service is spawned on this host, next to the broker — the host is
     /// fixed to 127.0.0.1).
     pub mqtt_port: u16,
+    /// Broker CONNECT password forwarded via `--mqtt-password` when
+    /// `mqtt.auth_enabled` is on: the Gateway's internal publisher token,
+    /// which the broker admits `user:service` with (ADR-084 §决策 4b).
+    /// `None` (auth off, the default) forwards nothing.
+    pub mqtt_password: Option<String>,
 }
 
 /// Spawn the user supervisor task. Non-fatal: if the service cannot start,
@@ -197,16 +202,25 @@ async fn spawn_and_monitor(cfg: &UserSupervisorConfig, state: &SharedState) {
     // Publish the public key before advertising readiness: the proxy routes
     // to `port` the moment `user_process` is set, and a request that arrives
     // with a verifiable token but no verifier would be rejected.
-    let verifier = match details.get("data_dir").and_then(|v| v.as_str()) {
-        Some(dir) => load_verifier(std::path::Path::new(dir)).await,
-        None => {
-            // Not fatal, but loud: the service is up and the Gateway still
-            // cannot verify anything it signs.
-            tracing::error!(
-                "user service /health reports no data_dir; cannot locate its signing key"
-            );
-            None
+    //
+    // `local` mode has no account system at all (ADR-076 §决策 12), so the
+    // service never writes a key. Waiting anyway would stall readiness for the
+    // whole 5s deadline and then log a false "authenticated requests will be
+    // refused" error — in this mode nothing authenticates.
+    let verifier = if cfg.auth_mode == crate::auth::AuthMode::MultiUser.as_str() {
+        match details.get("data_dir").and_then(|v| v.as_str()) {
+            Some(dir) => load_verifier(std::path::Path::new(dir)).await,
+            None => {
+                // Not fatal, but loud: the service is up and the Gateway still
+                // cannot verify anything it signs.
+                tracing::error!(
+                    "user service /health reports no data_dir; cannot locate its signing key"
+                );
+                None
+            }
         }
+    } else {
+        None
     };
 
     {
@@ -469,6 +483,11 @@ async fn spawn_user(cfg: &UserSupervisorConfig) -> Result<(tokio::process::Child
         cmd.process_group(0);
     }
 
+    // ADR-084 §决策 4b: with broker auth on the broker refuses a
+    // credential-less `user:service`; forward the internal token.
+    if let Some(password) = &cfg.mqtt_password {
+        cmd.arg("--mqtt-password").arg(password);
+    }
     if let Some(dir) = &cfg.data_dir {
         cmd.arg("--data-dir").arg(dir);
     }

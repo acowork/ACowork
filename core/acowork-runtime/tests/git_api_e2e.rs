@@ -53,14 +53,26 @@ fn init_repo(dir: &Path) {
 }
 
 /// Write `config/agent_workspaces.json` registering `SUB_WS_ID` → `path`.
+///
+/// The document must be built with `serde_json`: a raw
+/// `format!`-interpolated path is invalid JSON on Windows (a path like
+/// `C:\Users\...` contains the illegal escape `\U`), and the runtime's
+/// JSON reader rejects the whole file — surfacing as a 500 instead of
+/// the 200 the subdir test expects.
 fn register_workspace(work_dir: &Path, ws_id: &str, path: &Path) {
     let cfg_dir = work_dir.join("config");
     std::fs::create_dir_all(&cfg_dir).unwrap();
-    let cfg = format!(
-        r#"{{"additional_dirs":[{{"id":"{ws_id}","path":"{}"}}]}}"#,
-        path.display()
-    );
-    std::fs::write(cfg_dir.join("agent_workspaces.json"), cfg).unwrap();
+    let cfg = serde_json::json!({
+        "additional_dirs": [{
+            "id": ws_id,
+            "path": path.to_string_lossy(),
+        }],
+    });
+    std::fs::write(
+        cfg_dir.join("agent_workspaces.json"),
+        serde_json::to_string_pretty(&cfg).unwrap(),
+    )
+    .unwrap();
 }
 
 // ── server + HTTP helpers ────────────────────────────────────────────────

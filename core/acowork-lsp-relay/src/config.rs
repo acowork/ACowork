@@ -1657,11 +1657,30 @@ mod tests {
 
     // ── verify_command_runnable tests ──────────────────────────────────
 
-    fn write_fake_binary(body: &str) -> std::path::PathBuf {
+    /// Write a fake LSP binary that [`verify_command_runnable`] can exec.
+    ///
+    /// Unix: a `#!` script with the executable bit set. Windows: a `.cmd`
+    /// batch file — `Command::new` cannot execute a `.sh` directly
+    /// (CreateProcess rejects it with "not a valid Win32 application"),
+    /// while batch files are run through `cmd.exe`.
+    fn write_fake_binary(unix_body: &str, windows_body: &str) -> std::path::PathBuf {
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("fake_lsp.sh");
-        std::fs::write(&path, format!("#!/usr/bin/env bash\n{}\n", body))
-            .expect("write script");
+        let (name, prefix, body) = if cfg!(windows) {
+            // cmd.exe is line-oriented around CRLF — normalize the body.
+            (
+                "fake_lsp.cmd",
+                "@echo off\r\n",
+                windows_body.replace('\n', "\r\n"),
+            )
+        } else {
+            (
+                "fake_lsp.sh",
+                "#!/usr/bin/env bash\n",
+                unix_body.to_string(),
+            )
+        };
+        let path = dir.path().join(name);
+        std::fs::write(&path, format!("{prefix}{body}\n")).expect("write script");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -1669,7 +1688,7 @@ mod tests {
                 .expect("chmod");
         }
         let path_clone = path.clone();
-        std::mem::forget(dir);
+        std::mem::forget(dir); // keep temp dir alive for test duration
         path_clone
     }
 
@@ -1678,6 +1697,8 @@ mod tests {
         let path = write_fake_binary(
             "if [ \"$1\" = \"--version\" ]; then echo 1.0; exit 0; fi\n\
              exit 0",
+            "if \"%1\"==\"--version\" echo 1.0\n\
+             exit /B 0",
         );
         let path_str = path.to_str().unwrap();
         assert!(verify_command_runnable(path_str, &[]).await);
@@ -1698,6 +1719,13 @@ mod tests {
                  sleep 60\n\
              fi\n\
              exit 1",
+            "if \"%1\"==\"--version\" exit /B 1\n\
+             if \"%1\"==\"--stdio\" (\n\
+                 set /p _handshake=\n\
+                 ping -n 10 127.0.0.1 >NUL\n\
+                 exit /B 1\n\
+             )\n\
+             exit /B 1",
         );
         let path_str = path.to_str().unwrap();
         let args = vec!["--stdio".to_string()];
@@ -1709,6 +1737,7 @@ mod tests {
         let path = write_fake_binary(
             "if [ \"$1\" = \"--version\" ]; then exit 1; fi\n\
              exit 1",
+            "exit /B 1",
         );
         let path_str = path.to_str().unwrap();
         let args = vec!["--stdio".to_string()];
@@ -1799,12 +1828,22 @@ mod tests {
 
     // ── Status cache tests ─────────────────────────────────────────────
 
+    /// Serializes the tests that mutate the process-wide status-cache TTL.
+    ///
+    /// `init_status_cache_ttl` stores into a global atomic; with cargo's
+    /// parallel test runner the two tests below would clobber each other's
+    /// value between write and read (observed as `left: 120, right: 1800`).
+    static TTL_MUTATION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// `init_status_cache_ttl(0)` must fall back to `DEFAULT_STATUS_TTL_SECS`.
     /// Protects against misconfigured env vars (`ACOWORK_LSP_STATUS_TTL_SECS=`
     /// would otherwise parse as `0` and make every call go through the probe
     /// path — defeating the cache).
     #[test]
     fn test_init_status_cache_ttl_zero_falls_back_to_default() {
+        let _guard = TTL_MUTATION_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let prev = status_ttl_secs();
         init_status_cache_ttl(0);
         assert_eq!(
@@ -1818,6 +1857,9 @@ mod tests {
 
     #[test]
     fn test_init_status_cache_ttl_stores_value() {
+        let _guard = TTL_MUTATION_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let prev = status_ttl_secs();
         init_status_cache_ttl(120);
         assert_eq!(status_ttl_secs(), 120);

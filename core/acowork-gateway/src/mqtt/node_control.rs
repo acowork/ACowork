@@ -270,7 +270,17 @@ impl NodeControlClient {
         dispatch: NodeInstallDispatch<'_>,
     ) -> Result<(), NodeControlError> {
         let node_id = dispatch.node_id.to_string();
-        let operation_id = dispatch.operation_id.to_string();
+        // Boot-time bundled install (gateway/mod.rs `dispatch_bundled_agent_install`)
+        // passes `operation_id = ""` because nothing on the boot path tracks an
+        // OperationId for the dispatch. The node still requires a non-empty
+        // `request_id` for dedup, so synthesise a UUID when the caller has no
+        // correlation id of its own. Callers that DO have a real OperationId
+        // (HTTP install/ensure endpoints) keep the original correlation id.
+        let operation_id = if dispatch.operation_id.is_empty() {
+            uuid::Uuid::new_v4().to_string()
+        } else {
+            dispatch.operation_id.to_string()
+        };
         let instance_id = dispatch.instance_id.to_string();
         let command = NodeControlCommand {
             node_id: node_id.clone(),

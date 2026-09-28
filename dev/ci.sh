@@ -97,10 +97,29 @@ run_gateway_fs_redline() {
         fi
     done <<< "$files"
 
+    # ADR-084 §决策 1 (appended to this red line by the migration plan):
+    # the user domain's data — `accounts.json`, the derived profile view, the
+    # `users/` chat trees, avatars — belongs to `acowork-user`. The Gateway
+    # reaches it only through `http/user_proxy.rs` and the snapshot pull; a
+    # direct path reference here is the same bug class as an `install_path`
+    # read (silently right on one machine, wrong the moment data_dir moves).
+    local user_hits
+    user_hits=$(grep -rnE '(accounts\.json|user_profiles\.json|assets/avatars|\.join\("users"\)|\.join\("chats"\)|\.join\("avatars"\))' \
+        --include='*.rs' "$root" \
+        | grep -vE ':[0-9]+:[[:space:]]*//' \
+        || true)
+    if [ -n "$user_hits" ]; then
+        echo "ERROR: user-domain data path referenced in Gateway source (ADR-084 §决策 1):"
+        echo "$user_hits"
+        failed=1
+    fi
+
     if [ "$failed" -ne 0 ]; then
         echo ""
         echo "Agent-private data must be proxied through the Runtime, not read by the Gateway:"
         echo "  core/acowork-gateway/src/http/proxy.rs  ->  core/acowork-runtime/src/http/"
+        echo "User-domain data must be proxied through acowork-user, not read by the Gateway:"
+        echo "  core/acowork-gateway/src/http/user_proxy.rs  ->  core/acowork-user/"
         exit 1
     fi
     echo "Gateway filesystem red line: OK"
@@ -122,6 +141,10 @@ META_LAYOUT_CEILING="
 acowork-runtime/src/agent/session/session_manager.rs:1
 acowork-runtime/src/http/server.rs:3
 acowork-runtime/tests/conversation_session_tokens.rs:3
+# Negative assertion only: the SQLite e2e test asserts the legacy JSON meta
+# directory was never created, i.e. it checks the *absence* of the layout this
+# lint protects. Pre-existing, unrelated to ADR-084.
+acowork-runtime/tests/session_meta_sqlite_e2e.rs:1
 "
 run_meta_layout_redline() {
     echo "Checking session meta layout-ownership red line (ADR-024)..."
@@ -158,22 +181,25 @@ run_meta_layout_redline() {
     echo "Session meta layout red line: OK"
 }
 
-# ADR-076 §决策 3/4: identity injection has exactly one trusted writer —
-# `auth_middleware`. The reverse proxy forwards inbound headers verbatim, so
-# any other `x-user-id` write is a client-asserted identity that could claim
-# another user's sessions. Both the constant (`USER_SCOPE_HEADER`) and the raw
-# literal (`"x-user-id"`) may only appear in their definition site and in tests
-# (both live in auth_middleware.rs) — matching the literal too closes the hole
-# where a new writer spells the header out as a string and bypasses the lint.
+# ADR-076 §决策 3/4 (+ADR-084 §决策 7): identity injection has exactly two
+# trusted writers, both deriving the identity from a verified token —
+# `auth_middleware` (`x-user-id`, consumed by the Runtime) and `user_proxy`
+# (`X-Auth-*`, consumed by the user service). Inbound headers are forwarded
+# verbatim, so any other write of either family is a client-asserted identity
+# that could claim another user's sessions or admin role. Both the constants
+# and the raw literals may only appear in those two files (definition sites
+# and their tests) — matching the literals closes the hole where a new writer
+# spells the header out as a string and bypasses the lint.
 run_gateway_auth_scope_redline() {
     echo "Checking ADR-076 identity-injection red line..."
     local root="$SCRIPT_DIR/../core/acowork-gateway/src"
     local offenders
-    offenders=$(grep -rnE '(USER_SCOPE_HEADER|"x-user-id")' --include='*.rs' "$root" \
+    offenders=$(grep -rnE '(USER_SCOPE_HEADER|"x-user-id"|AUTH_USER_HEADER|AUTH_ROLE_HEADER|AUTH_AS_USER_HEADER|"x-auth-)' --include='*.rs' "$root" \
         | grep -vE "^$root/http/auth_middleware\.rs:" \
+        | grep -vE "^$root/http/user_proxy\.rs:" \
         || true)
     if [ -n "$offenders" ]; then
-        echo "ERROR: x-user-id scope header (constant or literal) referenced outside auth_middleware.rs (ADR-076 §决策 4):"
+        echo "ERROR: identity header (constant or literal) referenced outside auth_middleware.rs / user_proxy.rs (ADR-076 §决策 4):"
         echo "$offenders"
         echo "The Gateway reverse proxy must never assert a user identity itself —"
         echo "the scope is injected once, in auth_middleware, from the verified token."
@@ -183,21 +209,26 @@ run_gateway_auth_scope_redline() {
 }
 
 # ADR-076 §决策 12: the account API exists only under `AUTH_MODE=multi_user`.
-# Its routes must stay behind an `auth_service.is_some()` branch, so `local`
-# mode returns 404 rather than exposing a gated-but-registered surface.
-run_gateway_auth_mode_redline() {
+# Its routes must stay behind an `is_multi_user()` branch, so `local` mode
+# returns 404 rather than exposing a gated-but-registered surface.
+#
+# Since ADR-084 the registrations live in the user service, not the Gateway —
+# the Gateway registers no account route at all, it reverse-proxies the whole
+# surface. Scanned file is therefore `acowork-user/src/http/mod.rs`; pointing
+# the lint at the Gateway after the move would pass vacuously.
+run_user_auth_mode_redline() {
     echo "Checking ADR-076 auth-mode routing red line..."
-    local routes="$SCRIPT_DIR/../core/acowork-gateway/src/http/routes.rs"
+    local routes="$SCRIPT_DIR/../core/acowork-user/src/http/mod.rs"
     # Every `auth_routes()` / `account_api` registration line must sit inside a
-    # branch whose scrutinee (`state.auth_service`) is within the preceding 4
-    # lines — i.e. a `match &state.auth_service { Some(_) => …, None => … }`.
+    # branch whose scrutinee (`state.is_multi_user()`) is within the preceding
+    # 4 lines.
     local offenders
     offenders=$(awk '
         { ctx[NR % 5] = $0 }
         /auth_api::auth_routes|account_api::/ {
             ok = 0
             for (i = 1; i <= 4; i++) {
-                if (ctx[(NR - i) % 5] ~ /auth_service|AuthMode|auth_mode/) ok = 1
+                if (ctx[(NR - i) % 5] ~ /is_multi_user|AuthMode|auth_mode/) ok = 1
             }
             if (!ok) print FILENAME ":" NR ": " $0
         }
@@ -216,10 +247,11 @@ run_gateway_auth_mode_redline() {
 # layout — `data_dir/users/{min(a,b)}/chats/{max(a,b)}/`. A second place
 # deriving that path would re-implement the min/max ordering, and the first
 # thing an order-dependent re-derivation gets wrong is *whose* messages you
-# are reading. The path is built once, in `chat.rs`.
-run_gateway_chat_path_redline() {
+# are reading. The path is built once, in `chat.rs` — since ADR-084 inside
+# `acowork-user`, so the scanned root follows the code.
+run_user_chat_path_redline() {
     echo "Checking ADR-076 chat-path ownership red line..."
-    local root="$SCRIPT_DIR/../core/acowork-gateway/src"
+    local root="$SCRIPT_DIR/../core/acowork-user/src"
     local offenders
     offenders=$(grep -rnE '\.join\("(users|chats|files|conversation\.json|messages\.jsonl)"\)' \
         --include='*.rs' "$root" \
@@ -233,6 +265,60 @@ run_gateway_chat_path_redline() {
         exit 1
     fi
     echo "Chat-path ownership red line: OK"
+}
+
+# ADR-084 §决策 1/3 suggested ceilings:
+#   - `acowork-user` code must not reach into the Gateway's data directory
+#     (the mirror of the fs red line above): all user data lives under the
+#     service's own data dir, written by nobody else;
+#   - the Gateway must never reference the Ed25519 *private* key file. It only
+#     loads the public half (via the supervisor's `/health` data_dir), so a
+#     private-key reference here would break the "verify, never sign"
+#     property of §决策 3;
+#   - the `X-Auth-*` header literals live in `acowork_core::auth` only — the
+#     user service must import them, never hand-roll its own copy (migration
+#     plan §5.3, header single-source rule).
+run_user_boundary_redline() {
+    echo "Checking ADR-084 user-domain boundary red lines..."
+    local failed=0
+    local gw_data_hits
+    gw_data_hits=$(grep -rnE 'acowork-gateway[\\/]+data' --include='*.rs' \
+        "$SCRIPT_DIR/../core/acowork-user" \
+        | grep -vE ':[0-9]+:[[:space:]]*//' \
+        || true)
+    if [ -n "$gw_data_hits" ]; then
+        echo "ERROR: acowork-user source references the Gateway data directory (ADR-084 §决策 1):"
+        echo "$gw_data_hits"
+        failed=1
+    fi
+    local key_hits
+    key_hits=$(grep -rnE 'ed25519\.key' --include='*.rs' \
+        "$SCRIPT_DIR/../core/acowork-gateway/src" \
+        | grep -vE ':[0-9]+:[[:space:]]*//' \
+        || true)
+    if [ -n "$key_hits" ]; then
+        echo "ERROR: Gateway source references the Ed25519 private key file (ADR-084 §决策 3):"
+        echo "$key_hits"
+        failed=1
+    fi
+    local hdr_hits
+    hdr_hits=$(grep -rnE '"x-auth-' --include='*.rs' \
+        "$SCRIPT_DIR/../core/acowork-user" \
+        | grep -vE ':[0-9]+:[[:space:]]*//' \
+        || true)
+    if [ -n "$hdr_hits" ]; then
+        echo "ERROR: acowork-user source hand-rolls an X-Auth-* header literal (single-source rule):"
+        echo "$hdr_hits"
+        echo "Import the constants from acowork_core::auth instead."
+        failed=1
+    fi
+    if [ "$failed" -ne 0 ]; then
+        echo ""
+        echo "The user data dir and the signing key belong to acowork-user; the"
+        echo "Gateway reaches the user domain only through user_proxy / snapshot pull."
+        exit 1
+    fi
+    echo "User-domain boundary red lines: OK"
 }
 
 run_clippy() {
@@ -297,10 +383,11 @@ run_smoke() {
 case "$MODE" in
     check)
         run_gateway_fs_redline
+        run_user_boundary_redline
         run_meta_layout_redline
         run_gateway_auth_scope_redline
-        run_gateway_auth_mode_redline
-        run_gateway_chat_path_redline
+        run_user_auth_mode_redline
+        run_user_chat_path_redline
         run_check
         ;;
     clippy)
@@ -319,10 +406,11 @@ case "$MODE" in
         run_node_redline
         run_mqtt_redline
         run_gateway_fs_redline
+        run_user_boundary_redline
         run_meta_layout_redline
         run_gateway_auth_scope_redline
-        run_gateway_auth_mode_redline
-        run_gateway_chat_path_redline
+        run_user_auth_mode_redline
+        run_user_chat_path_redline
         run_check
         run_clippy
         run_test

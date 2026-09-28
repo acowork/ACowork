@@ -1,6 +1,6 @@
 # ADR-084: 账号/用户聊天从 Gateway 剥离为独立进程 acowork-user
 
-**状态**：草案（待评审）
+**状态**：已决策（2026-10-20，架构评审定案）
 **日期**：2026-10-20
 **决策者**：架构评审（用户定案：用户域业务迁出 Gateway）
 
@@ -396,7 +396,7 @@ core/acowork-user/
 ## 9. 开放问题（评审重点）
 
 1. **用户服务未就绪时受限模式的保守语义**：`user_snapshot.requires_setup` 未知时，闸门应按"非受限直通"（availability 优先）还是"保守拒绝"（安全优先）？（倾向直通：受限模式仅首次启动的短暂窗口，直通不放大攻击面，因为业务路由本身仍要 token。）
-2. **档案刷新的信号通道**：MQTT topic（复用 doc 范式） vs 用户服务回调 Gateway 内部端点 vs Gateway 轮询。需与现有 global-resources 发布链协调。
+2. **档案刷新的信号通道**：MQTT topic（复用 doc 范式） vs 用户服务回调 Gateway 内部端点 vs Gateway 轮询。需与现有 global-resources 发布链协调。**（已落地：MQTT topic `acowork/user/profiles/changed` 为快路径 + supervisor 2s `/health` 轮询兜底；`mqtt.auth_enabled` 下 broker 以启动时生成的 `publisher_token` 放行 `user:service` / `doc:service`——由 supervisor 经 `--mqtt-password` 注入，信号不因鉴权静默失效。）**
 3. **`local` 模式是否值得为档案/头像单起进程**：本 ADR 选"是"（代码归属唯一）。若评审更重最低开销，可回退到"`local` 保留档案在 Gateway"——但会造成档案代码分裂，需显式接受。
 4. **`registration_open` 的公开读取**：`/api/status`（无鉴权）是否继续由 Gateway 从快照透出，还是改由前端另调用户服务端点？（倾向保持 `/api/status` 契约。）
 5. **Ed25519 密钥轮换**：本期不做（YAGNI）；记录升级路径 = 公钥带 `kid`，用户服务可并存多把公钥。

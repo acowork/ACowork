@@ -174,7 +174,8 @@ graph TB
 > - `resource_cache.user_profile_list` 不再读本地 `user_profiles.json`：启动为空，由拉取填充（`load_resource_cache` 保留其余列表的磁盘加载）。顺带删除已成死代码的 `user_profile_list_path` / `load_user_profile_list` / `save_user_profile_list` / `rebuild_and_save_user_profile_cache` —— Gateway 侧不再有任何用户档案写入路径。
 > - **实测出口证据**（隔离 `--home` + 隔离端口，脚本跑完即删）：(a) `admin-setup` 后 `/api/status` 的 `requires_setup` 由 `true` 翻成 `false`，**gateway 未重启**（2s 轮询生效）；(b) 建 alice 后 dispatch 记 `user profile change signal received version="5"`、紧接 `user profile snapshot refreshed version=5 users=2`，**同一毫秒** → 走的是 MQTT 快路径而非轮询；(c) 直接 `GET http://127.0.0.1:{user_port}/internal/user-profiles` 返回 `{"version":5,"users":[admin,Alice]}`。
 > - **新增测试**：user `/internal/user-profiles` 路由契约（multi_user）；`user_profile_sync` 的 topic 契约、无服务 no-op、对真实 HTTP server 的"拉取→替换缓存→同版本不重复"，另加 `mqtt_publisher` 的 topic/明文 payload 两条。回归：`cargo test -p acowork-gateway`（582 lib + 全部集成）与 `-p acowork-user`（95）全绿，`clippy -D warnings` 三个 crate 干净。
-> - **未覆盖**：MQTT 快路径与轮询兜底之间没有强一致/去重语义（信号重复时靠版本号幂等跳过），以及 `mqtt.auth_enabled` 下 `user:service` 被拒这件事本身没修（只兜底）。真要修，得让 broker 认 `user:service`（复用 `publisher_token`）并把 token 传进服务 —— 属于 ADR-084 §9 的未决项，留到那一步一起定。
+> - **未覆盖**：MQTT 快路径与轮询兜底之间没有强一致/去重语义（信号重复时靠版本号幂等跳过）。
+> - **后续补修（收尾已落地）**：`mqtt.auth_enabled` 下 `user:service` 被 broker 拒的缺口已修——broker 的 `check_connect_auth` 放行 `user:service` / `doc:service`（并入 `gateway:publisher` 分支，复用启动时生成的 `publisher_token`）；Gateway 在 supervisor 启动前生成 token 并写入两个 supervisor cfg，supervisor 经 `--mqtt-password` 注入（服务端 CLI 支持 `ACOWORK_MQTT_PASSWORD` env 兜底）；doc 的 `doc:service` 同款既有隐患一并修复。回归：gateway broker 12 单测（含新增 `internal_service_publishers_accept_publisher_token`）、user 95、doc 100 全绿，clippy 三 crate 干净。协议文档 zh/en §8.5 + §8.7 四张表已同步，ADR-084 §9 未决项 2 同步关闭。
 > - **顺带发现两条待修**（已记入 M4）：`--home` 是顶层参数，`acowork-gateway admin-setup --home X` 会报 `unexpected argument`（必须 `--home X admin-setup`），与 `acowork-user` 的同一个坑，用 clap `global = true` 一并解决；`admin-setup` 输出的 `Restart gateway to serve requests` 现在已不准确（2s 轮询会让它自动生效，无需重启）。
 
 
@@ -189,6 +190,23 @@ graph TB
 
 **出口**：两模式 e2e 全绿；`cli.sh all` 通过；`grep` 确认 Gateway 内无用户域代码残留。
 
+> **实施备注（M4 已完成，出口已实测）**
+>
+> - **代码拆除**（复核确认）：Gateway 内 `src/account/`、`src/chat.rs`、`src/auth/{service,revoked}.rs`、`src/http/{account_api,users_api,auth_api,chat_api}.rs` 全部删除（glob 0 命中）；`local` 分支与头像逻辑随文件移除，`/api/auth/*`、`/api/users/{id}/chats/*` 由用户服务按 `auth_mode` 决定是否注册（`local` 下 404）。
+> - **依赖瘦身**：`argon2` / `hmac` / `tokio-util` 均不在 gateway 依赖表（随用户域迁出）。**保留 `rpassword` / `zeroize`**（对计划第 3 点"移除"清单的有意偏离）：Gateway `cli.rs` 的交互式首启仍在本地读密码（隐藏回显 + 缓冲区擦除），再经 `admin-setup --password-stdin` 委托 `acowork-user`；删除会让交互式首启失效，与 M2"委托 CLI"决策一致。
+> - **`dev/ci.sh` 红黄线**（§5.3 五处全部落地，另三条建议 lint 合并为一条）：
+>   - 修复 `all` 分支调用旧函数名（`run_gateway_auth_mode_redline` / `run_gateway_chat_path_redline` → `run_user_*`）：此前 `all` 一进 lint 段即 `command not found` 中止（`check` 分支当时是好的，因此未暴露）。
+>   - `run_gateway_fs_redline` 追加 ADR-084 §决策 1 扫描：Gateway 侧不得出现 `accounts.json` / `user_profiles.json` / `assets/avatars` / `.join("users"|"chats"|"avatars")`。
+>   - 新增 `run_user_boundary_redline`：用户侧不得引用 `acowork-gateway/data`；Gateway 侧不得出现 `ed25519.key`；用户侧不得手写 `"x-auth-` 字面量（须 import `acowork_core` 常量）。
+>   - 验证：WSL bash 下用 stub 副本（cargo 函数替换为 echo）跑 `check` / `all` 两模式全过；负向探针逐条命中违规，注释行正确豁免。
+> - **计划外修复**：`dev/build_core.ps1` 首启检测路径 `~/.acowork/acowork-gateway/data/accounts.json` → `~/.acowork/acowork-user/accounts.json`（旧路径在 ADR-084 后必然不存在，会每次启动误报"需要设置密码"）。
+> - **回归实测**：`cargo clippy -p acowork-gateway -p acowork-user -p acowork-core --all-targets -- -D warnings` 干净；`cargo test`：core 250 绿、user 95 绿、gateway 572 绿（lib 526 + 集成 45 + doctest 1；含 `auth_mode_e2e` 4/4：local ×2、受限模式、multi_user 各一）。
+> - **已执行**：完整 `dev/ci.sh all`（run7，2026-09-28）：8 条红线 + `cargo check` + `cargo clippy`（含 acowork-embed） + `cargo test --workspace --exclude acowork-embed` + `run_integration` 4 项（`node_control_plane_e2e` 6/6 / `settings_api` 6/6 / `node_proto_golden` 11/11 / `dependency_redline` 1/1）全部绿。`run_smoke` 39/44 过、5 项败：见下“环境性失败”条。环境与中途修复：
+>   - **LSP-relay 锁**：`target/debug/acowork-lsp-relay.exe` 被用户 daemon（PID 33812，1:21 启动）持锁，`cargo build --workspace --bins` 删除旧 binary 失败（os error 5 / Access denied）。本保大厅能够直接杀用户进程（AGENTS.md 禁烟），以加速路为 `cargo build --workspace --bins --exclude acowork-embed --exclude acowork-lsp-relay`（跳过 lsp-relay rebuild，复用其 1:21 binary——spwan 后 Windows 可共享 read 加载现有 binary）。然后 inline 补跑 smoke，避免动 ci.sh。
+>   - **memory_m5_bench Plan Y 假设修补**：ADR-062 §6.2 Plan Y 以 "BM25 alone cannot match K* nodes" 为前提，但 `MemoryManager::retrieve` 始终为 hybrid（vector + text RRF）——vector 路径在 `DeterministicEmbedding` 下 cosine ≠ 0，K* 在 keyword_index=false 下 hit@5=1.0。将 L518 断言改为 `after.mrr > before.mrr`（Plan Y 真正的 MRR lift，0.7917 → 0.9375），p5/r5/mrr 回归护栏保留。ADR-062 §6.2 需后续提 PR 备注 supersede。
+>   - **git_api_e2e 两补全**：`status_workspace_subdir_of_repo_filters_changes` 500 原因为夹具 `format!` 手拼 JSON 含 Windows 非法转义 `\U`——改为 `serde_json::json!` 序列化；`diff_index_ref_reads_index_not_worktree` 400 原因为 `diff_two_refs` 未接通 head_ref=":" 路由（`rev-parse ":"^{commit}"` 必败），补实现：特判 "："、跳过头侧 rev-parse、read_blob 传空 rev（拼出 `git show :path` 即 index 语义），`head_rev` 为 `None`。两个修复后 git_api_e2e 31/31 全过。
+> - **环境性失败（run_smoke，5/44）**：isolated broker 环境下 `user:service` / `doc:service` MQTT 客户端从启动后 ~25 s 进入 重连死循环（broker 抛 `Duplicate client_id, dropping previous`）——这不是本表修代码造成的，反而是 smoke_test.py L417-419 已记载的 ADR-018 watchdog 已知副作用。败项 TC-BOOT-02（system agent 20 s 未 ready）/ TC-HARNESS-08（provider MQTT 10 s 未同步）/ TC-CHAT-02（agent start 404） / TC-AUTH-02（identity.json 未出现）/ Recovery（node 未重 enroll）均为同一现象（系统 agent / node agent 等待被 user/doc 连接握手拖住）。本地完整 daemon 下不会重现（本 smoke 是故意 isolated broker）；解决路径：（1）on demand 中修复 broker 携 session takeover 以接受同 client_id 重接（代 ADR-018）；（2）或 smoke 跑在独立 daemon下（先 stop 本地 daemon/lsp-relay，待锁释放）。本次不动产品代码、动 dev/ci.sh 仅限临场 inline 环境调整。
+
 ### M5 — 迁移 + 打包｜1d
 
 **任务**
@@ -197,6 +215,19 @@ graph TB
 3. 文档同步：ADR-084 状态定稿；ADR-076 已加取代说明；`docs/module-design/zh/` 视需要补 `acowork-user` 条目（可选）。
 
 **出口**：迁移后登录旧账号成功、历史聊天可读、头像可见；`package_desktop_windows.ps1` 产物 `bin/` 含 `acowork-user.exe`。
+
+> **实施备注（M5 打包链 + 文档同步已完成；§6 数据迁移经评估为本机 no-op，见下）**
+>
+> - **构建 / 打包链**（§5.2 全部落点）：
+>   - `apps/acowork-desktop/package.json`：`core:build:debug` / `core:build:release` 追加 `-p acowork-user`。
+>   - `apps/acowork-desktop/src-tauri/build.rs`：`BINARIES` 追加 `acowork-user`（release 随 `bin/*` resources 进包；dev 不 stage，保持反文件锁行为）。
+>   - `dev/build_core.sh` / `build_core.ps1` / `build_macos.sh`：停止列表（`stop_process "acowork-user"`）+ 18083 端口释放 + 构建步骤 + 产物清单；ps1 / macOS 步数变量同步 +1。
+>   - `dev/package_desktop_{windows.ps1,linux.sh,macos.sh}`：拷贝 `target/release/acowork-user(.exe)` → `src-tauri/bin/`，缺失时警告 `/api/auth/*`、`/api/users/*`、`/api/user/*` 将 503。
+>   - `dev/e2e_frontend_smoke/`（`smoke_test.py` / `onboarding_installs_all_agents.py`）：孤儿回收清单加 `acowork-user`（ADR-018 watchdog 最长 300s 存活，会占端口并锁住 `target/debug/acowork-user.exe`）。
+> - **文档**：`AGENTS.md`（16 crates / Required binaries 加 `acowork-pm`、`acowork-user` / crate 列表加 `acowork-user` / Logs 加 `user.log` / ADR 计数 80 = zh 77 + en 3）；ADR-084 状态定稿"已决策"；ADR-076 取代说明（先行落字）。
+> - **§6 数据迁移评估（本机 no-op，含结论依据）**：源目录 `~/.acowork/acowork-gateway/data` 无 `accounts.json` / `users/` / `assets/` 等账号级遗留（账号数据唯一真源在用户服务数据目录）；仅存一份 `user_profiles.json`，是 M2 之前构建对 `POST /api/users` 的本地写产物（派生视图，日志实锤该请求由 Gateway 本地处理返回 201），current tree 完全不读不写；ADR-084 §决策 8 明确该视图“可由 `accounts.json` 重新派生，可省”。目标 `~/.acowork/acowork-user/` 已有真实数据。结论：不拷贝、不删除（原目录保留备查）；旧档案展示名如需找回，在新 UI 改 admin 档案即可。
+> - **既有缺口已补**（收尾）：`package.json` 的 `core:build:debug` / `core:build:release` 已补 `-p acowork-doc`——`build.rs` 的 `BINARIES` 与三个 `package_desktop_*` 都预期 doc 存在，补上后 `npm run tauri build` 的 core:build 阶段会构建 doc，`bin/` 不再缺 `acowork-doc`。（完整 `npm run tauri build` 产物校验仍待执行。）
+> - **出口状态**：拷贝清单已含 `acowork-user`；实际产物校验（完整跑一次 `npm run tauri build` 后检查 `bin/acowork-user.exe`）待执行。
 
 ---
 

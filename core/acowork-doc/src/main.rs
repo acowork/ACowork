@@ -69,7 +69,7 @@ async fn main() {
     // the embedded Gateway broker on this host; a not-yet-ready broker
     // is fine (auto-reconnect). Failure never blocks startup — events
     // are best-effort, the Desktop's 30s poll is the fallback.
-    mqtt_publisher::init(&cli.mqtt_host, cli.mqtt_port).await;
+    mqtt_publisher::init(&cli.mqtt_host, cli.mqtt_port, cli.mqtt_password.clone()).await;
 
     let service = match DocService::new(config.clone()).await {
         Ok(svc) => Arc::new(svc),

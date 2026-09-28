@@ -53,7 +53,7 @@ function Install-Server {
             if ($LASTEXITCODE -eq 0) { $versionOk = $true }
         } catch { }
         if ($versionOk) { return }
-    fi
+    }
 
     # Not installed or broken proxy — install the component
     if (Get-Command rustup -ErrorAction SilentlyContinue) {

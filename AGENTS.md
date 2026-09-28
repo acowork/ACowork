@@ -6,11 +6,11 @@ ACowork is a decentralized, high-security, scalable AI Agent runtime platform. E
 
 ## Build & Test
 
-### Core (Rust workspace, 13 crates)
+### Core (Rust workspace, 16 crates)
 
 ```bash
 cd core
-cargo build --release          # all 13 crates
+cargo build --release          # all 16 crates
 cargo clippy --all-targets -- -D warnings
 cargo test                     # unit + integration tests
 # ./dev/ci.sh all              # check + clippy + test + integration
@@ -19,7 +19,7 @@ cargo test                     # unit + integration tests
 ### Desktop App (Tauri v2)
 
 Required core binaries (built by `core:build:debug|release`):
-`acowork-gateway`, `acowork-runtime`, `acowork-embed`, `acowork-lsp-relay`, `acowork-node`.
+`acowork-gateway`, `acowork-runtime`, `acowork-embed`, `acowork-doc`, `acowork-lsp-relay`, `acowork-node`, `acowork-pm`, `acowork-user`.
 
 ```bash
 # Release — beforeBuildCommand auto-runs core:build:release + npm build + tauri bundle
@@ -38,11 +38,12 @@ npm run tauri dev
 - Gateway: `{HOME_DIR}\.acowork\acowork-gateway\data\logs`
 - Desktop: `{HOME_DIR}\.acowork\desktop-app\logs`
 - Runtime: `{HOME_DIR}\.acowork\acowork-gateway\config\packages\com.acowork.senior-engineer\workspace\logs`
+- User service: `{HOME_DIR}\.acowork\acowork-gateway\data\logs\user.log`
 
 ## Project Structure
 
 ```
-core/                  # Rust workspace (15 crates; source of truth: core/Cargo.toml [workspace] members)
+core/                  # Rust workspace (16 crates; source of truth: core/Cargo.toml [workspace] members)
   acowork-core/        # Shared types, errors, config, MQTT proto
   acowork-embed/       # ONNX-Runtime embedding model runner
   acowork-gateway/     # HTTP API, embedded MQTT broker, reverse proxy, lifecycle, package mgr
@@ -53,6 +54,7 @@ core/                  # Rust workspace (15 crates; source of truth: core/Cargo.
   acowork-pm/          # Project & task management service (REST API + MCP tools)
   acowork-node/        # Node Agent (ADR-055) — per-machine daemon hosting Runtime processes
   acowork-doc/         # Online document library service (REST API + MCP tools)
+  acowork-user/        # User domain service (ADR-084) — accounts, credentials, roles, profiles/avatars, user chat
   acowork-runtime/     # Agent runtime (main loop, tools, providers, sessions)
   acowork-sign/        # Package signing & verification
   acowork-sqlite/      # SQLite storage backend — memory + session meta + conversation index (ADR-082)
@@ -64,9 +66,9 @@ apps/
   cli/                 # Gateway CLI (planned)
 
 docs/                  # Public architecture docs
-  design/{zh,en}/      # 17 design docs (zh only; en TBD)
-  module-design/{zh,en}/ # Rust crate specs (8 zh + en placeholder)
-  adr/{zh,en}/         # 78 ADRs (en: 2, zh: 76)
+  design/{zh,en}/      # 21 zh / 17 en design docs
+  module-design/{zh,en}/ # 8 zh / 7 en Rust crate specs
+  adr/{zh,en}/         # 80 ADRs (en: 3, zh: 77)
   prd/{zh,en}/         # Platform + Desktop UI/UX PRD
   protocols/{zh,en}/   # HTTP + MQTT + RAG protocol reference
   mcp-server-research/{zh,en}/

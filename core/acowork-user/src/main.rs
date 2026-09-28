@@ -111,7 +111,8 @@ fn main() {
         // Profile-change signal (ADR-084 §决策 4b). Best-effort: a broker that
         // is not up yet is fine (the client reconnects), and a total failure
         // only delays the Gateway's view until its next pull.
-        acowork_user::mqtt_publisher::init(&cli.mqtt_host, cli.mqtt_port).await;
+        acowork_user::mqtt_publisher::init(&cli.mqtt_host, cli.mqtt_port, cli.mqtt_password.clone())
+            .await;
 
         if let Some(ref url) = cli.gateway_health_url {
             spawn_gateway_health_watchdog(
@@ -237,11 +238,12 @@ fn run_admin_setup(
 
 /// Read the admin password from a file or stdin.
 ///
-/// ponytail: the interactive TTY prompt is **not** ported in M1 — the
-/// Gateway's own `admin-setup` still owns that path (it is deleted in M4),
-/// and only one process should be prompting. M4 must bring the `rpassword`
-/// prompt over here; until then the non-interactive paths below are the
-/// contract, which is also the one the supervisor/scripts use.
+/// Note (ADR-084, decided in M4): the interactive TTY prompt stays in the
+/// **Gateway's** `admin-setup`, which reads it and pipes the password to
+/// `acowork-user admin-setup --password-stdin`. Only one process should ever
+/// prompt, and for an operator the Gateway CLI is the entry point — so this
+/// binary's contract is deliberately non-interactive, which is also the shape
+/// the Gateway supervisor and scripts use.
 fn read_admin_password(
     password_file: Option<&std::path::Path>,
     password_stdin: bool,

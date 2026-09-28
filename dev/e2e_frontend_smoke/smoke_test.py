@@ -414,8 +414,11 @@ class Gateway:
         # embed model runner). Gateway SIGTERM does not kill them, and a
         # stale node keeps holding the 19900 proxy port — the next run's
         # node then logs "reverse proxy failed to bind" and degrades.
+        # The user service (ADR-084) is reaped for the same reason: its
+        # ADR-018 watchdog can lag up to ~300s while it keeps a lock on
+        # target/debug/acowork-user.exe, which stalls concurrent rebuilds.
         home_str = str(self.home)
-        for pat in ("acowork-node", "acowork-embed"):
+        for pat in ("acowork-node", "acowork-embed", "acowork-user"):
             try:
                 out = subprocess.run(
                     ["pgrep", "-f", rf"{pat} .*{home_str}"],

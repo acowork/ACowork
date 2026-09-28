@@ -116,11 +116,30 @@ impl Gateway {
 
 impl Drop for Gateway {
     fn drop(&mut self) {
-        // Only ever our own child — never a pattern match on process names.
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        kill_tree(&mut self.child);
     }
 }
+
+/// Kill the child **and every process it spawned**.
+///
+/// `Child::kill()` is TerminateProcess on Windows: it reaps only the direct
+/// child, so the services that child hosted (embed / node / doc / pm / user)
+/// survive until their ADR-018 watchdog notices the Gateway is gone (5 min),
+/// holding their ports and — on Windows — a lock on `acowork-*.exe` that
+/// fails the next `cargo build`. `taskkill /T` reaps the tree with it.
+///
+/// Only ever our own child — never a pattern match on process names. Unix
+/// needs no equivalent here: the watchdog is the designed backstop and a
+/// running binary does not lock its own path there.
+fn kill_tree(child: &mut std::process::Child) {
+    #[cfg(windows)]
+    let _ = std::process::Command::new("taskkill")
+        .args(["/PID", &child.id().to_string(), "/T", "/F"])
+        .output();
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 
 fn temp_home(tag: &str) -> PathBuf {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -390,12 +409,12 @@ fn local_mode_leaves_no_account_state_behind() {
     gw.wait_until_serving();
 
     assert!(
-        !gw.data_file("accounts.json").exists(),
-        "local mode must not create an account store"
+        !gw.home.join("acowork-user").join("accounts.json").exists(),
+        "local mode must not create an account store (ADR-084 §1.4)"
     );
     assert!(
-        !gw.data_file("auth").exists(),
-        "local mode must not create the auth secret directory"
+        !gw.home.join("acowork-user").join("auth").exists(),
+        "local mode must not create the signing-key directory (ADR-084 §1.4)"
     );
 }
 

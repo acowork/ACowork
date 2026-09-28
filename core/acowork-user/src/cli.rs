@@ -22,51 +22,60 @@ pub struct Cli {
 
     /// Bind host. Must be loopback: the service trusts Gateway-injected
     /// `X-Auth-*` headers (ADR-084 §决策 7).
-    #[arg(long, default_value = "127.0.0.1")]
+    #[arg(long, default_value = "127.0.0.1", global = true)]
     pub host: String,
 
     /// HTTP listen port (default 18083; auto-increments on conflict by 20).
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub port: Option<u16>,
 
     /// Write the actually-bound port here (read by the Gateway supervisor).
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub port_file: Option<PathBuf>,
 
     /// Data directory. Default `$HOME/.acowork/acowork-user/`.
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub data_dir: Option<PathBuf>,
 
     /// Deployment mode, resolved by the Gateway (`local` | `multi_user`).
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub auth_mode: Option<String>,
 
     /// TOML config file to layer over the defaults.
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub config: Option<PathBuf>,
 
     /// Gateway health URL (ADR-018): self-exit when the Gateway is gone.
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub gateway_health_url: Option<String>,
 
     /// Gateway health probe interval (ms, default 10000 = 10s).
-    #[arg(long, default_value = "10000")]
+    #[arg(long, default_value = "10000", global = true)]
     pub gateway_health_interval_ms: u64,
 
     /// Gateway unreachable self-exit timeout (ms, default 300000 = 5min).
-    #[arg(long, default_value = "300000")]
+    #[arg(long, default_value = "300000", global = true)]
     pub gateway_health_timeout_ms: u64,
 
     /// MQTT broker host (the embedded Gateway broker; default 127.0.0.1).
-    #[arg(long, default_value = "127.0.0.1")]
+    #[arg(long, default_value = "127.0.0.1", global = true)]
     pub mqtt_host: String,
 
     /// MQTT broker port (default 19875).
-    #[arg(long, default_value_t = 19875)]
+    #[arg(long, default_value_t = 19875, global = true)]
     pub mqtt_port: u16,
 
+    /// MQTT broker CONNECT password: the Gateway's internal publisher
+    /// token, forwarded by the supervisor only when `mqtt.auth_enabled`
+    /// is on (the broker admits any `user:service:*` client id with
+    /// it, ADR-084 §决策 4b — see `mqtt_publisher::client_id`).
+    /// Standalone mode can set it manually; env `ACOWORK_MQTT_PASSWORD`
+    /// as fallback.
+    #[arg(long, env = "ACOWORK_MQTT_PASSWORD", global = true)]
+    pub mqtt_password: Option<String>,
+
     /// Log level.
-    #[arg(long, default_value = "info")]
+    #[arg(long, default_value = "info", global = true)]
     pub log_level: String,
 }
 

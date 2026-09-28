@@ -32,10 +32,19 @@ use tracing::warn;
 use acowork_core::mqtt_proto::USER_PROFILES_CHANGED_TOPIC;
 use acowork_mqtt_session::{MqttClient, MqttClientConfig, MqttClientError, MqttClientHandler};
 
-/// Broker client id (protocol §8.5 colon convention, `gateway:publisher`
-/// style). Stable so a restart kicks the stale session instead of piling up
-/// ghosts.
-const CLIENT_ID: &str = "user:service";
+/// Broker client id. The shared prefix `user:service` is matched by
+/// the Gateway broker allowlist (ADR-084 §决策 4b, `starts_with`).
+/// The per-process suffix avoids `Duplicate client_id, dropping previous`
+/// on internal reconnect — rumqttd drops the previous session and the
+/// publisher's reconnect loop then races itself; a unique suffix makes
+/// each reconnect a fresh session and the broker stops issuing
+/// `Duplicate`. Stable across restarts of the same process is not
+/// required (the broker auth path treats all `user:service:*` ids
+/// identically and the rest of the runtime never subscribes to this
+/// publisher).
+fn client_id() -> String {
+    format!("user:service:{}", std::process::id())
+}
 
 static PUBLISHER: OnceLock<Arc<UserMqttPublisher>> = OnceLock::new();
 
@@ -43,10 +52,13 @@ static PUBLISHER: OnceLock<Arc<UserMqttPublisher>> = OnceLock::new();
 /// is not up yet is fine — [`MqttClient::connect`] only spawns the poll task
 /// (auto-reconnect inside), it does not wait for CONNACK.
 ///
+/// `password` is the Gateway publisher token when `mqtt.auth_enabled` is on
+/// (ADR-084 §决策 4b); `None` connects without credentials.
+///
 /// Never returns an error that should kill the user service: without the
 /// signal the Gateway still picks the new profiles up on its next restart.
-pub async fn init(host: &str, port: u16) {
-    match UserMqttPublisher::connect(host.to_string(), port).await {
+pub async fn init(host: &str, port: u16, password: Option<String>) {
+    match UserMqttPublisher::connect(host.to_string(), port, password).await {
         Ok(publisher) => {
             let _ = PUBLISHER.set(Arc::new(publisher));
             tracing::info!(host, port, "user MQTT publisher ready");
@@ -84,8 +96,17 @@ struct UserMqttPublisher {
 }
 
 impl UserMqttPublisher {
-    async fn connect(host: String, port: u16) -> Result<Self, MqttClientError> {
-        let config = MqttClientConfig::new(CLIENT_ID, host, port);
+    async fn connect(
+        host: String,
+        port: u16,
+        password: Option<String>,
+    ) -> Result<Self, MqttClientError> {
+        let mut config = MqttClientConfig::new(client_id(), host, port);
+        // With `mqtt.auth_enabled` on, the broker only admits
+        // `user:service:*` (any per-process id with this prefix) with
+        // the Gateway's publisher token; the supervisor forwards it
+        // at spawn time (ADR-084 §决策 4b).
+        config.credentials = password.map(|p| (client_id(), p));
         let client = MqttClient::connect(config, NoopHandler, None).await?;
         Ok(Self { client })
     }

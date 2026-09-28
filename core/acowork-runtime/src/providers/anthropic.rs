@@ -336,6 +336,9 @@ struct AnthropicContentBlock {
     block_type: String,
     #[serde(default)]
     text: Option<String>,
+    /// Extended-thinking text, carried by `type: "thinking"` blocks.
+    #[serde(default)]
+    thinking: Option<String>,
     #[serde(default)]
     id: Option<String>,
     #[serde(default)]
@@ -399,6 +402,9 @@ struct StreamDelta {
     text: Option<String>,
     #[serde(default)]
     partial_json: Option<String>,
+    /// Extended-thinking text, carried by `thinking_delta` events.
+    #[serde(default)]
+    thinking: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -524,6 +530,17 @@ fn convert_messages(
                 });
             }
             MessageRole::Assistant => {
+                // The signed thinking block is not regenerated here (see the
+                // `ponytail:` note in `parse_anthropic_sse_line`). Surface the
+                // drop in logs so the gap is observable the moment a native
+                // Claude tool turn with thinking enabled actually hits it.
+                if msg.reasoning_content.is_some() {
+                    tracing::debug!(
+                        "anthropic: assistant reasoning_content not replayed on this turn \
+                         (signed thinking replay unimplemented; see parse_anthropic_sse_line)"
+                    );
+                }
+
                 let mut content_blocks: Vec<serde_json::Value> = Vec::new();
 
                 // Add text content if present
@@ -650,6 +667,7 @@ fn convert_tools(tools: Option<&[serde_json::Value]>) -> Option<Vec<AnthropicToo
 /// Parse Anthropic response into our ChatResponse
 fn parse_response(resp: AnthropicResponse) -> ChatResponse {
     let mut text_parts: Vec<String> = Vec::new();
+    let mut reasoning_parts: Vec<String> = Vec::new();
     let mut tool_calls: Vec<ToolCall> = Vec::new();
 
     for block in resp.content {
@@ -657,6 +675,13 @@ fn parse_response(resp: AnthropicResponse) -> ChatResponse {
             "text" => {
                 if let Some(text) = block.text {
                     text_parts.push(text);
+                }
+            }
+            // Extended-thinking block — surface as reasoning_content so the
+            // loop can show a `thought` turn instead of silently dropping it.
+            "thinking" => {
+                if let Some(thinking) = block.thinking {
+                    reasoning_parts.push(thinking);
                 }
             }
             "tool_use" => {
@@ -693,6 +718,11 @@ fn parse_response(resp: AnthropicResponse) -> ChatResponse {
 
     ChatResponse {
         content: text_parts.join(""),
+        reasoning_content: if reasoning_parts.is_empty() {
+            None
+        } else {
+            Some(reasoning_parts.join(""))
+        },
         tool_calls: if tool_calls.is_empty() {
             None
         } else {
@@ -1103,6 +1133,34 @@ fn parse_anthropic_sse_line(
         }
         "content_block_delta" => {
             if let Some(delta) = event.delta {
+                // Extended-thinking delta. Carries the model's reasoning as
+                // plain text (`{"type":"thinking_delta","thinking":"..."}`).
+                // Forward it as ReasoningContent so the agent loop streams it
+                // into the `thought` role (ADR-022) instead of dropping it —
+                // this is what Anthropic-compatible providers (e.g. MiniMax)
+                // send in place of the OpenAI `reasoning_content` field.
+                //
+                // ponytail: thinking is displayed but NOT replayed to the
+                // endpoint on later turns — the signed block is never rebuilt in
+                // `convert_messages`. Replay is only required by native Anthropic
+                // *extended thinking + tool use*, i.e. only when the user
+                // explicitly sets a reasoning effort (Auto/None sends no thinking
+                // config at all), so it is unreachable on the default path and
+                // entirely unvalidated on compat endpoints (MiniMax etc.).
+                // It is deliberately not implemented here: the exact replay
+                // contract (block position, signature validation) is unverified
+                // (Anthropic docs are region-blocked), and a mis-shaped block
+                // turns a working tool loop into a 400 — strictly worse than the
+                // status quo. Upgrade path, gated on one probe: run a native
+                // Claude tool call with thinking on; if it 400s on a missing
+                // thinking block, capture `signature_delta` here and rebuild
+                // `{type:"thinking",thinking,signature}` in `convert_messages`
+                // before the `tool_use` block, native endpoints only.
+                if let Some(thinking) = delta.thinking
+                    && !thinking.is_empty()
+                {
+                    return Some(StreamEvent::ReasoningContent(thinking));
+                }
                 if let Some(text) = delta.text
                     && !text.is_empty()
                 {
@@ -1474,6 +1532,7 @@ mod tests {
             content: vec![AnthropicContentBlock {
                 block_type: "text".to_string(),
                 text: Some("Hello! How can I help?".to_string()),
+                thinking: None,
                 id: None,
                 name: None,
                 input: None,
@@ -1502,6 +1561,7 @@ mod tests {
                 AnthropicContentBlock {
                     block_type: "text".to_string(),
                     text: Some("Let me check that.".to_string()),
+                    thinking: None,
                     id: None,
                     name: None,
                     input: None,
@@ -1509,6 +1569,7 @@ mod tests {
                 AnthropicContentBlock {
                     block_type: "tool_use".to_string(),
                     text: None,
+                    thinking: None,
                     id: Some("toolu_abc".to_string()),
                     name: Some("weather".to_string()),
                     input: Some(serde_json::json!({"city": "Shanghai"})),
@@ -1560,6 +1621,131 @@ mod tests {
         } else {
             panic!("Expected Content event");
         }
+    }
+
+    #[test]
+    fn test_parse_sse_thinking_delta() {
+        // MiniMax-on-Anthropic sends extended thinking as `thinking_delta`
+        // events, not the OpenAI `reasoning_content` field. The parser must
+        // surface it as ReasoningContent so the loop shows a `thought` turn.
+        let mut tool_id = None;
+        let mut tool_name = None;
+        let mut input_tokens = 0u64;
+        let mut cache_read_tokens = 0u64;
+        let mut cache_write_tokens = 0u64;
+        let mut block_index_map: HashMap<u64, u64> = HashMap::new();
+
+        let event = parse_anthropic_sse_line(
+            r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Let me think"}}"#,
+            &mut tool_id,
+            &mut tool_name,
+            &mut input_tokens,
+            &mut cache_read_tokens,
+            &mut cache_write_tokens,
+            &mut block_index_map,
+        );
+        let is_reasoning =
+            matches!(event, Some(StreamEvent::ReasoningContent(ref t)) if t == "Let me think");
+        assert!(is_reasoning, "thinking_delta must map to ReasoningContent, got {event:?}");
+
+        // An empty thinking delta must not emit a spurious event.
+        let empty = parse_anthropic_sse_line(
+            r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":""}}"#,
+            &mut tool_id,
+            &mut tool_name,
+            &mut input_tokens,
+            &mut cache_read_tokens,
+            &mut cache_write_tokens,
+            &mut block_index_map,
+        );
+        assert!(empty.is_none());
+    }
+
+    #[test]
+    fn test_parse_sse_thinking_text_tool_index_isolation() {
+        // thinking (block 0) + text (block 1) + tool_use (block 2) in one turn.
+        // Reasoning and text deltas must NOT perturb the tool-call index map:
+        // the single tool must still be routed to index 0, not 2.
+        let mut tool_id = None;
+        let mut tool_name = None;
+        let mut input_tokens = 0u64;
+        let mut cache_read_tokens = 0u64;
+        let mut cache_write_tokens = 0u64;
+        let mut block_index_map: HashMap<u64, u64> = HashMap::new();
+
+        // Thinking split across two chunks.
+        let t1 = parse_anthropic_sse_line(
+            r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"step1 "}}"#,
+            &mut tool_id, &mut tool_name, &mut input_tokens,
+            &mut cache_read_tokens, &mut cache_write_tokens, &mut block_index_map,
+        );
+        let t2 = parse_anthropic_sse_line(
+            r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"step2"}}"#,
+            &mut tool_id, &mut tool_name, &mut input_tokens,
+            &mut cache_read_tokens, &mut cache_write_tokens, &mut block_index_map,
+        );
+        assert!(matches!(t1, Some(StreamEvent::ReasoningContent(ref t)) if t == "step1 "));
+        assert!(matches!(t2, Some(StreamEvent::ReasoningContent(ref t)) if t == "step2"));
+
+        // Text delta in a different content block.
+        let txt = parse_anthropic_sse_line(
+            r#"data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Answer"}}"#,
+            &mut tool_id, &mut tool_name, &mut input_tokens,
+            &mut cache_read_tokens, &mut cache_write_tokens, &mut block_index_map,
+        );
+        assert!(matches!(txt, Some(StreamEvent::Content(ref t)) if t == "Answer"));
+
+        // tool_use start at content_block index 2 -> registers as tool index 0.
+        let start = parse_anthropic_sse_line(
+            r#"data: {"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"toolu_1","name":"shell","input":{}}}"#,
+            &mut tool_id, &mut tool_name, &mut input_tokens,
+            &mut cache_read_tokens, &mut cache_write_tokens, &mut block_index_map,
+        );
+        assert!(matches!(start, Some(StreamEvent::ToolCallStart(ref tc)) if tc.id == "toolu_1"));
+
+        // Its argument delta must carry tool index 0 despite content_block 2.
+        let arg = parse_anthropic_sse_line(
+            r#"data: {"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{\"a\":1}"}}"#,
+            &mut tool_id, &mut tool_name, &mut input_tokens,
+            &mut cache_read_tokens, &mut cache_write_tokens, &mut block_index_map,
+        );
+        let ok = matches!(arg, Some(StreamEvent::ToolCallChunk { index: 0, ref arguments }) if arguments == "{\"a\":1}");
+        assert!(ok, "reasoning/text blocks must not shift tool index; got {arg:?}");
+    }
+
+    #[test]
+    fn test_parse_response_extracts_thinking() {
+        // Extended-thinking block alongside text must surface as
+        // `reasoning_content`, not be dropped by the `_ => {}` arm.
+        let resp = AnthropicResponse {
+            content: vec![
+                AnthropicContentBlock {
+                    block_type: "thinking".to_string(),
+                    text: None,
+                    thinking: Some("weighing options".to_string()),
+                    id: None,
+                    name: None,
+                    input: None,
+                },
+                AnthropicContentBlock {
+                    block_type: "text".to_string(),
+                    text: Some("Here is the answer.".to_string()),
+                    thinking: None,
+                    id: None,
+                    name: None,
+                    input: None,
+                },
+            ],
+            usage: None,
+            stop_reason: Some("end_turn".to_string()),
+        };
+
+        let chat_resp = parse_response(resp);
+        assert_eq!(chat_resp.content, "Here is the answer.");
+        assert_eq!(
+            chat_resp.reasoning_content.as_deref(),
+            Some("weighing options")
+        );
     }
 
     #[test]

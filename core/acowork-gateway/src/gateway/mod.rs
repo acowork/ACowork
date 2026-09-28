@@ -712,6 +712,15 @@ impl Gateway {
             };
         }
 
+        // ADR-084 §决策 4b: generated once and shared by the three
+        // internal publishers — the user/doc supervisors (forwarded to
+        // the services as `--mqtt-password`, so `user:service` /
+        // `doc:service` pass the broker's CONNECT auth) and the
+        // Gateway's own publisher (client_id `gateway:publisher`,
+        // created after the broker starts). Generating it before the
+        // supervisors start keeps a single source for all of them.
+        let publisher_token = crate::mqtt::enrollment::generate_token();
+
         // acowork-doc: standalone process `acowork-doc`, lifecycle managed by
         // the Gateway supervisor (spawn + /health poll + exponential-backoff
         // restart); `/api/doc/*` is reverse-proxied by `http::doc_proxy` to
@@ -751,6 +760,10 @@ impl Gateway {
                 data_dir: self.config.doc.data_dir.clone(),
                 request_ttl_hours: self.config.doc.request_ttl_hours,
                 mqtt_port: self.config.mqtt.port,
+                // ADR-084 §决策 4b: with broker auth on, the service
+                // authenticates as `doc:service` with the shared
+                // internal publisher token.
+                mqtt_password: self.config.mqtt.auth_enabled.then(|| publisher_token.clone()),
             };
             crate::lifecycle::doc_supervisor::start_doc_supervisor(
                 supervisor_cfg,
@@ -786,6 +799,10 @@ impl Gateway {
                 config: self.config.user.config.clone(),
                 auth_mode: self.config.effective_auth_mode().as_str(),
                 mqtt_port: self.config.mqtt.port,
+                // ADR-084 §决策 4b: with broker auth on, the service
+                // authenticates as `user:service` with the shared
+                // internal publisher token.
+                mqtt_password: self.config.mqtt.auth_enabled.then(|| publisher_token.clone()),
             };
             crate::lifecycle::user_supervisor::start_user_supervisor(
                 supervisor_cfg,
@@ -884,7 +901,9 @@ impl Gateway {
         }
         let enrollment_tokens = crate::mqtt::new_shared_enrollment_store(&data_dir_path);
         let node_tokens = crate::mqtt::new_shared_node_token_store(&data_dir_path);
-        let publisher_token = crate::mqtt::enrollment::generate_token();
+        // `publisher_token` was generated before the user/doc supervisors
+        // started — they already forwarded it to their services
+        // (ADR-084 §决策 4b).
         let broker_auth = crate::mqtt::broker::BrokerAuth {
             auth_enabled: mqtt_config.auth_enabled,
             enrollment_tokens: enrollment_tokens.clone(),
@@ -1799,6 +1818,32 @@ impl Gateway {
                     }
                 }
 
+                // The other Gateway-hosted services (doc / pm / user) are
+                // spawned by this process, so this process owns their
+                // lifetime — same reason as `acowork-embed` above. Without
+                // this they outlive a restart until their ADR-018 watchdog
+                // notices the Gateway is gone (5 min default): duplicate
+                // services on the old ports, and on Windows a locked
+                // `acowork-*.exe` that blocks the next build.
+                {
+                    let gw = shared_state.read().await;
+                    let hosted = [
+                        ("acowork-doc", gw.doc_process.as_ref().map(|p| p.pid)),
+                        ("acowork-pm", gw.pm_process.as_ref().map(|p| p.pid)),
+                        ("acowork-user", gw.user_process.as_ref().map(|p| p.pid)),
+                    ];
+                    drop(gw);
+                    for (name, pid) in hosted {
+                        let Some(pid) = pid.filter(|p| *p != 0) else {
+                            continue;
+                        };
+                        tracing::info!(name, pid, "Shutting down hosted service");
+                        if let Err(e) = crate::lifecycle::process::kill_agent_process(pid).await {
+                            tracing::warn!(name, error = %e, "Failed to kill hosted service process");
+                        }
+                    }
+                }
+
                 // ADR-055 §6.11: shut down the local Node Agent.
                 if let Some(supervisor) = &local_node_supervisor {
                     supervisor.shutdown().await;
@@ -1922,7 +1967,6 @@ mod tests {
             user: crate::config::UserConfig::default(),
             security: crate::config::SecurityConfig::default(),
             auth_mode: None,
-            multi_user: crate::config::MultiUserConfig::default(),
         }
     }
 

@@ -161,11 +161,11 @@ fi
 TARGET_DIR="$WORKSPACE_ROOT/target/$PROFILE"
 
 # ── Total step count ──────────────────────────────────────────────────────────
-#   --start : 9  (Stop, Gateway, Runtime, Embed, LSP Relay, Node, PM, Doc, Copy, Start)
-#   else    : 8  (Stop, Gateway, Runtime, Embed, LSP Relay, Node, PM, Doc, Copy)
-TOTAL_STEPS=8
+#   --start : 10 (Stop, Gateway, Runtime, Embed, LSP Relay, Node, PM, Doc, User, Copy, Start)
+#   else    : 9  (Stop, Gateway, Runtime, Embed, LSP Relay, Node, PM, Doc, User, Copy)
+TOTAL_STEPS=9
 if [ "$START_GATEWAY" = "true" ]; then
-    TOTAL_STEPS=9
+    TOTAL_STEPS=10
 fi
 
 # ── Header ──────────────────────────────────────────────────────────────────
@@ -265,8 +265,9 @@ echo -e "${YELLOW}[1/$TOTAL_STEPS] Stopping old processes...${NC}"
 # standalone process (ADR-064) spawned by the Gateway supervisor; it self-exits
 # via the ADR-018 watchdog but the poll can lag, so kill it explicitly. Doc
 # mirrors PM (ADR-064): standalone process `acowork-doc` on port 18081, same
-# watchdog caveat applies.
-for proc in acowork-gateway acowork-runtime acowork-embed acowork-lsp-relay acowork-node acowork-pm acowork-doc; do
+# watchdog caveat applies. User likewise mirrors PM/Doc (ADR-084): standalone
+# process `acowork-user` on port 18083.
+for proc in acowork-gateway acowork-runtime acowork-embed acowork-lsp-relay acowork-node acowork-pm acowork-doc acowork-user; do
     pids=$(pgrep -f "$proc" 2>/dev/null || true)
     if [ -n "$pids" ]; then
         pkill -f "$proc" 2>/dev/null || true
@@ -288,6 +289,10 @@ fi
 # Free Doc port 18081 (ADR-064 standalone process).
 if command -v fuser &>/dev/null; then
     fuser -k 18081/tcp 2>/dev/null || true
+fi
+# Free User port 18083 (ADR-084 standalone process).
+if command -v fuser &>/dev/null; then
+    fuser -k 18083/tcp 2>/dev/null || true
 fi
 sleep 1
 echo -e "${GREEN}  ✓ Process cleanup complete${NC}"
@@ -466,6 +471,28 @@ else
 fi
 echo ""
 
+# ── Step 4.9: Build User service ─────────────────────────────────────────
+#
+# Mirrors the Doc service above: the User service is a standalone process
+# (`acowork-user`, ADR-084), located via `current_exe().parent().join("acowork-user")` —
+# so the binary MUST sit next to acowork-gateway. Without it the Gateway
+# supervisor logs "acowork-user binary not found" and every user-domain route
+# (`/api/auth/*`, `/api/users/*`, `/api/user/*`) returns 503 (accounts,
+# profiles and user chat unavailable).
+echo -e "${YELLOW}[4.9/$TOTAL_STEPS] Building User service ($PROFILE)...${NC}"
+if [ "$PROFILE" = "release" ]; then
+    cargo_args=(cargo build --release -p acowork-user)
+else
+    cargo_args=(cargo build -p acowork-user)
+fi
+if "${cargo_args[@]}" 2>&1 | tail -20; then
+    echo -e "${GREEN}  ✓ User service compiled successfully${NC}"
+else
+    echo -e "${RED}  ✗ User service compile failed${NC}"
+    exit 1
+fi
+echo ""
+
 # ── Step 5: Copy resource files ─────────────────────────────────────────────
 #
 # The gateway (and embed) read these from `{exe_dir}/`. We only stage into the
@@ -528,7 +555,7 @@ fi
 echo -e "${YELLOW}[$TOTAL_STEPS/$TOTAL_STEPS] Done!${NC}"
 echo ""
 echo -e "${CYAN}Build artifacts:${NC}"
-ls -lh "$TARGET_DIR/acowork-gateway" "$TARGET_DIR/acowork-runtime" "$TARGET_DIR/acowork-embed" "$TARGET_DIR/acowork-lsp-relay" "$TARGET_DIR/acowork-pm" "$TARGET_DIR/acowork-doc" 2>/dev/null | awk '{print "  " $9 " (" $5 ")"}'
+ls -lh "$TARGET_DIR/acowork-gateway" "$TARGET_DIR/acowork-runtime" "$TARGET_DIR/acowork-embed" "$TARGET_DIR/acowork-lsp-relay" "$TARGET_DIR/acowork-pm" "$TARGET_DIR/acowork-doc" "$TARGET_DIR/acowork-user" 2>/dev/null | awk '{print "  " $9 " (" $5 ")"}'
 echo ""
 
 if [ "$START_GATEWAY" = "true" ]; then

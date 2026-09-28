@@ -223,7 +223,7 @@ stop_process() {
 
 # Step 1: Stop running processes (only when we are about to start a new one)
 if [ "$START_GATEWAY" = "true" ] || [ "$STOP_GATEWAY" = "true" ]; then
-    echo -e "${YELLOW}[1/8] Stopping running Gateway, Runtime, Embed, LSP Relay, Node Agent, PM, and Doc processes...${NC}"
+    echo -e "${YELLOW}[1/8] Stopping running Gateway, Runtime, Embed, LSP Relay, Node Agent, PM, Doc, and User processes...${NC}"
     stop_process "acowork-gateway" "Gateway"
     stop_process "acowork-runtime" "Runtime"
     stop_process "acowork-embed"  "Embed"
@@ -248,6 +248,11 @@ if [ "$START_GATEWAY" = "true" ] || [ "$STOP_GATEWAY" = "true" ]; then
     # port 18081 by default. The ADR-018 watchdog self-exit can lag, so kill
     # it explicitly to keep the stop step idempotent and to release 18081.
     stop_process "acowork-doc" "Doc"
+    # The User service mirrors the PM/Doc pattern (ADR-084). It is a standalone
+    # process (`acowork-user`) spawned by the Gateway supervisor and listens on
+    # port 18083 by default. The ADR-018 watchdog self-exit can lag, so kill it
+    # explicitly to keep the stop step idempotent and to release 18083.
+    stop_process "acowork-user" "User"
 
     # Ensure embed port is released before starting a new gateway.
     # On Unix, pkill may not have finished releasing port 18080 within the
@@ -311,6 +316,22 @@ if [ "$START_GATEWAY" = "true" ] || [ "$STOP_GATEWAY" = "true" ]; then
             doc_waited=$((doc_waited + 1))
             if [ $doc_waited -ge 6 ]; then
                 echo -e "${RED}  WARNING: Port 18081 still in use after 3s${NC}"
+                break
+            fi
+        done
+
+        # Free User port 18083 (ADR-084 standalone process). Same rationale as
+        # the PM/Doc port blocks above: a stale user service from a killed
+        # Gateway would hold the default port and shift the new one to 18084+.
+        if command -v fuser &>/dev/null; then
+            fuser -k 18083/tcp 2>/dev/null || true
+        fi
+        user_waited=0
+        while command -v ss &>/dev/null && ss -tlnp 2>/dev/null | grep -q ":18083 "; do
+            sleep 0.5
+            user_waited=$((user_waited + 1))
+            if [ $user_waited -ge 6 ]; then
+                echo -e "${RED}  WARNING: Port 18083 still in use after 3s${NC}"
                 break
             fi
         done
@@ -550,6 +571,33 @@ else
     exit 1
 fi
 rm -f /tmp/doc_build.log
+echo ""
+
+# Step 3.10: Build User service (standalone binary, sibling of acowork-gateway)
+#
+# Mirrors the Doc service above: the User service is a standalone process
+# (`acowork-user`, ADR-084), located via `current_exe().parent().join("acowork-user")` —
+# so the binary MUST sit next to acowork-gateway. Without it the Gateway
+# supervisor logs "acowork-user binary not found" and every user-domain route
+# (`/api/auth/*`, `/api/users/*`, `/api/user/*`) returns 503 (accounts,
+# profiles and user chat unavailable).
+echo -e "${YELLOW}[3.10/8] Building User service ($PROFILE mode)...${NC}"
+if [ "$PROFILE" = "release" ]; then
+    cargo_args=(cargo build --release -p acowork-user)
+else
+    cargo_args=(cargo build -p acowork-user)
+fi
+if "${cargo_args[@]}" 2>&1 | tee /tmp/user_build.log; then
+    if grep -q "error\[" /tmp/user_build.log 2>/dev/null; then
+        echo -e "${RED}  User service build failed with errors.${NC}"
+        exit 1
+    fi
+    echo -e "${GREEN}  User service build completed.${NC}"
+else
+    echo -e "${RED}  User service build failed.${NC}"
+    exit 1
+fi
+rm -f /tmp/user_build.log
 echo ""
 
 # Step 4: Copy offline_providers.json from assets to target dir

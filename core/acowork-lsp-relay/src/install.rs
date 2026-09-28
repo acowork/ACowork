@@ -369,10 +369,24 @@ mod tests {
     // rather than through the HTTP handler to avoid running real install
     // scripts (e.g. `rustup component add rust-analyzer`).
 
-    fn write_temp_script(body: &str) -> PathBuf {
+    /// Write an install-script fixture for the active platform.
+    ///
+    /// Mirrors `lsp_install_run`: Unix runs the body with `bash`, Windows
+    /// with PowerShell (`.ps1`) — see [`script_command`].
+    fn write_temp_script(unix_body: &str, windows_body: &str) -> PathBuf {
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("test_install.sh");
-        std::fs::write(&path, format!("#!/usr/bin/env bash\n{body}\n")).expect("write script");
+        let (name, prefix, body) = if cfg!(windows) {
+            // Windows shells expect CRLF — normalize the body.
+            ("test_install.ps1", "", windows_body.replace('\n', "\r\n"))
+        } else {
+            (
+                "test_install.sh",
+                "#!/usr/bin/env bash\n",
+                unix_body.to_string(),
+            )
+        };
+        let path = dir.path().join(name);
+        std::fs::write(&path, format!("{prefix}{body}\n")).expect("write script");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -384,11 +398,29 @@ mod tests {
         path_clone
     }
 
+    /// Build the command that runs `script`, matching `lsp_install_run`.
+    fn script_command(script: &std::path::Path) -> tokio::process::Command {
+        if cfg!(windows) {
+            let mut c = tokio::process::Command::new("powershell");
+            c.args(["-ExecutionPolicy", "Bypass", "-NoProfile", "-File"]);
+            c.arg(script);
+            c
+        } else {
+            let mut c = tokio::process::Command::new("bash");
+            c.arg(script);
+            c
+        }
+    }
+
     #[tokio::test]
     async fn idle_timeout_normal_completion() {
-        let script = write_temp_script("echo 'installing...'\necho 'done'\nexit 0");
-        let mut cmd = tokio::process::Command::new("bash");
-        cmd.arg(&script);
+        let script = write_temp_script(
+            "echo 'installing...'\necho 'done'\nexit 0",
+            "[Console]::Out.WriteLine('installing...')\n\
+             [Console]::Out.WriteLine('done')\n\
+             exit 0",
+        );
+        let mut cmd = script_command(&script);
         let output = run_command_with_idle_timeout(&mut cmd, Duration::from_secs(10))
             .await
             .expect("should complete normally");
@@ -399,9 +431,11 @@ mod tests {
 
     #[tokio::test]
     async fn idle_timeout_script_failure() {
-        let script = write_temp_script("echo 'error occurred'\nexit 1");
-        let mut cmd = tokio::process::Command::new("bash");
-        cmd.arg(&script);
+        let script = write_temp_script(
+            "echo 'error occurred'\nexit 1",
+            "[Console]::Out.WriteLine('error occurred')\nexit 1",
+        );
+        let mut cmd = script_command(&script);
         let output = run_command_with_idle_timeout(&mut cmd, Duration::from_secs(10))
             .await
             .expect("should complete (non-zero exit is not an error)");
@@ -412,9 +446,8 @@ mod tests {
     #[tokio::test]
     async fn idle_timeout_triggers_on_silent_script() {
         // Script sleeps for 10s with no output — should be killed after 2s idle.
-        let script = write_temp_script("sleep 10");
-        let mut cmd = tokio::process::Command::new("bash");
-        cmd.arg(&script);
+        let script = write_temp_script("sleep 10", "Start-Sleep -Seconds 10");
+        let mut cmd = script_command(&script);
         let result = run_command_with_idle_timeout(&mut cmd, Duration::from_secs(2)).await;
         assert!(result.is_err(), "should timeout — no output for 2s");
         let err = result.unwrap_err();
@@ -427,9 +460,14 @@ mod tests {
         // because the idle timer resets on each output line.
         let script = write_temp_script(
             "for i in $(seq 1 10); do echo \"progress $i\"; sleep 0.5; done\nexit 0",
+            "for ($i = 1; $i -le 10; $i++) {\n\
+                 [Console]::Out.WriteLine(\"progress $i\")\n\
+                 [Console]::Out.Flush()\n\
+                 Start-Sleep -Milliseconds 500\n\
+             }\n\
+             exit 0",
         );
-        let mut cmd = tokio::process::Command::new("bash");
-        cmd.arg(&script);
+        let mut cmd = script_command(&script);
         let output = run_command_with_idle_timeout(&mut cmd, Duration::from_secs(2))
             .await
             .expect("should complete — continuous output prevents timeout");
