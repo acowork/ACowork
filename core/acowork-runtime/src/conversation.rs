@@ -1325,6 +1325,24 @@ impl ConversationSession {
         );
     }
 
+    /// Persist the per-session multi-account `account_id` pick to the
+    /// meta file. Mirrors [`update_model_provider`] for the multi-account
+    /// dimension: updates the in-memory field, writes the meta file, and
+    /// notifies the config-change channel so MQTT re-publishes the
+    /// session_config envelope (front-end `providerAccountId` selector).
+    pub fn update_account_id(&self, account_id: &str) {
+        if let Ok(mut a) = self.account_id.lock() {
+            *a = Some(account_id.to_string());
+        }
+        self.write_meta();
+        self.notify_config_change();
+        tracing::info!(
+            session_id = %self.session_id,
+            account_id = %account_id,
+            "Session account_id persisted to meta file + config_change_tx notified"
+        );
+    }
+
     /// Return the persisted reasoning_effort string, if any.
     pub fn reasoning_effort(&self) -> Option<String> {
         self.reasoning_effort.lock().ok().and_then(|r| r.clone())

@@ -767,6 +767,7 @@
     "exitingDebug": "正在退出偵錯...",
     "labelModel": "模型",
     "labelProvider": "服務商",
+    "labelApiKeyAlias": "API Key 別名",
     "labelCharactersPerToken": "字元/Token",
     "labelThinkingLevel": "思考深度",
     "labelTemperature": "溫度",

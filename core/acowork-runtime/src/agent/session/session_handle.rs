@@ -151,6 +151,7 @@ impl SessionHandle {
                     status: r#""idle""#.to_string(),
                     model: None,
                     provider: None,
+                    account_id: None,
                     ratio: None,
                     todos_json: None,
                     context_usage: None,

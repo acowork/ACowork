@@ -7839,6 +7839,10 @@ mod tests {
             .json(&serde_json::json!({
                 "model": "gpt-4o",
                 "provider": "openai",
+                // Multi-account pick. The frontend sends this key on the
+                // model menu's account row and reads it back from GET —
+                // see `sessionConfigToPatch` in session-config-mapper.ts.
+                "account_id": "acct-7",
             }))
             .send()
             .await
@@ -7855,6 +7859,10 @@ mod tests {
         let body: serde_json::Value = resp.json().await.unwrap();
         assert_eq!(body["model"], "gpt-4o");
         assert_eq!(body["provider"], "openai");
+        // The wire key must stay `account_id`: the Desktop mapper reads it
+        // by that name, and a `null` here is what wipes the session's
+        // API-key selection on every reopen.
+        assert_eq!(body["account_id"], "acct-7");
 
         // 4. PUT temperature
         let resp = client
@@ -7886,6 +7894,9 @@ mod tests {
         .expect("meta row must exist after PUT");
         assert_eq!(meta.model.as_deref(), Some("gpt-4o"));
         assert_eq!(meta.provider.as_deref(), Some("openai"));
+        // Persisted, not just echoed back from memory: this is what makes a
+        // reopened session remember which API key it was using.
+        assert_eq!(meta.account_id.as_deref(), Some("acct-7"));
         assert!((meta.temperature.unwrap() - 0.7).abs() < 0.01);
 
         std::fs::remove_dir_all(&temp_dir).ok();

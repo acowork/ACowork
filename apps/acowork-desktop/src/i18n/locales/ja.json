@@ -768,6 +768,7 @@
     "exitingDebug": "デバッグ終了中...",
     "labelModel": "モデル",
     "labelProvider": "プロバイダー",
+    "labelApiKeyAlias": "APIキー別名",
     "labelCharactersPerToken": "文字数/トークン",
     "labelThinkingLevel": "思考レベル",
     "labelTemperature": "温度",

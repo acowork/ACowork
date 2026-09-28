@@ -69,6 +69,18 @@ pub struct SessionRuntimeSnapshot {
     /// **Runtime mirror of `SessionState::provider`** — see ADR-039 (revised).
     /// The authoritative value lives in `data/meta/{session_id}.json`.
     pub provider: Option<String>,
+    /// Multi-account `account_id` pick for the current session (ADR-012).
+    ///
+    /// Runtime mirror of `ConversationSession::account_id`, kept in sync
+    /// by `SessionManager::route_model_switch` (the synchronous
+    /// model/provider switch path) and by `ConversationSession::update_account_id`
+    /// (the inheritance path on new-session creation). Read by
+    /// `SessionManager::current_account_id`'s Level-2 fallback so a
+    /// brand-new session created in a runtime whose `session_configs`
+    /// map is `None` (tests, single-session mode) still inherits the
+    /// most recent pick from the in-memory snapshot. `None` when the
+    /// session has not picked an account yet.
+    pub account_id: Option<String>,
     /// Calibrated chars/token ratio, if available.
     pub ratio: Option<f64>,
     /// Current todo list managed by the `todo_write` built-in tool.
@@ -388,6 +400,7 @@ impl SessionState {
                 status,
                 model: None,
                 provider: None,
+                account_id: None,
                 ratio: None,
                 todos_json: None,
                 context_usage: None,

@@ -41,10 +41,11 @@ export interface SessionConfigInput {
   provider?: string | null;
   /**
    * Multi-account: which of the provider's accounts this session uses.
-   * HTTP `SessionConfigSnapshot` carries `account_id`; MQTT `SessionConfig`
-   * carries it as `account_id` (empty string → `null`).
+   * Both sources use `account_id` verbatim — the HTTP
+   * `SessionConfigSnapshot` serializes the field under that name, and the
+   * MQTT `SessionConfig` envelope does too (empty string → `null`).
    */
-  account?: string | null;
+  account_id?: string | null;
   reasoning_effort?: string | null;
   temperature?: number | null;
   /**
@@ -120,8 +121,8 @@ export function sessionConfigToPatch(
   }
 
   // -- account (multi-account) --
-  if (typeof config.account === "string" && config.account) {
-    patch.providerAccountId = config.account;
+  if (typeof config.account_id === "string" && config.account_id) {
+    patch.providerAccountId = config.account_id;
   } else if (clearOnNull) {
     patch.providerAccountId = null;
   }

@@ -1052,6 +1052,7 @@
     "exitingDebug": "Exiting Debug...",
     "labelModel": "Model",
     "labelProvider": "Provider",
+    "labelApiKeyAlias": "API Key Alias",
     "labelCharactersPerToken": "Characters/Token",
     "labelThinkingLevel": "Thinking Level",
     "labelTemperature": "Temperature",

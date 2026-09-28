@@ -20,7 +20,7 @@ describe("sessionConfigToPatch", () => {
         {
           model: "claude-3",
           provider: "anthropic",
-          account: "acc-1",
+          account_id: "acc-1",
           reasoning_effort: "high",
           temperature: 0.5,
         },
@@ -36,12 +36,33 @@ describe("sessionConfigToPatch", () => {
       });
     });
 
+    it("reads the HTTP snapshot's `account_id` key (not `account`)", () => {
+      // REGRESSION: the Runtime's `SessionConfigSnapshot` serializes the
+      // multi-account pick as `account_id` (agent/session_config/delta.rs,
+      // no serde rename) and `fetchSessionConfig` passes that JSON through
+      // verbatim. When this mapper read `config.account` instead, the HTTP
+      // path silently produced `providerAccountId: null` — every session
+      // reopen wiped the session's API-key selection and the model menu
+      // lost its highlight until the user picked again.
+      const httpSnapshot = {
+        model: "deepseek-flash",
+        provider: "deepseek",
+        account_id: "3cea4c11-d614-4a8c-b339-96a7847d8891",
+        workspace_id: "ws-1",
+        reasoning_effort: "auto",
+        temperature: 0.1,
+        title: "t",
+      };
+      expect(sessionConfigToPatch(httpSnapshot, { clearOnNull: true }).providerAccountId)
+        .toBe("3cea4c11-d614-4a8c-b339-96a7847d8891");
+    });
+
     it("clears all fields to null when backend returns null", () => {
       const patch = sessionConfigToPatch(
         {
           model: null,
           provider: null,
-          account: null,
+          account_id: null,
           reasoning_effort: null,
           temperature: null,
         },

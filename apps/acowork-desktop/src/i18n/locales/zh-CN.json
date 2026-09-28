@@ -822,6 +822,7 @@
     "exitingDebug": "正在退出调试...",
     "labelModel": "模型",
     "labelProvider": "服务商",
+    "labelApiKeyAlias": "API Key 别名",
     "labelCharactersPerToken": "字符/Token",
     "labelThinkingLevel": "思考深度",
     "labelTemperature": "温度",

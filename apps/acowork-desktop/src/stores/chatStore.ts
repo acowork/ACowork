@@ -3797,7 +3797,9 @@ export function handleMessageEvent(
       const mqttConfig: SessionConfigInput = {
         model: typeof data.model_id === "string" && data.model_id ? data.model_id : null,
         provider: typeof data.provider_id === "string" && data.provider_id ? data.provider_id : null,
-        account: typeof data.account_id === "string" && data.account_id ? data.account_id : null,
+        // Same key as the HTTP snapshot (`account_id`) — see
+        // sessionConfigMapper.ts; only `model_id` / `provider_id` are renamed.
+        account_id: typeof data.account_id === "string" && data.account_id ? data.account_id : null,
         reasoning_effort: typeof data.reasoning_effort === "string" && data.reasoning_effort ? data.reasoning_effort : null,
         temperature: typeof data.temperature === "number" && !Number.isNaN(data.temperature) ? data.temperature : null,
         // ADR-074: prost `optional uint64` presence → `number | null`.
