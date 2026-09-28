@@ -96,18 +96,7 @@ export const UserList = forwardRef<UserListHandle>(function UserList(_props, ref
     [canInvite],
   );
 
-  const reload = useCallback(async () => {
-    const token = useAuthStore.getState().accessToken;
-    try {
-      setAccounts(await fetchAccounts(getGatewayUrl(), token ?? ""));
-      setLoadFailed(false);
-    } catch {
-      setLoadFailed(true);
-    }
-  }, []);
-
-  useEffect(() => {
-    if (!loggedIn) return;
+  const refetch = useCallback(async () => {
     if (!isAdmin) {
       // Non-admin: the full `/api/users` list is admin-only, but the
       // `/api/users/directory` endpoint exposes just enough (id / username /
@@ -121,20 +110,29 @@ export const UserList = forwardRef<UserListHandle>(function UserList(_props, ref
       // harmless — non-admin viewers never show the admin badge (gated by
       // `isAdmin` in the row), and admin viewers keep using `fetchAccounts`
       // for the real role.
-      void (async () => {
-        const token = useAuthStore.getState().accessToken ?? "";
-        try {
-          const dir = await fetchDirectory(getGatewayUrl(), token);
-          setAccounts(dir.map(directoryRow));
-          setLoadFailed(false);
-        } catch {
-          setLoadFailed(true);
-        }
-      })();
+      const token = useAuthStore.getState().accessToken ?? "";
+      try {
+        const dir = await fetchDirectory(getGatewayUrl(), token);
+        setAccounts(dir.map(directoryRow));
+        setLoadFailed(false);
+      } catch {
+        setLoadFailed(true);
+      }
       return;
     }
-    void reload();
-  }, [loggedIn, isAdmin, self, accessToken, reload]);
+    const token = useAuthStore.getState().accessToken;
+    try {
+      setAccounts(await fetchAccounts(getGatewayUrl(), token ?? ""));
+      setLoadFailed(false);
+    } catch {
+      setLoadFailed(true);
+    }
+  }, [isAdmin]);
+
+  useEffect(() => {
+    if (!loggedIn) return;
+    void refetch();
+  }, [loggedIn, self, accessToken, refetch]);
 
   if (!loggedIn) return null;
 
@@ -327,6 +325,10 @@ export const UserList = forwardRef<UserListHandle>(function UserList(_props, ref
           if (result.invite_token) {
             setInvite({ token: result.invite_token, username: result.account.display_name });
           }
+          // The new account isn't in the local snapshot yet — refetch so the
+          // sidebar row appears immediately instead of waiting for a tab
+          // switch to remount <UserList /> and re-fire the load effect.
+          void refetch();
         }}
       />
 
