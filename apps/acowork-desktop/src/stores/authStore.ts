@@ -29,6 +29,7 @@ import {
 } from "../lib/auth-api";
 import type { AuthMode, AuthState, TokenPair, UserAccount } from "../lib/types";
 import { useUserProfileStore } from "./userProfileStore";
+import { RECOVERY_RELOAD_FLAG } from "../lib/recoveryReload";
 
 const TOKENS_KEY = "acowork.auth.tokens";
 
@@ -78,10 +79,11 @@ function clearStoredTokens(): void {
  *  (already up) is re-probed for no reason. */
 function reloadApp(): void {
   try {
-    sessionStorage.setItem("acowork_recovery_reload", "1");
+    sessionStorage.setItem(RECOVERY_RELOAD_FLAG, "1");
+    log.info("[reloadApp] setItem OK, raw=" + JSON.stringify(sessionStorage.getItem(RECOVERY_RELOAD_FLAG)) + ", reloading…");
     window.location.reload();
-  } catch {
-    // jsdom / non-browser environment — no reload available
+  } catch (err) {
+    log.warn("[reloadApp] reload failed:", err);
   }
 }
 
@@ -323,14 +325,22 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
     const refreshToken = get().refreshToken;
     clearStoredTokens();
     set({ status: "logged_out", account: null, accessToken: null, refreshToken: null });
-    if (refreshToken) {
-      try {
-        await logoutRequest(getGatewayUrl(), refreshToken);
-      } catch (err) {
-        log.warn("[authStore] logout revoke failed (ignored):", err);
-      }
-    }
+    // Reload FIRST, before any await: the set() above already scheduled a
+    // React re-render that will briefly hit the SplashScreen/LoginView
+    // before window.location.reload() can take over. Calling reloadApp()
+    // synchronously here — before awaiting the server revoke — collapses
+    // that interim render and lets App.tsx's `isRecoveryReload` branch
+    // land directly on LoginView with a single paint.
+    // ponytail: known ceiling — the server revoke becomes best-effort
+    // fire-and-forget; an in-flight request may be aborted by the reload.
+    // Refresh-token TTL bounds the risk window. Upgrade path: move revoke
+    // to a Tauri Rust command that survives the webview reload.
     reloadApp();
+    if (refreshToken) {
+      logoutRequest(getGatewayUrl(), refreshToken).catch((err) =>
+        log.warn("[authStore] logout revoke failed (ignored):", err)
+      );
+    }
   },
 
   switchAccount: async () => {
@@ -342,6 +352,12 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
     if (!accessToken) throw new AuthApiError(401, "not logged in");
     await changePasswordRequest(getGatewayUrl(), accessToken, oldPassword, newPassword);
     // §决策 6.2: all refresh families are revoked — a fresh login is required.
+    // Clear local tokens BEFORE reload: init() runs on the freshly mounted
+    // component and would otherwise restore the session from localStorage
+    // before the server-side revocation takes effect. Then setState + reload
+    // — setState schedules an interim React render that the synchronous
+    // reloadApp() overrides, so App.tsx's recovery branch lands directly on
+    // LoginView with a single paint.
     clearStoredTokens();
     set({ status: "logged_out", account: null, accessToken: null, refreshToken: null });
     reloadApp();
@@ -351,6 +367,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
     const { accessToken, account } = get();
     if (!accessToken || !account) throw new AuthApiError(401, "not logged in");
     await deleteAccount(getGatewayUrl(), accessToken, account.user_id);
+    // Clear local tokens before reload — see comment in changePassword.
     clearStoredTokens();
     set({ status: "logged_out", account: null, accessToken: null, refreshToken: null });
     reloadApp();

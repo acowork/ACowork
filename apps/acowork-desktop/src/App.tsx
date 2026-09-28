@@ -15,12 +15,14 @@ import { initDocTreeChangeListener } from "./lib/docFsEvents";
 import { useGatewayStore } from "./stores/gatewayStore";
 import { useSettingsStore } from "./stores/settingsStore";
 import { log } from "./lib/logger";
+import { isRecoveryReload, clearRecoveryReload } from "./lib/recoveryReload";
 
 function App() {
   // On sleep-recovery reload, skip splash screen — gateway is already running
   // (Rust backend survives reload) and Zustand persisted stores restore from
-  // localStorage, so we can jump straight to AppLayout.
-  const isRecoveryReload = sessionStorage.getItem("acowork_recovery_reload") === "1";
+  // localStorage, so we can jump straight to AppLayout. The value is cached at
+  // module scope (see lib/recoveryReload.ts) so a StrictMode remount cannot
+  // re-read the flag after the effect below clears it.
   log.debug("[App] boot branch selection", { isRecoveryReload });
 
   const [onboardingDone, setOnboardingDone] = useState(() => {
@@ -51,7 +53,7 @@ function App() {
   // stays false forever and the UI permanently shows "Connecting to agent".
   useEffect(() => {
     if (isRecoveryReload) {
-      sessionStorage.removeItem("acowork_recovery_reload");
+      clearRecoveryReload();
       initMqttListener().catch((e) =>
         log.warn("[App] initMqttListener failed on recovery reload:", e)
       );
