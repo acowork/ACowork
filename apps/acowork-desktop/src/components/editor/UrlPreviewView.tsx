@@ -171,7 +171,7 @@ export function UrlPreviewView({ url, fileName }: UrlPreviewViewProps) {
             <div className="relative flex-1">
                 {/* Loading spinner */}
                 {loading && (
-                    <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-page-bg">
+                    <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-right-panel">
                         <Loader2 className="h-8 w-8 animate-spin text-text-tertiary" />
                         <span className="text-sm text-text-tertiary">{t("fileEditor.loadingUrl")}</span>
                     </div>

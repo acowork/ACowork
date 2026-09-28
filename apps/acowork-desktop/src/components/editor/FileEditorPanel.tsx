@@ -1301,11 +1301,11 @@ export function FileEditorPanel({ width }: { width: number }) {
         <div
             ref={rootRef}
             data-panel="file-editor"
-            className="relative flex flex-col shrink-0 bg-page-bg dark:border-zinc-800 rounded-xl overflow-hidden"
+            className="relative flex flex-col shrink-0 rounded-xl overflow-hidden border border-right-panel-border bg-right-panel"
             style={{ width }}
         >
             {/* Tab bar */}
-            <div className="flex bg-page-bg select-none px-0.5 gap-0.5 mt-[5px] border-b border-border-divider">
+            <div className="flex bg-right-panel select-none px-0.5 gap-0.5 mt-[5px] border-b border-border-divider">
                 <ScrollableTabBar
                     activeItemSelector={activeFileId ? `[data-file-id="${activeFileId}"]` : undefined}
                     activeItemId={activeFileId ?? undefined}
@@ -1492,15 +1492,11 @@ export function FileEditorPanel({ width }: { width: number }) {
                 Monaco model) without recreating the Editor instance, so LSP
                 cross-file navigation no longer races with editor remounts.
 
-                `border-x border-right-panel-border` paints left & right
-                hairlines that match the right-panel divider color
-                (`--color-right-panel-border`, zinc-200/50 — see globals.css
-                L49). The tab bar above is intentionally left untouched so
-                only the Monaco surface is framed. Borders live on the
-                editor container rather than the outer `rounded-xl` root so
-                the existing rounded bottom corners of the panel still
-                clip cleanly under `overflow-hidden`. */}
-            <div className="relative flex flex-1 flex-col overflow-hidden border-x border-right-panel-border">
+                No inner border: the outer wrapper's `border border-right-
+                panel-border` is the panel's silhouette, and the tab bar's
+                own `border-b` is the divider between the tab strip and the
+                Monaco surface below. */}
+            <div className="relative flex flex-1 flex-col overflow-hidden">
                 {!activeFile ? (
                     <div className="flex h-full items-center justify-center text-xs text-text-tertiary ">
                         {t("fileEditor.emptyState")}
@@ -1840,7 +1836,7 @@ export function FileEditorPanel({ width }: { width: number }) {
                             </button>
                         )}
                         {activeFile.loading && (
-                            <div className="absolute inset-0 flex items-center justify-center gap-2 bg-page-bg/80 text-xs text-text-tertiary">
+                            <div className="absolute inset-0 flex items-center justify-center gap-2 bg-right-panel/80 text-xs text-text-tertiary">
                                 <Loader2 className="h-4 w-4 animate-spin" />
                                 Loading...
                             </div>
