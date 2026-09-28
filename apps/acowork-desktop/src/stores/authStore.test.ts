@@ -198,3 +198,96 @@ describe("authStore.refreshTokens", () => {  it("is single-flight: concurrent ca
     expect(localStorage.getItem(TOKENS_KEY)).toBeNull();
   });
 });
+
+describe("authStore.onGatewayUrlChanged", () => {
+  it("is a no-op when newUrl equals oldUrl", async () => {
+    const spy = stubFetch({ "/api/status": () => json({ auth_mode: "multi_user" }) });
+
+    await useAuthStore
+      .getState()
+      .onGatewayUrlChanged("http://gw.test", "http://gw.test");
+
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("keeps the session when the new URL is an alias for the same Gateway", async () => {
+    useAuthStore.setState({
+      refreshToken: "rt",
+      accessToken: "at",
+      status: "logged_in",
+      account: acct,
+    });
+    const meSpy = vi.fn(() => json(acct));
+    stubFetch({
+      "/api/auth/me": meSpy,
+      "/api/status": () => json({ auth_mode: "multi_user" }),
+    });
+
+    await useAuthStore
+      .getState()
+      .onGatewayUrlChanged("http://localhost:19876", "http://127.0.0.1:19876");
+
+    const state = useAuthStore.getState();
+    expect(state.status).toBe("logged_in");
+    expect(state.accessToken).toBe("at");
+    expect(meSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("drops the session when the new Gateway rejects the token with 401", async () => {
+    useAuthStore.setState({
+      refreshToken: "rt",
+      accessToken: "at",
+      status: "logged_in",
+      account: acct,
+    });
+    stubFetch({
+      "/api/auth/me": () => json({ detail: "invalid token" }, 401),
+      "/api/status": () => json({ auth_mode: "multi_user" }),
+    });
+
+    await useAuthStore
+      .getState()
+      .onGatewayUrlChanged("http://new-gw:19876", "http://old-gw:19876");
+
+    const state = useAuthStore.getState();
+    expect(state.status).toBe("logged_out");
+    expect(state.accessToken).toBeNull();
+    expect(state.refreshToken).toBeNull();
+    expect(localStorage.getItem(TOKENS_KEY)).toBeNull();
+  });
+
+  it("keeps the session when the probe fails with a network error", async () => {
+    useAuthStore.setState({
+      refreshToken: "rt",
+      accessToken: "at",
+      status: "logged_in",
+      account: acct,
+    });
+    globalThis.fetch = vi.fn(async () => {
+      throw new TypeError("Failed to fetch");
+    }) as unknown as typeof fetch;
+
+    await useAuthStore
+      .getState()
+      .onGatewayUrlChanged("http://unreachable:19876", "http://old-gw:19876");
+
+    const state = useAuthStore.getState();
+    expect(state.accessToken).toBe("at");
+    expect(state.status).toBe("logged_in");
+  });
+
+  it("skips the probe when there is no session and just re-inits", async () => {
+    useAuthStore.setState({
+      status: "logged_out",
+      accessToken: null,
+      refreshToken: null,
+    });
+    stubFetch({ "/api/status": () => json({ auth_mode: "multi_user" }) });
+
+    await useAuthStore
+      .getState()
+      .onGatewayUrlChanged("http://new-gw:19876", "http://old-gw:19876");
+
+    expect(useAuthStore.getState().status).toBe("logged_out");
+  });
+});

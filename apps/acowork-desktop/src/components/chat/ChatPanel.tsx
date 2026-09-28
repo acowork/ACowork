@@ -93,6 +93,16 @@ import { log } from "../../lib/logger";
 // exist. The same pattern is already used in RightPanel.tsx.
 const EMPTY_MESSAGES: ChatMessage[] = [];
 
+// Shared shell used by every pre-session placeholder (no-agents / no-selection
+// / agent-stopped / session-loading) AND by the live chat view itself.
+// Keeping the shape, border, and bg identical eliminates a visible flash on
+// agent switch or app cold-start: the placeholder occupies the same rounded
+// panel slot as the chat view, so when the session finally hydrates there is
+// no transparent gap to "fill in". Mirrors the file-editor suspense shell in
+// AppLayout.tsx for the same reason.
+const CHAT_PANEL_SHELL_CN =
+  "flex flex-1 min-w-[288px] flex-col overflow-hidden rounded-xl border border-border-outer bg-chat-body";
+
 // Monaco-style top-edge shadow: the messages area shows a soft gradient
 // under the session tab bar's hairline whenever it is scrolled away from
 // the very top, so the boundary reads as a depth edge (same affordance as
@@ -1981,13 +1991,18 @@ export function ChatPanel() {
   }, [sending]);
 
   // ── Empty state: no agents at all ──
+  // Renders inside the same chat-panel-shaped shell as the live view
+  // (CHAT_PANEL_SHELL_CN) so the surface stays opaque from first paint
+  // through to session hydration — see comment on the constant above.
   if (Object.keys(useAgentStore.getState().agents).length === 0) {
     return (
-      <div className="flex flex-1 items-center justify-center">
-        <div className="text-center">
-          <Bot className="mx-auto h-12 w-12 text-text-secondary " />
-          <p className="mt-3 text-sm text-text-tertiary ">No agents available</p>
-          <p className="mt-1 text-xs text-text-tertiary ">Connect to Gateway and install the System Agent</p>
+      <div className={CHAT_PANEL_SHELL_CN}>
+        <div className="flex flex-1 items-center justify-center">
+          <div className="text-center">
+            <Bot className="mx-auto h-12 w-12 text-text-secondary " />
+            <p className="mt-3 text-sm text-text-tertiary ">No agents available</p>
+            <p className="mt-1 text-xs text-text-tertiary ">Connect to Gateway and install the System Agent</p>
+          </div>
         </div>
       </div>
     );
@@ -1996,11 +2011,13 @@ export function ChatPanel() {
   // ── No agent selected ──
   if (!selectedAgent) {
     return (
-      <div className="flex flex-1 items-center justify-center">
-        <div className="text-center">
-          <Bot className="mx-auto h-12 w-12 text-text-secondary " />
-          <p className="mt-3 text-sm text-text-tertiary ">Select an agent to start chatting</p>
-          <p className="mt-1 text-xs text-text-tertiary ">or install a new agent from the sidebar</p>
+      <div className={CHAT_PANEL_SHELL_CN}>
+        <div className="flex flex-1 items-center justify-center">
+          <div className="text-center">
+            <Bot className="mx-auto h-12 w-12 text-text-secondary " />
+            <p className="mt-3 text-sm text-text-tertiary ">Select an agent to start chatting</p>
+            <p className="mt-1 text-xs text-text-tertiary ">or install a new agent from the sidebar</p>
+          </div>
         </div>
       </div>
     );
@@ -2010,39 +2027,46 @@ export function ChatPanel() {
   // Auto-sleep was retired in Sept 2026 — this branch only renders
   // when the agent has been stopped (or never started). The Start
   // button here is the user-visible recovery path.
+  // Uses the chat-panel-shaped shell (see CHAT_PANEL_SHELL_CN) so the
+  // surface stays opaque while stopped and the transition into the live
+  // chat view is seamless — the previous flat /items-center/ div left a
+  // transparent gap when the user clicked Start and the live shell
+  // mounted, causing a one-frame flash.
   if (!selectedAgent.alive) {
     return (
-      <div className="flex flex-1 items-center justify-center">
-        <div className="text-center">
-          <Tooltip content={t("chatPanel.startAgent")} variant="plain">
-            <button
-              onClick={async () => {
-                // ADR-073: start is instance-scoped — use the instance key,
-                // not the package `agent_id` (ambiguous in multi-instance).
-                if (!selectedAgentId) return;
-                try {
-                  await startAgentAndSyncUI(selectedAgentId);
-                } catch (e) {
-                  // Start failure must surface to the user, not leak as an
-                  // unhandled rejection (2026-09-14: waitForAgentReady
-                  // raced the async /start and the rejection was swallowed).
-                  addToast({
-                    type: "error",
-                    message:
-                      typeof e === "string"
-                        ? e
-                        : e instanceof Error
-                          ? e.message
-                          : String(e),
-                  });
-                }
-              }}
-              className="mx-auto flex h-20 w-20 items-center justify-center rounded-full btn-solid"
-            >
-              <Play className="h-8 w-8" />
-            </button>
-          </Tooltip>
-          <p className="mt-3 text-xs text-text-tertiary ">{t("chatPanel.agentStopped", { name: agentDisplayName ?? "" })}</p>
+      <div className={CHAT_PANEL_SHELL_CN}>
+        <div className="flex flex-1 items-center justify-center">
+          <div className="text-center">
+            <Tooltip content={t("chatPanel.startAgent")} variant="plain">
+              <button
+                onClick={async () => {
+                  // ADR-073: start is instance-scoped — use the instance key,
+                  // not the package `agent_id` (ambiguous in multi-instance).
+                  if (!selectedAgentId) return;
+                  try {
+                    await startAgentAndSyncUI(selectedAgentId);
+                  } catch (e) {
+                    // Start failure must surface to the user, not leak as an
+                    // unhandled rejection (2026-09-14: waitForAgentReady
+                    // raced the async /start and the rejection was swallowed).
+                    addToast({
+                      type: "error",
+                      message:
+                        typeof e === "string"
+                          ? e
+                          : e instanceof Error
+                            ? e.message
+                            : String(e),
+                    });
+                  }
+                }}
+                className="mx-auto flex h-20 w-20 items-center justify-center rounded-full btn-solid"
+              >
+                <Play className="h-8 w-8" />
+              </button>
+            </Tooltip>
+            <p className="mt-3 text-xs text-text-tertiary ">{t("chatPanel.agentStopped", { name: agentDisplayName ?? "" })}</p>
+          </div>
         </div>
       </div>
     );
@@ -2078,10 +2102,12 @@ export function ChatPanel() {
   // when the chat view finally mounts, the session is fully bootstrapped.
   if (!currentSessionId) {
     return (
-      <div className="flex flex-1 items-center justify-center">
-        <div className="text-center">
-          <div className="mx-auto h-8 w-8 animate-spin rounded-full border-2 border-zinc-300 border-t-zinc-600 dark:border-zinc-600 dark:border-t-zinc-300" />
-          <p className="mt-3 text-xs text-text-tertiary ">Loading session...</p>
+      <div className={CHAT_PANEL_SHELL_CN}>
+        <div className="flex flex-1 items-center justify-center">
+          <div className="text-center">
+            <div className="mx-auto h-8 w-8 animate-spin rounded-full border-2 border-zinc-300 border-t-zinc-600 dark:border-zinc-600 dark:border-t-zinc-300" />
+            <p className="mt-3 text-xs text-text-tertiary ">Loading session...</p>
+          </div>
         </div>
       </div>
     );
@@ -2096,9 +2122,7 @@ export function ChatPanel() {
 
   return (
     <>
-      <div
-        className="flex flex-1 min-w-[288px] flex-col overflow-hidden rounded-xl border border-border-outer bg-chat-body"
-      >
+      <div className={CHAT_PANEL_SHELL_CN}>
         {/* LLM config warning */}
         {llmAvailability === "missing" && (
           <div

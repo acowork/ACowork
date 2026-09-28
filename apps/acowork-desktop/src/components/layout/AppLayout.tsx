@@ -1053,7 +1053,25 @@ export function AppLayout() {
                     </div>
                   }
                 >
-                  <Suspense fallback={<div className="h-full w-full" />}>
+                  {/*
+                   * Suspense fallback mirrors the FileEditorPanel shell
+                   * (relative flex flex-col shrink-0 rounded-xl overflow-hidden
+                   * border border-right-panel-border bg-right-panel) so the
+                   * lazy chunk paints into an opaque panel-shaped slot
+                   * instead of an empty <div>. Without this the file pane
+                   * flashed transparent glass for one frame the first time
+                   * a file was opened in a session — the same flicker bug
+                   * fixed on the chat side via CHAT_PANEL_SHELL_CN.
+                   */}
+                  <Suspense
+                    fallback={
+                      <div
+                        aria-hidden="true"
+                        className="relative flex flex-col shrink-0 rounded-xl overflow-hidden border border-right-panel-border bg-right-panel"
+                        style={{ width: fileWidth }}
+                      />
+                    }
+                  >
                     <FileEditorPanel width={fileWidth} />
                   </Suspense>
                 </ChunkLoadBoundary>

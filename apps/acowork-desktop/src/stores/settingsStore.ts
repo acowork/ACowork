@@ -19,6 +19,7 @@ import {
   type LogLevel,
 } from "../lib/logger";
 import { log } from "../lib/logger";
+import { useAuthStore } from "./authStore";
 import {
   DEFAULT_ACCENT_PRESET,
   getAccentPresetByHex,
@@ -416,6 +417,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => {
     },
 
     setGatewayUrl: (gatewayUrl) => {
+      const oldUrl = get().gatewayUrl;
       try { localStorage.setItem(STORAGE_KEY_GATEWAY_URL, gatewayUrl); } catch { }
       set({ gatewayUrl });
       // Sync to Rust so subsequent Tauri commands use the new URL
@@ -426,6 +428,20 @@ export const useSettingsStore = create<SettingsStore>((set, get) => {
       // lifecycle subscriber (see SplashScreen / AppLayout), so only URLs
       // that ACTUALLY connected (or were just disconnected from) end up
       // in the LRU.
+
+      // NEW: notify authStore when the URL actually changed. Skipped on
+      // no-op writes (SettingsPage re-saves the same value, devtools
+      // tweak) so we don't burn a probe round-trip for nothing. The
+      // probe validates the existing access token against the new
+      // Gateway: same Gateway behind an alias → keep session; different
+      // Gateway (new signing key) → drop session and re-resolve the
+      // auth mode. See `authStore.onGatewayUrlChanged` for the full
+      // decision tree. Fixes the WiFi-hop / LAN-move "Node 不在网关里"
+      // failure where stale tokens held by the old Gateway's HMAC key
+      // turn every /api/* into 401.
+      if (oldUrl !== gatewayUrl) {
+        void useAuthStore.getState().onGatewayUrlChanged(gatewayUrl, oldUrl);
+      }
     },
     /**
      * LRU-push: dedupe, cap, prepend. Called by setGatewayUrl so every

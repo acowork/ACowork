@@ -42,7 +42,7 @@
   /* = zinc-200/50 — message surface */
   --color-chat-title: hsl(240 4.8% 86.1% / 0.5);
   /* = zinc-300 — block title */
-  --color-chat-body: hsl(0 0% 98% / 0.8);
+  --color-chat-body: hsl(0 0% 100%);
   /* = #FAFAFA, same as ChatPanel background — block body merges with panel surface */
   --color-chat-border: hsl(240 5.9% 90.6%);
   /* = zinc-200, #e4e4e7 — container border (CodeBlock/Mermaid wrapper & title separator) */
@@ -134,7 +134,7 @@
         consumers just write `bg-page-bg` / `bg-right-panel` /
         `bg-panel-block` / `bg-modal-surface` / `bg-modal-overlay`
         with no `dark:` prefix needed. */
-  --color-page-bg: hsl(0 0% 99%);
+  --color-page-bg: hsl(0 0% 100%);
   /* = #FAFAFA — unified page background (chat/settings/harness/pm/doc) */
   --color-right-panel: hsl(0 0% 95%);
   /* = #F3F3F3, zinc-100 — right panel surface (light) */
@@ -444,7 +444,7 @@
   /* = zinc-800, #27272a — message surface */
   --color-chat-title: hsl(240 5.2% 26.1% / 0.7);
   /* = zinc-700, #3f3f46 — block title (lighter than body) */
-  --color-chat-body: hsl(240 5.9% 10% / 0.7);
+  --color-chat-body: hsl(240 3.8% 8%);
   /* = zinc-900, #18181b — block body (darker, closer to panel) */
   --color-chat-border: hsl(240 5.2% 26.1%);
   /* = zinc-700, #3f3f46 — container border */
@@ -469,7 +469,7 @@
   --color-editor-canvas: #1E1E1E;
   /* = Monaco `vs-dark` background — file editor / preview surface (dark) */
   /* App-wide surface palette (dark) — auto-flips the @theme light values. */
-  --color-page-bg: hsl(240 5.9% 6%);
+  --color-page-bg: hsl(240 3.8% 8%);
   /* = zinc-950 附近，#131316 — unified page background (chat/settings/harness/pm/doc) */
   --color-right-panel: hsl(0 0% 11.7%);
   /* = #1E1E1E — right panel surface (dark) */

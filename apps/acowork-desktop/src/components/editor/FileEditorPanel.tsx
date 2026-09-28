@@ -1304,8 +1304,17 @@ export function FileEditorPanel({ width }: { width: number }) {
             className="relative flex flex-col shrink-0 rounded-xl overflow-hidden border border-right-panel-border bg-right-panel"
             style={{ width }}
         >
-            {/* Tab bar */}
-            <div className="flex bg-right-panel select-none px-0.5 gap-0.5 mt-[5px] border-b border-border-divider">
+            {/* Tab bar — bg must match the Monaco editor surface (vs=#FFFFFF in
+                light, vs-dark=#1E1E1E in dark) so the strip and the editor body
+                read as a single panel. Previously used `bg-right-panel` which is
+                #F3F3F3 in light, producing a visible two-tone header above the
+                white editor body. The dark values of `right-panel` and `vs-dark`
+                already coincide (#1E1E1E), so the `dark:bg-right-panel` arm is a
+                no-op there but kept for explicitness.
+                `pt-[5px]` (not `mt-[5px]`) so the 5 px of top padding is filled
+                by the tab strip's own bg rather than leaking the outer panel's
+                `bg-right-panel` (#F3F3F3) and reintroducing the same seam. */}
+            <div className="flex bg-white dark:bg-right-panel select-none px-0.5 gap-0.5 pt-[5px] border-b border-border-divider">
                 <ScrollableTabBar
                     activeItemSelector={activeFileId ? `[data-file-id="${activeFileId}"]` : undefined}
                     activeItemId={activeFileId ?? undefined}

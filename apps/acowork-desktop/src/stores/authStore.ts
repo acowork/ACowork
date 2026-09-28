@@ -144,6 +144,42 @@ interface AuthStore {
   init: () => Promise<void>;
 
   /**
+   * Validate + re-resolve the session against a Gateway URL the user
+   * just switched to (WiFi hop, LAN move, alias edit). Called by
+   * `settingsStore.setGatewayUrl` whenever the URL actually changes.
+   *
+   * Probe-only: 1 round-trip to `GET /api/auth/me` on the new URL
+   * with the existing access token.
+   *
+   *   - 200 OK          → keep session (same Gateway behind an alias).
+   *                       Mode / registrationOpen / setupRequired are
+   *                       unchanged, so init() is intentionally NOT
+   *                       re-run: re-running would re-read tokens from
+   *                       localStorage and clobber our in-memory
+   *                       session with `logged_out` whenever localStorage
+   *                       happens to be empty.
+   *   - 401             → drop session (different Gateway, different
+   *                       signing key) and re-run init() so the login
+   *                       gate reflects the new deployment policy.
+   *                       The existing zustand subscription in
+   *                       `gatewayAuthBridge.ts` mirrors the `null`
+   *                       access token into Rust, releasing any
+   *                       in-flight `gateway-auth-required` waiter
+   *                       (ADR-076 §决策 3) — no extra wiring required.
+   *   - network error   → keep session, do NOT re-init. We can't
+   *                       resolve the new Gateway's policy anyway,
+   *                       and re-init would clobber the in-memory
+   *                       session. The natural 401→refresh ladder in
+   *                       `authFetch.ts` will recover when the
+   *                       network is back.
+   *
+   * When called with no in-memory session (the user was on LoginView
+   * when the URL changed), the probe is skipped and init() runs to
+   * re-resolve the deployment mode for the new URL.
+   */
+  onGatewayUrlChanged: (newUrl: string, oldUrl: string) => Promise<void>;
+
+  /**
    * ADR-076 §决策 12 v2: poll `/api/status` every 5 s while
    * `setupRequired` is `true`. The moment the Gateway flips
    * `requires_setup` to `false`, stop polling and re-run `init()` so
@@ -260,6 +296,53 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
         log.warn("[authStore] session restore failed:", err);
         get().clearLocalSession();
       }
+    }
+  },
+
+  onGatewayUrlChanged: async (newUrl, oldUrl) => {
+    if (newUrl === oldUrl) return;
+    const accessToken = get().accessToken;
+    // No session to validate: skip the probe (no Authorization header
+    // to send). Just re-resolve the mode so LoginView's "wrong
+    // credentials" state clears and setup_required transitions take
+    // effect. init() will see no stored tokens → status=logged_out.
+    if (!accessToken) {
+      await get().init();
+      return;
+    }
+    // 1 round-trip probe. Uses fetchMe directly (NOT through
+    // installAuthFetchInterceptor) to avoid a recursive 401→refresh
+    // loop on the very request that is supposed to validate the
+    // token.
+    try {
+      await fetchMe(newUrl, accessToken);
+      // Same Gateway behind an alias — session survives. We
+      // deliberately do NOT re-run init() here: init() reads
+      // tokens from localStorage (which may have been cleared by
+      // a prior clearLocalSession or simply absent in tests), and
+      // re-running it would clobber our in-memory session with
+      // logged_out. Mode / registrationOpen / setupRequired are
+      // unchanged when talking to the same Gateway behind an alias.
+      return;
+    } catch (err) {
+      if (err instanceof AuthApiError && err.status === 401) {
+        // Different Gateway's signing key. Drop the session; the
+        // existing subscription on authStore.accessToken mirrors
+        // null into Rust, releasing any in-flight
+        // `gateway-auth-required` waiter (ADR-076 §决策 3). Then
+        // re-init() against the new Gateway so the login gate
+        // reflects the new deployment policy (mode / setup).
+        get().clearLocalSession();
+        await get().init();
+        return;
+      }
+      // Network unreachable / 5xx — don't drop a possibly-valid
+      // session on a flaky probe. Do NOT re-init either: a network
+      // error there means we can't even resolve the new Gateway's
+      // auth mode, and re-init would clobber our in-memory session.
+      // Leave the store as-is; later 401s will trip the natural
+      // interceptor refresh ladder when the network is back.
+      log.warn("[authStore] onGatewayUrlChanged probe failed (keeping session):", err);
     }
   },
 
