@@ -795,8 +795,16 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       // `?as_user=`; the Gateway only honors it for admin tokens on GET.
       const viewAs = useAuthStore.getState().viewAsUserId;
       const asUser = viewAs ? `&as_user=${encodeURIComponent(viewAs)}` : "";
-      const resp = await fetch(
-        `${getGatewayUrl()}/api/agents/${agentId}/sessions?page=${currentPage}&size=${pageSize}${asUser}`,
+      // Bug B v3: transient 503 while the Runtime's session manager is
+      // still coming up after `inventory-change`. `with503Retry` honours
+      // the Gateway's `Retry-After` so the sidebar list repopulates
+      // itself instead of clearing to empty on a 1-second startup window.
+      const resp = await with503Retry(
+        () =>
+          fetch(
+            `${getGatewayUrl()}/api/agents/${agentId}/sessions?page=${currentPage}&size=${pageSize}${asUser}`,
+          ),
+        { tag: `AgentStore.fetchSessions(${agentId})`, logger: log },
       );
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const data = (await resp.json()) as {

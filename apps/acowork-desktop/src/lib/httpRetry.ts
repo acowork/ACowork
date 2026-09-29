@@ -38,6 +38,39 @@ export const DEFAULT_503_RETRY: Retry503Policy = {
 };
 
 /**
+ * Policy for **user-initiated, awaited writes** (delete, import, control
+ * ops). Same motivation as `DEFAULT_503_RETRY` but far tighter: a read can
+ * afford to wait out a slow boot, a write is a button the user is watching,
+ * so a genuinely dead Runtime must surface an error instead of freezing it
+ * for a minute.
+ *
+ * Sizing is driven by the Gateway, not by us. Every boot-window 503
+ * (`proxy.rs` node-not-ready / registry-missing / endpoint-unregistered,
+ * `auth_middleware.rs` user-service-down) ships a hard-coded `Retry-After: 2`,
+ * and `with503Retry` lets the header OVERRIDE `backoffBaseMs` — so the real
+ * cadence is a flat 2s and `backoffBaseMs` only matters if a 503 ever arrives
+ * without the header. 4 retries x 2s = 8s of wall clock, and the 10s budget
+ * must clear that: `with503Retry` checks the budget BEFORE the attempt count,
+ * so a budget under 8s kills the loop at t=6s with only 2 retries done and
+ * logs a spurious "exceeded retry budget" warning.
+ *
+ * ponytail: ceiling — 8s worst case on a write. Raise maxRetries and
+ * totalBudgetMs together if a field report shows a longer boot window.
+ *
+ * Only use where a retry provably cannot duplicate a side effect. For
+ * Runtime-proxied routes the 503 is raised before any work
+ * (`session_manager()` / the service-slot check is the first fallible
+ * step), so replays are safe; never apply this to a handler that performs
+ * side effects *before* its 503 could fire.
+ */
+export const WRITE_503_RETRY: Retry503Policy = {
+  maxRetries: 4,
+  backoffBaseMs: 2_000,
+  backoffCapMs: 4_000,
+  totalBudgetMs: 10_000,
+};
+
+/**
  * Minimal logger shape — every store already exports a `log` module
  * with debug/warn/error. We duck-type so this util stays logger-free
  * and tree-shakable.

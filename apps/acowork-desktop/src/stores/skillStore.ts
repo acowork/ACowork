@@ -6,6 +6,7 @@ import type {
 } from "../lib/types";
 import { getGatewayUrl } from "../lib/config";
 import { log } from "../lib/logger";
+import { with503Retry } from "../lib/httpRetry";
 
 interface SkillStore {
   skills: SkillListEntry[];
@@ -43,7 +44,13 @@ export const useSkillStore = create<SkillStore>((set, get) => ({
   fetchSkills: async (agentId) => {
     set({ loading: true, error: null });
     try {
-      const res = await fetch(`${getGatewayUrl()}/api/agents/${agentId}/skills?page=1&size=100`);
+      // Bug B v3: 503 while the Runtime's HTTP endpoint is still being
+      // discovered. The skill list is read-only, so a retry is free of
+      // side effects and rides out the boot window transparently.
+      const res = await with503Retry(
+        () => fetch(`${getGatewayUrl()}/api/agents/${agentId}/skills?page=1&size=100`),
+        { tag: `SkillStore.fetchSkills(${agentId})`, logger: log },
+      );
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       set({ skills: data.skills, total: data.total, loading: false });
@@ -55,8 +62,12 @@ export const useSkillStore = create<SkillStore>((set, get) => ({
   selectSkill: async (agentId, skillName) => {
     set({ selectedSkillName: skillName, selectedSkillDetail: null, executionHistory: null });
     try {
-      const res = await fetch(
-        `${getGatewayUrl()}/api/agents/${agentId}/skills/${encodeURIComponent(skillName)}`,
+      const res = await with503Retry(
+        () =>
+          fetch(
+            `${getGatewayUrl()}/api/agents/${agentId}/skills/${encodeURIComponent(skillName)}`,
+          ),
+        { tag: `SkillStore.selectSkill(${agentId}/${skillName})`, logger: log },
       );
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const detail: SkillDetailResponse = await res.json();
@@ -68,8 +79,12 @@ export const useSkillStore = create<SkillStore>((set, get) => ({
 
   fetchExecutionHistory: async (agentId, skillName, page = 1) => {
     try {
-      const res = await fetch(
-        `${getGatewayUrl()}/api/agents/${agentId}/skills/${encodeURIComponent(skillName)}/history?page=${page}&size=50`,
+      const res = await with503Retry(
+        () =>
+          fetch(
+            `${getGatewayUrl()}/api/agents/${agentId}/skills/${encodeURIComponent(skillName)}/history?page=${page}&size=50`,
+          ),
+        { tag: `SkillStore.fetchExecutionHistory(${agentId}/${skillName})`, logger: log },
       );
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data: SkillExecutionHistoryResponse = await res.json();

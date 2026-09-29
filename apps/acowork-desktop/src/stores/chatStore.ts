@@ -1116,11 +1116,6 @@ function applyConnectionTransition(
   }
   if (prevEffective === nextEffective) return;
 
-  log.warn(
-    `[mqtt-status] applying transition ${prevEffective} → ${nextEffective}` +
-      (raw.reason ? ` (reason: ${raw.reason})` : "") +
-      (options.fromWatchdog ? " [via watchdog]" : ""),
-  );
   const nextError = dedupeError(
     state.lastMqttError,
     raw.connected ? null : raw.reason ?? null,
@@ -1132,7 +1127,7 @@ function applyConnectionTransition(
     nextEffective,
     raw.reason ?? null,
   );
-  log.debug?.(
+  log.debug(
     `[mqtt-status] ${prevEffective} → ${nextEffective}` +
       (raw.reason ? ` (reason: ${raw.reason})` : "") +
       (options.fromWatchdog ? " [via watchdog]" : ""),
@@ -1368,7 +1363,7 @@ async function doInitMqttListener(): Promise<void> {
   // transition may have been emitted before this listener registered.
     try {
       const snapshot = await invoke<MqttStatusSnapshot>("get_mqtt_status");
-      log.warn(
+      log.debug(
         "[initMqttListener] initial snapshot from Rust:",
         JSON.stringify(snapshot),
       );

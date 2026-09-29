@@ -6,6 +6,8 @@
 
 import { create } from "zustand";
 import { getGatewayUrl } from "../lib/config";
+import { with503Retry } from "../lib/httpRetry";
+import { log } from "../lib/logger";
 import { emitAgentConfigRefresh } from "../lib/refresh";
 import type {
   McpCatalogEntryResponse,
@@ -302,7 +304,13 @@ export const useMcpStore = create<McpStore>((set, get) => ({
       error: null,
     }));
     try {
-      const resp = await fetch(`${getGatewayUrl()}/api/agents/${encodeURIComponent(agentId)}/tools`);
+      // Bug B v3: 503 while the Runtime's HTTP endpoint is still being
+      // discovered after an agent starts. Retrying rides out the boot
+      // window instead of blanking the MCP server list.
+      const resp = await with503Retry(
+        () => fetch(`${getGatewayUrl()}/api/agents/${encodeURIComponent(agentId)}/tools`),
+        { tag: `McpStore.loadActiveServers(${agentId})`, logger: log },
+      );
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const data = await resp.json() as { mcp_servers?: string[] };
       set((s) => ({

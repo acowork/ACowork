@@ -407,7 +407,7 @@ impl GatewayClient {
         let Some(fresh) = self.auth.renew(epoch).await else {
             return Ok(resp);
         };
-        tracing::info!("Gateway 401 — replaying the request with the renewed access token");
+        tracing::debug!("Gateway 401 — replaying the request with the renewed access token");
         build()?.bearer_auth(fresh).send().await.map_err(Into::into)
     }
 

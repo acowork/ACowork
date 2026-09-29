@@ -13,17 +13,28 @@
 //! `session_created` event, so behaviour is unchanged there.)
 
 import { getGatewayUrl } from "./config";
+import { with503Retry, WRITE_503_RETRY } from "./httpRetry";
+import { log } from "./logger";
 
 async function controlRequest(
   method: "POST" | "DELETE" | "PUT",
   path: string,
   body?: unknown,
 ): Promise<void> {
-  const resp = await fetch(`${getGatewayUrl()}${path}`, {
-    method,
-    headers: body === undefined ? undefined : { "content-type": "application/json" },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
+  // Bug B v3: the Runtime's `session manager not ready` window (between
+  // Gateway discovering an agent and its HTTP port landing in the reverse
+  // proxy) makes every control op 503 for a second or two. Retry inside
+  // the shared helper so all six callers recover transparently instead of
+  // each logging a hard error.
+  const resp = await with503Retry(
+    () =>
+      fetch(`${getGatewayUrl()}${path}`, {
+        method,
+        headers: body === undefined ? undefined : { "content-type": "application/json" },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      }),
+    { policy: WRITE_503_RETRY, tag: `session-control ${method} ${path}`, logger: log },
+  );
   if (!resp.ok) {
     throw new Error(`HTTP ${resp.status}: ${await resp.text()}`);
   }

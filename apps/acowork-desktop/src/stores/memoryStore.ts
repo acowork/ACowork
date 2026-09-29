@@ -16,7 +16,7 @@ import {
 } from "../lib/gateway-api";
 import { useGatewayStore } from "./gatewayStore";
 import { log } from "../lib/logger";
-import { with503Retry } from "../lib/httpRetry";
+import { with503Retry, WRITE_503_RETRY } from "../lib/httpRetry";
 
 interface MemoryFilters {
   type: "All" | "Knowledge" | "Episodic" | "Procedural" | "Autobiographical";
@@ -219,9 +219,17 @@ export const useMemoryStore = create<MemoryStore>((set, get) => ({
 
   deleteNode: async (agentId, nodeId) => {
     try {
-      const res = await fetch(`${getGatewayUrl()}/api/agents/${agentId}/memory/nodes/${nodeId}`, {
-        method: "DELETE",
-      });
+      // Bug B v3: the Runtime answers 503 until its memory service slot is
+      // populated, and that check (`svc.as_ref().ok_or(503)`) runs BEFORE
+      // `delete_node()` — so a retry can never double-delete. Uses the
+      // write policy: the user is watching a button, not a background list.
+      const res = await with503Retry(
+        () =>
+          fetch(`${getGatewayUrl()}/api/agents/${agentId}/memory/nodes/${nodeId}`, {
+            method: "DELETE",
+          }),
+        { policy: WRITE_503_RETRY, tag: `MemoryStore.deleteNode(${nodeId})`, logger: log },
+      );
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data: DeleteNodeResponse = await res.json();
       if (data.deleted) {

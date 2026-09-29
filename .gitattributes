@@ -15,4 +15,18 @@
 *.bat text eol=crlf
 
 # All source code — LF everywhere
-*.{ts,tsx,js,jsx,mjs,cjs,json,md,yml,yaml,css,html,vue,svelte} text eol=lf
+# All source code — LF everywhere
+*.ts text eol=lf
+*.tsx text eol=lf
+*.js text eol=lf
+*.jsx text eol=lf
+*.mjs text eol=lf
+*.cjs text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.css text eol=lf
+*.html text eol=lf
+*.vue text eol=lf
+*.svelte text eol=lf
