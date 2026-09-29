@@ -23,13 +23,6 @@ use std::sync::Arc;
 /// **None** when MQTT is disabled in the Gateway config.
 pub type MqttBrokerControlHandle = tokio::sync::Mutex<Option<crate::mqtt::MqttBrokerHandle>>;
 
-/// System Agent ID — always auto-started with the Gateway.
-///
-/// ADR-055 Phase 2b.3: moved here from `lifecycle/manager.rs` (deleted).
-/// This is a Gateway policy constant (the System Agent is privileged and
-/// cannot be stopped by normal stop commands), not a node concern.
-pub const SYSTEM_AGENT_ID: &str = "com.acowork.system";
-
 /// Information about an installed agent
 #[derive(Debug, Clone)]
 pub struct AgentInfo {
@@ -461,19 +454,6 @@ impl GatewayState {
         self.capability_registry
             .register_from_manifest(&info.instance_id, &info.agent_id, &info.manifest);
         self.installed_agents.insert(info.instance_id.clone(), info);
-    }
-
-    /// Look up the (first) instance identity for a package id. Used by
-    /// the System Agent auto-start path — at boot the Gateway knows the
-    /// package id (`com.acowork.system`) but not the instance id, since
-    /// the latter is gateway-generated at install time. Returns the
-    /// instance id of the first installed instance of `agent_id`, or
-    /// `None` if no instance is installed.
-    pub fn find_instance_by_agent_id(&self, agent_id: &str) -> Option<String> {
-        self.installed_agents
-            .values()
-            .find(|info| info.agent_id == agent_id)
-            .map(|info| info.instance_id.clone())
     }
 
     /// Remove an installed agent. `id` is the instance identity

@@ -249,9 +249,8 @@ pub struct AgentModelResponse {
 /// - `?node_id=node-a`    → all instances currently hosted on that node
 ///
 /// Sort order (sidebar contract):
-/// 1. System agent (`com.acowork.system`) is always pinned to the top.
-/// 2. Running agents come before stopped agents.
-/// 3. Within each group, agents with `last_interaction_at` come first
+/// 1. Running agents come before stopped agents.
+/// 2. Within each group, agents with `last_interaction_at` come first
 ///    sorted newest-first; agents that have never been interacted with
 ///    sink to the bottom of their group, ordered alphabetically by name.
 #[derive(Debug, Deserialize)]
