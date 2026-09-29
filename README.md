@@ -45,16 +45,39 @@
 
 ## What is ACowork.AI?
 
-ACowork.AI is a **decentralized, high-security, scalable AI Agent runtime platform** modeled after Android.
-Instead of just building tools, ACowork lets you create **AI colleagues** — autonomous digital beings with their own
-memory, workspace, and personality, each specialized in a different domain, collaborating with you and each other.
+ACowork.AI is a **multi-user, distributed, AI-native collaboration platform**. It brings together people, AI
+colleagues, projects, and documents into one runtime — so a team can plan work, write specs, review code, and ship
+features alongside their agents the same way they would alongside a human teammate.
 
-Every Agent is an independent **"digital being"**: its own runtime process, private memory, workspace, and configuration.
-Think of having a team of AI specialists working alongside you — a QA analyst, a project manager, a senior engineer —
-each with their own expertise and memory, communicating through the platform's Intent mechanism.
+- **Multi-user by default.** Real accounts, roles, sessions, and per-user audit trails. No more single-actor demo mode.
+- **Distributed by default.** Gateway is the single control plane; Node Agents run on every machine that hosts
+  Runtimes — your GPU box, your laptop, your cloud VM — and the Gateway talks to all of them over the same protocol.
+- **AI-native project & document management.** Project / task management (`acowork-pm`) and the online document
+  library (`acowork-doc`) are first-class services — agents read, write, and collaborate on them through REST +
+  MCP, with real-time multi-user editing.
+- **Seamless human ↔ AI collaboration.** Users talk to agents in the same chat surface where humans talk to each
+  other; agents subscribe to project / document events; intents route between any two actors.
+- **Standalone or cluster.** Run a single host for personal use; flip a flag and the same binary becomes a
+  cluster spanning every machine in your team — one protocol, no code branches.
 
-**Tune prompt, tools, and memory = build an AI colleague.** Personal and sensitive data is automatically stripped
-during packaging, so you can share an agent's capabilities freely without leaking your private memories.
+Every Agent is still an independent **"digital being"**: its own runtime process, private memory, workspace, and
+configuration. **Tune prompt, tools, and memory = build an AI colleague.** Personal and sensitive data is
+automatically stripped during packaging, so you can share an agent's capabilities freely without leaking your
+private memories.
+
+---
+
+## 🎯 Why ACowork
+
+These are the bets ACowork is built around — and the reasons to choose it over a single-process agent playground.
+
+| | |
+|---|---|
+| 👥 **Multi-user, not single-actor** | Real accounts, roles, sessions, audit. The same chat / project / document surface is shared by humans and AI colleagues. |
+| 🌐 **Distributed agents, one control plane** | Gateway brokers MQTT + HTTP reverse proxy; Node Agents run on every host. A GPU box, a workstation, and a cloud VM all look the same to the Gateway. |
+| 🗂️ **AI-native project & document management** | `acowork-pm` and `acowork-doc` are first-class services with REST + MCP. Agents read, write, and edit them like any other teammate — including real-time multi-user editing (Yjs CRDT). |
+| 🤝 **Humans and AI in one conversation** | One chat surface, one project tree, one doc library. AI subscribes to events, raises intents, and ships work alongside humans — no "AI side panel" silo. |
+| 🚀 **Standalone or cluster — same binary** | Run a single host for personal use, or scale out to a cluster across your team. One protocol path, no local-vs-remote code branches. |
 
 ---
 
@@ -62,39 +85,51 @@ during packaging, so you can share an agent's capabilities freely without leakin
 
 | | |
 |---|---|
+| 👥 **Multi-user, not single-actor** | Real accounts, roles, sessions, per-user audit. Humans and AI colleagues share the same chat / project / doc surface. |
+| 🌐 **Distributed agents, one control plane** | Gateway brokers MQTT + HTTP reverse proxy; Node Agents run on every host that hosts Runtimes (GPU box / workstation / cloud VM) — single-host and multi-host share one protocol path. |
+| 🗂️ **AI-native project & document management** | `acowork-pm` and `acowork-doc` are first-class services; agents read, write, and collaborate on tasks and documents through REST + MCP — including real-time multi-user editing (Yjs CRDT). |
+| 🤝 **Human ↔ AI in one conversation** | One chat surface, one project tree, one doc library. AI subscribes to project / doc events and ships work alongside humans — no "AI side panel" silo. |
+| 🚀 **Standalone or cluster — same binary** | Start a single host for personal use; flip a flag and the same binary becomes a cluster across your team. No local-vs-remote code branches in Gateway. |
 | 🧩 **Declarative agents** | `.agent` packages contain manifest + prompts + skills — **no executable code**, signed and verified at install time. |
 | ⚙️ **Universal runtime** | A single Rust binary loads any `.agent` package; Agents connect directly to LLM APIs — no Gateway proxy, no extra latency. |
 | 🔒 **Process-level isolation** | Every Agent runs as an independent OS process with its own filesystem, Grafeo DB, and sandboxed tool execution. |
 | 🧠 **Biomimetic memory** | 3-tier / 5-class layered memory on a per-Agent Grafeo graph DB — HNSW + BM25 hybrid retrieval, associative diffusion. |
 | 🛡️ **Three-layer security** | Package signing + OS process sandbox + Wasmtime tool sandbox. |
 | 💬 **Intent collaboration** | Agents advertise capabilities in a registry, route requests/observations, sync or async, with the Gateway as broker. |
-| 🌐 **Distributed by design** | Gateway as a single control-plane entry; Node Agents dispatch Runtimes to any host (GPU box / workstation / cloud) over MQTT + HTTP reverse proxy — single-host and multi-host share one protocol path. |
 | 🛠️ **Full-stack dev loop** | Desktop App (Tauri v2) supports DevMode: conversational debug, skill hot-reload, breakpoints, recording & replay, publishing wizard. |
 
 ---
 
 ## 🏛️ Architecture
 
-ACowork treats every Agent like **an app on your phone**. Each `.agent` package is a self-contained application
-(like an APK); the universal Runtime is the OS; the Gateway is the cloud-side control plane; per-machine **Node Agents**
-host Agent processes and act as the local auth / network-exposure boundary.
+ACowork has a flat three-tier topology: **Gateway** (one control plane per cluster), **Node Agent** (one per
+machine that hosts Runtimes), **Runtime** (one per `.agent` instance). Every actor — human, AI agent, project
+service, document service — talks to the Gateway over the same protocol path.
 
-### Android Analogy
+| Tier | Component | Role |
+|------|-----------|------|
+| **Gateway** (`acowork-gateway`) | One keep-alive Rust process per cluster | HTTP API on `:19876`, embedded MQTT broker on `:19875`, reverse proxy to every Node / Runtime, package manager, intent router, global resources (LLM providers / MCP / budget / cron / rate-limit). |
+| **Node Agent** (`acowork-node`) | One per machine that hosts Runtimes | Process table (spawn / kill / reap Runtimes), local package store, MQTT enrollment with the Gateway, local reverse proxy on `:19900`, LSP sidecar supervisor, node-local fs browse. |
+| **Runtime** (`acowork-runtime`) | One per running `.agent` instance | Universal Rust binary that loads a `.agent` package, hosts the LLM loop, Grafeo memory, tools, and per-agent HTTP on loopback. |
 
-| Android         | ACowork                              | Role                                                                                                                |
-| --------------- | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------- |
-| ART             | Agent Runtime                        | Universal execution engine (single binary, loopback-only)                                                           |
-| APK             | `.agent` package                     | Declarative bundle (config + prompts + skills, no executable code)                                                 |
-| APK Signature   | Signing Block                        | Package signing, verifies integrity and origin                                                                     |
-| AMS             | Gateway                              | Single entry: MQTT broker host + HTTP unified entry + global resource authority (providers / MCP / budget / cron…)   |
-| **OEM Service** | **Node Agent** (`acowork-node`)      | **Per-machine Runtime parent: process lifecycle + local package management + node reverse-proxy `:19900`**          |
-| Binder IPC      | MQTT + HTTP Reverse Proxy            | IPC: real-time events + bulk query forwarding                                                                       |
-| ContentProvider | System Agent                         | System-level data service (identity, preferences)                                                                   |
+Alongside these, four co-resident services plug into the same Gateway protocol path and are reachable to Runtimes
+through the same REST + MCP surface that humans use:
 
-In single-host mode the Gateway auto-spawns a local Node (`local`); in distributed mode each target machine runs
-its own Node via `acowork-node start`. **Gateway has zero local/remote code branches** — the same protocol path
-is used everywhere. See [`docs/adr/zh/ADR-055-remote-runtime-node-topology.md`](./docs/adr/zh/ADR-055-remote-runtime-node-topology.md)
-for the full design rationale.
+| Service | Role |
+|---------|------|
+| `acowork-user` | User domain — accounts, credentials, roles, profiles / avatars, user↔user chat. |
+| `acowork-pm`   | Project & task management — first-class service, agents and humans read / write / subscribe to the same project tree. |
+| `acowork-doc`  | Online document library with real-time multi-user editing (Tiptap + Yjs). |
+| `acowork-embed` / `acowork-lsp-relay` / `acowork-vault` / `acowork-sqlite` / `acowork-sign` | Embedding model runner, LSP relay, encrypted KV store, storage backend, package signing — supporting tiers. |
+
+### Standalone vs. cluster
+
+- **Standalone** — Gateway auto-spawns one local Node (`acowork-node --mode local`) on the same host. Best for
+  personal use, demos, and edge devices. One process tree, one MQTT broker, one HTTP entry.
+- **Cluster** — install `acowork-node` on every host you want Runtimes to live on (`GPU box`, `workstation`,
+  `cloud VM`), enroll them with the Gateway's MQTT broker, and the same protocol path lights up. Gateway has
+  **zero local-vs-remote code branches** — see
+  the project's design docs for the rationale and frozen ceilings.
 
 ### System Architecture
 
@@ -206,7 +241,7 @@ For more — packaging installers, signing, CI, remote-node onboarding — see [
 
 ```
 ① Authoring       manifest.toml + prompts/ + skills/SKILL.md + optional tools/*.wasm
-② Signing         acowork-keygen → acowork-sign  (developer key, APK-style signature)
+② Signing         acowork-keygen → acowork-sign  (developer key, signed package)
 ③ Debugging       Desktop App DevMode → conversational debug, SKILL.md hot-reload, breakpoints, recording/replay
 ④ Publishing      Publishing wizard → remote registry, or share the .agent file directly
 ```
@@ -218,15 +253,15 @@ not writing imperative code. The whole pipeline from authoring to publishing is 
 
 ## 📈 Roadmap
 
-| Phase | Scope                                                                                                          | Status         |
-| ----- | -------------------------------------------------------------------------------------------------------------- | -------------- |
-| 1     | Foundation + LLM interaction (MVP): package parsing, signing, Runtime main loop, Gateway basics                | ✅ Done         |
-| 2     | Memory layering + System Agent: Grafeo biomimetic layers, instant extraction, associative diffusion           | 🚧 In progress |
-| 3     | Permissions & sandbox: filesystem isolation, WASM sandbox (Wasmtime), Approval Gate                           | 🚧 Partial     |
-| 4     | Communication & coordination: Intent, Budget Tracker, Rate Limiter, Cron                                       | 🚧 Partial     |
-| 5     | Desktop App + dev framework: Debug Protocol, Skill hot-reload, recording/replay; MQTT-based IPC                | 🚧 In progress |
-| 6     | Cloud & ecosystem: Memory Sync, remote `.agent` registry, Agent store                                         | 🔮 Planning    |
-| 7     | Cross-platform: Windows / macOS / Android / iOS                                                                | 🔮 Planning    |
+| Phase | Scope                                                                                                                                            | Status         |
+| ----- | ------------------------------------------------------------------------------------------------------------------------------------------------ | -------------- |
+| 1     | Foundation + LLM interaction (MVP): package parsing, signing, Runtime main loop, Gateway basics                                                  | ✅ Done         |
+| 2     | Memory layering + multi-user accounts: Grafeo biomimetic layers, instant extraction, associative diffusion; per-user sessions & audit | ✅ Done         |
+| 3     | AI-native PM & Doc: `acowork-pm` and `acowork-doc` standalone services, REST + MCP, multi-user real-time editing (Tiptap + Yjs) | 🚧 In progress |
+| 4     | Distributed runtime: Node Agent enrollment, cluster mode, shared protocol path | 🚧 In progress |
+| 5     | Permissions & sandbox: filesystem isolation, WASM sandbox (Wasmtime), Approval Gate                                                             | 🚧 Partial     |
+| 6     | Desktop App + dev framework: Debug Protocol, Skill hot-reload, recording/replay; MQTT-based IPC                                                | 🚧 In progress |
+| 7     | Ecosystem: remote `.agent` registry, Agent store, Memory Sync across hosts                                                                     | 🔮 Planning    |
 
 ---
 
@@ -234,7 +269,7 @@ not writing imperative code. The whole pipeline from authoring to publishing is 
 
 - Architecture design: [`docs/design/zh/`](./docs/design/zh/)
 - Module-level design: [`docs/module-design/zh/`](./docs/module-design/zh/)
-- Architecture Decision Records: [`docs/adr/zh/`](./docs/adr/zh/) (ADR-009 → ADR-058+)
+- Design notes & decision history: [`docs/adr/zh/`](./docs/adr/zh/)
 - Developer conventions: [`AGENTS.md`](./AGENTS.md)
 
 ---

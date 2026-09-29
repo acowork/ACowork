@@ -45,15 +45,36 @@
 
 ## ACowork.AI 是什么？
 
-ACowork.AI 是一个**去中心化、高安全、可扩展的 AI Agent 运行时平台**，对标 Android 的设计哲学。
-它不只是一套开发框架，而是让你创造 **AI 同事**的平台——每个 Agent 都是拥有独立记忆、工作区和个性的自主数字存在，
-各有所长，彼此协作。
+ACowork.AI 是一个**多用户、分布式、AI 原生的协作平台**。它把团队成员、AI 同事、项目与文档统一装进同一个
+运行时——规划工作、撰写文档、评审代码、交付功能，都可以像和人类队友协作一样和 Agent 并肩完成。
 
-每个 Agent 都是独立的**"数字伙伴"**：拥有自己的运行时进程、私有记忆、工作区和配置——完全独立的个性化认知。
-就像身边有一支 AI 专家团队——质量分析师、项目经理、高级工程师——各司其职，通过平台的 Intent 机制沟通协调。
+- **多用户优先**。真实的账号、角色、会话与按用户的审计轨迹，不再是单 actor 的 demo 形态。
+- **分布式优先**。Gateway 作为唯一控制面；Node Agent 跑在每台需要承载 Runtime 的机器上——你的 GPU 主机、
+  你的笔记本、你的云上 VM——Gateway 都通过同一条协议路径与它们对话。
+- **AI 原生的项目 & 文档管理**。项目管理（`acowork-pm`）与在线文档库（`acowork-doc`）是一等公民服务——
+  Agent 通过 REST + MCP 像普通同事一样读、写、协作，并支持实时多人编辑。
+- **用户 ↔ AI 无缝沟通协作**。人和 Agent 在同一个聊天面板里协作；Agent 订阅项目/文档事件；Intent 在
+  任意两个 actor 之间路由。
+- **Standalone 与集群通吃**。单机自用就开 standalone；翻一个开关，同一套二进制就成为横跨整个团队的
+  集群——一条协议路径，代码里没有「本地 / 远程」分支。
 
-**调优 Prompt、Tools、Memory = 构建 AI 同事。** Personal/Sensitive 数据在打包时自动剥离，
-你可以自由分享 Agent 的能力，而不必担心泄露私有记忆。
+每个 Agent 依然是独立的**"数字伙伴"**：拥有自己的运行时进程、私有记忆、工作区和配置——
+完全独立的个性化认知。**调优 Prompt、Tools、Memory = 构建 AI 同事。** Personal/Sensitive 数据在打包时
+自动剥离，你可以自由分享 Agent 的能力，而不必担心泄露私有记忆。
+
+---
+
+## 🎯 为什么选择 ACowork
+
+这些是 ACowork 立项时押下的赌注，也是它在「单进程 Agent 玩具」之外值得被选用的理由。
+
+| | |
+|---|---|
+| 👥 **多用户，而不是单 actor** | 真实账号、角色、会话、按用户审计。人和 AI 同事共享同一个聊天、项目与文档面板。 |
+| 🌐 **分布式 Agent，一个控制面** | Gateway 负责 MQTT + HTTP 反代，Node Agent 跑在每台主机上。GPU 主机、工位机、云 VM 在 Gateway 眼里长得一样。 |
+| 🗂️ **AI 原生的项目 & 文档管理** | `acowork-pm` 和 `acowork-doc` 是一等公民服务，对外暴露 REST + MCP。Agent 像同事一样读写任务与文档，并支持实时多人编辑（Yjs CRDT）。 |
+| 🤝 **人与 AI 在同一段对话里** | 同一个聊天、同一个项目树、同一个文档库。Agent 订阅事件、抛出 Intent、与人类一起交付工作，没有「AI 侧边栏」这种孤岛。 |
+| 🚀 **Standalone 或集群——同一份二进制** | 单机自用就开 standalone；想扩展成团队集群就用同一份二进制，Gateway 代码里没有「本地 / 远程」分支。 |
 
 ---
 
@@ -61,37 +82,49 @@ ACowork.AI 是一个**去中心化、高安全、可扩展的 AI Agent 运行时
 
 | | |
 |---|---|
+| 👥 **多用户，而不是单 actor** | 真实账号、角色、会话、按用户审计。人和 AI 同事共享同一个聊天 / 项目 / 文档面板。 |
+| 🌐 **分布式 Agent，一个控制面** | Gateway 负责 MQTT + HTTP 反代；Node Agent 跑在每台需要承载 Runtime 的主机（GPU 机 / 工位 / 云 VM）上——单机与多机走同一条协议路径。 |
+| 🗂️ **AI 原生的项目 & 文档管理** | `acowork-pm` 和 `acowork-doc` 是一等公民服务；Agent 通过 REST + MCP 读写任务与文档，并支持实时多人编辑（Yjs CRDT）。 |
+| 🤝 **人与 AI 在同一段对话里** | 同一个聊天、同一个项目树、同一个文档库。AI 订阅项目 / 文档事件、与人类一起交付工作——没有「AI 侧边栏」这种孤岛。 |
+| 🚀 **Standalone 或集群——同一份二进制** | 单机自用就开 standalone；翻一个开关，同一份二进制成为横跨团队的集群。Gateway 代码里没有「本地 / 远程」分支。 |
 | 🧩 **声明式 Agent** | `.agent` 包只包含 manifest + prompts + skills——**无可执行代码**，签名后在安装时强制验证。 |
 | ⚙️ **统一 Runtime** | 单一 Rust 二进制加载任意 `.agent` 包；Agent 直连 LLM API——不经 Gateway 代理，零额外延迟。 |
 | 🔒 **进程级隔离** | 每个 Agent 作为独立 OS 进程运行，自带文件系统、Grafeo DB 与沙箱化的工具执行。 |
 | 🧠 **仿生记忆** | 每个 Agent 拥有私有 Grafeo 图数据库，三层五类分层记忆 + HNSW/BM25 混合检索 + 关联扩散。 |
 | 🛡️ **三层安全** | 包签名 + 操作系统进程沙箱 + Wasmtime 工具沙箱。 |
 | 💬 **Intent 协作** | Agent 通过 Capability Registry 声明能力，Gateway 作为 broker 路由请求/订阅，支持同步/异步。 |
-| 🌐 **分布式原生** | Gateway 作为单一控制面入口；Node Agent 把 Runtime 派到任意机器（GPU 机 / 工位 / 云主机），MQTT + HTTP 反代——单机与多机走同一条协议路径。 |
 | 🛠️ **全链路开发** | Desktop App（Tauri v2）内置 DevMode：对话调试、Skill 热加载、断点、录制回放、发布向导。 |
 
 ---
 
 ## 🏛️ 架构
 
-ACowork 把每个 Agent 视作**手机上的一个应用**。`.agent` 包就是完整自包含的应用（如 APK），通用 Runtime 是操作系统，
-Gateway 是云端控制面，每台机器上的 **Node Agent** 负责托管 Agent 进程，并作为本地鉴权 / 网络暴露边界。
+ACowork 采用扁平的三层拓扑：**Gateway**（每个集群唯一控制面）、**Node Agent**（每台需要承载 Runtime
+的主机一个）、**Runtime**（每个运行中的 `.agent` 实例一个）。无论是人、AI Agent、项目服务还是文档服务，
+都通过同一条协议路径与 Gateway 对话。
 
-### Android 类比
+| 层级 | 组件 | 作用 |
+|------|------|------|
+| **Gateway**（`acowork-gateway`） | 每个集群一个常驻 Rust 进程 | `:19876` 上的 HTTP API，`:19875` 上内嵌的 MQTT broker；反代到所有 Node / Runtime；包管理；Intent 路由；全局资源（LLM providers / MCP / budget / cron / rate-limit）。 |
+| **Node Agent**（`acowork-node`） | 每台承载 Runtime 的主机一个 | 进程表（spawn / kill / reap Runtime）、本地包存储、向 Gateway 的 MQTT 接入、本地反代 `:19900`、LSP sidecar 监督、节点级 fs 浏览。 |
+| **Runtime**（`acowork-runtime`） | 每个运行中的 `.agent` 实例一个 | 通用 Rust 二进制：加载 `.agent` 包、跑 LLM 主循环、Grafeo 记忆、工具执行、loopback 上的 per-agent HTTP。 |
 
-| Android         | ACowork                              | 作用                                                                                                |
-| --------------- | ------------------------------------ | --------------------------------------------------------------------------------------------------- |
-| ART             | Agent Runtime                        | 通用执行引擎（平台唯一二进制，loopback-only）                                                       |
-| APK             | `.agent` 包                          | 声明式打包（config + prompts + skills，无可执行代码）                                               |
-| APK Signature   | Signing Block                        | 包签名，验证完整性和来源                                                                            |
-| AMS             | Gateway                              | 单点入口：MQTT broker 宿主 + HTTP 统一入口 + 全局资源权威（providers / MCP / budget / cron …）       |
-| **OEM Service** | **Node Agent**（`acowork-node`）     | **节点级 Runtime 父进程：进程生命周期 + 本地 package 管理 + 节点反代 `:19900`**                     |
-| Binder IPC      | MQTT + HTTP 反向代理                 | 进程间通信（实时事件 + 大数据查询反代）                                                              |
-| ContentProvider | 系统 Agent                           | 系统级数据服务（身份、偏好）                                                                        |
+除了这三层之外，四个常驻服务挂在同一条 Gateway 协议路径上，对 Runtime 暴露的 REST + MCP 接口与人类一致：
 
-单机模式下 Gateway 自动 spawn 一个本机 Node（`local`）；分布式模式下用户在目标机器执行 `acowork-node start`。
-**Gateway 侧代码完全无「本地 / 远程」分支**——任何场景都走同一条协议路径。完整设计权衡见
-[`docs/adr/zh/ADR-055-remote-runtime-node-topology.md`](./docs/adr/zh/ADR-055-remote-runtime-node-topology.md)。
+| 服务 | 作用 |
+|------|------|
+| `acowork-user` | 用户域——账号、凭据、角色、档案/头像、用户↔用户聊天。 |
+| `acowork-pm`   | 项目与任务管理——一等公民服务，Agent 和人读写/订阅同一棵项目树。 |
+| `acowork-doc`  | 在线文档库，支持多人实时编辑（Tiptap + Yjs）。 |
+| `acowork-embed` / `acowork-lsp-relay` / `acowork-vault` / `acowork-sqlite` / `acowork-sign` | Embedding 模型 runner、LSP relay、加密 KV、存储后端、包签名——支撑层。 |
+
+### Standalone vs. 集群
+
+- **Standalone** —— Gateway 在本机自动 spawn 一个本地 Node（`acowork-node --mode local`）。适合个人自用、
+  Demo 与边缘设备。一个进程树、一个 MQTT broker、一个 HTTP 入口。
+- **集群** —— 在每台要承载 Runtime 的机器上（`GPU 主机`、`工位机`、`云上 VM`）安装 `acowork-node`，向 Gateway
+  的 MQTT broker 完成接入，同一条协议路径即刻点亮。**Gateway 代码里完全无「本地 / 远程」分支**——
+  详见项目设计文档的设计权衡与冻结的上限。
 
 ### 系统架构
 
@@ -201,7 +234,7 @@ tools = ["web_search", "read_file", "write_file"]
 
 ```
 ① 编写       manifest.toml + prompts/ + skills/SKILL.md + 可选 tools/*.wasm
-② 签名       acowork-keygen → acowork-sign  （Developer 私钥 + APK 风格签名）
+② 签名       acowork-keygen → acowork-sign  （Developer 私钥 + 包签名）
 ③ 调试       Desktop App DevMode → 对话调试、SKILL.md 热加载、断点、录制回放
 ④ 发布       发布向导 → 远程仓库，或直接分享 .agent 文件
 ```
@@ -213,15 +246,15 @@ tools = ["web_search", "read_file", "write_file"]
 
 ## 📈 路线图
 
-| 阶段    | 内容                                                                                                       | 状态     |
-| ------- | ---------------------------------------------------------------------------------------------------------- | -------- |
-| Phase 1 | 基础框架 + LLM 交互（MVP）：包解析、签名验证、Runtime 主循环、Gateway 基础                                  | ✅ 已完成 |
-| Phase 2 | Memory 分层 + 系统 Agent：Grafeo 仿生分层、即时提取、关联扩散                                              | 🚧 进行中 |
-| Phase 3 | 权限与沙箱：文件系统隔离、WASM 沙箱（Wasmtime）、Approval Gate                                             | 🚧 部分实现 |
-| Phase 4 | 通信与协调：Intent、Budget Tracker、Rate Limiter、Cron                                                     | 🚧 部分实现 |
-| Phase 5 | Desktop App + 开发框架：Debug Protocol、Skill 热加载、录制回放；MQTT 协议栈重构                            | 🚧 进行中 |
-| Phase 6 | 云端与生态：Memory Sync、远程 `.agent` 仓库、Agent 商店                                                    | 🔮 规划中 |
-| Phase 7 | 跨平台适配：Windows / macOS / Android / iOS                                                                | 🔮 规划中 |
+| 阶段    | 内容                                                                                                                                                                                                                                          | 状态     |
+| ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------- |
+| Phase 1 | 基础框架 + LLM 交互（MVP）：包解析、签名验证、Runtime 主循环、Gateway 基础                                                                                                                                                                  | ✅ 已完成 |
+| Phase 2 | Memory 分层 + 多用户账号：Grafeo 仿生分层、即时提取、关联扩散；按用户的会话与审计                                                                                                       | ✅ 已完成 |
+| Phase 3 | AI 原生的项目 & 文档管理：`acowork-pm` 与 `acowork-doc` 独立进程服务，REST + MCP，多人实时编辑（Tiptap + Yjs）                                                                                                                                                | 🚧 进行中 |
+| Phase 4 | 分布式 Runtime：Node Agent 接入、多主机集群模式、共用同一条协议路径                                                                                                                                                                                  | 🚧 进行中 |
+| Phase 5 | 权限与沙箱：文件系统隔离、WASM 沙箱（Wasmtime）、Approval Gate                                                                                                                                                                                 | 🚧 部分实现 |
+| Phase 6 | Desktop App + 开发框架：Debug Protocol、Skill 热加载、录制回放；MQTT 协议栈重构                                                                                                                                                              | 🚧 进行中 |
+| Phase 7 | 生态：远程 `.agent` 仓库、Agent 商店、跨主机 Memory Sync                                                                                                                                                                                       | 🔮 规划中 |
 
 ---
 
@@ -229,7 +262,7 @@ tools = ["web_search", "read_file", "write_file"]
 
 - 架构设计：[`docs/design/zh/`](./docs/design/zh/)
 - 模块级设计：[`docs/module-design/zh/`](./docs/module-design/zh/)
-- 架构决策记录（ADR）：[`docs/adr/zh/`](./docs/adr/zh/)（ADR-009 → ADR-058+）
+- 设计与决策记录：[`docs/adr/zh/`](./docs/adr/zh/)
 - 开发者约定：[`AGENTS.md`](./AGENTS.md)
 
 ---
