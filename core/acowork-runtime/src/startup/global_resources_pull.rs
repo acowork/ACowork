@@ -522,7 +522,9 @@ mod tests {
                 acowork_core::mqtt_proto::data_envelope::Payload::AvailableProviders(
                     acowork_core::mqtt_proto::AvailableProviders {
                         version,
+                        #[allow(deprecated)]
                         default_compact_model: None,
+                        default_compact_models: vec![],
                         providers: vec![ProviderRef {
                             id: "openai".to_string(),
                             base_url: "https://api.openai.com/v1".to_string(),
@@ -581,7 +583,9 @@ mod tests {
             let mut guard = cache.write().await;
             guard.providers = Some(acowork_core::mqtt_proto::AvailableProviders {
                 version: 9,
+                #[allow(deprecated)]
                 default_compact_model: None,
+                default_compact_models: vec![],
                 providers: vec![],
             });
         }
@@ -735,7 +739,9 @@ mod tests {
             });
             guard.providers = Some(acowork_core::mqtt_proto::AvailableProviders {
                 version: 9,
+                #[allow(deprecated)]
                 default_compact_model: None,
+                default_compact_models: vec![],
                 providers: vec![],
             });
         }

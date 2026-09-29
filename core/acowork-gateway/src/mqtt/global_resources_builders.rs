@@ -226,16 +226,28 @@ pub(crate) fn build_available_providers(gw: &GatewayState) -> AvailableProviders
     AvailableProviders {
         version: cache.version,
         providers,
-        // ADR-056: forward the global default compact model so Runtime can
-        // resolve the distillation fallback chain without an extra round-trip.
-        // `None` (i.e. not set in `provider_list.json`) means "no global
-        // override" — Runtime falls back to provider.compact_model and chat.
-        default_compact_model: cache.default_compact_model.clone().map(|r| {
-            CompactModelRef {
+        // ADR-056: forward the global compact-model candidate list so
+        // Runtime can resolve the distillation fallback chain without an
+        // extra round-trip. Empty = "no global override" — Runtime falls
+        // back to provider.compact_model and chat. Field 3 mirrors the
+        // head of the list for old Runtimes that predate the list form.
+        #[allow(deprecated)]
+        default_compact_model: cache
+            .default_compact_models
+            .first()
+            .cloned()
+            .map(|r| CompactModelRef {
                 provider_id: r.provider_id,
                 model_id: r.model_id,
-            }
-        }),
+            }),
+        default_compact_models: cache
+            .default_compact_models
+            .iter()
+            .map(|r| CompactModelRef {
+                provider_id: r.provider_id.clone(),
+                model_id: r.model_id.clone(),
+            })
+            .collect(),
     }
 }
 

@@ -18,22 +18,42 @@ use acowork_memory::consolidation::{LlmMessage, LlmResponse, TripleExtractorLlm}
 ///
 /// Uses a fixed low temperature (0.1) and no tool-calling to get
 /// deterministic structured output from the LLM.
+///
+/// Holds an ordered candidate list (ADR-056 list follow-up): each `chat()`
+/// call walks the candidates in order and returns the first success; when
+/// all fail the last error is returned. Candidates with different providers
+/// carry their own `Arc<dyn Provider>` (built by the caller), so
+/// cross-provider distillation works in the background pipeline too.
 pub struct ProviderLlmAdapter {
-    provider: std::sync::Arc<dyn Provider>,
-    model: String,
+    candidates: Vec<DistillCandidate>,
+}
+
+/// One distillation target: a provider instance plus the model to request.
+pub struct DistillCandidate {
+    pub provider: std::sync::Arc<dyn Provider>,
+    pub model: String,
 }
 
 impl ProviderLlmAdapter {
-    /// Create a new adapter from a Provider and model name.
+    /// Create a new single-candidate adapter from a Provider and model name.
     pub fn new(provider: std::sync::Arc<dyn Provider>, model: String) -> Self {
-        Self { provider, model }
+        Self::with_candidates(vec![DistillCandidate { provider, model }])
+    }
+
+    /// Create an adapter with an ordered candidate fallback chain.
+    /// Panics-free on empty list: a single placeholder candidate must be
+    /// supplied by the caller (resolution chains always end with one).
+    pub fn with_candidates(candidates: Vec<DistillCandidate>) -> Self {
+        debug_assert!(!candidates.is_empty(), "ProviderLlmAdapter needs ≥1 candidate");
+        Self { candidates }
     }
 }
 
 #[async_trait::async_trait]
 impl TripleExtractorLlm for ProviderLlmAdapter {
     async fn chat(&self, messages: Vec<LlmMessage>) -> std::result::Result<LlmResponse, String> {
-        // Convert grafeo LlmMessage → acowork-core ChatMessage.
+        // Convert grafeo LlmMessage → acowork ChatMessage once; reused per
+        // candidate (ChatMessage is cheap to clone relative to an LLM call).
         let chat_messages: Vec<ChatMessage> = messages
             .iter()
             .map(|m| {
@@ -50,26 +70,45 @@ impl TripleExtractorLlm for ProviderLlmAdapter {
             })
             .collect();
 
-        let request = ChatRequest {
-            model: self.model.clone(),
-            messages: chat_messages,
-            temperature: Some(0.1), // Low temperature for structured extraction
-            max_tokens: Some(2048), // Enough for triple arrays / classification JSON
-            tools: None,            // No tool calling for extraction tasks
-            reasoning_effort: None,
-            thinking_mode: None,
-        };
+        let mut last_err = String::from("no distiller candidates configured");
+        for (i, cand) in self.candidates.iter().enumerate() {
+            let request = ChatRequest {
+                model: cand.model.clone(),
+                messages: chat_messages.clone(),
+                temperature: Some(0.1), // Low temperature for structured extraction
+                max_tokens: Some(2048), // Enough for triple arrays / classification JSON
+                tools: None,            // No tool calling for extraction tasks
+                reasoning_effort: None,
+                thinking_mode: None,
+            };
 
-        let response = self
-            .provider
-            .chat(request)
-            .await
-            .map_err(|e| format!("Provider chat failed: {}", e))?;
-
-        Ok(LlmResponse {
-            content: response.content,
-            usage_tokens: response.usage.map(|u| u.total_tokens),
-        })
+            match cand.provider.chat(request).await {
+                Ok(response) => {
+                    if i > 0 {
+                        tracing::info!(
+                            candidate_index = i,
+                            model = %cand.model,
+                            "Distiller LLM call succeeded on fallback candidate"
+                        );
+                    }
+                    return Ok(LlmResponse {
+                        content: response.content,
+                        usage_tokens: response.usage.map(|u| u.total_tokens),
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        candidate_index = i,
+                        model = %cand.model,
+                        provider = %cand.provider.name(),
+                        error = %e,
+                        "Distiller LLM candidate failed, trying next"
+                    );
+                    last_err = format!("Provider chat failed: {}", e);
+                }
+            }
+        }
+        Err(last_err)
     }
 }
 

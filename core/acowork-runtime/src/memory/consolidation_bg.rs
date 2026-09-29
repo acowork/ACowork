@@ -580,8 +580,10 @@ async fn run_episodic_distiller_step(
 /// Parameters for [`start_consolidation_pipeline`].
 pub struct ConsolidationParams {
     pub provider: Arc<dyn acowork_memory::MemoryProvider>,
-    pub llm_provider: Arc<dyn acowork_core::providers::traits::Provider>,
-    pub model: String,
+    /// Pre-built distiller LLM adapter carrying the ordered candidate
+    /// fallback chain (ADR-056 list follow-up — built by
+    /// `AgentCore::build_distiller_llm`).
+    pub llm_adapter: Arc<ProviderLlmAdapter>,
     pub embedding_provider: Arc<dyn EmbeddingProvider>,
     pub scheduler_config: SchedulerConfig,
     pub poll_interval: Duration,
@@ -598,7 +600,7 @@ pub struct ConsolidationParams {
 pub fn start_consolidation_pipeline(
     params: ConsolidationParams,
 ) -> (Arc<ConsolidationTimer>, ConsolidationBgTask) {
-    let llm_adapter = Arc::new(ProviderLlmAdapter::new(params.llm_provider, params.model));
+    let llm_adapter = params.llm_adapter;
 
     let scheduler = Arc::new(ConsolidationTimer::new(params.scheduler_config));
 

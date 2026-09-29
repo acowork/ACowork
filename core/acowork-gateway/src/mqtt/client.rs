@@ -498,8 +498,10 @@ mod tests {
                 acowork_core::mqtt_proto::AvailableProviders {
                     version: 1,
                     providers: vec![],
-                    // ADR-056: forward the global default compact model (None here).
+                    // ADR-056: forward the global compact-model list (empty here).
+                    #[allow(deprecated)]
                     default_compact_model: None,
+                    default_compact_models: vec![],
                 },
             )),
         };

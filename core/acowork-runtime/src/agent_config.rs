@@ -201,11 +201,17 @@ pub struct AgentConfig {
     /// `[memory.distiller].enabled` initial value (default false).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub distiller_enabled: Option<bool>,
-    /// Runtime-chosen distiller model. `None` = fall through to manifest
-    /// model → global `default_compact_model` → first provider model
+    /// Runtime-chosen distiller model candidate list (ordered, tried in
+    /// order on call failure). `None` = fall through to manifest model →
+    /// global `default_compact_models` → first provider model
     /// (ADR-071 D5 resolution chain).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub distiller_model: Option<acowork_core::protocol::CompactModelRef>,
+    pub distiller_models: Option<Vec<acowork_core::protocol::CompactModelRef>>,
+    /// Legacy single-value form of `distiller_models` (pre-list
+    /// `agent_config.json`). Read-on-migrate only — folded into
+    /// `distiller_models` by `migrate_legacy_fields()`; never serialized.
+    #[serde(default, skip_serializing, alias = "distiller_model")]
+    pub distiller_model_legacy: Option<acowork_core::protocol::CompactModelRef>,
     /// Distiller periodic trigger interval (minutes). `None` = manifest /
     /// default (60).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -262,6 +268,18 @@ pub struct AgentConfig {
     pub session_language: Option<String>,
 }
 
+impl AgentConfig {
+    /// Fold the legacy single `distiller_model` into `distiller_models`.
+    /// Idempotent; called once after loading from disk.
+    pub fn migrate_legacy_fields(&mut self) {
+        if let Some(legacy) = self.distiller_model_legacy.take()
+            && self.distiller_models.is_none()
+        {
+            self.distiller_models = Some(vec![legacy]);
+        }
+    }
+}
+
 /// Filename for per-agent config in the workspace config directory.
 const AGENT_CONFIG_FILE: &str = "agent_config.json";
 
@@ -283,8 +301,9 @@ pub fn load_agent_config(work_dir: &Path) -> Result<Option<AgentConfig>, String>
     let raw = std::fs::read_to_string(&path)
         .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
 
-    let cfg: AgentConfig = serde_json::from_str(&raw)
+    let mut cfg: AgentConfig = serde_json::from_str(&raw)
         .map_err(|e| format!("Failed to parse {}: {}", path.display(), e))?;
+    cfg.migrate_legacy_fields();
 
     tracing::info!(
         work_dir = %work_dir.display(),
@@ -1308,8 +1327,9 @@ pub fn load_agent_provider_config(
     let raw = std::fs::read_to_string(&path)
         .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
 
-    let cfg: acowork_core::protocol::AgentProviderConfig = serde_json::from_str(&raw)
+    let mut cfg: acowork_core::protocol::AgentProviderConfig = serde_json::from_str(&raw)
         .map_err(|e| format!("Failed to parse {}: {}", path.display(), e))?;
+    cfg.migrate_legacy_defaults();
 
     tracing::info!(
         work_dir = %work_dir.display(),
@@ -1375,12 +1395,13 @@ pub fn save_agent_provider_config_from_available(
     work_dir: &Path,
     providers: &[acowork_core::protocol::ProviderListItem],
     version: u64,
-    default_compact_model: Option<&acowork_core::protocol::CompactModelRef>,
+    default_compact_models: &[acowork_core::protocol::CompactModelRef],
 ) -> Result<(), String> {
     let cfg = acowork_core::protocol::AgentProviderConfig {
         providers: providers.to_vec(),
         version,
-        default_compact_model: default_compact_model.cloned(),
+        default_compact_models: default_compact_models.to_vec(),
+        default_compact_model_legacy: None,
     };
     save_agent_provider_config(work_dir, &cfg)
 }

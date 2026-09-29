@@ -138,17 +138,19 @@ pub struct AgentCore {
     /// on their next `resolve_distill_model()` call. A plain HashMap
     /// would be snapshotted per session and go stale.
     pub(crate) provider_compact_models: Arc<RwLock<HashMap<String, Option<String>>>>,
-    /// ADR-056: Global default compact model reference — `(provider_id, model_id)`.
-    /// Set from `AvailableProviders.default_compact_model` at session init.
-    /// Top-priority candidate in the distillation fallback chain
-    /// (`resolve_distill_model`). `None` means no global override; runtime
-    /// then falls back to `provider_compact_models` (Level 2) and finally the
-    /// session's current chat model (Level 3).
+    /// ADR-056: Ordered global compact-model candidate list — each entry is
+    /// `(provider_id, model_id)`. Set from
+    /// `AvailableProviders.default_compact_models` at session init.
+    /// Top-priority tier in the distillation fallback chain
+    /// (`resolve_distill_model`): entries are tried in order; when all are
+    /// unusable the runtime falls back to `provider_compact_models`
+    /// (provider tier) and finally the session's current chat model.
+    /// Empty means no global override.
     ///
     /// Shared across sessions via `Arc<RwLock<...>>` for the same reason
     /// as [`Self::provider_compact_models`] — the global pick must reach
     /// in-flight sessions, not just sessions created after the change.
-    pub(crate) default_compact_model: Arc<RwLock<Option<(String, String)>>>,
+    pub(crate) default_compact_models: Arc<RwLock<Vec<(String, String)>>>,
     /// LLM temperature override (from Gateway config via agent_config.json).
     /// Level 1 in the resolution chain.
     pub(crate) temperature_override: Option<f32>,
@@ -168,7 +170,7 @@ pub struct AgentCore {
     /// ADR-071 D4/D6: runtime distiller settings (`agent_config.json`).
     /// Layer 1 of the distiller config chain, above the manifest
     /// `[memory.distiller]` section. Written by the memory-panel PUT
-    /// (`distiller_enabled` / `distiller_model` / …) and applied when the
+    /// (`distiller_enabled` / `distiller_models` / …) and applied when the
     /// consolidation pipeline starts or is rebuilt.
     pub(crate) distiller_runtime: DistillerRuntimeSettings,
     /// Episodic forgetting runtime settings (`agent_config.json`). Layer 1
@@ -380,10 +382,11 @@ pub struct AgentCore {
 pub(crate) struct DistillerRuntimeSettings {
     /// Master switch (overrides `[memory.distiller].enabled`).
     pub enabled: Option<bool>,
-    /// Distiller model ref `{provider_id, model_id}` (overrides the
-    /// manifest pair). `None` → manifest pair → global
-    /// `default_compact_model` → provider compact_model → chat model.
-    pub model: Option<acowork_core::protocol::CompactModelRef>,
+    /// Ordered distiller model candidate list (overrides the manifest
+    /// pair). Tried in order; when all are unusable the chain continues
+    /// manifest pair → global `default_compact_models` → first provider
+    /// model. Empty provider_id = the agent's active provider.
+    pub models: Vec<acowork_core::protocol::CompactModelRef>,
     /// Periodic trigger interval in minutes (overrides manifest).
     pub interval_minutes: Option<u64>,
     /// Unconsolidated-episode backlog threshold (overrides manifest).
@@ -553,7 +556,7 @@ impl AgentCore {
             search_provider_list: Arc::new(RwLock::new(Vec::new())),
             compat_cache: None,
             provider_compact_models: Arc::new(RwLock::new(HashMap::new())),
-            default_compact_model: Arc::new(RwLock::new(None)),
+            default_compact_models: Arc::new(RwLock::new(Vec::new())),
             temperature_override: None,
             manifest_temperature,
             context_window_override: None,
@@ -1031,10 +1034,10 @@ impl AgentCore {
             self.distiller_runtime.enabled = Some(v);
             distiller_changed = true;
         }
-        if let Some(ref v) = overrides.distiller_model
-            && self.distiller_runtime.model.as_ref() != Some(v)
+        if let Some(ref v) = overrides.distiller_models
+            && self.distiller_runtime.models != *v
         {
-            self.distiller_runtime.model = Some(v.clone());
+            self.distiller_runtime.models = v.clone();
             distiller_changed = true;
         }
         if let Some(v) = overrides.distiller_interval_minutes
@@ -1058,7 +1061,7 @@ impl AgentCore {
         if distiller_changed {
             tracing::info!(
                 enabled = ?self.distiller_runtime.enabled,
-                model = ?self.distiller_runtime.model,
+                models = ?self.distiller_runtime.models,
                 interval_minutes = ?self.distiller_runtime.interval_minutes,
                 accumulation_threshold = ?self.distiller_runtime.accumulation_threshold,
                 idle_minutes = ?self.distiller_runtime.idle_minutes,
@@ -1417,42 +1420,153 @@ impl AgentCore {
         timer.update_config(self.distiller_scheduler_config());
     }
 
-    /// ADR-071 D4/D5: resolve the LLM model used by the EpisodicDistiller.
+    /// ADR-071 D4/D5 (+ list follow-up): resolve the ordered distiller model
+    /// candidate list used by the EpisodicDistiller.
     ///
     /// Chain (mirrors the summary/distill model selection used by
     /// `resolve_distill_model` in the session layer):
-    ///   1. `agent_config.json` `distiller_model` (runtime, Layer 1)
-    ///   2. manifest `[memory.distiller].model_*` (Layer 2)
-    ///   3. global `default_compact_model` (ADR-056)
+    ///   1. `agent_config.json` `distiller_models` (runtime, Layer 1) — list
+    ///   2. manifest `[memory.distiller].model_*` (Layer 2) — single, prepended
+    ///   3. global `default_compact_models` (ADR-056) — list
     ///   4. first model in the provider list (legacy fallback)
     ///
-    /// The distiller's LLM adapter (`ProviderLlmAdapter`) runs against the
-    /// agent's active provider, so the chosen `model_id` must be servable by
-    /// that provider; provider switching for a cross-provider distiller
-    /// model is out of scope for the background pipeline (the session-layer
-    /// summary path can rebuild providers because it owns a session core).
-    pub(crate) fn resolve_distiller_model_id(&self) -> String {
-        // Layer 1: agent_config.json (runtime memory-panel choice).
-        if let Some(m) = &self.distiller_runtime.model {
-            return m.model_id.clone();
+    /// Entries are `(provider_id, model_id)`; an empty `provider_id` means
+    /// "the agent's active provider" (manifest pairs and the legacy fallback
+    /// historically carried only a model id). `ProviderLlmAdapter` walks the
+    /// list in order, rebuilding a provider only for cross-provider
+    /// candidates.
+    pub(crate) fn resolve_distiller_targets(&self) -> Vec<acowork_core::protocol::CompactModelRef> {
+        use acowork_core::protocol::CompactModelRef;
+        let mut out: Vec<CompactModelRef> = Vec::new();
+        let push = |pid: String, mid: String, out: &mut Vec<CompactModelRef>| {
+            if !out
+                .iter()
+                .any(|r| r.provider_id == pid && r.model_id == mid)
+            {
+                out.push(CompactModelRef {
+                    provider_id: pid,
+                    model_id: mid,
+                });
+            }
+        };
+        // Layer 1: agent_config.json (runtime memory-panel choice, ordered).
+        for m in &self.distiller_runtime.models {
+            push(m.provider_id.clone(), m.model_id.clone(), &mut out);
         }
-        // Layer 2: manifest [memory.distiller].
+        // Layer 2: manifest [memory.distiller] (single author-declared pair;
+        // empty/absent provider = active provider, same as before).
         if let Some(d) = self.manifest.memory.distiller.as_ref()
             && let Some(mid) = d.model_id.as_ref()
         {
-            return mid.clone();
+            push(
+                d.model_provider_id.clone().unwrap_or_default(),
+                mid.clone(),
+                &mut out,
+            );
         }
-        // Layer 3: global default compact model.
-        if let Some((_, mid)) = self.default_compact_model.read().unwrap().as_ref() {
-            return mid.clone();
+        // Layer 3: global compact-model candidate list (Harness pick).
+        for (pid, mid) in self.default_compact_models.read().unwrap().iter() {
+            push(pid.clone(), mid.clone(), &mut out);
         }
-        // Layer 4: first model in the provider list (legacy convention).
-        let list = self.global_provider_list.read().unwrap();
-        list.iter()
-            .flat_map(|p| p.models.iter())
-            .next()
-            .map(|m| m.id.clone())
-            .unwrap_or_else(|| "default".to_string())
+        // Layer 4: first model in the provider list (legacy convention —
+        // model id against the active provider).
+        if out.is_empty() {
+            let list = self.global_provider_list.read().unwrap();
+            let first = list.iter().flat_map(|p| p.models.iter()).next();
+            match first {
+                Some(m) => push(String::new(), m.id.clone(), &mut out),
+                None => push(String::new(), "default".to_string(), &mut out),
+            }
+        }
+        out
+    }
+
+    /// Build the distiller LLM adapter from [`Self::resolve_distiller_targets`]:
+    /// one [`DistillCandidate`] per target, with a per-candidate provider
+    /// (cross-provider targets rebuild their own `Provider`, mirroring
+    /// `SessionCore::build_provider_for` minus the session retry-UX wiring).
+    /// Targets whose provider cannot be built are skipped; if nothing
+    /// survives, the active provider is used so the adapter always has ≥1
+    /// candidate.
+    pub(crate) fn build_distiller_llm(&self) -> Arc<crate::memory::llm_adapter::ProviderLlmAdapter> {
+        use crate::memory::llm_adapter::{DistillCandidate, ProviderLlmAdapter};
+        let targets = self.resolve_distiller_targets();
+        let mut candidates: Vec<DistillCandidate> = Vec::with_capacity(targets.len());
+        for t in targets {
+            let provider = if t.provider_id.is_empty() {
+                self.provider.clone()
+            } else {
+                match self.build_compact_provider(&t.provider_id) {
+                    Some(p) => p,
+                    None => {
+                        tracing::warn!(
+                            provider_id = %t.provider_id,
+                            model_id = %t.model_id,
+                            "Distiller target provider unavailable, skipping candidate"
+                        );
+                        continue;
+                    }
+                }
+            };
+            candidates.push(DistillCandidate {
+                provider,
+                model: t.model_id,
+            });
+        }
+        if candidates.is_empty() {
+            candidates.push(DistillCandidate {
+                provider: self.provider.clone(),
+                model: "default".to_string(),
+            });
+        }
+        Arc::new(ProviderLlmAdapter::with_candidates(candidates))
+    }
+
+    /// Build a standalone `Provider` for a compact/distill target id.
+    /// Same construction as `SessionCore::build_provider_for` but without
+    /// session retry-UX wiring (the background pipeline has no session to
+    /// render retry state into).
+    fn build_compact_provider(
+        &self,
+        provider_id: &str,
+    ) -> Option<Arc<dyn acowork_core::providers::traits::Provider>> {
+        let provider_meta = self
+            .global_provider_list
+            .read()
+            .unwrap()
+            .iter()
+            .find(|p| p.id == provider_id)
+            .cloned()?;
+        let api_key = {
+            let vault = self.provider_key_vault.read().unwrap();
+            crate::agent::session_core::resolve_provider_key(
+                vault.get(provider_id).map(|v| v.as_slice()),
+                None,
+            )
+        };
+        let timeouts =
+            Some(crate::providers::router::ProviderTimeouts::from(&self.config));
+        let wiring = crate::providers::router::ProviderWiring {
+            provider_id: Some(provider_meta.id.clone()),
+            compat_cache: self.compat_cache.clone(),
+        };
+        let raw = crate::providers::router::create_provider_with_wiring(
+            &provider_meta.id,
+            &provider_meta.protocol_type,
+            api_key.as_deref(),
+            if provider_meta.base_url.is_empty() {
+                None
+            } else {
+                Some(&provider_meta.base_url)
+            },
+            timeouts,
+            wiring,
+        );
+        let retry_config =
+            crate::providers::reliable::RetryConfig::from(&self.config.timeouts.retry);
+        Some(Arc::new(crate::providers::reliable::ReliableProvider::new(
+            raw, retry_config,
+        )))
     }
 
     /// ADR-071 D2: run one EpisodicDistiller pass on demand (manual trigger).
@@ -1474,7 +1588,6 @@ impl AgentCore {
         &self,
     ) -> Result<Option<acowork_memory::consolidation::DistillerResult>, String> {
         use crate::memory::consolidation_bg::run_episodic_distiller_step_once;
-        use crate::memory::llm_adapter::ProviderLlmAdapter;
         use acowork_memory::consolidation::{SchedulerConfig, TripleExtractorLlm};
 
         if !self.distiller_scheduler_config().distiller_enabled {
@@ -1491,10 +1604,7 @@ impl AgentCore {
             .embedding_provider
             .clone()
             .ok_or_else(|| "embedding provider not initialized".to_string())?;
-        let llm: Arc<dyn TripleExtractorLlm> = Arc::new(ProviderLlmAdapter::new(
-            self.provider.clone(),
-            self.resolve_distiller_model_id(),
-        ));
+        let llm: Arc<dyn TripleExtractorLlm> = self.build_distiller_llm();
         // Manual run uses the effective runtime-over-manifest distiller
         // parameters when present; defaults otherwise. Enabled is forced
         // true (the gate above already checked the effective switch).
@@ -1539,7 +1649,7 @@ impl AgentCore {
         }
         use crate::memory::consolidation_bg::{ConsolidationParams, start_consolidation_pipeline};
         use std::time::Duration;
-        let model = self.resolve_distiller_model_id();
+        let llm_adapter = self.build_distiller_llm();
         // ADR-068 M4/M7 + ADR-071 D4/D6: resolve the distiller switch and
         // scheduler parameters from the runtime `agent_config.json` layer
         // (memory-panel) over the manifest `[memory.distiller]` section.
@@ -1548,8 +1658,7 @@ impl AgentCore {
         let scheduler_config = self.distiller_scheduler_config();
         let params = ConsolidationParams {
             provider: provider.clone(),
-            llm_provider: self.provider.clone(),
-            model,
+            llm_adapter,
             embedding_provider: embedding.clone(),
             scheduler_config,
             poll_interval: Duration::from_secs(60),
@@ -1634,15 +1743,11 @@ impl AgentCore {
     ///      local base_url (Ollama native protocol, or any base_url
     ///      pointing at localhost / 127.0.0.1 / 0.0.0.0 / ::1).
     ///
-    /// This is what `resolve_distill_model` consults before accepting
-    /// Level 1 — without the local-provider branch, a user-chosen Ollama
-    /// default (ADR-056 §2.3 "chat 用 deepseek,蒸馏用本地 qwen2.5:0.5b")
+    /// This is what `resolve_distill_model` consults before accepting a
+    /// global candidate — without the local-provider branch, a user-chosen
+    /// Ollama default (ADR-056 §2.3 "chat 用 deepseek,蒸馏用本地 qwen2.5:0.5b")
     /// would always be rejected and the feature would never fire.
-    pub fn is_default_compact_provider_available(&self) -> bool {
-        let guard = self.default_compact_model.read().unwrap();
-        let Some((pid, _)) = guard.as_ref() else {
-            return false;
-        };
+    pub fn is_compact_provider_available(&self, pid: &str) -> bool {
         // 1) Cloud provider with a configured key.
         if self
             .get_provider_api_key(pid)
@@ -1654,7 +1759,7 @@ impl AgentCore {
         // 2) Local provider — no key required, but must still be present in
         //    the provider list with a reachable local base_url.
         let list = self.global_provider_list.read().unwrap();
-        list.iter().find(|p| p.id == *pid).is_some_and(|p| {
+        list.iter().find(|p| p.id == pid).is_some_and(|p| {
             matches!(p.protocol_type, ProtocolType::Ollama)
                 || crate::providers::is_local_base_url(&p.base_url)
         })
@@ -1831,7 +1936,7 @@ impl Clone for AgentCore {
             search_provider_list: self.search_provider_list.clone(),
             compat_cache: self.compat_cache.clone(),
             provider_compact_models: Arc::clone(&self.provider_compact_models),
-            default_compact_model: Arc::clone(&self.default_compact_model),
+            default_compact_models: Arc::clone(&self.default_compact_models),
             temperature_override: self.temperature_override,
             manifest_temperature: self.manifest_temperature,
             context_window_override: self.context_window_override,
@@ -2943,7 +3048,7 @@ mod tests {
     fn test_agent_core_clone_shares_arc_for_compact_models() {
         // Regression (compact-model switch didn't take effect): the SSE
         // session kept distilling with the stale provider after the global
-        // pick was switched to minimax. Root cause — `default_compact_model`
+        // pick was switched to minimax. Root cause — `default_compact_models`
         // and `provider_compact_models` were plain fields, so the deep clone
         // taken by `SessionTask::new` snapshotted them and a write from
         // `SessionManager::update_global_provider_list` (which holds the
@@ -2957,8 +3062,8 @@ mod tests {
 
         // Simulate `update_global_provider_list` writing through the
         // canonical handle held by SessionManager.
-        *core.default_compact_model.write().unwrap() =
-            Some(("minimax".to_string(), "MiniMax-M2.5".to_string()));
+        core.default_compact_models.write().unwrap()
+            .push(("minimax".to_string(), "MiniMax-M2.5".to_string()));
         core.provider_compact_models
             .write()
             .unwrap()
@@ -2968,13 +3073,13 @@ mod tests {
         // The in-flight session's clone must observe all three writes.
         assert_eq!(
             session_clone
-                .default_compact_model
+                .default_compact_models
                 .read()
                 .unwrap()
-                .as_ref()
+                .first()
                 .map(|(p, m)| (p.as_str(), m.as_str())),
             Some(("minimax", "MiniMax-M2.5")),
-            "default_compact_model must be shared, not snapshotted per session"
+            "default_compact_models must be shared, not snapshotted per session"
         );
         assert_eq!(
             session_clone

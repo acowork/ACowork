@@ -155,8 +155,9 @@ fn apply_field_patch(
         ConfigField::DistillerEnabled => {
             cfg.distiller_enabled = patch_typed::<bool>(field, op);
         }
-        ConfigField::DistillerModel => {
-            cfg.distiller_model = patch_typed::<acowork_core::protocol::CompactModelRef>(field, op);
+        ConfigField::DistillerModels => {
+            cfg.distiller_models =
+                patch_typed::<Vec<acowork_core::protocol::CompactModelRef>>(field, op);
         }
         ConfigField::DistillerIntervalMinutes => {
             cfg.distiller_interval_minutes = patch_typed::<u64>(field, op);
@@ -282,44 +283,41 @@ mod tests {
         assert_eq!(cfg.distiller_enabled, None);
     }
 
-    /// ADR-071 D4/D5: the model patch accepts the `{provider_id, model_id}`
-    /// wire shape, refuses a plain string, and Clear nulls it.
+    /// ADR-071 D4/D5 (list form): the models patch accepts an array of
+    /// `{provider_id, model_id}` refs, refuses a plain string, and Clear
+    /// nulls it.
     #[test]
-    fn test_distiller_model_patch() {
+    fn test_distiller_models_patch() {
         let mut cfg = AgentConfig::default();
         apply(
             &mut cfg,
             &[patch(
-                ConfigField::DistillerModel,
-                serde_json::json!({
-                    "provider_id": "openai",
-                    "model_id": "gpt-4o-mini",
-                }),
+                ConfigField::DistillerModels,
+                serde_json::json!([
+                    {"provider_id": "openai", "model_id": "gpt-4o-mini"},
+                    {"provider_id": "ollama", "model_id": "qwen2.5:0.5b"},
+                ]),
             )],
         );
-        assert_eq!(
-            cfg.distiller_model.as_ref().map(|m| m.provider_id.as_str()),
-            Some("openai")
-        );
-        assert_eq!(
-            cfg.distiller_model.as_ref().map(|m| m.model_id.as_str()),
-            Some("gpt-4o-mini")
-        );
+        let models = cfg.distiller_models.as_ref().unwrap();
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].provider_id, "openai");
+        assert_eq!(models[1].model_id, "qwen2.5:0.5b");
 
         // Wrong-typed value: clears the field (see test_distiller_enabled_patch
         // for the pre-existing dispatch semantics).
         apply(
             &mut cfg,
             &[patch(
-                ConfigField::DistillerModel,
+                ConfigField::DistillerModels,
                 serde_json::json!("oops"),
             )],
         );
-        assert_eq!(cfg.distiller_model, None, "bad shape clears the field");
+        assert_eq!(cfg.distiller_models, None, "bad shape clears the field");
 
         // Explicit clear.
-        apply(&mut cfg, &[clear(ConfigField::DistillerModel)]);
-        assert_eq!(cfg.distiller_model, None);
+        apply(&mut cfg, &[clear(ConfigField::DistillerModels)]);
+        assert_eq!(cfg.distiller_models, None);
     }
 
     /// ADR-071 D1/D3: the three trigger fields accept u64 numbers (accumulation
@@ -390,10 +388,10 @@ mod tests {
             None, // approval_timeout_secs absent -> skip
             None, // compression_ratio_threshold absent -> skip
             Some(serde_json::json!(true)), // distiller_enabled
-            Some(serde_json::json!({
-                "provider_id": "p",
-                "model_id": "m",
-            })), // distiller_model
+            None, // distiller_model (legacy) absent
+            Some(serde_json::json!([
+                {"provider_id": "p", "model_id": "m"}
+            ])), // distiller_models
             Some(serde_json::json!(30)),   // distiller_interval_minutes
             Some(serde_json::json!(null)), // distiller_accumulation_threshold -> Clear
             None,                          // distiller_idle_minutes absent -> skip
@@ -416,8 +414,8 @@ mod tests {
             &FieldPatch::Set(serde_json::json!(true))
         )));
         assert!(fields.contains(&(
-            ConfigField::DistillerModel,
-            &FieldPatch::Set(serde_json::json!({"provider_id":"p","model_id":"m"}))
+            ConfigField::DistillerModels,
+            &FieldPatch::Set(serde_json::json!([{"provider_id":"p","model_id":"m"}]))
         )));
         assert!(fields.contains(&(
             ConfigField::DistillerIntervalMinutes,
@@ -449,6 +447,7 @@ mod tests {
             None,                          // compression_ratio_threshold absent -> skip
             None,                          // distiller_enabled absent
             None,                          // distiller_model absent
+            None,                          // distiller_models absent
             None,                          // distiller_interval_minutes absent
             None,                          // distiller_accumulation_threshold absent
             None,                          // distiller_idle_minutes absent

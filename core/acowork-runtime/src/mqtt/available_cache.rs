@@ -447,7 +447,9 @@ mod tests {
                     AvailableProviders {
                         version: 5,
                         // ADR-056: No global default compact model in this fixture.
+                        #[allow(deprecated)]
                         default_compact_model: None,
+                        default_compact_models: vec![],
                         providers: vec![
                             acowork_core::mqtt_proto::ProviderRef {
                                 id: "openai".to_string(),
@@ -496,7 +498,9 @@ mod tests {
                 acowork_core::mqtt_proto::data_envelope::Payload::AvailableProviders(
                     AvailableProviders {
                         version: 1,
+                        #[allow(deprecated)]
                         default_compact_model: None,
+                        default_compact_models: vec![],
                         providers: vec![acowork_core::mqtt_proto::ProviderRef {
                             id: "ollama-local".to_string(),
                             base_url: "http://localhost:11434/v1".to_string(),
@@ -529,7 +533,9 @@ mod tests {
                 acowork_core::mqtt_proto::data_envelope::Payload::AvailableProviders(
                     AvailableProviders {
                         version: 1,
+                        #[allow(deprecated)]
                         default_compact_model: None,
+                        default_compact_models: vec![],
                         providers: vec![acowork_core::mqtt_proto::ProviderRef {
                             id: "anthropic".to_string(),
                             base_url: "https://api.anthropic.com/v1".to_string(),
@@ -561,7 +567,9 @@ mod tests {
                 acowork_core::mqtt_proto::data_envelope::Payload::AvailableProviders(
                     AvailableProviders {
                         version: 1,
+                        #[allow(deprecated)]
                         default_compact_model: None,
+                        default_compact_models: vec![],
                         providers: vec![],
                     },
                 ),
@@ -897,7 +905,9 @@ mod tests {
                     acowork_core::mqtt_proto::data_envelope::Payload::AvailableProviders(
                         AvailableProviders {
                             version: 9,
+                            #[allow(deprecated)]
                             default_compact_model: None,
+                            default_compact_models: vec![],
                             providers: vec![acowork_core::mqtt_proto::ProviderRef {
                                 id: "openai".to_string(),
                                 base_url: "https://api.openai.com/v1".to_string(),
@@ -1027,7 +1037,9 @@ mod tests {
                     acowork_core::mqtt_proto::data_envelope::Payload::AvailableProviders(
                         AvailableProviders {
                             version,
+                            #[allow(deprecated)]
                             default_compact_model: None,
+                            default_compact_models: vec![],
                             providers: vec![],
                         },
                     ),

@@ -135,7 +135,20 @@ message AvailableProviders {
   //   ② provider.compact_model on the session's current provider
   //   ③ the session's current chat model
   // Absent / unset = no global override; behavior degrades to legacy chain.
-  optional CompactModelRef default_compact_model = 3;
+  //
+  // DEPRECATED: superseded by `default_compact_models` (ordered list).
+  // Kept so an old Runtime can still read the top pick; Gateway now mirrors
+  // the FIRST element of the list here. Do not remove before all Runtimes
+  // in the field understand field 4.
+  optional CompactModelRef default_compact_model = 3 [deprecated = true];
+
+  // ADR-056 follow-up: Ordered list of global compact-model candidates.
+  // The Runtime tries them in order (selection-phase availability check +
+  // call-phase LLM failure both step down to the next entry); when every
+  // candidate fails it falls back to the legacy chain above (②③).
+  // Empty / absent = no global override. When non-empty, this field is the
+  // source of truth — field 3 is only a compatibility mirror of its head.
+  repeated CompactModelRef default_compact_models = 4;
 }
 
 /// ADR-056: Reference to a (provider_id, model_id) pair.

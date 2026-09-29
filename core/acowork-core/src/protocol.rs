@@ -373,13 +373,33 @@ pub struct AgentProviderConfig {
     pub providers: Vec<ProviderListItem>,
     /// Monotonic version for diff sync (mirrors AvailableProviders.version).
     pub version: u64,
-    /// ADR-056: Global default compact model reference — picked by the user
-    /// in the Harness from across all configured providers. Runtime uses this
-    /// as the top-priority candidate in the distillation fallback chain.
-    /// `None` (or absent in on-disk JSON) means no global override; the
-    /// runtime then falls back to `provider.compact_model` and the chat model.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub default_compact_model: Option<CompactModelRef>,
+    /// ADR-056: Ordered list of global compact-model candidates — picked by
+    /// the user in the Harness from across all configured providers. The
+    /// Runtime tries them in order; when all fail it falls back to
+    /// `provider.compact_model` and the chat model. Empty = no global override.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub default_compact_models: Vec<CompactModelRef>,
+    /// Legacy single-value form of `default_compact_models` (pre-list
+    /// `agent_provider.json` / `provider_list.json`). Read-on-migrate only:
+    /// `migrate_legacy_defaults()` folds it into the list and clears it;
+    /// never serialized back out.
+    #[serde(default, skip_serializing, alias = "default_compact_model")]
+    #[allow(deprecated)]
+    pub default_compact_model_legacy: Option<CompactModelRef>,
+}
+
+impl AgentProviderConfig {
+    /// Fold the legacy single `default_compact_model` into the ordered list.
+    /// Idempotent; call once after loading from disk / proto.
+    pub fn migrate_legacy_defaults(&mut self) {
+        if let Some(legacy) = self.default_compact_model_legacy.take()
+            && !self.default_compact_models.iter().any(|r| {
+                r.provider_id == legacy.provider_id && r.model_id == legacy.model_id
+            })
+        {
+            self.default_compact_models.insert(0, legacy);
+        }
+    }
 }
 
 /// Per-agent search configuration — persisted to agent_search.json.

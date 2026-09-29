@@ -165,8 +165,9 @@ pub struct RuntimeConfigOverrides {
     pub compression_ratio_threshold: Option<f64>,
     /// ADR-071 D4: EpisodicDistiller runtime switch (`agent_config.json`).
     pub distiller_enabled: Option<bool>,
-    /// ADR-071 D4/D5: distiller model reference (`agent_config.json`).
-    pub distiller_model: Option<acowork_core::protocol::CompactModelRef>,
+    /// ADR-071 D4/D5: ordered distiller model candidate list
+    /// (`agent_config.json`). `Some(vec![])` clears the runtime layer.
+    pub distiller_models: Option<Vec<acowork_core::protocol::CompactModelRef>>,
     /// ADR-071 D4: distiller interval (minutes).
     pub distiller_interval_minutes: Option<u64>,
     /// ADR-071 D4: distiller accumulation threshold.
@@ -201,7 +202,7 @@ impl RuntimeConfigOverrides {
             && self.approval_timeout_secs.is_none()
             && self.compression_ratio_threshold.is_none()
             && self.distiller_enabled.is_none()
-            && self.distiller_model.is_none()
+            && self.distiller_models.is_none()
             && self.distiller_interval_minutes.is_none()
             && self.distiller_accumulation_threshold.is_none()
             && self.distiller_idle_minutes.is_none()
@@ -242,8 +243,8 @@ impl RuntimeConfigOverrides {
         if other.distiller_enabled.is_some() {
             self.distiller_enabled = other.distiller_enabled;
         }
-        if other.distiller_model.is_some() {
-            self.distiller_model = other.distiller_model.clone();
+        if other.distiller_models.is_some() {
+            self.distiller_models = other.distiller_models.clone();
         }
         if other.distiller_interval_minutes.is_some() {
             self.distiller_interval_minutes = other.distiller_interval_minutes;
@@ -309,8 +310,8 @@ impl RuntimeConfigOverrides {
         if let Some(v) = self.distiller_enabled {
             cfg.distiller_enabled = Some(v);
         }
-        if let Some(v) = &self.distiller_model {
-            cfg.distiller_model = Some(v.clone());
+        if let Some(v) = &self.distiller_models {
+            cfg.distiller_models = Some(v.clone());
         }
         if let Some(v) = self.distiller_interval_minutes {
             cfg.distiller_interval_minutes = Some(v);
@@ -356,7 +357,7 @@ impl From<&AgentConfig> for RuntimeConfigOverrides {
             approval_timeout_secs: cfg.approval_timeout_secs,
             compression_ratio_threshold: cfg.compression_ratio_threshold,
             distiller_enabled: cfg.distiller_enabled,
-            distiller_model: cfg.distiller_model.clone(),
+            distiller_models: cfg.distiller_models.clone(),
             distiller_interval_minutes: cfg.distiller_interval_minutes,
             distiller_accumulation_threshold: cfg.distiller_accumulation_threshold,
             distiller_idle_minutes: cfg.distiller_idle_minutes,
@@ -2258,13 +2259,13 @@ After installation, ask the user to re-enable the MCP server.",
         provider_list: Vec<acowork_core::protocol::ProviderListItem>,
         provider_list_version: u64,
         provider_key_vault: Vec<acowork_core::protocol::ProviderKeyEntry>,
-        default_compact_model: Option<acowork_core::protocol::CompactModelRef>,
+        default_compact_models: Vec<acowork_core::protocol::CompactModelRef>,
     ) {
         tracing::info!(
             provider_count = provider_list.len(),
             version = provider_list_version,
             key_count = provider_key_vault.len(),
-            has_default_compact = default_compact_model.is_some(),
+            default_compact_count = default_compact_models.len(),
             "SessionManager: updating global provider list"
         );
 
@@ -2282,12 +2283,13 @@ After installation, ask the user to re-enable the MCP server.",
             }
         }
         *self.core.provider_list_version.write().unwrap() = provider_list_version;
-        // ADR-056: Sync the global default compact model through the
+        // ADR-056: Sync the global compact-model candidate list through the
         // shared Arc — in-flight sessions see the new value on their next
         // resolve_distill_model() call, no session broadcast needed.
-        *self.core.default_compact_model.write().unwrap() = default_compact_model
-            .as_ref()
-            .map(|r| (r.provider_id.clone(), r.model_id.clone()));
+        *self.core.default_compact_models.write().unwrap() = default_compact_models
+            .iter()
+            .map(|r| (r.provider_id.clone(), r.model_id.clone()))
+            .collect();
 
         // Replace the shared global provider list (live read-view for sessions).
         {

@@ -392,22 +392,22 @@ pub(crate) async fn phase_b_init_session(
             );
         }
 
-        // ADR-056: Surface the global default compact model from
-        // `AgentProviderConfig` (mirrors `AvailableProviders.default_compact_model`)
-        // into `AgentCore.default_compact_model`. The MQTT path is the
+        // ADR-056: Surface the global compact-model candidate list from
+        // `AgentProviderConfig` (mirrors `AvailableProviders.default_compact_models`)
+        // into `AgentCore.default_compact_models`. The MQTT path is the
         // authoritative source for runtime sessions; the on-disk field is
         // the cold-start cache populated by the MQTT handler.
-        if let Some(cm) = ctx
-            .provider_config
-            .as_ref()
-            .and_then(|c| c.default_compact_model.as_ref())
+        if let Some(cfg) = ctx.provider_config.as_ref()
+            && !cfg.default_compact_models.is_empty()
         {
-            *c.default_compact_model.write().unwrap() =
-                Some((cm.provider_id.clone(), cm.model_id.clone()));
+            *c.default_compact_models.write().unwrap() = cfg
+                .default_compact_models
+                .iter()
+                .map(|cm| (cm.provider_id.clone(), cm.model_id.clone()))
+                .collect();
             tracing::info!(
-                provider_id = %cm.provider_id,
-                model_id = %cm.model_id,
-                "Populated AgentCore.default_compact_model from resource cache"
+                count = c.default_compact_models.read().unwrap().len(),
+                "Populated AgentCore.default_compact_models from resource cache"
             );
         }
 
@@ -496,7 +496,7 @@ pub(crate) async fn phase_b_init_session(
         // manifest `[memory.distiller]` section inside the scheduler-config
         // merge, so an absent runtime layer keeps the package defaults.
         c.distiller_runtime.enabled = agent_cfg.distiller_enabled;
-        c.distiller_runtime.model = agent_cfg.distiller_model.clone();
+        c.distiller_runtime.models = agent_cfg.distiller_models.clone().unwrap_or_default();
         c.distiller_runtime.interval_minutes = agent_cfg.distiller_interval_minutes;
         c.distiller_runtime.accumulation_threshold = agent_cfg.distiller_accumulation_threshold;
         c.distiller_runtime.idle_minutes = agent_cfg.distiller_idle_minutes;
@@ -763,14 +763,16 @@ pub(crate) async fn phase_b_init_session(
                     );
                     dirty = true;
                 }
-                if updated.distiller_model.is_none()
+                if updated.distiller_models.is_none()
                     && let Some(d) = manifest_distiller.as_ref()
                     && (d.model_provider_id.is_some() || d.model_id.is_some())
                 {
-                    updated.distiller_model = Some(acowork_core::protocol::CompactModelRef {
-                        provider_id: d.model_provider_id.clone().unwrap_or_default(),
-                        model_id: d.model_id.clone().unwrap_or_default(),
-                    });
+                    updated.distiller_models = Some(vec![
+                        acowork_core::protocol::CompactModelRef {
+                            provider_id: d.model_provider_id.clone().unwrap_or_default(),
+                            model_id: d.model_id.clone().unwrap_or_default(),
+                        },
+                    ]);
                     dirty = true;
                 }
                 if updated.distiller_interval_minutes.is_none() {

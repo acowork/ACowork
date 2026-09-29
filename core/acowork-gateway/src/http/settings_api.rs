@@ -1,7 +1,7 @@
 //! Settings HTTP API — global runtime toggles that are not tied to a
 //! specific provider, MCP server, or search engine.
 //!
-//! ADR-056: Hosts the `default_compact_model` endpoint. Lives in its own
+//! ADR-056: Hosts the `default_compact_models` endpoint. Lives in its own
 //! module so future global settings (e.g. global embedding default,
 //! auto-compaction thresholds) can be added alongside without polluting
 //! `provider_api.rs`.
@@ -26,20 +26,39 @@ pub fn settings_routes() -> Router<AppState> {
 
 #[derive(Debug, Serialize)]
 pub struct DefaultCompactModelResponse {
-    /// Current global default, `None` when not configured.
-    pub default_compact_model: Option<CompactModelRef>,
+    /// Ordered candidate list, empty when not configured.
+    pub default_compact_models: Vec<CompactModelRef>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct PutDefaultCompactModelRequest {
-    /// `null` clears the global default. Otherwise sets the (provider_id,
-    /// model_id) pair.
-    pub default_compact_model: Option<CompactModelRef>,
+    /// Ordered candidate list. `[]` clears the global override.
+    #[serde(default)]
+    pub default_compact_models: Vec<CompactModelRef>,
+    /// Legacy single-value form, still accepted for older Desktop builds:
+    /// `Some(r)` → `[r]`, `null` → `[]` (only when the list field is absent).
+    #[serde(default)]
+    #[allow(deprecated)]
+    pub default_compact_model: Option<Option<CompactModelRef>>,
+}
+
+impl PutDefaultCompactModelRequest {
+    /// Effective list: new field wins; legacy field is folded in when the
+    /// new field was omitted entirely.
+    fn effective_list(&self) -> Vec<CompactModelRef> {
+        if !self.default_compact_models.is_empty() {
+            return self.default_compact_models.clone();
+        }
+        match &self.default_compact_model {
+            Some(Some(r)) => vec![r.clone()],
+            _ => Vec::new(),
+        }
+    }
 }
 
 // ── Handlers ─────────────────────────────────────────────────────────
 
-/// `GET /api/settings/default-compact-model` — read current value.
+/// `GET /api/settings/default-compact-model` — read current list.
 pub async fn get_default_compact_model(
     State(state): State<AppState>,
 ) -> Result<Json<DefaultCompactModelResponse>, ApiError> {
@@ -47,17 +66,18 @@ pub async fn get_default_compact_model(
     let current = gw
         .resource_cache
         .provider_list
-        .default_compact_model
+        .default_compact_models
         .clone();
     Ok(Json(DefaultCompactModelResponse {
-        default_compact_model: current,
+        default_compact_models: current,
     }))
 }
 
 /// `PUT /api/settings/default-compact-model` — set or clear.
 ///
-/// Body: `{ "default_compact_model": { "provider_id": "...", "model_id": "..." } }`
-/// or `{ "default_compact_model": null }` to clear.
+/// Body: `{ "default_compact_models": [ { "provider_id": "...", "model_id": "..." }, ... ] }`
+/// or `{ "default_compact_models": [] }` to clear. The legacy single-object
+/// form `{ "default_compact_model": {...} | null }` is still accepted.
 ///
 /// 422 on invalid (provider_id unknown, model_id not in that provider).
 pub async fn put_default_compact_model(
@@ -74,27 +94,25 @@ pub async fn put_default_compact_model(
 
     let mut gw = state.gateway_state.write().await;
 
-    // In-memory mutation with validation. `set_default_compact_model` bumps
+    // In-memory mutation with validation. `set_default_compact_models` bumps
     // `version` on success; we persist right after. Validation failure
     // (unknown provider_id / model_id not in that provider) → 422 per
     // ADR-056 §4.1.
-    let prev = resource_cache::set_default_compact_model(
+    let prev = resource_cache::set_default_compact_models(
         &mut gw.resource_cache.provider_list,
-        body.default_compact_model.clone(),
+        body.effective_list(),
     )
     .map_err(|e| ApiError::unprocessable_entity(&e))?;
 
     // Persist to disk (the in-memory version bump is sufficient; we don't
     // call `persist_provider_cache` here because that would bump the version
     // a *second* time).
-    if let Err(e) = resource_cache::save_provider_list(
-        &data_dir,
-        &gw.resource_cache.provider_list,
-    ) {
+    if let Err(e) = resource_cache::save_provider_list(&data_dir, &gw.resource_cache.provider_list)
+    {
         // Roll back in-memory mutation on disk failure so on-disk + memory
-        // stay consistent. The setter already mutated `default_compact_model`
+        // stay consistent. The setter already mutated `default_compact_models`
         // and bumped `version`; revert those.
-        gw.resource_cache.provider_list.default_compact_model = prev.clone();
+        gw.resource_cache.provider_list.default_compact_models = prev.clone();
         // The version bump is monotonic and cannot be trivially reversed
         // without racing with concurrent updates, so we leave it. The next
         // legitimate save will replace it.
@@ -107,7 +125,7 @@ pub async fn put_default_compact_model(
     let current = gw
         .resource_cache
         .provider_list
-        .default_compact_model
+        .default_compact_models
         .clone();
 
     // Trigger MQTT retained republish so Runtimes pick up the new value
@@ -119,11 +137,11 @@ pub async fn put_default_compact_model(
     tracing::info!(
         new = ?current,
         prev = ?prev,
-        "default_compact_model updated via HTTP"
+        "default_compact_models updated via HTTP"
     );
 
     Ok(Json(DefaultCompactModelResponse {
-        default_compact_model: current,
+        default_compact_models: current,
     }))
 }
 
@@ -132,26 +150,43 @@ mod tests {
     use super::*;
 
     #[test]
-    fn request_deserialization_with_value() {
+    fn request_deserialization_with_list() {
+        let json = r#"{"default_compact_models":[{"provider_id":"ollama","model_id":"qwen2.5:0.5b"},{"provider_id":"deepseek","model_id":"dsv"}]}"#;
+        let req: PutDefaultCompactModelRequest = serde_json::from_str(json).unwrap();
+        let list = req.effective_list();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].provider_id, "ollama");
+        assert_eq!(list[1].model_id, "dsv");
+    }
+
+    #[test]
+    fn request_deserialization_empty_list_clears() {
+        let json = r#"{"default_compact_models":[]}"#;
+        let req: PutDefaultCompactModelRequest = serde_json::from_str(json).unwrap();
+        assert!(req.effective_list().is_empty());
+    }
+
+    #[test]
+    fn request_deserialization_legacy_single_still_accepted() {
         let json = r#"{"default_compact_model":{"provider_id":"ollama","model_id":"qwen2.5:0.5b"}}"#;
         let req: PutDefaultCompactModelRequest = serde_json::from_str(json).unwrap();
-        let dcm = req.default_compact_model.unwrap();
-        assert_eq!(dcm.provider_id, "ollama");
-        assert_eq!(dcm.model_id, "qwen2.5:0.5b");
+        let list = req.effective_list();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].provider_id, "ollama");
     }
 
     #[test]
-    fn request_deserialization_with_null_clears() {
+    fn request_deserialization_legacy_null_clears() {
         let json = r#"{"default_compact_model":null}"#;
         let req: PutDefaultCompactModelRequest = serde_json::from_str(json).unwrap();
-        assert!(req.default_compact_model.is_none());
+        assert!(req.effective_list().is_empty());
     }
 
     #[test]
-    fn request_deserialization_missing_field_is_none() {
-        // Omitted field → deserializes to None via #[serde(default)].
+    fn request_deserialization_missing_field_is_empty() {
+        // Omitted fields → empty list via #[serde(default)].
         let json = r#"{}"#;
         let req: PutDefaultCompactModelRequest = serde_json::from_str(json).unwrap();
-        assert!(req.default_compact_model.is_none());
+        assert!(req.effective_list().is_empty());
     }
 }

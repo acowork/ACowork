@@ -115,9 +115,10 @@ pub enum ConfigField {
     /// `AgentConfig::distiller_enabled` — `Option<bool>`.
     /// ADR-071 D4 runtime switch for the EpisodicDistiller.
     DistillerEnabled,
-    /// `AgentConfig::distiller_model` — `Option<CompactModelRef>`.
-    /// ADR-071 D4/D5 runtime-chosen distiller model.
-    DistillerModel,
+    /// `AgentConfig::distiller_models` — `Option<Vec<CompactModelRef>>`.
+    /// ADR-071 D4/D5 runtime-chosen distiller model candidate list
+    /// (ordered; tried in order on call failure).
+    DistillerModels,
     /// `AgentConfig::distiller_interval_minutes` — `Option<u64>`.
     DistillerIntervalMinutes,
     /// `AgentConfig::distiller_accumulation_threshold` — `Option<usize>`.
@@ -156,7 +157,7 @@ impl ConfigField {
             ConfigField::ApprovalTimeoutSecs => "approval_timeout_secs",
             ConfigField::CompressionRatioThreshold => "compression_ratio_threshold",
             ConfigField::DistillerEnabled => "distiller_enabled",
-            ConfigField::DistillerModel => "distiller_model",
+            ConfigField::DistillerModels => "distiller_models",
             ConfigField::DistillerIntervalMinutes => "distiller_interval_minutes",
             ConfigField::DistillerAccumulationThreshold => "distiller_accumulation_threshold",
             ConfigField::DistillerIdleMinutes => "distiller_idle_minutes",
@@ -231,6 +232,7 @@ impl PutAgentConfigBody {
         compression_ratio_threshold: Option<serde_json::Value>,
         distiller_enabled: Option<serde_json::Value>,
         distiller_model: Option<serde_json::Value>,
+        distiller_models: Option<serde_json::Value>,
         distiller_interval_minutes: Option<serde_json::Value>,
         distiller_accumulation_threshold: Option<serde_json::Value>,
         distiller_idle_minutes: Option<serde_json::Value>,
@@ -295,10 +297,21 @@ impl PutAgentConfigBody {
                 op: value_to_patch(&v),
             });
         }
-        if let Some(v) = distiller_model {
+        // New list field wins when present; the legacy single-value field
+        // is folded into a one-element list for older Desktop builds.
+        if let Some(v) = distiller_models {
             patches.push(ConfigFieldPatch {
-                field: ConfigField::DistillerModel,
+                field: ConfigField::DistillerModels,
                 op: value_to_patch(&v),
+            });
+        } else if let Some(v) = distiller_model {
+            let folded = match &v {
+                serde_json::Value::Null => serde_json::Value::Null,
+                other => serde_json::Value::Array(vec![other.clone()]),
+            };
+            patches.push(ConfigFieldPatch {
+                field: ConfigField::DistillerModels,
+                op: value_to_patch(&folded),
             });
         }
         if let Some(v) = distiller_interval_minutes {

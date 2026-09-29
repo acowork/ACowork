@@ -189,7 +189,9 @@ mod tests {
         AvailableProviders {
             version: 1,
             providers: entries,
+            #[allow(deprecated)]
             default_compact_model: None,
+            default_compact_models: vec![],
         }
     }
 

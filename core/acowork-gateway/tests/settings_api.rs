@@ -129,7 +129,7 @@ async fn json_body(resp: axum::response::Response) -> (StatusCode, Value) {
 // ── Tests ──────────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn get_default_compact_model_returns_null_initially() {
+async fn get_default_compact_models_returns_empty_initially() {
     let (state, dir) = test_app_state();
     seed_provider_list(&state, &dir).await;
 
@@ -146,7 +146,7 @@ async fn get_default_compact_model_returns_null_initially() {
 
     let (status, body) = json_body(resp).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body, json!({ "default_compact_model": null }));
+    assert_eq!(body, json!({ "default_compact_models": [] }));
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -182,10 +182,10 @@ async fn put_default_compact_model_happy_path_persists() {
     assert_eq!(
         body,
         json!({
-            "default_compact_model": {
+            "default_compact_models": [{
                 "provider_id": "ollama-local",
                 "model_id": "qwen2.5:0.5b"
-            }
+            }]
         })
     );
 
@@ -203,18 +203,18 @@ async fn put_default_compact_model_happy_path_persists() {
     let (status, body) = json_body(resp).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
-        body["default_compact_model"],
-        json!({ "provider_id": "ollama-local", "model_id": "qwen2.5:0.5b" })
+        body["default_compact_models"],
+        json!([ { "provider_id": "ollama-local", "model_id": "qwen2.5:0.5b" } ])
     );
 
     // Disk file has the same value (re-read with resource_cache helper).
     let reloaded_cache = acowork_gateway::resource_cache::load_resource_cache(&dir);
     assert_eq!(
-        reloaded_cache.provider_list.default_compact_model,
-        Some(CompactModelRef {
+        reloaded_cache.provider_list.default_compact_models,
+        vec![CompactModelRef {
             provider_id: "ollama-local".to_string(),
             model_id: "qwen2.5:0.5b".to_string()
-        })
+        }]
     );
     // version monotonically increased (fixture started at version=0).
     assert!(reloaded_cache.provider_list.version > 0);
@@ -344,11 +344,11 @@ async fn put_default_compact_model_with_null_clears() {
 
     let (status, body) = json_body(resp).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body, json!({ "default_compact_model": null }));
+    assert_eq!(body, json!({ "default_compact_models": [] }));
 
     // Disk also cleared.
     let reloaded_cache = acowork_gateway::resource_cache::load_resource_cache(&dir);
-    assert!(reloaded_cache.provider_list.default_compact_model.is_none());
+    assert!(reloaded_cache.provider_list.default_compact_models.is_empty());
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -386,6 +386,64 @@ async fn put_default_compact_model_round_trip_with_two_puts_bumps_version() {
         gw.resource_cache.provider_list.version > v0 + 1,
         "two PUTs must bump version at least twice"
     );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn put_default_compact_models_list_form_round_trips_ordered() {
+    // New list wire shape: ordered candidates survive PUT → GET → disk.
+    let (state, dir) = test_app_state();
+    seed_provider_list(&state, &dir).await;
+
+    let list = json!([
+        { "provider_id": "deepseek", "model_id": "deepseek-v4-flash" },
+        { "provider_id": "ollama-local", "model_id": "qwen2.5:0.5b" }
+    ]);
+    let router = build_router(state.clone());
+    let resp = router
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/settings/default-compact-model")
+                .header("content-type", "application/json")
+                .body(Body::from(json!({ "default_compact_models": list }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let (status, body) = json_body(resp).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["default_compact_models"], list);
+
+    // Rejected atomically when ANY entry is invalid (nothing persisted).
+    let router = build_router(state.clone());
+    let resp = router
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/settings/default-compact-model")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "default_compact_models": [
+                            { "provider_id": "ollama-local", "model_id": "qwen2.5:0.5b" },
+                            { "provider_id": "anthropic", "model_id": "nope" }
+                        ]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let (status, _body) = json_body(resp).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+
+    // Old list survives the failed PUT.
+    let reloaded_cache = acowork_gateway::resource_cache::load_resource_cache(&dir);
+    assert_eq!(reloaded_cache.provider_list.default_compact_models.len(), 2);
+    assert_eq!(reloaded_cache.provider_list.default_compact_models[0].provider_id, "deepseek");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

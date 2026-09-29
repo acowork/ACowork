@@ -2744,6 +2744,7 @@ async fn put_agent_config(
         req.compression_ratio_threshold,
         req.distiller_enabled,
         req.distiller_model,
+        req.distiller_models,
         req.distiller_interval_minutes,
         req.distiller_accumulation_threshold,
         req.distiller_idle_minutes,
@@ -2886,9 +2887,15 @@ struct UpdateAgentConfigRequest {
     /// leave the on-disk value alone (partial PUT).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     distiller_enabled: Option<serde_json::Value>,
-    /// ADR-071 D4/D5: distiller model ref `{"provider_id":…,"model_id":…}`.
+    /// ADR-071 D4/D5: legacy single distiller model ref
+    /// `{"provider_id":…,"model_id":…}` (folded into a one-element list
+    /// when `distiller_models` is absent).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     distiller_model: Option<serde_json::Value>,
+    /// Ordered distiller model candidate list
+    /// `[{"provider_id":…,"model_id":…}, …]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    distiller_models: Option<serde_json::Value>,
     /// ADR-071 D4: distiller periodic interval (minutes).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     distiller_interval_minutes: Option<serde_json::Value>,
@@ -4901,13 +4908,10 @@ mod tests {
             .expect("load ok")
             .expect("config exists");
         assert_eq!(reloaded.distiller_enabled, Some(true));
-        assert_eq!(
-            reloaded
-                .distiller_model
-                .as_ref()
-                .map(|m| m.model_id.as_str()),
-            Some("gpt-4o-mini")
-        );
+        // Legacy single-value wire field folds into the ordered list.
+        let models = reloaded.distiller_models.as_ref().expect("distiller_models set");
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].model_id, "gpt-4o-mini");
         assert_eq!(reloaded.distiller_interval_minutes, Some(45));
         assert_eq!(reloaded.distiller_accumulation_threshold, Some(80usize));
         assert_eq!(reloaded.distiller_idle_minutes, Some(20));
@@ -4917,8 +4921,8 @@ mod tests {
         let cfg = get["config"].as_object().expect("config envelope");
         assert_eq!(cfg["distiller_enabled"], serde_json::json!(true));
         assert_eq!(
-            cfg["distiller_model"],
-            serde_json::json!({"provider_id": "openai", "model_id": "gpt-4o-mini"})
+            cfg["distiller_models"],
+            serde_json::json!([{"provider_id": "openai", "model_id": "gpt-4o-mini"}])
         );
         assert_eq!(cfg["distiller_interval_minutes"], serde_json::json!(45));
         assert_eq!(

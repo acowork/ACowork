@@ -121,9 +121,11 @@ pub struct ProviderUpdate {
     pub provider_list: Vec<acowork_core::protocol::ProviderListItem>,
     pub provider_list_version: u64,
     pub provider_key_vault: Vec<acowork_core::protocol::ProviderKeyEntry>,
-    /// ADR-056: Global default compact model reference forwarded from
-    /// `AvailableProviders.default_compact_model`. `None` = no global override.
-    pub default_compact_model: Option<acowork_core::protocol::CompactModelRef>,
+    /// ADR-056: Ordered global compact-model candidate list forwarded from
+    /// `AvailableProviders.default_compact_models` (falls back to the
+    /// deprecated single field when the list is absent). Empty = no global
+    /// override.
+    pub default_compact_models: Vec<acowork_core::protocol::CompactModelRef>,
 }
 
 /// Search provider update pushed from MQTT poll loop to SessionManager.
@@ -776,22 +778,39 @@ impl MqttClientHandler for RuntimeHandler {
                 // Runtime can load it on restart. API keys are NOT
                 // persisted - they stay in available_cache (in-memory
                 // only).
-                let (provider_list, version, key_vault, default_compact_model) =
+                let (provider_list, version, key_vault, default_compact_models) =
                     match cache_write.providers.as_ref() {
                         Some(p) => {
                             let list = map_provider_refs_to_list_items(&p.providers);
                             let keys = extract_provider_keys(&p.providers);
-                            // ADR-056: forward the global default compact
-                            // model reference.
-                            let dcm = p.default_compact_model.as_ref().map(|r| {
-                                acowork_core::protocol::CompactModelRef {
-                                    provider_id: r.provider_id.clone(),
-                                    model_id: r.model_id.clone(),
-                                }
-                            });
+                            // ADR-056: forward the global compact-model
+                            // candidate list. Prefer the list field; fall
+                            // back to the deprecated single field so an old
+                            // Gateway keeps working.
+                            let dcm: Vec<acowork_core::protocol::CompactModelRef> = if !p
+                                .default_compact_models
+                                .is_empty()
+                            {
+                                p.default_compact_models
+                                    .iter()
+                                    .map(|r| acowork_core::protocol::CompactModelRef {
+                                        provider_id: r.provider_id.clone(),
+                                        model_id: r.model_id.clone(),
+                                    })
+                                    .collect()
+                            } else {
+                                #[allow(deprecated)]
+                                p.default_compact_model
+                                    .iter()
+                                    .map(|r| acowork_core::protocol::CompactModelRef {
+                                        provider_id: r.provider_id.clone(),
+                                        model_id: r.model_id.clone(),
+                                    })
+                                    .collect()
+                            };
                             (list, p.version, keys, dcm)
                         }
-                        None => (vec![], 0, vec![], None),
+                        None => (vec![], 0, vec![], vec![]),
                     };
                 drop(cache_write);
 
@@ -800,7 +819,7 @@ impl MqttClientHandler for RuntimeHandler {
                     &self.work_dir,
                     &provider_list,
                     version,
-                    default_compact_model.as_ref(),
+                    &default_compact_models,
                 ) {
                     tracing::warn!(
                         agent_id = %self.agent_id,
@@ -811,7 +830,7 @@ impl MqttClientHandler for RuntimeHandler {
                     tracing::info!(
                         agent_id = %self.agent_id,
                         provider_count = provider_list.len(),
-                        has_default_compact = default_compact_model.is_some(),
+                        default_compact_count = default_compact_models.len(),
                         "Synced provider list from acowork/global/providers into agent_provider.json"
                     );
                 }
@@ -822,7 +841,7 @@ impl MqttClientHandler for RuntimeHandler {
                         provider_list,
                         provider_list_version: version,
                         provider_key_vault: key_vault,
-                        default_compact_model,
+                        default_compact_models,
                     };
                     if let Err(e) = tx.send(update) {
                         tracing::warn!(

@@ -40,17 +40,37 @@ pub struct ResourceCache {
 
 /// Versioned provider list persisted to disk.
 ///
-/// ADR-056: Also carries `default_compact_model` — the user's global pick
-/// for cross-provider distillation. Lives at the top level (not inside any
-/// `providers[]` entry) so it can refer to any provider by id.
+/// ADR-056: Also carries `default_compact_models` — the user's ordered
+/// global picks for cross-provider distillation. Live at the top level (not
+/// inside any `providers[]` entry) so they can refer to any provider by id.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[derive(Default)]
 pub struct ProviderListFile {
     pub version: u64,
     pub providers: Vec<ProviderListItem>,
-    /// ADR-056: Global default compact model. `None` = no global override.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub default_compact_model: Option<CompactModelRef>,
+    /// ADR-056: Ordered global compact-model candidates. Empty = no global
+    /// override (runtime degrades to provider.compact_model → chat model).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub default_compact_models: Vec<CompactModelRef>,
+    /// Legacy single-value form (pre-list `provider_list.json`).
+    /// Read-on-migrate only — see `migrate_legacy_defaults`.
+    #[serde(default, skip_serializing, alias = "default_compact_model")]
+    pub default_compact_model_legacy: Option<CompactModelRef>,
+}
+
+impl ProviderListFile {
+    /// Fold the legacy single `default_compact_model` into the ordered list.
+    /// Idempotent; called once after loading from disk.
+    pub fn migrate_legacy_defaults(&mut self) {
+        if let Some(legacy) = self.default_compact_model_legacy.take()
+            && !self
+                .default_compact_models
+                .iter()
+                .any(|r| r.provider_id == legacy.provider_id && r.model_id == legacy.model_id)
+        {
+            self.default_compact_models.insert(0, legacy);
+        }
+    }
 }
 
 /// Versioned MCP server list persisted to disk.
@@ -128,8 +148,11 @@ pub fn load_resource_cache(data_dir: &Path) -> ResourceCache {
 fn load_provider_list(data_dir: &Path) -> ProviderListFile {
     let path = provider_list_path(data_dir);
     match std::fs::read_to_string(&path) {
-        Ok(raw) => match serde_json::from_str(&raw) {
-            Ok(list) => list,
+        Ok(raw) => match serde_json::from_str::<ProviderListFile>(&raw) {
+            Ok(mut list) => {
+                list.migrate_legacy_defaults();
+                list
+            }
             Err(e) => {
                 tracing::warn!(
                     path = %path.display(),
@@ -334,31 +357,38 @@ pub fn validate_compact_model_ref(
     Ok(())
 }
 
-/// ADR-056: Set (or clear) the global default compact model on the in-memory
-/// `ProviderListFile`, bumping `version` so MQTT retained republish fires.
+/// ADR-056: Set (or clear) the ordered global compact-model candidate list
+/// on the in-memory `ProviderListFile`, bumping `version` so MQTT retained
+/// republish fires.
 ///
-/// `value = None` clears the global default (Runtime then degrades to the
+/// The incoming list is validated entry-by-entry and de-duplicated by
+/// `(provider_id, model_id)` (first occurrence wins, order preserved).
+/// `value = []` clears the global override (Runtime then degrades to the
 /// legacy provider.compact_model → chat-model fallback chain).
 ///
-/// Returns the previous value (if any) on success; `Err` is returned when
-/// `(provider_id, model_id)` does not point to an existing model. The
-/// in-memory state is **not** mutated on error — caller decides whether
-/// to persist.
-pub fn set_default_compact_model(
+/// Returns the previous list on success; `Err` is returned when any entry
+/// does not point to an existing model. The in-memory state is **not**
+/// mutated on error — caller decides whether to persist.
+pub fn set_default_compact_models(
     list: &mut ProviderListFile,
-    value: Option<CompactModelRef>,
-) -> Result<Option<CompactModelRef>, String> {
-    if let Some(ref r) = value {
+    value: Vec<CompactModelRef>,
+) -> Result<Vec<CompactModelRef>, String> {
+    for r in &value {
         validate_compact_model_ref(list, r)?;
     }
-    let prev = list.default_compact_model.take();
-    list.default_compact_model = value;
+    let mut seen = std::collections::HashSet::new();
+    let deduped: Vec<CompactModelRef> = value
+        .into_iter()
+        .filter(|r| seen.insert((r.provider_id.clone(), r.model_id.clone())))
+        .collect();
+    let prev = std::mem::take(&mut list.default_compact_models);
+    list.default_compact_models = deduped;
     list.version = list.version.saturating_add(1);
     tracing::info!(
-        new = ?list.default_compact_model,
+        new = ?list.default_compact_models,
         prev = ?prev,
         version = list.version,
-        "default_compact_model updated"
+        "default_compact_models updated"
     );
     Ok(prev)
 }
@@ -783,7 +813,7 @@ mod tests {
         let dir = temp_dir("save-provider");
         let list = ProviderListFile {
             version: 1,
-            default_compact_model: None,
+            default_compact_models: Vec::new(), default_compact_model_legacy: None,
             providers: vec![ProviderListItem {
                 id: "openai".to_string(),
                 base_url: "https://api.openai.com/v1".to_string(),
@@ -916,7 +946,7 @@ mod tests {
     fn fixture_provider_list() -> ProviderListFile {
         ProviderListFile {
             version: 7,
-            default_compact_model: None,
+            default_compact_models: Vec::new(), default_compact_model_legacy: None,
             providers: vec![
                 ProviderListItem {
                     id: "ollama".to_string(),
@@ -983,8 +1013,8 @@ mod tests {
 
     #[test]
     fn test_load_old_provider_list_without_default_compact() {
-        // ADR-056 §8: legacy `provider_list.json` without `default_compact_model`
-        // must deserialize to `None` (no migration needed).
+        // Legacy `provider_list.json` without any compact-model field must
+        // deserialize to an empty list (no migration needed).
         let dir = temp_dir("old-provider-list");
         let raw = r#"{
             "version": 42,
@@ -1002,125 +1032,141 @@ mod tests {
         let loaded = load_provider_list(&dir);
         assert_eq!(loaded.version, 42);
         assert_eq!(loaded.providers.len(), 1);
-        assert!(loaded.default_compact_model.is_none());
+        assert!(loaded.default_compact_models.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn test_set_default_compact_model_happy_path() {
+    fn test_load_legacy_single_value_migrates_to_list() {
+        // Old on-disk shape: `"default_compact_model": {...}` (single object).
+        // load_provider_list must fold it into `default_compact_models` as
+        // the head element, and the legacy field must not survive.
+        let dir = temp_dir("legacy-single-migrate");
+        let raw = r#"{
+            "version": 9,
+            "default_compact_model": {"provider_id": "ollama", "model_id": "qwen2.5:0.5b"},
+            "providers": [
+                {
+                    "id": "ollama",
+                    "base_url": "http://localhost:11434/v1",
+                    "protocol_type": "openai",
+                    "custom": false,
+                    "models": []
+                }
+            ]
+        }"#;
+        std::fs::write(provider_list_path(&dir), raw).unwrap();
+        let loaded = load_provider_list(&dir);
+        assert_eq!(loaded.default_compact_models.len(), 1);
+        assert_eq!(loaded.default_compact_models[0].provider_id, "ollama");
+        assert_eq!(loaded.default_compact_models[0].model_id, "qwen2.5:0.5b");
+        assert!(loaded.default_compact_model_legacy.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn cm(provider: &str, model: &str) -> CompactModelRef {
+        CompactModelRef {
+            provider_id: provider.to_string(),
+            model_id: model.to_string(),
+        }
+    }
+
+    #[test]
+    fn test_set_default_compact_models_happy_path() {
         let mut list = fixture_provider_list();
         let prev_version = list.version;
-        let prev = set_default_compact_model(
+        let prev = set_default_compact_models(
             &mut list,
-            Some(CompactModelRef {
-                provider_id: "ollama".to_string(),
-                model_id: "qwen2.5:0.5b".to_string(),
-            }),
+            vec![cm("ollama", "qwen2.5:0.5b"), cm("deepseek", "deepseek-v4-flash")],
         )
-        .expect("ollama::qwen2.5:0.5b is a valid ref");
+        .expect("both refs are valid");
 
-        // Returns previous (None here), bumps version, mutates the field.
-        assert!(prev.is_none());
-        assert_eq!(list.default_compact_model.as_ref().unwrap().provider_id, "ollama");
-        assert_eq!(list.default_compact_model.as_ref().unwrap().model_id, "qwen2.5:0.5b");
+        assert!(prev.is_empty());
+        assert_eq!(list.default_compact_models.len(), 2);
+        assert_eq!(list.default_compact_models[0].provider_id, "ollama");
+        // Order preserved — the list IS the priority order.
+        assert_eq!(list.default_compact_models[1].provider_id, "deepseek");
         assert!(list.version > prev_version, "version must monotonically increase");
     }
 
     #[test]
-    fn test_set_default_compact_model_persists_and_round_trips() {
+    fn test_set_default_compact_models_dedup_preserves_first_order() {
+        let mut list = fixture_provider_list();
+        set_default_compact_models(
+            &mut list,
+            vec![
+                cm("deepseek", "deepseek-v4-flash"),
+                cm("ollama", "qwen2.5:0.5b"),
+                cm("deepseek", "deepseek-v4-flash"), // duplicate — dropped
+            ],
+        )
+        .unwrap();
+        assert_eq!(list.default_compact_models.len(), 2);
+        assert_eq!(list.default_compact_models[0].provider_id, "deepseek");
+        assert_eq!(list.default_compact_models[1].provider_id, "ollama");
+    }
+
+    #[test]
+    fn test_set_default_compact_models_persists_and_round_trips() {
         let dir = temp_dir("default-compact-persist");
         let mut list = fixture_provider_list();
-        set_default_compact_model(
+        set_default_compact_models(
             &mut list,
-            Some(CompactModelRef {
-                provider_id: "deepseek".to_string(),
-                model_id: "deepseek-v4-flash".to_string(),
-            }),
+            vec![cm("deepseek", "deepseek-v4-flash"), cm("ollama", "llama3:8b")],
         )
         .unwrap();
         save_provider_list(&dir, &list).unwrap();
 
         let loaded = load_provider_list(&dir);
         assert_eq!(
-            loaded.default_compact_model,
-            Some(CompactModelRef {
-                provider_id: "deepseek".to_string(),
-                model_id: "deepseek-v4-flash".to_string(),
-            })
+            loaded.default_compact_models,
+            vec![cm("deepseek", "deepseek-v4-flash"), cm("ollama", "llama3:8b")]
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn test_set_default_compact_model_unknown_provider_is_rejected() {
+    fn test_set_default_compact_models_unknown_provider_is_rejected() {
         let mut list = fixture_provider_list();
-        let result = set_default_compact_model(
+        let result = set_default_compact_models(
             &mut list,
-            Some(CompactModelRef {
-                provider_id: "anthropic".to_string(), // not in fixture
-                model_id: "claude-3-5-sonnet".to_string(),
-            }),
+            vec![cm("ollama", "qwen2.5:0.5b"), cm("anthropic", "claude-3-5-sonnet")],
         );
-        assert!(result.is_err(), "unknown provider_id must be rejected");
+        assert!(result.is_err(), "unknown provider_id must reject the whole list");
         // State must NOT be mutated on error.
-        assert!(list.default_compact_model.is_none());
-        // Version must NOT have been bumped on error.
+        assert!(list.default_compact_models.is_empty());
         assert_eq!(list.version, fixture_provider_list().version);
     }
 
     #[test]
-    fn test_set_default_compact_model_model_not_in_provider_is_rejected() {
+    fn test_set_default_compact_models_model_not_in_provider_is_rejected() {
         // Cross-provider sanity: `qwen2.5:0.5b` belongs to ollama, not deepseek.
         let mut list = fixture_provider_list();
-        let result = set_default_compact_model(
-            &mut list,
-            Some(CompactModelRef {
-                provider_id: "deepseek".to_string(),
-                model_id: "qwen2.5:0.5b".to_string(),
-            }),
-        );
+        let result = set_default_compact_models(&mut list, vec![cm("deepseek", "qwen2.5:0.5b")]);
         assert!(result.is_err(), "model from another provider must be rejected");
-        assert!(list.default_compact_model.is_none());
+        assert!(list.default_compact_models.is_empty());
     }
 
     #[test]
-    fn test_set_default_compact_model_clear_with_none() {
+    fn test_set_default_compact_models_clear_with_empty_vec() {
         let mut list = fixture_provider_list();
-        // Set then clear.
-        set_default_compact_model(
-            &mut list,
-            Some(CompactModelRef {
-                provider_id: "ollama".to_string(),
-                model_id: "qwen2.5:0.5b".to_string(),
-            }),
-        )
-        .unwrap();
-        assert!(list.default_compact_model.is_some());
+        set_default_compact_models(&mut list, vec![cm("ollama", "qwen2.5:0.5b")]).unwrap();
+        assert_eq!(list.default_compact_models.len(), 1);
 
-        let prev = set_default_compact_model(&mut list, None).unwrap();
-        assert_eq!(
-            prev,
-            Some(CompactModelRef {
-                provider_id: "ollama".to_string(),
-                model_id: "qwen2.5:0.5b".to_string(),
-            })
-        );
-        assert!(list.default_compact_model.is_none());
+        let prev = set_default_compact_models(&mut list, Vec::new()).unwrap();
+        assert_eq!(prev, vec![cm("ollama", "qwen2.5:0.5b")]);
+        assert!(list.default_compact_models.is_empty());
     }
 
     #[test]
-    fn test_set_default_compact_model_version_monotonic_under_repeat() {
+    fn test_set_default_compact_models_version_monotonic_under_repeat() {
         let mut list = fixture_provider_list();
         let v0 = list.version;
-        let ref_v = CompactModelRef {
-            provider_id: "ollama".to_string(),
-            model_id: "qwen2.5:0.5b".to_string(),
-        };
-        // Two updates → two bumps, never decrease.
-        set_default_compact_model(&mut list, Some(ref_v.clone())).unwrap();
+        let refs = vec![cm("ollama", "qwen2.5:0.5b")];
+        set_default_compact_models(&mut list, refs.clone()).unwrap();
         let v1 = list.version;
         assert!(v1 > v0);
-        set_default_compact_model(&mut list, Some(ref_v)).unwrap();
+        set_default_compact_models(&mut list, refs).unwrap();
         let v2 = list.version;
         assert!(v2 > v1);
     }

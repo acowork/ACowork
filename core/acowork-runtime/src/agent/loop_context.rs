@@ -56,8 +56,9 @@ pub(crate) const CONTEXT_CRITICAL_PERCENT: f64 = 95.0;
 /// which fallback chain fired.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DistillTier {
-    /// Level 1: `AgentCore.default_compact_model` — user's global pick
-    /// across all configured providers.
+    /// Level 1: `AgentCore.default_compact_models` — the user's ordered
+    /// global picks across all configured providers (each expansion in the
+    /// call-phase chain carries this tier).
     GlobalDefault,
     /// Level 2: `ProviderListItem.compact_model` of the session's current
     /// provider (the pre-ADR-056 behaviour).
@@ -335,43 +336,52 @@ impl AgentLoop {
 
         let estimated_tokens = crate::token::count_text(content_text) as u64;
 
-        // ── Level 1: global default compact model ──────────────────────
-        if let Some((pid, mid)) = self.core.default_compact_model.read().unwrap().clone() {
-            if !self.core.is_default_compact_provider_available() {
+        // ── Level 1: global compact-model candidate list (ordered) ─────
+        // Walk the user's list in priority order; the first candidate that
+        // passes availability + context-window checks wins. Candidates that
+        // fail are logged and skipped — the *call-phase* chain
+        // (`resolve_distill_targets`) still includes the skipped-but-
+        // available ones via `try_global_default_targets`.
+        let globals: Vec<(String, String)> =
+            self.core.default_compact_models.read().unwrap().clone();
+        for (pid, mid) in &globals {
+            if !self.core.is_compact_provider_available(pid) {
                 tracing::warn!(
                     provider_id = %pid,
                     model_id = %mid,
-                    "Global default compact model provider unavailable, falling back to Level 2"
+                    "Global compact candidate provider unavailable, trying next"
                 );
-            } else if let Some(cap) = self.core.get_model_capabilities(&mid) {
+                continue;
+            }
+            if let Some(cap) = self.core.get_model_capabilities(mid) {
                 if cap.context_window < estimated_tokens {
                     tracing::warn!(
                         provider_id = %pid,
                         model_id = %mid,
                         context_window = cap.context_window,
                         estimated_tokens,
-                        "Global default compact model context_window too small, falling back to Level 2"
+                        "Global compact candidate context_window too small, trying next"
                     );
-                } else {
-                    tracing::info!(
-                        provider_id = %pid,
-                        model_id = %mid,
-                        context_window = cap.context_window,
-                        estimated_tokens,
-                        tier = "global_default",
-                        "Using global default compact model for distillation"
-                    );
-                    return ResolvedDistill {
-                        provider_id: pid,
-                        model_id: mid,
-                        tier: DistillTier::GlobalDefault,
-                    };
+                    continue;
                 }
+                tracing::info!(
+                    provider_id = %pid,
+                    model_id = %mid,
+                    context_window = cap.context_window,
+                    estimated_tokens,
+                    tier = "global_default",
+                    "Using global default compact model for distillation"
+                );
+                return ResolvedDistill {
+                    provider_id: pid.clone(),
+                    model_id: mid.clone(),
+                    tier: DistillTier::GlobalDefault,
+                };
             } else {
                 tracing::warn!(
                     provider_id = %pid,
                     model_id = %mid,
-                    "Global default compact model not found in capabilities, falling back to Level 2"
+                    "Global compact candidate not found in capabilities, trying next"
                 );
             }
         }
@@ -441,8 +451,9 @@ impl AgentLoop {
     /// targets for [`Self::compact_history_if_needed`].
     ///
     /// Differences from [`Self::resolve_distill_model`]:
-    /// - Returns **all** candidates the current state can reach (up to three),
-    ///   in priority order: `[GlobalDefault?, ProviderCompact?, CurrentChat]`.
+    /// - Returns **all** candidates the current state can reach, in priority
+    ///   order: `[GlobalDefault…] (the whole ordered global list),
+    ///   ProviderCompact?, CurrentChat`.
     /// - `CurrentChat` is always present as the last-resort fallback so the
     ///   caller can guarantee at least one `distill_provider()` target.
     /// - Does **not** log per-tier "Using X for distillation" messages; the
@@ -458,28 +469,28 @@ impl AgentLoop {
         // already encodes the same selection logic as the single-tier
         // resolver, including context-window and capability checks.
         let top = self.resolve_distill_model("");
-        let mut out = vec![top.clone()];
+        let mut out: Vec<ResolvedDistill> = Vec::new();
 
-        // Append any tiers the top-tier selection skipped over, in priority
-        // order. We do this by re-evaluating each tier in isolation against
-        // the current `AgentCore` state.
-        if !matches!(top.tier, DistillTier::GlobalDefault)
-            && let Some(t) = self.try_global_default_target()
-            && !out.iter().any(|r| r.tier == t.tier)
-        {
-            out.insert(0, t);
+        // Global tier expands to the user's whole ordered list (filtered by
+        // provider availability), not just the single head. When `top` is
+        // itself a global pick it leads the chain; the remaining global
+        // candidates follow in the user's order.
+        let globals = self.try_global_default_targets();
+        if matches!(top.tier, DistillTier::GlobalDefault) {
+            out.push(top.clone());
+            out.extend(globals);
+        } else {
+            out.extend(globals);
+            out.push(top.clone());
         }
+
+        // Provider-compact tier: appended unless `top` already chose it.
         if !matches!(top.tier, DistillTier::ProviderCompact)
             && let Some(t) = self.try_provider_compact_target()
-            && !out.iter().any(|r| r.tier == t.tier)
         {
-            // Insert after GlobalDefault (if any), before top.
-            let pos = out
-                .iter()
-                .position(|r| !matches!(r.tier, DistillTier::GlobalDefault))
-                .unwrap_or(out.len());
-            out.insert(pos, t);
+            out.push(t);
         }
+
         // CurrentChat is the universal last-resort: always appended unless
         // `resolve_distill_model` already chose it as the top tier. This
         // guarantees the caller has at least one fallback even when both
@@ -491,19 +502,17 @@ impl AgentLoop {
                 .provider()
                 .map(str::to_string)
                 .unwrap_or_default();
-            let level3 = ResolvedDistill {
+            out.push(ResolvedDistill {
                 provider_id: session_pid,
                 model_id: current_model,
                 tier: DistillTier::CurrentChat,
-            };
-            if !out.iter().any(|r| r.tier == DistillTier::CurrentChat) {
-                out.push(level3);
-            }
+            });
         }
 
         // De-duplicate by (provider_id, model_id) preserving order — guards
         // against the degenerate case where two tiers resolve to the same
-        // (provider, model) pair (e.g. GlobalDefault == CurrentChat).
+        // (provider, model) pair (e.g. GlobalDefault == CurrentChat, or the
+        // top global appearing again inside `globals`).
         let mut deduped: Vec<ResolvedDistill> = Vec::with_capacity(out.len());
         for r in out {
             if !deduped
@@ -520,31 +529,27 @@ impl AgentLoop {
     /// distillation target right now. Mirrors the selection logic in
     /// [`Self::resolve_distill_model`] but returns `None` instead of
     /// falling through.
-    fn try_global_default_target(&self) -> Option<ResolvedDistill> {
-        let (pid, mid) = self
-            .core
-            .default_compact_model
-            .read()
-            .unwrap()
-            .as_ref()?
-            .clone();
-        if !self.core.is_default_compact_provider_available() {
-            return None;
-        }
-        // No token-estimated context_window check here: if Level 1's
-        // context_window is too small for the actual content, the LLM
-        // call will still succeed (just produce a short summary); the
-        // *call-phase* fallback only kicks in on call failure. The
-        // selection phase already rejected this candidate via
-        // `resolve_distill_model` when context_window < estimated_tokens,
-        // so re-checking here would only produce a different answer than
-        // the top-tier resolver — keep them aligned.
-        let _ = self.core.get_model_capabilities(&mid);
-        Some(ResolvedDistill {
-            provider_id: pid,
-            model_id: mid,
-            tier: DistillTier::GlobalDefault,
-        })
+    fn try_global_default_targets(&self) -> Vec<ResolvedDistill> {
+        let globals: Vec<(String, String)> =
+            self.core.default_compact_models.read().unwrap().clone();
+        globals
+            .into_iter()
+            .filter(|(pid, _mid)| self.core.is_compact_provider_available(pid))
+            // No token-estimated context_window check here: if a global
+            // candidate's context_window is too small for the actual
+            // content, the LLM call will still succeed (just produce a
+            // short summary); the *call-phase* fallback only kicks in on
+            // call failure. The selection phase already rejected this
+            // candidate via `resolve_distill_model` when context_window <
+            // estimated_tokens, so re-checking here would only produce a
+            // different answer than the top-tier resolver — keep them
+            // aligned.
+            .map(|(pid, mid)| ResolvedDistill {
+                provider_id: pid,
+                model_id: mid,
+                tier: DistillTier::GlobalDefault,
+            })
+            .collect()
     }
 
     /// Probe whether the session provider's `compact_model` is usable.
@@ -1964,7 +1969,7 @@ impl AgentLoop {
 // We exercise the resolver end-to-end by constructing a real `AgentLoop`
 // (per the test scaffolding already in `loop_.rs::tests`) and then
 // mutating its `AgentCore` fields (`global_provider_list`,
-// `provider_key_vault`, `provider_compact_models`, `default_compact_model`)
+// `provider_key_vault`, `provider_compact_models`, `default_compact_models`)
 // to stage each scenario. The resolver is purely a synchronous,
 // self-contained function on `AgentLoop`, so this approach covers every
 // branch without mocking anything.
@@ -2054,7 +2059,7 @@ mod tests {
     ///
     /// Only `deepseek` gets an API key — `ollama-local` is a local
     /// provider with an empty key, mirroring the real-world setup where
-    /// Ollama needs no key. `is_default_compact_provider_available` must
+    /// Ollama needs no key. `is_compact_provider_available` must
     /// accept it via the local base_url branch (ADR-056 §2.3).
     fn seed_providers(loop_: &AgentLoop) {
         let mut list = loop_.core.global_provider_list.write().unwrap();
@@ -2284,8 +2289,7 @@ mod tests {
         set_session(&mut loop_, "deepseek", "deepseek-v4-pro");
         set_provider_compact(&mut loop_, "deepseek", Some("deepseek-v4-flash"));
 
-        *loop_.core.default_compact_model.write().unwrap() =
-            Some(("ollama-local".to_string(), "qwen2.5:0.5b".to_string()));
+        *loop_.core.default_compact_models.write().unwrap() = vec![("ollama-local".to_string(), "qwen2.5:0.5b".to_string())];
 
         let resolved = loop_.resolve_distill_model("hello world");
         assert_eq!(resolved.provider_id, "ollama-local");
@@ -2302,8 +2306,7 @@ mod tests {
         set_session(&mut loop_, "deepseek", "deepseek-v4-pro");
         set_provider_compact(&mut loop_, "deepseek", Some("deepseek-v4-flash"));
 
-        *loop_.core.default_compact_model.write().unwrap() =
-            Some(("anthropic".to_string(), "claude-3-haiku".to_string())); // not seeded
+        *loop_.core.default_compact_models.write().unwrap() = vec![("anthropic".to_string(), "claude-3-haiku".to_string())]; // not seeded
 
         let resolved = loop_.resolve_distill_model("hello world");
         assert_eq!(resolved.provider_id, "deepseek");
@@ -2324,8 +2327,7 @@ mod tests {
 
         // Pick the tiny 8K model as global default; the estimated tokens for
         // a long input will exceed 8K → fall back.
-        *loop_.core.default_compact_model.write().unwrap() =
-            Some(("ollama-local".to_string(), "llama3:8b".to_string()));
+        *loop_.core.default_compact_models.write().unwrap() = vec![("ollama-local".to_string(), "llama3:8b".to_string())];
 
         // 50 KB of text → ~13k+ tokens by char/4 estimate, well above 8K.
         let long_input = "x".repeat(50_000);
@@ -2345,8 +2347,7 @@ mod tests {
         set_session(&mut loop_, "deepseek", "deepseek-v4-pro");
         set_provider_compact(&mut loop_, "deepseek", Some("deepseek-v4-flash"));
 
-        *loop_.core.default_compact_model.write().unwrap() =
-            Some(("ollama-local".to_string(), "ghost-model-99".to_string()));
+        *loop_.core.default_compact_models.write().unwrap() = vec![("ollama-local".to_string(), "ghost-model-99".to_string())];
 
         let resolved = loop_.resolve_distill_model("hi");
         assert!(matches!(resolved.tier, DistillTier::ProviderCompact));
@@ -2360,7 +2361,7 @@ mod tests {
         seed_providers(&loop_);
         set_session(&mut loop_, "deepseek", "deepseek-v4-pro");
         set_provider_compact(&mut loop_, "deepseek", Some("deepseek-v4-flash"));
-        assert!(loop_.core.default_compact_model.read().unwrap().is_none());
+        assert!(loop_.core.default_compact_models.read().unwrap().is_empty());
 
         let resolved = loop_.resolve_distill_model("hi");
         assert_eq!(resolved.provider_id, "deepseek");
@@ -2378,8 +2379,7 @@ mod tests {
         set_provider_compact(&mut loop_, "deepseek", None);
 
         // Global default -> unknown provider, will fall through.
-        *loop_.core.default_compact_model.write().unwrap() =
-            Some(("anthropic".to_string(), "claude-3-haiku".to_string()));
+        *loop_.core.default_compact_models.write().unwrap() = vec![("anthropic".to_string(), "claude-3-haiku".to_string())];
 
         let resolved = loop_.resolve_distill_model("hi");
         assert_eq!(resolved.provider_id, "deepseek");
@@ -2396,7 +2396,7 @@ mod tests {
         loop_.session.provider = None;
         loop_.session.model = Some("deepseek-v4-pro".to_string());
         set_provider_compact(&mut loop_, "deepseek", None);
-        *loop_.core.default_compact_model.write().unwrap() = None;
+        *loop_.core.default_compact_models.write().unwrap() = Vec::new();
 
         let resolved = loop_.resolve_distill_model("hi");
         assert_eq!(resolved.provider_id, "");
@@ -2404,7 +2404,7 @@ mod tests {
         assert!(matches!(resolved.tier, DistillTier::CurrentChat));
     }
 
-    // ── helpers: is_default_compact_provider_available ────────────────
+    // ── helpers: is_compact_provider_available ────────────────
 
     #[test]
     fn default_compact_provider_available_local_without_key() {
@@ -2414,10 +2414,9 @@ mod tests {
         // would never fire.
         let loop_ = build_loop();
         seed_providers(&loop_);
-        *loop_.core.default_compact_model.write().unwrap() =
-            Some(("ollama-local".to_string(), "qwen2.5:0.5b".to_string()));
+        *loop_.core.default_compact_models.write().unwrap() = vec![("ollama-local".to_string(), "qwen2.5:0.5b".to_string())];
         assert!(
-            loop_.core.is_default_compact_provider_available(),
+            loop_.core.is_compact_provider_available("ollama-local"),
             "local provider without key must be usable"
         );
     }
@@ -2428,9 +2427,8 @@ mod tests {
         // → distillation falls back to Level 2.
         let loop_ = build_loop();
         seed_providers(&loop_);
-        *loop_.core.default_compact_model.write().unwrap() =
-            Some(("deepseek".to_string(), "deepseek-v4-flash".to_string()));
-        assert!(loop_.core.is_default_compact_provider_available());
+        *loop_.core.default_compact_models.write().unwrap() = vec![("deepseek".to_string(), "deepseek-v4-flash".to_string())];
+        assert!(loop_.core.is_compact_provider_available("deepseek"));
 
         // Revoke the key -> no longer available.
         loop_
@@ -2439,13 +2437,13 @@ mod tests {
             .write()
             .unwrap()
             .remove("deepseek");
-        assert!(!loop_.core.is_default_compact_provider_available());
+        assert!(!loop_.core.is_compact_provider_available("deepseek"));
     }
 
     #[test]
     fn default_compact_provider_unavailable_when_not_set() {
         let loop_ = build_loop();
-        assert!(!loop_.core.is_default_compact_provider_available());
+        assert!(!loop_.core.is_compact_provider_available("anthropic"));
     }
 
     // ── Distill resolver prefers compact model over chat model ───────
@@ -2465,8 +2463,7 @@ mod tests {
         set_provider_compact(&mut loop_, "deepseek", None); // no Tier 2
 
         // Global default has ample context.
-        *loop_.core.default_compact_model.write().unwrap() =
-            Some(("ollama-local".to_string(), "qwen2.5:0.5b".to_string()));
+        *loop_.core.default_compact_models.write().unwrap() = vec![("ollama-local".to_string(), "qwen2.5:0.5b".to_string())];
 
         let resolved = loop_.resolve_distill_model("some long text");
         assert_eq!(resolved.provider_id, "ollama-local");
@@ -2484,8 +2481,7 @@ mod tests {
         seed_providers(&loop_);
         set_session(&mut loop_, "deepseek", "deepseek-v4-pro");
         set_provider_compact(&mut loop_, "deepseek", Some("deepseek-v4-flash"));
-        *loop_.core.default_compact_model.write().unwrap() =
-            Some(("ollama-local".to_string(), "qwen2.5:0.5b".to_string()));
+        *loop_.core.default_compact_models.write().unwrap() = vec![("ollama-local".to_string(), "qwen2.5:0.5b".to_string())];
 
         let targets = loop_.resolve_distill_targets();
         assert_eq!(targets.len(), 3, "expected three targets, got {targets:?}");
@@ -2499,13 +2495,77 @@ mod tests {
     }
 
     #[test]
+    fn targets_list_expands_multiple_global_candidates_in_order() {
+        // ADR-056 list follow-up: the whole global list participates in the
+        // call-phase chain, in the user's order, ahead of the provider tier.
+        let mut loop_ = build_loop();
+        seed_providers(&loop_);
+        set_session(&mut loop_, "deepseek", "deepseek-v4-pro");
+        set_provider_compact(&mut loop_, "deepseek", Some("deepseek-v4-flash"));
+        *loop_.core.default_compact_models.write().unwrap() = vec![
+            ("ollama-local".to_string(), "qwen2.5:0.5b".to_string()),
+            ("deepseek".to_string(), "deepseek-v4-flash".to_string()),
+        ];
+
+        let targets = loop_.resolve_distill_targets();
+        // global#1, global#2 (== provider compact, deduped), CurrentChat.
+        assert_eq!(targets.len(), 3, "expected three targets, got {targets:?}");
+        assert_eq!(targets[0].provider_id, "ollama-local");
+        assert_eq!(targets[0].model_id, "qwen2.5:0.5b");
+        assert_eq!(targets[1].provider_id, "deepseek");
+        assert_eq!(targets[1].model_id, "deepseek-v4-flash");
+        assert_eq!(targets[2].tier, DistillTier::CurrentChat);
+        assert_eq!(targets[2].model_id, "deepseek-v4-pro");
+    }
+
+    #[test]
+    fn resolve_skips_first_global_candidate_when_provider_unavailable() {
+        // First candidate lives on a keyless cloud provider (anthropic) →
+        // selection must step down to the second candidate, not fall to
+        // the provider tier.
+        let mut loop_ = build_loop();
+        seed_providers(&loop_);
+        set_session(&mut loop_, "deepseek", "deepseek-v4-pro");
+        set_provider_compact(&mut loop_, "deepseek", Some("deepseek-v4-flash"));
+        *loop_.core.default_compact_models.write().unwrap() = vec![
+            ("anthropic".to_string(), "claude-3-haiku".to_string()),
+            ("ollama-local".to_string(), "qwen2.5:0.5b".to_string()),
+        ];
+
+        let resolved = loop_.resolve_distill_model("hello world");
+        assert_eq!(resolved.provider_id, "ollama-local");
+        assert_eq!(resolved.model_id, "qwen2.5:0.5b");
+        assert!(matches!(resolved.tier, DistillTier::GlobalDefault));
+    }
+
+    #[test]
+    fn resolve_skips_first_global_candidate_when_context_too_small() {
+        // llama3:8b (8K window) is first but the content exceeds it →
+        // step down to qwen2.5:0.5b (32K) while staying in the global tier.
+        let mut loop_ = build_loop();
+        seed_providers(&loop_);
+        set_session(&mut loop_, "deepseek", "deepseek-v4-pro");
+        *loop_.core.default_compact_models.write().unwrap() = vec![
+            ("ollama-local".to_string(), "llama3:8b".to_string()),
+            ("ollama-local".to_string(), "qwen2.5:0.5b".to_string()),
+        ];
+
+        // 60K chars / 3.5 ratio ≈ 17K tokens: > llama3:8b's 8K window,
+        // < qwen2.5:0.5b's 32K window.
+        let big_text = "hello ".repeat(10_000);
+        let resolved = loop_.resolve_distill_model(&big_text);
+        assert_eq!(resolved.model_id, "qwen2.5:0.5b");
+        assert!(matches!(resolved.tier, DistillTier::GlobalDefault));
+    }
+
+    #[test]
     fn targets_list_collapses_to_current_chat_when_only_tier3_is_available() {
         // No global default + no provider compact → only Level 3 is reachable.
         let mut loop_ = build_loop();
         seed_providers(&loop_);
         set_session(&mut loop_, "deepseek", "deepseek-v4-pro");
         set_provider_compact(&mut loop_, "deepseek", None);
-        assert!(loop_.core.default_compact_model.read().unwrap().is_none());
+        assert!(loop_.core.default_compact_models.read().unwrap().is_empty());
 
         let targets = loop_.resolve_distill_targets();
         assert_eq!(targets.len(), 1, "expected one target, got {targets:?}");
@@ -2524,8 +2584,7 @@ mod tests {
         seed_providers(&loop_);
         set_session(&mut loop_, "deepseek", "deepseek-v4-flash");
         set_provider_compact(&mut loop_, "deepseek", Some("deepseek-v4-flash"));
-        *loop_.core.default_compact_model.write().unwrap() =
-            Some(("deepseek".to_string(), "deepseek-v4-flash".to_string()));
+        *loop_.core.default_compact_models.write().unwrap() = vec![("deepseek".to_string(), "deepseek-v4-flash".to_string())];
 
         let targets = loop_.resolve_distill_targets();
         let unique: std::collections::HashSet<(String, String)> = targets
@@ -2680,8 +2739,7 @@ mod tests {
         // GlobalDefault points to ollama-local which is NOT seeded as a
         // provider with a key, so `resolve_distill_model` skips it at
         // selection time and starts at Tier 2.
-        *loop_.core.default_compact_model.write().unwrap() =
-            Some(("ollama-local".to_string(), "qwen2.5:0.5b".to_string()));
+        *loop_.core.default_compact_models.write().unwrap() = vec![("ollama-local".to_string(), "qwen2.5:0.5b".to_string())];
 
         let _targets = loop_.resolve_distill_targets();
         // The session_pid is deepseek; deepseek has an API key, so the
@@ -2747,8 +2805,7 @@ mod tests {
         seed_providers(&loop_);
         set_session(&mut loop_, "deepseek", "deepseek-v4-pro");
         set_provider_compact(&mut loop_, "deepseek", Some("deepseek-v4-flash"));
-        *loop_.core.default_compact_model.write().unwrap() =
-            Some(("ollama-local".to_string(), "qwen2.5:0.5b".to_string()));
+        *loop_.core.default_compact_models.write().unwrap() = vec![("ollama-local".to_string(), "qwen2.5:0.5b".to_string())];
 
         loop_.core.update_provider(
             std::sync::Arc::new(AlwaysFailProvider) as std::sync::Arc<dyn Provider>,
@@ -2801,8 +2858,7 @@ mod tests {
         seed_providers(&loop_);
         set_session(&mut loop_, "deepseek", "deepseek-v4-pro");
         set_provider_compact(&mut loop_, "deepseek", Some("deepseek-v4-flash"));
-        *loop_.core.default_compact_model.write().unwrap() =
-            Some(("ollama-local".to_string(), "qwen2.5:0.5b".to_string()));
+        *loop_.core.default_compact_models.write().unwrap() = vec![("ollama-local".to_string(), "qwen2.5:0.5b".to_string())];
 
         let provider = Tier1FailThenSucceedProvider::from_responses(vec![
             MockResponse::Text {
@@ -2915,8 +2971,7 @@ mod tests {
         // fast path. (Pointing Tier 1 at `ollama-local` would make
         // `build_provider_for` construct a real Ollama client and hit the
         // network — the very thing this test needs to avoid.)
-        *loop_.core.default_compact_model.write().unwrap() =
-            Some(("deepseek".to_string(), "deepseek-v4-flash".to_string()));
+        *loop_.core.default_compact_models.write().unwrap() = vec![("deepseek".to_string(), "deepseek-v4-flash".to_string())];
 
         let hanging = HangingProvider::new();
         let calls = hanging.calls();
