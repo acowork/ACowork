@@ -367,7 +367,6 @@
     "agentUninstalled": "Agent가 제거되었습니다",
     "agentCloned": "Agent가 복제되었습니다: {{agentId}}",
     "agentCreated": "Agent가 생성되었습니다: {{agentId}}",
-    "systemAgentCannotUninstall": "시스템 Agent는 제거할 수 없습니다",
     "titleStopAgent": "Agent 중지",
     "titleUninstallAgent": "Agent 제거",
     "noAgentsInstalled": "설치된 Agent가 없습니다",

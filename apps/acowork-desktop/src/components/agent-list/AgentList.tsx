@@ -343,11 +343,9 @@ export function AgentList({ width }: AgentListProps) {
   };
 
   const handleUninstall = (agentId: string) => {
-    // Block uninstalling System Agent
-    if (agentId === "com.acowork.system") {
-      addToast({ type: "warning", message: t("agentList.systemAgentCannotUninstall") });
-      return;
-    }
+    // ADR-077: System Agent is a regular bundled agent; no uninstall
+    // guard. Removing it goes through the same confirm dialog as every
+    // other agent.
     const agent = agentsMap[agentId]?.meta;
     setConfirmDialog({
       open: true,
@@ -448,7 +446,9 @@ export function AgentList({ width }: AgentListProps) {
         });
       },
     });
-    if (contextAgent && contextAgent.agent_id !== "com.acowork.system") {
+    // ADR-077: System Agent gets the same context menu as every other
+    // agent — including Uninstall. No special-case omission.
+    if (contextAgent) {
       items.push({
         key: "uninstall",
         icon: <Trash2 size={14} />,

@@ -383,7 +383,6 @@
     "agentUninstalled": "Agent 已卸载",
     "agentCloned": "Agent 已克隆：{{agentId}}",
     "agentCreated": "Agent 已创建：{{agentId}}",
-    "systemAgentCannotUninstall": "系统 Agent 无法卸载",
     "titleStopAgent": "停止 Agent",
     "titleUninstallAgent": "卸载 Agent",
     "noAgentsInstalled": "未安装任何 Agent",

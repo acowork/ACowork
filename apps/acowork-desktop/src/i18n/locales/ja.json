@@ -368,7 +368,6 @@
     "agentUninstalled": "Agent をアンインストールしました",
     "agentCloned": "Agent をクローンしました：{{agentId}}",
     "agentCreated": "Agent を作成しました：{{agentId}}",
-    "systemAgentCannotUninstall": "システム Agent はアンインストールできません",
     "titleStopAgent": "Agent を停止",
     "titleUninstallAgent": "Agent をアンインストール",
     "noAgentsInstalled": "Agent がインストールされていません",

@@ -367,7 +367,6 @@
     "agentUninstalled": "Agent 已解除安裝",
     "agentCloned": "Agent 已複製：{{agentId}}",
     "agentCreated": "Agent 已建立：{{agentId}}",
-    "systemAgentCannotUninstall": "系統 Agent 無法解除安裝",
     "titleStopAgent": "停止 Agent",
     "titleUninstallAgent": "解除安裝 Agent",
     "noAgentsInstalled": "未安裝任何 Agent",

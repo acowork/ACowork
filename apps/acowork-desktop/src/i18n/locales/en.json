@@ -383,7 +383,6 @@
     "agentUninstalled": "Agent uninstalled",
     "agentCloned": "Agent cloned: {{agentId}}",
     "agentCreated": "Agent created: {{agentId}}",
-    "systemAgentCannotUninstall": "System Agent cannot be uninstalled",
     "titleStopAgent": "Stop Agent",
     "titleUninstallAgent": "Uninstall Agent",
     "noAgentsInstalled": "No agents installed",

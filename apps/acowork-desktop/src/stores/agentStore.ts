@@ -14,9 +14,6 @@ import { log } from "../lib/logger";
 import { with503Retry } from "../lib/httpRetry";
 import * as sessionControl from "../lib/session-control";
 
-/** System Agent ID — always auto-started by Gateway */
-export const SYSTEM_AGENT_ID = "com.acowork.system";
-
 // ── One-shot "agent came online" waiters (event-driven, no polling) ──────
 // startAgent 等待 Runtime 上线：MQTT `agent_status online` → chatStore →
 // `updateAgentLiveness(alive=true)` → 触发这里注册的回调。超时由调用方
@@ -611,15 +608,24 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
   },
 
   uninstallAgent: async (agentId) => {
-    // ADR-073: `agentId` here is the INSTANCE id; guard the system
-    // package by its manifest identity (the system agent's instance id
-    // is a UUID and never equals SYSTEM_AGENT_ID once multi-instance
-    // is live).
-    if (get().agents[agentId]?.meta.agent_id === SYSTEM_AGENT_ID) {
-      throw new Error("System Agent cannot be uninstalled");
-    }
+    // ADR-077: System Agent is a regular bundled agent — no uninstall
+    // guard. `meta` is read before the call because the store entry is gone
+    // once the removal below commits.
+    const meta = get().agents[agentId]?.meta;
     try {
       await invoke("uninstall_agent", { agentId });
+
+      // ADR-077 Q4: the user chose not to keep System Agent installed, so
+      // the next onboarding run defaults it to unchecked. Recorded only after
+      // the uninstall actually succeeded — a failed attempt must not silently
+      // opt the agent out of onboarding.
+      if (meta?.agent_id === "com.acowork.system") {
+        try {
+          localStorage.setItem("acowork.onboarding.skipSystemAgent", "1");
+        } catch {
+          // localStorage unavailable (private mode / quota) — ignore.
+        }
+      }
 
       // Clean up profile from localStorage (keyed by instance id, with
       // legacy package-id fallback).
@@ -627,7 +633,6 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
         const raw = localStorage.getItem(STORAGE_KEY);
         if (raw) {
           const profiles = JSON.parse(raw) as Record<string, unknown>;
-          const meta = get().agents[agentId]?.meta;
           const profileKeys = new Set<string>([agentId]);
           if (meta?.agent_id) profileKeys.add(meta.agent_id);
           let changed = false;
@@ -656,8 +661,9 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
         let selId = state.selectedAgentId;
         if (selId === agentId) {
           const remaining = Object.values(next);
-          const sys = remaining.find((s) => s.meta.agent_id === SYSTEM_AGENT_ID);
-          selId = sys ? instanceIdOf(sys.meta) : (remaining[0] ? instanceIdOf(remaining[0].meta) : null);
+          // ADR-077 Q2: no System Agent priority. Pick the first remaining
+          // agent, identical to every other deletion path.
+          selId = remaining[0] ? instanceIdOf(remaining[0].meta) : null;
         }
         return { agents: next, selectedAgentId: selId };
       });
