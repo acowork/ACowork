@@ -74,15 +74,11 @@ async function bootGateway(): Promise<void> {
         // because Desktop never spawns in remote mode.
     }
 
-    // 3) Ensure System Agent is installed on whichever Gateway we ended
-    //    up with. Rust uses its internal base_url (already configured).
-    try {
-        await invoke("ensure_system_agent");
-    } catch (err) {
-        // Non-fatal: user can install agents manually
-        log.warn("ensure_system_agent failed:", err);
-    }
-
+    // 3) ADR-077: System Agent is a regular bundled agent. Installation
+    //    happens through the standard flow (onboarding wizard / agentStore
+    //    `installAgent` → `POST /api/agents/ensure`), not a dedicated Tauri
+    //    command. No per-boot System-Agent step needed here.
+    //
     // 4) Connect MQTT client for real-time events (ADR-033).
     try {
         await invoke("connect_mqtt");

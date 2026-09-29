@@ -244,8 +244,8 @@ fn bootstrap_probe_client() -> Result<reqwest::Client, DependencyNotReady> {
         })
 }
 
-/// Structured error: a prerequisite of `ensure_system_agent` (or another
-/// bootstrap-dependent command) was not satisfied.
+/// Structured error: a prerequisite of a bootstrap-dependent command was
+/// not satisfied.
 ///
 /// Serialised as-is into the Tauri `Err` payload, so the frontend can
 /// branch on `error_code` instead of string-matching (ADR-059 §7).
@@ -254,7 +254,9 @@ pub struct DependencyNotReady {
     /// `"dependency_not_ready"` (bootstrap never reached READY) or
     /// `"install_failed"` (internal install error, kept for parity).
     pub error_code: String,
-    /// What was not ready, e.g. `"gateway.bootstrap"`, `"com.acowork.system"`.
+    /// What was not ready, e.g. `"gateway.bootstrap"`. Empty for
+    /// `install_failed` (general command failure — no specific subsystem
+    /// was the blocker; the caller decides how to phrase it).
     pub dependency: String,
     /// Bootstrap phase observed at failure time (empty for install errors).
     pub phase: String,
@@ -278,178 +280,11 @@ impl DependencyNotReady {
     fn install_failed(detail: String) -> Self {
         Self {
             error_code: "install_failed".to_string(),
-            dependency: SYSTEM_AGENT_ID.to_string(),
+            dependency: String::new(),
             phase: String::new(),
             detail,
             timeout_secs: 0,
         }
-    }
-}
-
-/// System Agent ID — always bundled with Desktop App.
-pub const SYSTEM_AGENT_ID: &str = "com.acowork.system";
-
-/// Declare that the bundled System Agent must be installed.
-///
-/// The client states the intent once (`POST /api/agents/ensure`) and the
-/// backend decides whether anything has to happen: the Gateway answers
-/// from the node's install table and the node's serialized install gate
-/// guarantees at most one instance, no matter how many times or how
-/// concurrently this call is issued. This command therefore holds no
-/// "already installed?" logic — that decision belongs to the backend
-/// (ADR-073: one package may legitimately have several instances, so a
-/// package-level check on the client was both wrong and racy).
-///
-/// Called by the frontend after `init_local_gateway` (local mode) or
-/// directly after `set_gateway_config` (remote mode, where the Gateway
-/// is presumed already running). Uses `state.gateway.base_url` so it
-/// targets whichever Gateway the user has configured.
-///
-/// ADR-059: the old "poll /health then sleep" heuristic is replaced by
-/// waiting for the bootstrap phase `READY` (readiness source of truth).
-/// `node.local` readiness is part of the bootstrap snapshot (Phase 2),
-/// so the separate `wait_for_node_online` step is gone.
-#[tauri::command]
-pub async fn ensure_system_agent(
-    state: tauri::State<'_, AppState>,
-    app_handle: tauri::AppHandle,
-) -> Result<(), DependencyNotReady> {
-    use tokio::time::{Duration, sleep};
-
-    // Resolve URL from AppState (single source of truth)
-    let gateway_url = state.gateway.read().await.base_url().to_string();
-
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(3))
-        .build()
-        .map_err(|e| {
-            DependencyNotReady::install_failed(format!("Failed to build HTTP client: {}", e))
-        })?;
-
-    // ADR-059: wait for the Gateway's bootstrap phase to reach READY
-    // (30 s, configurable). Covers both process startup (liveness) and
-    // subsystem readiness (vault / mqtt / node.local / system_agent /
-    // publisher) in one bounded wait. DEGRADED is tolerated with a
-    // warning (optional subsystem failure, e.g. local embed); FAILED /
-    // SHUTTING_DOWN fail fast.
-    if let Err(e) = wait_for_bootstrap_ready(&client, &gateway_url, BOOTSTRAP_TIMEOUT_SECS).await {
-        tracing::warn!(
-            "[SYS-AGENT] bootstrap not ready: {:?} — install deferred",
-            e
-        );
-        return Err(e);
-    }
-
-    // Declarative ensure: "make sure the System Agent is installed".
-    //
-    // Everything that used to be decided here — is it already installed?
-    // how many copies exist? — is decided by the backend now:
-    // `POST /api/agents/ensure` answers from the node's install table and
-    // the node's serialized install gate guarantees at most one instance
-    // even when this call is issued concurrently (e.g. React
-    // StrictMode double-invoking the boot effect). The client states the
-    // intent once and stops orchestrating.
-    //
-    // Locate the bundled System Agent on disk
-    let resource_dir = app_handle
-        .path()
-        .resource_dir()
-        .map_err(|e| DependencyNotReady::install_failed(format!("Failed to get resource dir: {}", e)))?;
-    let system_agent_package = resource_dir
-        .join("agent-packages")
-        .join("com.acowork.system.agent");
-
-    if !system_agent_package.exists() {
-        tracing::warn!(
-            "[SYS-AGENT] Bundled package not found at {:?}",
-            system_agent_package
-        );
-        return Ok(());
-    }
-
-    tracing::info!(
-        "[SYS-AGENT] Ensuring bundled package from {:?}",
-        system_agent_package
-    );
-
-    // Bounded retry loop. Most failures during onboarding are races that
-    // answer non-2xx (the node has not announced NodeReady yet); retrying
-    // is safe *because* the endpoint is idempotent — it never depends on
-    // how many times it is called.
-    //
-    // OnboardingFlow's InstallAgentStep performs its own higher-level
-    // retry when this function returns `Err(...)` — this internal loop
-    // handles the common case where the eventual node does come online
-    // in time.
-    let package_bytes = std::fs::read(&system_agent_package)
-        .map_err(|e| DependencyNotReady::install_failed(format!("Failed to read System Agent package: {}", e)))?;
-    const INSTALL_MAX_ATTEMPTS: usize = 5;
-    let mut attempt: usize = 0;
-    loop {
-        attempt += 1;
-        // Routed through `GatewayClient` instead of the 3s probe client
-        // above: `/api/agents/ensure` is not a public Gateway path, so under
-        // `AUTH_MODE=multi_user` a bare request answers 401 (ADR-076). Going
-        // through `send` also gets the transparent token-renewal replay.
-        let gw = state.gateway.read().await;
-        let ensure_url = format!("{}/api/agents/ensure", gw.base_url());
-        let result = gw
-            .send(|| {
-                let form = reqwest::multipart::Form::new().part(
-                    "package",
-                    reqwest::multipart::Part::bytes(package_bytes.clone())
-                        .file_name("com.acowork.system.agent")
-                        .mime_str("application/octet-stream")?,
-                );
-                Ok(gw.request(reqwest::Method::POST, &ensure_url).multipart(form))
-            })
-            .await;
-        drop(gw);
-
-        match result {
-            Ok(resp) => {
-                if resp.status().is_success() {
-                    // 200 = already present, 202 = install dispatched.
-                    // Both mean the System Agent will be there; the
-                    // Gateway tracks the install to completion.
-                    let body = resp.text().await.unwrap_or_default();
-                    tracing::info!(
-                        "[SYS-AGENT] Ensure accepted (attempt {}/{}): {}",
-                        attempt,
-                        INSTALL_MAX_ATTEMPTS,
-                        body
-                    );
-                    return Ok(());
-                }
-                let error = resp.text().await.unwrap_or_default();
-                tracing::warn!(
-                    "[SYS-AGENT] Ensure HTTP error (attempt {}/{}): {}",
-                    attempt,
-                    INSTALL_MAX_ATTEMPTS,
-                    error
-                );
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "[SYS-AGENT] Ensure call failed (attempt {}/{}): {}",
-                    attempt,
-                    INSTALL_MAX_ATTEMPTS,
-                    e
-                );
-            }
-        }
-
-        if attempt >= INSTALL_MAX_ATTEMPTS {
-            tracing::warn!(
-                "[SYS-AGENT] Install exhausted {} attempts — returning error so InstallAgentStep can retry",
-                INSTALL_MAX_ATTEMPTS
-            );
-            return Err(DependencyNotReady::install_failed(format!(
-                "System Agent install did not succeed after {} attempts",
-                INSTALL_MAX_ATTEMPTS
-            )));
-        }
-        sleep(Duration::from_millis(1500)).await;
     }
 }
 

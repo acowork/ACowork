@@ -19,8 +19,9 @@
 //!    for `/health`.
 //! 4. If mode = remote, frontend skips spawn and just polls `/health`
 //!    on the user-configured URL.
-//! 5. After the gateway is reachable, frontend calls `ensure_system_agent`
-//!    to auto-install the bundled System Agent if not already present.
+//! 5. After the gateway is reachable, frontend onboarding / agentStore
+//!    installs agents via the standard `POST /api/agents/ensure` endpoint;
+//!    no special "ensure System Agent" Tauri command is needed (ADR-077).
 
 mod commands;
 mod gateway_client;
@@ -659,7 +660,6 @@ pub fn run() {
             commands::gateway::start_local_gateway,
             commands::gateway::stop_local_gateway,
             commands::gateway::get_local_gateway_status,
-            commands::gateway::ensure_system_agent,
             // ADR-059: latest Gateway bootstrap snapshot (MQTT cache + HTTP
             // fallback).
             commands::gateway::get_bootstrap,
