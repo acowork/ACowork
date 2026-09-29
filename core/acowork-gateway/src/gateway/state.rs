@@ -308,6 +308,21 @@ pub struct GatewayState {
     /// （`user.enabled=false`）或尚未 ready。`http/user_proxy.rs` 读取 `port`
     /// 构造代理目标，未就绪时返回 503 + `Retry-After`。
     pub user_process: Option<crate::lifecycle::user_supervisor::UserProcessState>,
+    /// Internal-service HTTP credential (ADR-064 Phase 3).
+    ///
+    /// Spawned Gateway child processes that call back into Gateway HTTP
+    /// over loopback (today: `acowork-pm`'s `HttpAgentDirectory`) present
+    /// this as a Bearer token, read from `ACOWORK_PM_GATEWAY_TOKEN`.
+    ///
+    /// **Deliberately separate from the MQTT `publisher_token`**: that one is
+    /// handed to every internal service over `--mqtt-password` (visible in
+    /// the process table) and is shared across services, so promoting it to
+    /// an API credential would silently widen its blast radius. This value
+    /// is generated per-process, injected via env only, and never reused.
+    ///
+    /// `None` = no internal service was spawned (PM/doc/user disabled), so
+    /// nothing can present it. `auth_middleware` fails closed on `None`.
+    pub internal_service_token: Option<String>,
     /// ADR-084 §决策 2：验签用的 Ed25519 公钥。
     ///
     /// 由 user supervisor 在用户服务 ready 后从 `{user.data_dir}/auth/ed25519.pub`
@@ -356,6 +371,7 @@ impl GatewayState {
             pm_mcp_url: None,
             doc_process: None,
             user_process: None,
+            internal_service_token: None,
             user_verifier: None,
             user_snapshot: None,
             doc_mcp_url: None,

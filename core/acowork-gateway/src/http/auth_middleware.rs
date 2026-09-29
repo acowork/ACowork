@@ -186,6 +186,46 @@ pub async fn auth_middleware(
         // meaningful 401 rather than a silent bypass.
     }
 
+    // Internal services the Gateway itself spawned (`acowork-pm` today) call
+    // back into Gateway HTTP over loopback. They have no user account and no
+    // use for a user-level Bearer token, but under `multi_user` every
+    // `/api/*` route is gated below — so without this branch they can never
+    // reach the API at all. `acowork-pm` reads it from
+    // `ACOWORK_PM_GATEWAY_TOKEN`, which the supervisor injects at spawn.
+    //
+    // Shape and intent mirror the `X-ACowork-Node-Token` branch above: the
+    // middleware proves *who* the caller is, and deliberately does **not**
+    // decide *what* it may read. Authorization stays in each route (and in
+    // the calling service), so a new Gateway endpoint PM needs later needs no
+    // change here — keeping a path allowlist in this middleware would freeze
+    // today's needs into the auth layer and make every new requirement an
+    // auth-layer edit.
+    if let Some(token) = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+    {
+        let expected = state
+            .gateway_state
+            .read()
+            .await
+            .internal_service_token
+            .clone();
+        if let Some(expected) = expected
+            && crate::mqtt::enrollment::constant_time_eq(
+                expected.as_bytes(),
+                token.as_bytes(),
+            )
+        {
+            return next.run(req).await;
+        }
+        // Not the service token — fall through to the user-token path so the
+        // caller gets a meaningful 401 instead of a silent bypass.
+    }
+
     // ADR-084 §决策 2: the account system lives in the user service now, so
     // the Gateway verifies with the Ed25519 public key that service publishes
     // and never touches the account store. The supervisor loads it once the
@@ -387,6 +427,88 @@ mod tests {
         assert!(!is_valid_scope_id("u-1\r\nX-Admin: 1"));
         assert!(!is_valid_scope_id("u 1"));
         assert!(!is_valid_scope_id("用户一"));
+    }
+
+    /// ADR-064 Phase 3 regression: `acowork-pm` is spawned by the Gateway and
+    /// calls back over loopback to read the agent directory. Under `multi_user`
+    /// every `/api/*` route is gated, so without the internal-service token
+    /// branch PM's `agent_exists` 401s and every *add-member* is rejected with
+    /// a misleading 400 "agent not found". The branch must open for the
+    /// service token, stay shut for everyone else, and — because it proves
+    /// identity only — must not be a path allowlist.
+    #[tokio::test]
+    async fn internal_service_token_authenticates_but_only_that_token_does() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use axum::{Router, routing::get};
+        use tower::ServiceExt;
+
+        let dir = std::env::temp_dir().join(format!("acowork-mw-svc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        const SERVICE_TOKEN: &str = "svc-token-abc";
+        let app = |token: Option<&'static str>| {
+            let mut gw = crate::gateway::state::GatewayState::new(&dir.to_string_lossy());
+            gw.user_verifier = Some(crate::http::test_support::verifier());
+            gw.internal_service_token = token.map(str::to_string);
+            let mut st = crate::http::routes::AppState::new(
+                Arc::new(tokio::sync::RwLock::new(gw)),
+                Arc::new(crate::http::auth::HttpAuth::new(false)),
+            );
+            st.auth_mode = crate::auth::AuthMode::MultiUser;
+            Router::new()
+                .route("/api/agents", get(|| async { "ok" }))
+                .layer(axum::middleware::from_fn_with_state(st, auth_middleware))
+        };
+        let call = |bearer: &str| {
+            Request::builder()
+                .uri("/api/agents")
+                .header("authorization", format!("Bearer {bearer}"))
+                .body(Body::empty())
+                .unwrap()
+        };
+
+        // The service token authenticates: PM can read the agent directory.
+        let resp = app(Some(SERVICE_TOKEN))
+            .oneshot(call(SERVICE_TOKEN))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Identity only, no path allowlist: a *new* endpoint PM needs later
+        // must not require an auth-layer edit. `GET /api/agents` and whatever
+        // else the caller reaches are decided by the route, not here.
+        let any_path = |bearer: &str| {
+            Request::builder()
+                .uri("/api/some/future/endpoint")
+                .header("authorization", format!("Bearer {bearer}"))
+                .body(Body::empty())
+                .unwrap()
+        };
+        let resp = app(Some(SERVICE_TOKEN))
+            .oneshot(any_path(SERVICE_TOKEN))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "the gate must authenticate the service and then let the router answer, \
+             not 404 it as an unknown path (which would mean a path allowlist exists)"
+        );
+
+        // A near-miss token is NOT the service: it must fall through to the
+        // user-token path and get a real 401, not a silent bypass.
+        let resp = app(Some(SERVICE_TOKEN))
+            .oneshot(call("svc-token-abd"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        // No service spawned (`internal_service_token = None`) → fail closed,
+        // even for the token value that would otherwise have matched.
+        let resp = app(None).oneshot(call(SERVICE_TOKEN)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
     /// The whole point of ADR-076 §决策 4's transport: a client-asserted

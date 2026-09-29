@@ -501,6 +501,18 @@ impl Gateway {
         let http_config = self.config.http.clone();
         let data_dir_path = std::path::PathBuf::from(&self.config.data_dir);
 
+        // Internal-service HTTP credential (ADR-064 Phase 3). Generated before
+        // any supervisor so `auth_middleware` can compare against it from the
+        // first request, and stored in shared state so the token and the
+        // comparison site can never drift apart. See
+        // `GatewayState::internal_service_token` for why this is NOT the MQTT
+        // `publisher_token`.
+        let internal_service_token = crate::mqtt::enrollment::generate_token();
+        {
+            let mut gw = shared_state.write().await;
+            gw.internal_service_token = Some(internal_service_token.clone());
+        }
+
         // ADR-064: PM 已从 Gateway 解耦为独立进程 `acowork-pm`。
         //
         // Gateway 不再内嵌 PM（删除 `acowork-pm` 依赖），改为：
@@ -538,6 +550,7 @@ impl Gateway {
                 gateway_health_url: format!("http://127.0.0.1:{}/health", http_config.port),
                 // ADR-064 Phase 3: PM 经 Gateway HTTP 查询 `/api/agents`（AgentDirectory）。
                 gateway_url: Some(format!("http://127.0.0.1:{}", http_config.port)),
+                gateway_token: Some(internal_service_token.clone()),
             };
             crate::lifecycle::pm_supervisor::start_pm_supervisor(
                 supervisor_cfg,

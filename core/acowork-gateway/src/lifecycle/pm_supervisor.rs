@@ -63,6 +63,10 @@ pub struct PmSupervisorConfig {
     /// Gateway HTTP base URL（ADR-064 Phase 3）：PM 经 `--gateway-url` 查询
     /// `GET /api/agents` 校验 assignee 存在性。`None` 时 PM 用宽松目录。
     pub gateway_url: Option<String>,
+    /// Internal-service HTTP credential，spawn 时经 `ACOWORK_PM_GATEWAY_TOKEN`
+    /// env 注入（非 argv —— 进程列表可见）。PM 用它作为 Bearer token 调 Gateway
+    /// HTTP；`None` 时 PM 不带 token，multi_user 下会被 401 拒掉。
+    pub gateway_token: Option<String>,
 }
 
 /// Spawn the PM supervisor task. Non-fatal: if PM cannot start, the
@@ -219,6 +223,14 @@ async fn spawn_pm(cfg: &PmSupervisorConfig) -> Result<(tokio::process::Child, u3
     // ADR-064 Phase 3: 传 Gateway base URL 供 PM 查询 `/api/agents`（AgentDirectory）。
     if let Some(gw_url) = &cfg.gateway_url {
         cmd.arg("--gateway-url").arg(gw_url);
+    }
+
+    // 内部服务调用 Gateway HTTP 的凭证。走 env 而非 argv（`main.rs` 读
+    // `ACOWORK_PM_GATEWAY_TOKEN` 早已预留好这条通道，之前一直没人写入，
+    // 于是 multi_user 下 PM 的目录查询恒 401）。失败非致命：PM 会退化成
+    // 无 token 刷新，Gateway 侧照常服务。
+    if let Some(token) = &cfg.gateway_token {
+        cmd.env("ACOWORK_PM_GATEWAY_TOKEN", token);
     }
 
     // On Unix, create a new process group so a Gateway shutdown does not
