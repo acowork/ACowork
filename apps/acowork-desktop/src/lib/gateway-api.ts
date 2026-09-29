@@ -723,53 +723,54 @@ export async function runLspInstall(
 // ── Settings API ────────────────────────────────────────────────────────
 //
 // ADR-056: Global default compact model. The Gateway persists this on the
-// `provider_list.json` top-level `default_compact_model` field and pushes
+// `provider_list.json` top-level `default_compact_models` field and pushes
 // it as part of `acowork/global/providers` (AvailableProviders) via MQTT
 // retained, so Runtimes can apply the three-tier distillation fallback.
 
 /**
- * `GET /api/settings/default-compact-model` — read the user's current
- * global pick. Returns `null` when not configured.
+ * `GET /api/settings/default-compact-model` — read the user's ordered
+ * global candidate list. Empty array when not configured.
  */
-export async function getDefaultCompactModel(
+export async function getDefaultCompactModels(
   gatewayUrl = getGatewayUrl(),
-): Promise<CompactModelRef | null> {
+): Promise<CompactModelRef[]> {
   const resp = await fetch(`${gatewayUrl}/api/settings/default-compact-model`);
   if (!resp.ok) {
-    throw new Error(`Failed to fetch default compact model: ${resp.status}`);
+    throw new Error(`Failed to fetch default compact models: ${resp.status}`);
   }
   const data = (await resp.json()) as DefaultCompactModelResponse;
-  return data.default_compact_model ?? null;
+  return data.default_compact_models ?? [];
 }
 
 /**
- * `PUT /api/settings/default-compact-model` — set or clear the global
- * default. Pass `null` to clear (Runtime then falls back to provider
- * compact_model and current chat model only).
+ * `PUT /api/settings/default-compact-model` — replace the whole ordered
+ * candidate list. An empty array clears it (Runtime then falls back to
+ * provider compact_model and current chat model only).
  *
- * Returns the new value (as persisted by the Gateway).
+ * Returns the new list (as persisted by the Gateway).
  *
  * Throws on validation failure (unknown provider_id, or model_id not
  * belonging to that provider) — Gateway returns HTTP 422 with the
- * `error` field set (ADR-056 §4.1).
+ * `error` field set; the list is validated atomically, so a rejected
+ * PUT leaves the previous list untouched (ADR-056 §4.1).
  */
-export async function setDefaultCompactModel(
-  ref: CompactModelRef | null,
+export async function setDefaultCompactModels(
+  refs: CompactModelRef[],
   gatewayUrl = getGatewayUrl(),
-): Promise<CompactModelRef | null> {
+): Promise<CompactModelRef[]> {
   const resp = await fetch(`${gatewayUrl}/api/settings/default-compact-model`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ default_compact_model: ref }),
+    body: JSON.stringify({ default_compact_models: refs }),
   });
   const data = (await resp.json().catch(() => ({}))) as {
-    default_compact_model?: CompactModelRef | null;
+    default_compact_models?: CompactModelRef[];
     error?: string;
   };
   if (!resp.ok) {
-    throw new Error(data.error ?? `Failed to set default compact model: ${resp.status}`);
+    throw new Error(data.error ?? `Failed to set default compact models: ${resp.status}`);
   }
-  return data.default_compact_model ?? null;
+  return data.default_compact_models ?? [];
 }
 
 /**

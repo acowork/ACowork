@@ -213,7 +213,15 @@
     "create": "作成",
     "saving": "保存中…",
     "deleteProject": "プロジェクトを削除",
-    "close": "閉じる"
+    "close": "閉じる",
+    "modelList": {
+      "empty": "未設定（フォールバックチェーンを使用）",
+      "add": "モデルを追加…",
+      "moveUp": "上へ",
+      "moveDown": "下へ",
+      "remove": "削除",
+      "unavailable": "利用不可"
+    }
   },
   "time": {
     "justNow": "たった今",
@@ -648,9 +656,7 @@
     "optional": "任意",
     "globalCompactModel": {
       "title": "グローバルデフォルト精简モデル",
-      "description": "要約/蒸鸿用のクロスプロバイダーデフォルト。見つからない場合は現在のプロバイダーの compact_model、さらに現在のチャットモデルにフォールバックします。",
-      "noneLabel": "— 設定しない",
-      "unavailable": "使用できません",
+      "description": "プロバイダ横断の蒸留/要約候補モデルの順序付きリスト。上から順に試行し、すべて利用できない場合はセッションのプロバイダの compact_model、次に現在のチャットモデルにフォールバックします。",
       "saveFailed": "保存に失敗しました：{{error}}"
     }
   },
@@ -1034,8 +1040,7 @@
     "rebuildIndexInProgress": "再構築中…",
     "distillerTitle": "記憶蒸留",
     "distillerEnabled": "記憶蒸留を有効化",
-    "distillerModel": "蒸留モデル",
-    "distillerModelPlaceholder": "既定の要約モデルに従う（自動）",
+    "distillerModel": "蒸留モデル（順に試行）",
     "distillerInterval": "間隔（分）",
     "distillerAccumulation": "蓄積（件）",
     "distillerIdle": "アイドル（分）",

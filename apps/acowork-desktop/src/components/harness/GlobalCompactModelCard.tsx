@@ -4,10 +4,10 @@ import type {
   ProviderListEntry,
   CompactModelRef,
 } from "../../lib/types";
-import { getDefaultCompactModel, setDefaultCompactModel } from "../../lib/gateway-api";
+import { getDefaultCompactModels, setDefaultCompactModels } from "../../lib/gateway-api";
+import { ModelPriorityList } from "../common/ModelPriorityList";
 import { cn } from "../../lib/utils";
 import { useTranslation } from "../../i18n/useTranslation";
-import { Dropdown } from "../common/Dropdown";
 import { ExpandableRow, ListBox } from "../common/list";
 import { useToast } from "../common/ToastProvider";
 
@@ -73,9 +73,9 @@ export function buildCompactModelOptions(
  *                                            →  MQTT republish triggers
  *                                            →  Runtimes refresh AgentCore.default_compact_model
  *
- * UX: a single-row layout with a native `<select>`. Picking an option
- * immediately PUTs the new value (optimistic update, rollback on error).
- * Selecting the empty "(not configured)" option clears the setting.
+ * UX: an ordered list editor (add / move up-down / remove). Every
+ * mutation PUTs the full list (optimistic update, rollback on error);
+ * an empty list clears the setting.
  */
 export function GlobalCompactModelCard({
   keys,
@@ -84,7 +84,7 @@ export function GlobalCompactModelCard({
   const { t } = useTranslation();
   const { addToast } = useToast();
 
-  const [current, setCurrent] = useState<CompactModelRef | null>(null);
+  const [current, setCurrent] = useState<CompactModelRef[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   // Fold state — default open, same convention as the other collapsible
@@ -93,11 +93,11 @@ export function GlobalCompactModelCard({
 
   const refresh = useCallback(async () => {
     try {
-      const v = await getDefaultCompactModel();
+      const v = await getDefaultCompactModels();
       setCurrent(v);
     } catch {
-      // Gateway may be down — leave current null, UI stays editable
-      setCurrent(null);
+      // Gateway may be down — leave the list empty, UI stays editable
+      setCurrent([]);
     } finally {
       setLoading(false);
     }
@@ -116,31 +116,18 @@ export function GlobalCompactModelCard({
     return m;
   }, [providers]);
 
-  const handleChange = async (raw: string) => {
-    // Optimistic update
-    const next: CompactModelRef | null = raw
-      ? (() => {
-          const o = options.find((opt) => opt.key === raw);
-          return o ? { provider_id: o.providerId, model_id: o.modelId } : null;
-        })()
-      : null;
-
-    // Skip if unchanged
-    if (
-      (current?.provider_id ?? null) === (next?.provider_id ?? null) &&
-      (current?.model_id ?? null) === (next?.model_id ?? null)
-    ) {
-      return;
-    }
-
+  // Every mutation PUTs the full ordered list (optimistic update,
+  // rollback on error). The Gateway validates atomically — a rejected
+  // list leaves the persisted one untouched.
+  const handleChange = async (next: CompactModelRef[]) => {
+    if (JSON.stringify(next) === JSON.stringify(current)) return;
     const previous = current;
     setCurrent(next);
     setSaving(true);
     try {
-      const persisted = await setDefaultCompactModel(next);
+      const persisted = await setDefaultCompactModels(next);
       setCurrent(persisted);
     } catch (e) {
-      // Rollback
       setCurrent(previous);
       addToast({
         type: "error",
@@ -152,26 +139,6 @@ export function GlobalCompactModelCard({
       setSaving(false);
     }
   };
-
-  const selectedKey = current
-    ? `${current.provider_id}::${current.model_id}`
-    : "";
-
-  // If the persisted pick is no longer present in options (provider removed),
-  // expose it as a synthetic option so React's <select> doesn't auto-snap
-  // to the empty placeholder and trigger a bogus onChange (which would
-  // wipe the user's saved setting).
-  const currentIsStale =
-    !!current && !options.some((o) => o.key === selectedKey);
-
-  // Render "(not configured)" placeholder option.
-  const noneLabel = t("harness.globalCompactModel.noneLabel");
-  const unavailableLabel = t("harness.globalCompactModel.unavailable");
-  // Use an em-space on each side of the "·" separator so model and provider
-  // don't visually collide inside the native <option> row. Native option
-  // text is rendered by the browser without CSS, so we lean on Unicode
-  // whitespace (U+2003) to widen the gap.
-  const sep = "\u2003\u00b7\u2003";
 
   return (
     <ListBox dividers={false}>
@@ -186,24 +153,13 @@ export function GlobalCompactModelCard({
           <p className="text-[11px] text-text-tertiary ">
             {t("harness.globalCompactModel.description")}
           </p>
-          <Dropdown
+          <ModelPriorityList
             className={cn(saving && "opacity-60")}
-            value={selectedKey}
-            onChange={(v) => handleChange(v)}
+            items={current}
+            options={options}
+            providerNameById={providerNameById}
             disabled={loading || saving}
-            placeholder={{ value: "", label: noneLabel }}
-            options={[
-              ...options.map((o) => ({
-                value: o.key,
-                label: `${o.modelId}${sep}${providerNameById.get(o.providerId) ?? o.providerId}`,
-              })),
-              ...(currentIsStale && current
-                ? [{
-                    value: selectedKey,
-                    label: `${current.model_id}${sep}${current.provider_id} (${unavailableLabel})`,
-                  }]
-                : []),
-            ]}
+            onChange={(next) => void handleChange(next)}
           />
         </div>
       </ExpandableRow>

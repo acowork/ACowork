@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { VaultKeyEntry, DistillerStatus } from "../../lib/types";
 import { fetchProviders } from "../../lib/gateway-api";
@@ -6,7 +6,7 @@ import { getGatewayUrl } from "../../lib/config";
 import { useTranslation } from "../../i18n/useTranslation";
 import { useToast } from "../common/ToastProvider";
 import { Switch } from "../common/Switch";
-import { Dropdown } from "../common/Dropdown";
+import { ModelPriorityList } from "../common/ModelPriorityList";
 import { StyledInput } from "../common/StyledInput";
 import { ListBox, ExpandableRow } from "../common/list";
 import { log } from "../../lib/logger";
@@ -21,7 +21,7 @@ import { with503Retry } from "../../lib/httpRetry";
  * manifest `[memory.distiller]` stays the first-run seed / fallback.
  *
  * - Enabled switch → `distiller_enabled`
- * - Model pick → `distiller_model` (`{provider_id, model_id}`), same
+ * - Model list → `distiller_models` (ordered `{provider_id, model_id}[]`), same
  *   provider/model option source as the Harness compact-model card
  *   (vault keys + provider display names).
  * - Interval / accumulation / idle inputs → the three trigger fields.
@@ -54,7 +54,11 @@ export function MemoryDistillSettings({
 
   const [loaded, setLoaded] = useState(false);
   const [enabled, setEnabled] = useState(false);
-  const [modelKey, setModelKey] = useState(""); // "provider::model", "" = unset
+  // Ordered distiller-model candidates (ADR-056 list semantics);
+  // empty = "no runtime opinion", fall back to manifest → global list.
+  const [models, setModels] = useState<
+    { provider_id: string; model_id: string }[]
+  >([]);
   const [intervalInput, setIntervalInput] = useState("");
   const [accInput, setAccInput] = useState("");
   const [idleInput, setIdleInput] = useState("");
@@ -74,17 +78,13 @@ export function MemoryDistillSettings({
       // Same nested envelope as AgentSetupTab: `{ agent_id, config, … }`.
       const cfg = (data?.config ?? {}) as {
         distiller_enabled?: boolean | null;
-        distiller_model?: { provider_id: string; model_id: string } | null;
+        distiller_models?: { provider_id: string; model_id: string }[] | null;
         distiller_interval_minutes?: number | null;
         distiller_accumulation_threshold?: number | null;
         distiller_idle_minutes?: number | null;
       };
       setEnabled(!!cfg.distiller_enabled);
-      setModelKey(
-        cfg.distiller_model
-          ? `${cfg.distiller_model.provider_id}::${cfg.distiller_model.model_id}`
-          : "",
-      );
+      setModels(cfg.distiller_models ?? []);
       setIntervalInput(
         cfg.distiller_interval_minutes != null
           ? String(cfg.distiller_interval_minutes)
@@ -118,21 +118,10 @@ export function MemoryDistillSettings({
   // select; `/api/models` supplies human-readable provider names.
   const [options, providerNames] = useModelOptions();
 
-  const modelDropdownOptions = useMemo(() => {
-    const sep = "\u2003\u00b7\u2003";
-    return options.map((o) => ({
-      value: o.key,
-      label: `${o.modelId}${sep}${providerNames.get(o.providerId) ?? o.providerId}`,
-    }));
-  }, [options, providerNames]);
-
-  const selectedModelStale =
-    modelKey !== "" && !options.some((o) => o.key === modelKey);
-
   // ── PUT a single distiller field to agent_config.json ────────────────
   const putField = useCallback(
-    async (field: string, value: unknown) => {
-      if (!agentId) return;
+    async (field: string, value: unknown): Promise<boolean> => {
+      if (!agentId) return false;
       setSavingField(field);
       try {
         const res = await fetch(
@@ -150,13 +139,16 @@ export function MemoryDistillSettings({
               status: res.status,
             }),
           });
+          return false;
         }
+        return true;
       } catch (e) {
         log.warn("[MemoryDistillSettings] save failed:", field, e);
         addToast({
           type: "error",
           message: t("memoryPanel.distillerSaveFailed", { status: "network" }),
         });
+        return false;
       } finally {
         setSavingField(null);
       }
@@ -175,20 +167,16 @@ export function MemoryDistillSettings({
     void putField("distiller_enabled", v);
   };
 
-  const handleModelChange = (raw: string) => {
-    setModelKey(raw);
-    if (raw === "") {
-      // Explicit clear → agent_config field removed (manifest/default fallback).
-      void putField("distiller_model", null);
-      return;
-    }
-    const o = options.find((opt) => opt.key === raw);
-    if (o) {
-      void putField("distiller_model", {
-        provider_id: o.providerId,
-        model_id: o.modelId,
-      });
-    }
+  const handleModelsChange = (
+    next: { provider_id: string; model_id: string }[],
+  ) => {
+    // Optimistic local update; on PUT failure reload the persisted list.
+    setModels(next);
+    void putField("distiller_models", next.length > 0 ? next : null).then(
+      (ok) => {
+        if (!ok) void loadConfig();
+      },
+    );
   };
 
   const saveNumber = (
@@ -287,27 +275,13 @@ export function MemoryDistillSettings({
               <span className="text-[10px] text-text-tertiary ">
                 {t("memoryPanel.distillerModel")}
               </span>
-              <Dropdown
-                className="!py-1 text-[11px]"
-                value={modelKey}
-                onChange={handleModelChange}
-                disabled={!running || !enabled || savingField === "distiller_model"}
-                placeholder={{
-                  value: "",
-                  label: t("memoryPanel.distillerModelPlaceholder"),
-                  selectable: true,
-                }}
-                options={[
-                  ...modelDropdownOptions,
-                  ...(selectedModelStale && modelKey
-                    ? [
-                        {
-                          value: modelKey,
-                          label: `${modelKey.split("::")[1]} · ${modelKey.split("::")[0]}`,
-                        },
-                      ]
-                    : []),
-                ]}
+              <ModelPriorityList
+                items={models}
+                options={options}
+                providerNameById={providerNames}
+                disabled={!running || !enabled || savingField === "distiller_models"}
+                onChange={handleModelsChange}
+                className="!text-[11px]"
               />
             </label>
 

@@ -213,7 +213,15 @@
     "create": "만들기",
     "saving": "저장 중…",
     "deleteProject": "프로젝트 삭제",
-    "close": "닫기"
+    "close": "닫기",
+    "modelList": {
+      "empty": "미설정(폴백 체인 사용)",
+      "add": "모델 추가…",
+      "moveUp": "위로",
+      "moveDown": "아래로",
+      "remove": "제거",
+      "unavailable": "사용 불가"
+    }
   },
   "time": {
     "justNow": "방금",
@@ -649,9 +657,7 @@
     "optional": "선택사항",
     "globalCompactModel": {
       "title": "귀첨 기본 결정 모델",
-      "description": "요약/망진 용 크로스 프로베이더 기본값. 찾을 수 없으면 현재 프로베이더의 compact_model으로, 그 다음에는 현재 채팅 모델로 폭일덕합니다.",
-      "noneLabel": "— 설정 안 함",
-      "unavailable": "사용 불가",
+      "description": "provider 간 요약/증류 후보 모델 순서 목록. 위에서부터 순서대로 시도하며, 모두 사용 불가하면 세션 provider의 compact_model, 이어서 현재 채팅 모델로 대체됩니다.",
       "saveFailed": "저장 실패：{{error}}"
     }
   },
@@ -1035,8 +1041,7 @@
     "rebuildIndexInProgress": "재구축 중…",
     "distillerTitle": "메모리 증류",
     "distillerEnabled": "메모리 증류 활성화",
-    "distillerModel": "증류 모델",
-    "distillerModelPlaceholder": "기본 요약 모델 따르기(자동)",
+    "distillerModel": "증류 모델 (순서대로 시도)",
     "distillerInterval": "주기(분)",
     "distillerAccumulation": "누적(건)",
     "distillerIdle": "유휴(분)",

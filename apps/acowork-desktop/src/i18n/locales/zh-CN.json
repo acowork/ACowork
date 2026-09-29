@@ -213,7 +213,15 @@
     "create": "创建",
     "saving": "保存中…",
     "deleteProject": "删除项目",
-    "close": "关闭"
+    "close": "关闭",
+    "modelList": {
+      "empty": "未配置（按回退链执行）",
+      "add": "添加模型…",
+      "moveUp": "上移",
+      "moveDown": "下移",
+      "remove": "移除",
+      "unavailable": "已不可用"
+    }
   },
   "time": {
     "justNow": "刚刚",
@@ -699,9 +707,7 @@
     "optional": "可选",
     "globalCompactModel": {
       "title": "全局默认精简模型",
-      "description": "跨 provider 的精简（摘要/蒸馏）默认目标。找不到时回退到当前服务商的 compact_model，再回退到当前聊天模型。",
-      "noneLabel": "— 不设置",
-      "unavailable": "已不可用",
+      "description": "跨 provider 的蒸馏/摘要候选模型有序列表。按顺序逐个尝试；全部不可用时回退到当前会话 provider 的 compact_model，再回退到当前聊天模型。",
       "saveFailed": "保存失败：{{error}}"
     }
   },
@@ -1090,8 +1096,7 @@
     "rebuildIndexInProgress": "重建中…",
     "distillerTitle": "记忆沉淀",
     "distillerEnabled": "启用记忆蒸馏",
-    "distillerModel": "蒸馏模型",
-    "distillerModelPlaceholder": "跟随默认摘要模型（自动）",
+    "distillerModel": "蒸馏模型（按序尝试）",
     "distillerInterval": "周期（分钟）",
     "distillerAccumulation": "积压（条）",
     "distillerIdle": "空闲（分钟）",
