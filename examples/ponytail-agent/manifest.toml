@@ -9,7 +9,6 @@ role = "Senior Software Engineer"
 description = "The best code is the code you never wrote."
 author = "DietrichGebert"
 runtime_version = "0.1.0"
-system = false
 dev = false
 avatar = "assets/avatar.png"
 

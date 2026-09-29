@@ -188,7 +188,6 @@ pub async fn install_locally(
             agent_id: &agent_id,
             source: NodePackageSource::LocalPath(&req.package_path),
             dev_mode: crate::http::agents::gateway_dev_mode(&state).await,
-            system: manifest.system,
             ensure: false,
             operation_id: "",
         })

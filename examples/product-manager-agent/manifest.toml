@@ -9,7 +9,6 @@ role = "Product Manager"
 description = "A product manager agent skilled in product strategy, user research, PRD writing, roadmap prioritization, Figma design review, feature acceptance, and launch planning."
 author = "ACowork Team"
 runtime_version = "0.1.0"
-system = false
 dev = false
 avatar = "assets/avatar.jpg"
 

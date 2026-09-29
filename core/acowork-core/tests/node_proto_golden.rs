@@ -348,35 +348,32 @@ fn node_clone_upgrade_publish_command_wire_shape() {
 }
 
 #[test]
-fn node_install_command_carries_lane_and_intent_flags() {
-    // The install gate (ADR-073) gives `NodeInstall` two booleans whose
-    // field numbers are part of the Gateway ↔ Node contract:
-    //   `system` (6) — put the job on the node's System lane;
-    //   `ensure` (7) — declarative "ensure present" instead of "install
+fn node_install_command_carries_the_intent_flag() {
+    // The install gate (ADR-073) gives `NodeInstall` a boolean whose field
+    // number is part of the Gateway / Node contract:
+    //   `ensure` (7) - declarative "ensure present" instead of "install
     //                  one more copy".
     let install = acowork_core::mqtt_proto::NodeInstall {
-        agent_id: "com.acowork.system".to_string(),
-        package_url: "http://gw/api/packages/com.acowork.system/download".to_string(),
+        agent_id: "com.test.agent".to_string(),
+        package_url: "http://gw/api/packages/com.test.agent/download".to_string(),
         local_path: String::new(),
         dev_mode: false,
         instance_id: "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d".to_string(),
-        system: true,
         ensure: true,
     };
     let numbers = top_level_field_numbers(&install.encode_to_vec());
-    assert!(numbers.contains(&6), "`system` must be field 6");
     assert!(numbers.contains(&7), "`ensure` must be field 7");
 
     // proto3 default-false fields are NOT on the wire, so a Gateway that
-    // predates these flags still produces a valid command that the node
-    // reads as "explicit install, user lane".
+    // predates the flag still produces a valid command the node reads as
+    // "explicit install".
     assert!(
         top_level_field_numbers(&acowork_core::mqtt_proto::NodeInstall::default().encode_to_vec())
             .is_empty(),
         "default install must encode to zero bytes"
     );
 
-    // Full envelope round-trip: both flags survive Gateway → Node.
+    // Full envelope round-trip: the flag survives Gateway → Node.
     let decoded = decode_envelope(
         &envelope_with(data_envelope::Payload::NodeControlCommand(
             NodeControlCommand {
@@ -393,7 +390,6 @@ fn node_install_command_carries_lane_and_intent_flags() {
     let Some(node_control_command::Command::Install(install)) = cmd.command else {
         panic!("expected Install command");
     };
-    assert!(install.system, "system lane flag must round-trip");
     assert!(install.ensure, "declarative ensure flag must round-trip");
     assert_eq!(install.instance_id, "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d");
     assert_eq!(install.local_path, "", "url and local path are exclusive");

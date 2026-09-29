@@ -63,43 +63,8 @@ pub enum InstallKind {
     /// no-op ([`super::InstallOutcome::AlreadySatisfied`]) instead of
     /// landing a second copy. Used by `POST /api/agents/ensure` and the
     /// Desktop onboarding wizard — both are "ensure" calls, not "install
-    /// one more" calls. (ADR-077 removed the two boot-time callers that
-    /// used to land here: the Gateway's System Agent auto-start task and
-    /// the Desktop's `ensure_system_agent` Tauri command.)
+    /// one more" calls.
     Ensure,
-}
-
-/// Scheduling lane of an installation.
-///
-/// Variant order is the priority order: [`InstallPriority::System`]
-/// sorts before [`InstallPriority::User`], so deriving `Ord` gives the
-/// scheduler the comparison it needs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum InstallPriority {
-    /// System packages (ADR-073 `manifest.system = true`). Sorted first.
-    ///
-    /// ADR-077 dropped `system = true` from the bundled System Agent
-    /// manifest, so that agent now schedules on the User lane like every
-    /// other package; the lane itself stays for genuinely system-critical
-    /// installs.
-    ///
-    /// Priority affects *dequeue order only* — a running job is never
-    /// preempted, so a partially extracted package directory can never
-    /// be left behind.
-    System,
-    /// Everything the user installed explicitly. Sorted last.
-    User,
-}
-
-impl InstallPriority {
-    /// Priority implied by the manifest's `system` flag.
-    pub fn from_system_flag(is_system: bool) -> Self {
-        if is_system {
-            Self::System
-        } else {
-            Self::User
-        }
-    }
 }
 
 /// Where the package payload comes from.
@@ -187,8 +152,6 @@ pub struct InstallRequest {
     pub instance_id: AgentInstanceId,
     /// Explicit vs. declarative semantics — see [`InstallKind`].
     pub kind: InstallKind,
-    /// Scheduling lane — see [`InstallPriority`].
-    pub priority: InstallPriority,
     /// Where the package payload comes from — see [`InstallSource`].
     pub source: InstallSource,
     /// `ADR-055 §6.20` development mode: the package is read from the
@@ -204,13 +167,11 @@ pub struct InstallRequest {
 }
 
 impl InstallRequest {
-    /// An explicit install of one more copy, scheduled on the user lane
-    /// unless the package is a system package.
+    /// An explicit install of one more copy.
     pub fn install(
         operation_id: OperationId,
         agent_id: impl Into<String>,
         instance_id: AgentInstanceId,
-        is_system: bool,
         source: InstallSource,
     ) -> Self {
         Self {
@@ -218,7 +179,6 @@ impl InstallRequest {
             agent_id: agent_id.into(),
             instance_id,
             kind: InstallKind::Install,
-            priority: InstallPriority::from_system_flag(is_system),
             source,
             dev_mode: false,
             already_installed: None,
@@ -230,7 +190,6 @@ impl InstallRequest {
         operation_id: OperationId,
         agent_id: impl Into<String>,
         instance_id: AgentInstanceId,
-        is_system: bool,
         source: InstallSource,
     ) -> Self {
         Self {
@@ -238,7 +197,6 @@ impl InstallRequest {
             agent_id: agent_id.into(),
             instance_id,
             kind: InstallKind::Ensure,
-            priority: InstallPriority::from_system_flag(is_system),
             source,
             dev_mode: false,
             already_installed: None,
@@ -273,8 +231,6 @@ pub struct InstallTicket {
     pub instance_id: AgentInstanceId,
     /// See [`InstallKind`].
     pub kind: InstallKind,
-    /// See [`InstallPriority`].
-    pub priority: InstallPriority,
     /// See [`InstallSource`].
     pub source: InstallSource,
     /// See [`InstallRequest::dev_mode`].
@@ -345,25 +301,11 @@ mod tests {
     }
 
     #[test]
-    fn system_priority_sorts_before_user() {
-        assert!(InstallPriority::System < InstallPriority::User);
-        assert_eq!(
-            InstallPriority::from_system_flag(true),
-            InstallPriority::System
-        );
-        assert_eq!(
-            InstallPriority::from_system_flag(false),
-            InstallPriority::User
-        );
-    }
-
-    #[test]
     fn explicit_install_is_not_an_ensure_request() {
         let req = InstallRequest::install(
             OperationId::new(),
             "com.test.agent",
             instance(),
-            false,
             source(),
         );
         assert_eq!(req.kind, InstallKind::Install);
@@ -376,14 +318,12 @@ mod tests {
         let existing = instance();
         let req = InstallRequest::ensure(
             OperationId::new(),
-            "com.acowork.system",
+            "com.test.agent",
             instance(),
-            true,
             source(),
         )
         .with_already_installed(existing.clone());
         assert_eq!(req.kind, InstallKind::Ensure);
-        assert_eq!(req.priority, InstallPriority::System);
         assert_eq!(req.already_installed, Some(existing));
     }
 

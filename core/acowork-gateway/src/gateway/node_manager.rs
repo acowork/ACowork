@@ -969,7 +969,6 @@ pub async fn install_agent_via_mqtt(
             agent_id: &agent_id,
             source: NodePackageSource::Url(&url),
             dev_mode: dispatch.dev_mode,
-            system: manifest.system,
             // CLI `install` is an explicit install of one more copy.
             ensure: false,
             operation_id: operation_id.as_str(),

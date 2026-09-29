@@ -9,7 +9,6 @@ role = "Project Manager"
 description = "A professional project manager skilled in requirements analysis, task decomposition, progress tracking, risk assessment, and team coordination."
 author = "ACowork Team"
 runtime_version = "0.1.0"
-system = false
 dev = false
 avatar = "assets/avatar.jpg"
 

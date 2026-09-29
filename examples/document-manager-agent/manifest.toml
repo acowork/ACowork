@@ -9,7 +9,6 @@ role = "Document Manager"
 description = "A document management agent skilled in collecting, organizing, archiving, writing, reviewing, converting, and maintaining documentation and knowledge bases."
 author = "ACowork Team"
 runtime_version = "0.1.0"
-system = false
 dev = false
 avatar = "assets/avatar.jpg"
 

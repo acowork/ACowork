@@ -9,7 +9,6 @@ role = "Software Architect"
 description = "A principal-level software architect skilled in requirements analysis, system design, architecture review, module boundaries, interface contracts, scalability, security, and technical planning."
 author = "ACowork Team"
 runtime_version = "0.1.0"
-system = false
 dev = false
 avatar = "assets/avatar.jpg"
 

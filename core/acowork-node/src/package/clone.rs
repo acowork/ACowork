@@ -47,15 +47,7 @@ pub fn clone_agent(
         .get(&source_key)
         .ok_or_else(|| NodeError::AgentNotFound(source_key.clone()))?;
 
-    // 2. System agent cannot be cloned
-    if source_info.manifest.system {
-        return Err(NodeError::Package(format!(
-            "System agent '{}' cannot be cloned",
-            source_key
-        )));
-    }
-
-    // 3. Check conflict — the target is a NEW instance; only a collision
+    // 2. Check conflict — the target is a NEW instance; only a collision
     //    on the same instance_id (impossible for a fresh UUID) would fail.
     let new_instance_id = uuid::Uuid::new_v4().to_string();
     if state.is_installed(&new_instance_id) {
@@ -65,7 +57,7 @@ pub fn clone_agent(
         )));
     }
 
-    // 4. Validate new agent_id (reverse-domain format)
+    // 3. Validate new agent_id (reverse-domain format)
     if !is_valid_agent_id(new_agent_id) {
         return Err(NodeError::Package(format!(
             "Invalid agent ID '{}': must be reverse-domain format (e.g. com.example.myagent)",
@@ -90,7 +82,7 @@ pub fn clone_agent(
         ))
     })?;
 
-    // 5. Copy manifest (with modifications)
+    // 4. Copy manifest (with modifications)
     let mut new_manifest = source_info.manifest.clone();
     new_manifest.agent_id = new_agent_id.to_string();
     new_manifest.dev = true;
@@ -100,7 +92,7 @@ pub fn clone_agent(
     std::fs::write(target_path.join("manifest.toml"), &manifest_toml)
         .map_err(|e| NodeError::Package(format!("Failed to write manifest: {}", e)))?;
 
-    // 6. Copy skeleton directories
+    // 5. Copy skeleton directories
     let skeleton_dirs = &["prompts", "config", "tools", "resources"];
     let full_only_dirs = &["skills", "data"];
 
@@ -111,7 +103,7 @@ pub fn clone_agent(
         }
     }
 
-    // 7. Copy full-mode only directories
+    // 6. Copy full-mode only directories
     if mode == CloneMode::Full {
         for dir_name in full_only_dirs {
             let src = source_path.join(dir_name);
@@ -145,7 +137,7 @@ pub fn clone_agent(
         }
     }
 
-    // 8. Register cloned agent
+    // 7. Register cloned agent
     let info = InstalledAgent {
         instance_id: new_instance_id,
         agent_id: new_agent_id.to_string(),
@@ -226,7 +218,7 @@ fn is_valid_agent_id(agent_id: &str) -> bool {
 mod tests {
     use super::*;
 
-    fn setup_test_agent(dir: &Path, agent_id: &str, system: bool) {
+    fn setup_test_agent(dir: &Path, agent_id: &str) {
         let prompts_dir = dir.join("prompts");
         let config_dir = dir.join("config");
         let skills_dir = dir.join("skills");
@@ -251,13 +243,11 @@ mod tests {
             description = "Test"
             author = "test"
             runtime_version = "0.1.0"
-            {}
             [llm]
             provider = "openai"
             model = "gpt-4"
             "#,
             agent_id,
-            if system { "system = true" } else { "" }
         );
         std::fs::write(dir.join("manifest.toml"), manifest).unwrap();
         std::fs::write(prompts_dir.join("system.md"), "You are a test agent.").unwrap();
@@ -310,7 +300,7 @@ mod tests {
 
         let source_dir = temp_dir.join("source");
         let install_dir = temp_dir.join("installed");
-        setup_test_agent(&source_dir, "com.test.weather", false);
+        setup_test_agent(&source_dir, "com.test.weather");
 
         let mut state = NodeState::new(16);
         add_agent_to_state(&mut state, "com.test.weather", &source_dir.to_string_lossy());
@@ -354,7 +344,7 @@ mod tests {
 
         let source_dir = temp_dir.join("source");
         let install_dir = temp_dir.join("installed");
-        setup_test_agent(&source_dir, "com.test.weather", false);
+        setup_test_agent(&source_dir, "com.test.weather");
 
         let mut state = NodeState::new(16);
         add_agent_to_state(&mut state, "com.test.weather", &source_dir.to_string_lossy());
@@ -393,45 +383,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
-    #[test]
-    fn test_clone_system_agent_rejected() {
-        let temp_dir =
-            std::env::temp_dir().join(format!("acowork-test-clone-sys-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&temp_dir);
-        std::fs::create_dir_all(&temp_dir).unwrap();
-
-        let source_dir = temp_dir.join("source");
-        let install_dir = temp_dir.join("installed");
-        setup_test_agent(&source_dir, "com.acowork.system", true);
-
-        let mut state = NodeState::new(16);
-
-        // Add with system=true manifest (read from disk).
-        let manifest_toml = std::fs::read_to_string(source_dir.join("manifest.toml")).unwrap();
-        let manifest = acowork_core::AgentManifest::from_toml(&manifest_toml).unwrap();
-        state.add_installed(InstalledAgent {
-            instance_id: "inst-com.acowork.system".to_string(),
-            agent_id: "com.acowork.system".to_string(),
-            version: "1.0.0".to_string(),
-            name: "System Agent".to_string(),
-            install_path: source_dir.to_string_lossy().to_string(),
-            manifest,
-        });
-
-        let result = clone_agent(
-            "inst-com.acowork.system",
-            "com.acowork.system",
-            "com.acowork.system-clone",
-            CloneMode::Skeleton,
-            &install_dir,
-            &mut state,
-        );
-        assert!(result.is_err(), "System agent clone should be rejected");
-
-        let _ = std::fs::remove_dir_all(&temp_dir);
-    }
-
-    #[test]
+        #[test]
     fn test_clone_duplicate_agent_id() {
         let temp_dir =
             std::env::temp_dir().join(format!("acowork-test-clone-dup-{}", std::process::id()));
@@ -440,7 +392,7 @@ mod tests {
 
         let source_dir = temp_dir.join("source");
         let install_dir = temp_dir.join("installed");
-        setup_test_agent(&source_dir, "com.test.weather", false);
+        setup_test_agent(&source_dir, "com.test.weather");
 
         let mut state = NodeState::new(16);
         add_agent_to_state(

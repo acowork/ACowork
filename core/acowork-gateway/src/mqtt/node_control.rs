@@ -83,8 +83,6 @@ pub struct NodeInstallDispatch<'a> {
     pub source: NodePackageSource<'a>,
     /// Signature strictness (ADR-055 §6.20).
     pub dev_mode: bool,
-    /// `manifest.system` — the install takes the node's system lane.
-    pub system: bool,
     /// Declarative "ensure present" intent: if any instance of the
     /// package is already installed on the node, the request is a no-op
     /// instead of landing another copy. `false` = explicit install of
@@ -108,7 +106,6 @@ impl NodeInstallDispatch<'_> {
             local_path,
             dev_mode: self.dev_mode,
             instance_id: self.instance_id.to_string(),
-            system: self.system,
             ensure: self.ensure,
         }
     }

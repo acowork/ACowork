@@ -112,9 +112,6 @@ pub struct AgentManifest {
     /// Sandbox configuration
     #[serde(default)]
     pub sandbox: SandboxConfig,
-    /// Whether this is a system agent
-    #[serde(default)]
-    pub system: bool,
     /// Whether developer mode is enabled
     #[serde(default)]
     pub dev: bool,

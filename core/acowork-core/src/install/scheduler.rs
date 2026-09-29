@@ -12,8 +12,7 @@
 //!    it will create; re-submitting that id is the same install and is
 //!    merged into the accepted job, so no two jobs can ever target the
 //!    same landing directory.
-//! 3. **Lane ordering** — [`InstallPriority::System`] dequeues before
-//!    [`InstallPriority::User`]; FIFO within a lane.
+//! 3. **Ordering** — tickets dequeue in admission order (plain FIFO).
 //!
 //! Deliberately *not* here: package-level uniqueness. Two different
 //! instance ids for the same `agent_id` are both admitted and both run
@@ -185,7 +184,6 @@ impl Entry {
             agent_id: self.request.agent_id.clone(),
             instance_id: self.request.instance_id.clone(),
             kind: self.request.kind,
-            priority: self.request.priority,
             source: self.request.source.clone(),
             dev_mode: self.request.dev_mode,
             phase,
@@ -283,7 +281,7 @@ impl InstallScheduler {
             .pending
             .iter()
             .enumerate()
-            .min_by_key(|(_, entry)| (entry.request.priority, entry.seq))
+            .min_by_key(|(_, entry)| entry.seq)
             .map(|(idx, _)| idx)?;
         let entry = self.pending.swap_remove(idx);
         let ticket = entry.ticket(InstallPhase::Running);
@@ -354,9 +352,9 @@ fn entry_phase(inflight: &Option<Entry>, entry: &Entry) -> InstallPhase {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::install::{InstallOutcome, InstallPriority, InstallSource};
+    use crate::install::{InstallOutcome, InstallSource};
 
-    const AGENT: &str = "com.acowork.system";
+    const AGENT: &str = "com.test.agent";
 
     /// Payload origin shared by scheduler tests — the scheduler never
     /// interprets it, it only has to survive the trip into the ticket.
@@ -368,10 +366,10 @@ mod tests {
         let op = OperationId::new();
         match kind {
             InstallKind::Install => {
-                InstallRequest::install(op, AGENT, instance, true, test_source())
+                InstallRequest::install(op, AGENT, instance, test_source())
             }
             InstallKind::Ensure => {
-                InstallRequest::ensure(op, AGENT, instance, true, test_source())
+                InstallRequest::ensure(op, AGENT, instance, test_source())
             }
         }
     }
@@ -493,34 +491,16 @@ mod tests {
     }
 
     #[test]
-    fn system_lane_dequeues_before_user_lane() {
+    fn tickets_dequeue_in_admission_order() {
         let mut sched = InstallScheduler::new();
-        let user_a = InstallRequest::install(
-            OperationId::new(),
-            "com.test.user-a",
-            AgentInstanceId::new(),
-            false,
-            test_source(),
-        );
-        let user_b = InstallRequest::install(
-            OperationId::new(),
-            "com.test.user-b",
-            AgentInstanceId::new(),
-            false,
-            test_source(),
-        );
-        let system = InstallRequest::install(
-            OperationId::new(),
-            "com.acowork.system",
-            AgentInstanceId::new(),
-            true,
-            test_source(),
-        );
-        let (a, b, s) = (
-            sched.admit(user_a),
-            sched.admit(user_b),
-            sched.admit(system),
-        );
+        for id in ["com.test.a", "com.test.b", "com.test.c"] {
+            sched.admit(InstallRequest::install(
+                OperationId::new(),
+                id,
+                AgentInstanceId::new(),
+                test_source(),
+            ));
+        }
 
         let mut order = Vec::new();
         for _ in 0..3 {
@@ -528,14 +508,7 @@ mod tests {
             order.push(ticket.agent_id.clone());
             assert!(sched.finish(&ticket.operation_id, ready(&ticket)));
         }
-        // System first despite being admitted last; FIFO within a lane.
-        assert_eq!(order, vec!["com.acowork.system", "com.test.user-a", "com.test.user-b"]);
-        assert_eq!(
-            s.ticket().expect("admitted").priority,
-            InstallPriority::System
-        );
-        assert_eq!(a.ticket().expect("admitted").priority, InstallPriority::User);
-        assert_eq!(b.ticket().expect("admitted").priority, InstallPriority::User);
+        assert_eq!(order, ["com.test.a", "com.test.b", "com.test.c"]);
         assert!(sched.is_idle());
     }
 

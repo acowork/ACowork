@@ -370,7 +370,6 @@ async fn handle_command(
                     operation_id,
                     cmd.agent_id.clone(),
                     instance_id,
-                    cmd.system,
                     source,
                 )
             } else {
@@ -378,7 +377,6 @@ async fn handle_command(
                     operation_id,
                     cmd.agent_id.clone(),
                     instance_id,
-                    cmd.system,
                     source,
                 )
             }
@@ -2345,7 +2343,6 @@ mod tests {
                     // ADR-073: valid instance id — the test targets the
                     // missing-source validation, not the UUID gate.
                     instance_id: TEST_INSTANCE_ID.to_string(),
-                    system: false,
                     ensure: false,
                 },
             )),
@@ -2384,7 +2381,6 @@ mod tests {
                     local_path: local_path.to_string(),
                     dev_mode: false,
                     instance_id: instance_id.to_string(),
-                    system: false,
                     ensure,
                 },
             )),
@@ -2401,15 +2397,15 @@ mod tests {
         let existing = uuid::Uuid::new_v4().to_string();
         state.write().await.add_installed(crate::state::InstalledAgent {
             instance_id: existing.clone(),
-            agent_id: "com.acowork.system".to_string(),
+            agent_id: "com.test.agent".to_string(),
             version: "1.0.0".to_string(),
-            name: "System".to_string(),
+            name: "Test".to_string(),
             install_path: "D:/tmp/sys".to_string(),
             manifest: acowork_core::AgentManifest::from_toml(
                 r#"
-                agent_id = "com.acowork.system"
+                agent_id = "com.test.agent"
                 version = "1.0.0"
-                name = "System"
+                name = "Test"
                 description = "t"
                 author = "t"
                 runtime_version = "0.1.0"
@@ -2423,7 +2419,7 @@ mod tests {
 
         let cmd = install_command(
             &uuid::Uuid::new_v4().to_string(),
-            "com.acowork.system",
+            "com.test.agent",
             "D:/tmp/pkg.agent",
             true,
         );

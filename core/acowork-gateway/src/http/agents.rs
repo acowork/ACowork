@@ -959,7 +959,6 @@ pub async fn ensure_agent(
             agent_id: &agent_id,
             source: NodePackageSource::Url(&package_url),
             dev_mode: gateway_dev_mode(&state).await,
-            system: staged.manifest.system,
             // The intent: at most one instance, no matter how many
             // callers ask (the node re-checks after dequeue).
             ensure: true,
@@ -1039,8 +1038,6 @@ pub async fn install_agent(
             agent_id: &agent_id,
             source: NodePackageSource::Url(&package_url),
             dev_mode: gateway_dev_mode(&state).await,
-            // `manifest.system` decides the node's install lane.
-            system: manifest.system,
             // `POST /api/agents/install` is an explicit install of one
             // more copy (ADR-073 multi-instance) — a declarative
             // "ensure present" is a different intent and a different
@@ -2289,7 +2286,6 @@ mod tests {
             capabilities: Default::default(),
             resources: Default::default(),
             sandbox: Default::default(),
-            system: false,
             dev: false,
             skills: Default::default(),
         }

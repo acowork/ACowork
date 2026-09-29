@@ -255,7 +255,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
-    use acowork_core::install::{InstallPriority, InstallSource};
+    use acowork_core::install::InstallSource;
 
     /// Records every terminal outcome the gate reports.
     #[derive(Default)]
@@ -372,22 +372,20 @@ mod tests {
         InstallSource::local_file("D:/tmp/com.test.agent")
     }
 
-    fn install_request(agent_id: &str, is_system: bool) -> InstallRequest {
+    fn install_request(agent_id: &str) -> InstallRequest {
         InstallRequest::install(
             OperationId::new(),
             agent_id,
             AgentInstanceId::new(),
-            is_system,
             test_source(),
         )
     }
 
-    fn ensure_request(agent_id: &str, is_system: bool) -> InstallRequest {
+    fn ensure_request(agent_id: &str) -> InstallRequest {
         InstallRequest::ensure(
             OperationId::new(),
             agent_id,
             AgentInstanceId::new(),
-            is_system,
             test_source(),
         )
     }
@@ -424,9 +422,9 @@ mod tests {
         spawn(&gate, &executor);
 
         let (a, b, c) = tokio::join!(
-            gate.admit_and_wait(ensure_request("com.acowork.system", true)),
-            gate.admit_and_wait(ensure_request("com.acowork.system", true)),
-            gate.admit_and_wait(ensure_request("com.acowork.system", true)),
+            gate.admit_and_wait(ensure_request("com.test.agent")),
+            gate.admit_and_wait(ensure_request("com.test.agent")),
+            gate.admit_and_wait(ensure_request("com.test.agent")),
         );
 
         for outcome in [&a, &b, &c] {
@@ -436,7 +434,7 @@ mod tests {
         assert_eq!(a.instance_id(), b.instance_id());
         assert_eq!(b.instance_id(), c.instance_id());
         assert_eq!(
-            executor.installed_for("com.acowork.system").await.len(),
+            executor.installed_for("com.test.agent").await.len(),
             1
         );
         // The two later requests were satisfied, not re-installed.
@@ -457,7 +455,6 @@ mod tests {
                 OperationId::new(),
                 "com.acowork.senior-engineer",
                 instance.clone(),
-                false,
                 test_source(),
             ))
             .await;
@@ -466,7 +463,6 @@ mod tests {
                 OperationId::new(),
                 "com.acowork.senior-engineer",
                 instance.clone(),
-                false,
                 test_source(),
             ))
             .await;
@@ -495,8 +491,8 @@ mod tests {
         spawn(&gate, &executor);
 
         let (a, b) = tokio::join!(
-            gate.admit_and_wait(install_request("com.acowork.senior-engineer", false)),
-            gate.admit_and_wait(install_request("com.acowork.senior-engineer", false)),
+            gate.admit_and_wait(install_request("com.acowork.senior-engineer")),
+            gate.admit_and_wait(install_request("com.acowork.senior-engineer")),
         );
 
         assert!(a.is_satisfied());
@@ -527,7 +523,7 @@ mod tests {
         spawn(&gate, &executor);
 
         let outcome =
-            gate.admit_and_wait(install_request("com.acowork.senior-engineer", false)).await;
+            gate.admit_and_wait(install_request("com.acowork.senior-engineer")).await;
 
         assert!(matches!(outcome, InstallOutcome::Ready { .. }));
         assert_ne!(outcome.instance_id(), Some(&existing));
@@ -544,7 +540,7 @@ mod tests {
         for i in 0..6 {
             let gate = gate.clone();
             handles.push(tokio::spawn(async move {
-                gate.admit_and_wait(install_request(&format!("com.test.agent-{i}"), false))
+                gate.admit_and_wait(install_request(&format!("com.test.agent-{i}")))
                     .await
             }));
         }
@@ -556,46 +552,7 @@ mod tests {
         assert_eq!(executor.executed_agents().await.len(), 6);
     }
 
-    #[tokio::test]
-    async fn system_lane_is_served_first() {
-        let gate = InstallGate::new();
-        let executor = FakeExecutor::new();
-
-        // Queue a user ticket, then a system ticket, with no worker
-        // running yet so the dequeue order is what decides the outcome.
-        let user = gate.admit(install_request("com.test.user", false)).await;
-        let system = gate.admit(install_request("com.acowork.system", true)).await;
-        assert!(user.is_accepted() && system.is_accepted());
-        spawn(&gate, &executor);
-
-        let system_outcome = system
-            .completion()
-            .expect("completion handle")
-            .clone()
-            .wait()
-            .await;
-        let user_outcome = user
-            .completion()
-            .expect("completion handle")
-            .clone()
-            .wait()
-            .await;
-        assert!(system_outcome.is_satisfied() && user_outcome.is_satisfied());
-
-        let order = executor.executed_agents().await;
-        let system_pos = order
-            .iter()
-            .position(|id| id == "com.acowork.system")
-            .expect("system install ran");
-        let user_pos = order
-            .iter()
-            .position(|id| id == "com.test.user")
-            .expect("user install ran");
-        assert!(
-            system_pos < user_pos,
-            "system ticket must dequeue first, got order {order:?}"
-        );
-    }
+    
 
     /// The precondition can be satisfied *while* a ticket waits in the
     /// queue — by the install in front of it, or by an inventory entry
@@ -607,8 +564,8 @@ mod tests {
         let executor = FakeExecutor::new();
 
         // Block the worker behind a slow install, then queue the Ensure.
-        let blocker = gate.admit(install_request("com.test.blocker", false)).await;
-        let ensure = gate.admit(ensure_request("com.acowork.system", true)).await;
+        let blocker = gate.admit(install_request("com.test.blocker")).await;
+        let ensure = gate.admit(ensure_request("com.test.agent")).await;
         assert!(blocker.is_accepted() && ensure.is_accepted());
 
         // While the Ensure sits in the queue, the instance shows up in
@@ -618,7 +575,7 @@ mod tests {
             .preexisting
             .lock()
             .await
-            .push(("com.acowork.system".to_string(), restored.clone()));
+            .push(("com.test.agent".to_string(), restored.clone()));
 
         spawn(&gate, &executor);
         let _ = blocker
@@ -646,7 +603,7 @@ mod tests {
                 .executed_agents()
                 .await
                 .iter()
-                .any(|id| id == "com.acowork.system")
+                .any(|id| id == "com.test.agent")
         );
     }
 
@@ -659,9 +616,9 @@ mod tests {
         let executor = FakeExecutor::new();
         let sink = Arc::new(RecordingSink::default());
 
-        let blocker = gate.admit(install_request("com.test.blocker", false)).await;
-        let ensure = gate.admit(ensure_request("com.acowork.system", true)).await;
-        let doomed = gate.admit(install_request("com.test.boom", false)).await;
+        let blocker = gate.admit(install_request("com.test.blocker")).await;
+        let ensure = gate.admit(ensure_request("com.test.agent")).await;
+        let doomed = gate.admit(install_request("com.test.boom")).await;
         assert!(blocker.is_accepted() && ensure.is_accepted() && doomed.is_accepted());
         executor.fail_on_call.store(1, Ordering::SeqCst);
 
@@ -671,7 +628,7 @@ mod tests {
             .preexisting
             .lock()
             .await
-            .push(("com.acowork.system".to_string(), restored.clone()));
+            .push(("com.test.agent".to_string(), restored.clone()));
 
         spawn_with_sink(&gate, &executor, sink.clone());
         for admitted in [&blocker, &ensure, &doomed] {
@@ -737,8 +694,8 @@ mod tests {
         spawn(&gate, &executor);
 
         let (failed, ok) = tokio::join!(
-            gate.admit_and_wait(install_request("com.test.boom", false)),
-            gate.admit_and_wait(install_request("com.test.after", false)),
+            gate.admit_and_wait(install_request("com.test.boom")),
+            gate.admit_and_wait(install_request("com.test.after")),
         );
 
         let outcomes = [failed, ok];
@@ -765,7 +722,7 @@ mod tests {
         let existing = AgentInstanceId::new();
         let outcome = gate
             .admit(
-                ensure_request("com.acowork.system", true).with_already_installed(existing.clone()),
+                ensure_request("com.test.agent").with_already_installed(existing.clone()),
             )
             .await;
 
@@ -777,19 +734,5 @@ mod tests {
         assert_eq!(gate.pending_len().await, 0);
     }
 
-    #[tokio::test]
-    async fn priority_comes_from_the_system_flag() {
-        let gate = InstallGate::new();
-        let system = gate.admit(ensure_request("com.acowork.system", true)).await;
-        let user = gate.admit(install_request("com.test.agent", false)).await;
-
-        assert_eq!(
-            system.ticket().expect("admitted").priority,
-            InstallPriority::System
-        );
-        assert_eq!(
-            user.ticket().expect("admitted").priority,
-            InstallPriority::User
-        );
-    }
+    
 }
