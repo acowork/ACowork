@@ -590,8 +590,9 @@ async fn cold_start_first_publisher_carries_key_then_readiness() {
     );
 
     // Bootstrap orchestrator: all required subsystems ready → READY.
+    // System Agent is intentionally NOT Required (ADR-077).
     let registry = SubsystemReadinessRegistry::new_shared();
-    for id in ["vault", "mqtt", "publisher", "node.local", "system_agent"] {
+    for id in ["vault", "mqtt", "publisher", "node.local"] {
         registry.register(id, ReadinessKind::Required).mark_ready(None);
     }
     let orchestrator = BootstrapOrchestrator::new("instance-cold".to_string(), registry.clone());
@@ -732,64 +733,44 @@ async fn early_install_returns_dependency_not_ready_then_succeeds() {
     drop(broker);
 }
 
-/// 3. The System Agent is a required subsystem: while it is still
-/// booting the aggregated phase stays BOOTING; its `mark_ready` flips
-/// the retained snapshot to READY.
+/// 3. ADR-077: the System Agent is NOT a Required bootstrap subsystem.
+/// It may be absent, slow to install, or have its Runtime still booting —
+/// none of that must delay the aggregated phase reaching READY. Readiness
+/// is signalled separately via the agent's own `acowork/agents/{id}/ready`
+/// retained topic, consumed by the Desktop via `/api/agents`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn system_agent_delay_keeps_bootstrap_booting() {
+async fn bootstrap_succeeds_without_system_agent() {
     let port = unique_port("system");
     let broker = start_broker("127.0.0.1", port).expect("broker should start");
     let surface = build_surface(port, "instance-system").await;
 
-    let mut handles = Vec::new();
+    // Required subsystems — exactly the platform-readiness blockers.
+    // System Agent is intentionally NOT in this list.
     for id in ["vault", "mqtt", "publisher", "node.local"] {
-        handles.push(surface.registry.register(id, ReadinessKind::Required));
-    }
-    let system_agent = surface.registry.register("system_agent", ReadinessKind::Required);
-    for h in &handles {
-        h.mark_ready(None);
+        surface
+            .registry
+            .register(id, ReadinessKind::Required)
+            .mark_ready(None);
     }
 
-    // Bootstrap publisher is live; the retained snapshot stays BOOTING.
+    // Bootstrap publisher is live; the retained snapshot must reach
+    // READY without any system_agent registration at all.
     let _bp = BootstrapPublisher::start(BootstrapPublisherOptions {
         client: &surface.gw_client,
         orchestrator: surface.orchestrator.clone(),
     });
     let (sub_client, mut sub_eventloop) =
         subscribe(TOPIC_BOOTSTRAP, "test:bootstrap:system", port).await;
-    let payload = collect_first_publish_payload(
+    let payload = collect_bootstrap_until(
         &mut sub_eventloop,
         TOPIC_BOOTSTRAP,
         Duration::from_secs(5),
+        |bs: &BootstrapState| bs.phase == 2,
     )
     .await
-    .expect("bootstrap retained while system agent booting");
-    let bs = decode_bootstrap_state(&payload);
-    assert_eq!(bs.phase, 1, "must stay BOOTING while system_agent is booting");
-
-    // System Agent ready → retained converges to READY with a higher
-    // version. Poll until the retained publish carries the READY phase:
-    // the publisher is change-driven, so an intermediate BOOTING
-    // republish can race the READY flip and must be skipped.
-    system_agent.mark_ready(None);
-    let bs_version = bs.version;
-    let orch = surface.orchestrator.clone();
-    let ready = wait_until(Duration::from_secs(5), move || {
-        let snap = orch.snapshot();
-        snap.phase == BootstrapPhase::Ready && snap.version > bs_version
-    })
-    .await;
-    assert!(ready, "phase must reach READY after system_agent ready");
-    let bs2 = collect_bootstrap_until(
-        &mut sub_eventloop,
-        TOPIC_BOOTSTRAP,
-        Duration::from_secs(5),
-        |bs: &BootstrapState| bs.phase == 2 && bs.version > bs_version,
-    )
-    .await
-    .expect("retained bootstrap state converges to READY after system_agent ready");
-    assert_eq!(bs2.phase, 2, "phase READY (proto enum 2)");
-    assert!(bs2.version > bs_version, "version must be monotonic");
+    .expect("bootstrap reaches READY without system_agent");
+    assert_eq!(payload.phase, 2, "phase READY (proto enum 2)");
+    assert!(payload.version >= 2, "version must advance past initial BOOTING");
 
     drop(sub_client);
     drop(_bp);
@@ -1087,8 +1068,9 @@ async fn reconnect_observes_new_instance_and_old_operation_is_uncertain() {
     let broker = start_broker("127.0.0.1", port).expect("broker should start");
 
     // Generation A: fully ready, publishes READY retained.
+    // System Agent is intentionally NOT Required (ADR-077).
     let surface_a = build_surface(port, "instance-A").await;
-    for id in ["vault", "mqtt", "publisher", "node.local", "system_agent"] {
+    for id in ["vault", "mqtt", "publisher", "node.local"] {
         surface_a.registry.register(id, ReadinessKind::Required).mark_ready(None);
     }
     // Fold the registrations into the snapshot before the publisher
@@ -1203,8 +1185,9 @@ async fn cross_generation_restart_does_not_prematurely_ready() {
     let broker = start_broker("127.0.0.1", port).expect("broker should start");
 
     // Generation A: fully ready at version 7+.
+    // System Agent is intentionally NOT Required (ADR-077).
     let surface_a = build_surface(port, "instance-A").await;
-    for id in ["vault", "mqtt", "publisher", "node.local", "system_agent"] {
+    for id in ["vault", "mqtt", "publisher", "node.local"] {
         surface_a.registry.register(id, ReadinessKind::Required).mark_ready(None);
     }
     // Fold the registrations into the snapshot before the publisher
@@ -1278,7 +1261,8 @@ async fn cross_generation_restart_does_not_prematurely_ready() {
     );
 
     // B becomes fully ready → READY, with a higher version.
-    for id in ["vault", "system_agent", "node.local"] {
+    // System Agent is intentionally NOT Required (ADR-077).
+    for id in ["vault", "node.local"] {
         surface_b.registry.register(id, ReadinessKind::Required).mark_ready(None);
     }
     let orch_b = surface_b.orchestrator.clone();
@@ -1346,7 +1330,8 @@ async fn http_and_mqtt_projections_agree() {
     assert_eq!(mqtt.phase, 1);
 
     // Reach READY; both channels must advance in lockstep.
-    for id in ["vault", "system_agent", "node.local"] {
+    // System Agent is intentionally NOT Required (ADR-077).
+    for id in ["vault", "node.local"] {
         surface.registry.register(id, ReadinessKind::Required).mark_ready(None);
     }
     let orch = surface.orchestrator.clone();
@@ -1389,7 +1374,8 @@ async fn remote_node_reconnect_restores_readiness() {
     let port = unique_port("node-reconnect");
     let broker = start_broker("127.0.0.1", port).expect("broker should start");
     let surface = build_surface(port, "instance-node").await;
-    for id in ["vault", "mqtt", "publisher", "system_agent"] {
+    // System Agent is intentionally NOT Required (ADR-077).
+    for id in ["vault", "mqtt", "publisher"] {
         surface.registry.register(id, ReadinessKind::Required).mark_ready(None);
     }
     surface.registry.register(format!("node.{NODE_ID}"), ReadinessKind::Required);
@@ -1530,7 +1516,8 @@ async fn ocp_wire_fields_stable_under_subsystem_churn() {
     // Same required COUNT as registry2 below — the phase_detail
     // aggregate must be byte-identical across the churn so the wire
     // fields stay stable (only the subsystem NAMES differ).
-    for id in ["vault", "publisher", "node.local", "system_agent"] {
+    // System Agent is intentionally NOT Required (ADR-077).
+    for id in ["vault", "publisher", "node.local"] {
         registry1.register(id, ReadinessKind::Required).mark_ready(None);
     }
     let orch1 = BootstrapOrchestrator::new("instance-ocp-1".to_string(), registry1.clone());
@@ -1545,8 +1532,10 @@ async fn ocp_wire_fields_stable_under_subsystem_churn() {
     assert!(ready_1, "orch1 must reach READY");
 
     // "Churn": a renamed subsystem replaces an old one, plus extras.
+    // Count must match registry1 above so phase_detail is byte-identical
+    // across the churn (the test asserts equality on the wire shape).
     let registry2 = SubsystemReadinessRegistry::new_shared();
-    for id in ["renamed-vault", "embedding", "extra", "extra2"] {
+    for id in ["renamed-vault", "embedding", "extra"] {
         registry2.register(id, ReadinessKind::Required).mark_ready(None);
     }
     let orch2 = BootstrapOrchestrator::new("instance-ocp-2".to_string(), registry2.clone());
