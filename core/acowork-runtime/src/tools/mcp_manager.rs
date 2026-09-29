@@ -31,144 +31,17 @@ pub type McpConnectResult = (
 
 /// MCP connection manager.
 ///
-/// Holds a shared [`McpRegistry`] and provides helpers for connecting
-/// servers and building tool wrappers.
+/// Holds a shared [`McpRegistry`] handed to it via [`Self::set_registry`]
+/// after a background connect through
+/// [`connect_mcp_with_reconcile_and_filter`].
 pub struct McpManager {
     registry: Option<Arc<McpRegistry>>,
-    /// Workspace root — needed by [`Self::connect`] to reconcile
-    /// `agent_mcp_tools.json` against the live MCP `tools/list`
-    /// (ADR-069). When empty (the `Default`/`new()` case, including
-    /// unit tests), reconciliation is skipped and the caller-supplied
-    /// `tools_cfg` is used verbatim.
-    work_dir: Arc<Path>,
 }
 
 impl McpManager {
-    /// Create an empty MCP manager (no servers connected). Uses an
-    /// empty path as the workspace root — [`Self::connect`] will still
-    /// work but skips the reconciliation pass.
+    /// Create an empty MCP manager (no servers connected).
     pub fn new() -> Self {
-        Self {
-            registry: None,
-            work_dir: Arc::from(Path::new("")),
-        }
-    }
-
-    /// Set the workspace root for `agent_mcp_tools.json` reconciliation
-    /// (ADR-069). Required in production so that every `connect` call
-    /// reconciles the flat per-server tool list against the live
-    /// `tools/list` before applying the filter. Cheap — just swaps an
-    /// `Arc<Path>`.
-    pub fn set_work_dir(&mut self, work_dir: Arc<Path>) {
-        self.work_dir = work_dir;
-    }
-
-    /// Connect to MCP servers and create tool wrappers.
-    ///
-    /// - `configs`: list of MCP server configurations.
-    /// - `tools_cfg`: per-agent allowlist from
-    ///   `workspace/config/agent_mcp_tools.json` (ADR-069). Used as a
-    ///   fallback when the manager has no `work_dir` set (see
-    ///   [`Self::set_work_dir`]); when `work_dir` IS set, the
-    ///   persisted flat list is first reconciled with the live
-    ///   `tools/list` via [`reconcile_and_persist_mcp_tools`] and the
-    ///   caller-supplied `tools_cfg` is ignored.
-    ///
-    /// Returns a tuple of:
-    ///   - `Arc<McpRegistry>` — shared registry for tool dispatch
-    ///   - `Vec<McpToolWrapper>` — one wrapper per MCP tool (filtered)
-    ///   - `Vec<(String, serde_json::Value)>` — tool specs for LLM definitions (filtered)
-    ///   - `Vec<McpConnectionFailure>` — connection failures to surface to LLM
-    ///
-    /// On connection failure, individual servers are skipped (logged as errors).
-    /// The returned registry may be empty if no servers connected successfully.
-    ///
-    /// **Filtering (ADR-069):** for each `mcp_<server>__<tool>` produced
-    /// by the registry's `tools/list`, the reconciled config's per-row
-    /// `enabled` flag decides exposure. The raw registry still exposes
-    /// every tool via [`Self::registry`] / `call_tool` — filtering is
-    /// **LLM-visible** only, not transport-level.
-    pub async fn connect(
-        &mut self,
-        configs: &[McpServerConfigDef],
-        tools_cfg: &AgentMcpToolsConfig,
-    ) -> (
-        Arc<McpRegistry>,
-        Vec<McpToolWrapper>,
-        Vec<(String, serde_json::Value)>,
-        Vec<McpConnectionFailure>,
-    ) {
-        // McpServerConfigDef is now the single source of truth for MCP config,
-        // shared between acowork-core (wire format) and acowork-mcp (runtime).
-        // No conversion needed — the same type flows through both crates.
-        let (registry, failures) = McpRegistry::connect_all(configs)
-            .await
-            .expect("connect_all is non-fatal and should never fail");
-        let registry = Arc::new(registry);
-
-        // ADR-069: reconcile the persisted flat list against the live
-        // `tools/list` BEFORE the filter pass. Uses the work_dir set
-        // via `set_work_dir`; if the work_dir is empty (e.g. a unit
-        // test), the reconciliation is a no-op and the caller-supplied
-        // `tools_cfg` is used verbatim.
-        let active_cfg = if self.work_dir.as_os_str().is_empty() {
-            tools_cfg.clone()
-        } else {
-            reconcile_and_persist_mcp_tools(&self.work_dir, &registry)
-        };
-
-        // Build tool wrappers and specs from the registry, applying
-        // ADR-069 per-tool filtering along the way.
-        let mut wrappers = Vec::new();
-        let mut specs = Vec::new();
-        let mut filtered_out: usize = 0;
-
-        for prefixed_name in registry.tool_names() {
-            let prefixed = prefixed_name.clone();
-            let Some((server_name, tool_name)) = split_prefixed_tool(&prefixed) else {
-                tracing::warn!(
-                    prefixed = %prefixed,
-                    "MCP tool name missing `mcp_<server>__<tool>` shape; passing through unfiltered"
-                );
-                if let Some(def) = registry.get_tool_def(&prefixed) {
-                    let wrapper = McpToolWrapper::new(prefixed.clone(), def, registry.clone());
-                    let spec = wrapper.spec();
-                    let serialized = serde_json::to_value(&spec).unwrap_or_default();
-                    specs.push((spec.name.clone(), serialized));
-                    wrappers.push(wrapper);
-                }
-                continue;
-            };
-
-            if !tool_allowed(&active_cfg, server_name, tool_name) {
-                filtered_out += 1;
-                tracing::debug!(
-                    server = %server_name,
-                    tool = %tool_name,
-                    "MCP tool filtered out by agent_mcp_tools.json (ADR-069)"
-                );
-                continue;
-            }
-
-            if let Some(def) = registry.get_tool_def(&prefixed) {
-                let wrapper = McpToolWrapper::new(prefixed.clone(), def, registry.clone());
-                let spec = wrapper.spec();
-                let serialized = serde_json::to_value(&spec).unwrap_or_default();
-                specs.push((spec.name.clone(), serialized));
-                wrappers.push(wrapper);
-            }
-        }
-
-        tracing::info!(
-            server_count = registry.server_count(),
-            exposed_tool_count = wrappers.len(),
-            filtered_out,
-            failure_count = failures.len(),
-            "MCP manager: connected (with ADR-069 reconcile+filter applied)"
-        );
-
-        self.registry = Some(registry.clone());
-        (registry, wrappers, specs, failures)
+        Self { registry: None }
     }
 
     /// Get the current MCP registry, if any servers are connected.
@@ -191,8 +64,9 @@ impl McpManager {
     ///
     /// Closes transport connections (kills stdio child processes, releases
     /// HTTP connection pools). After calling disconnect, the manager is
-    /// reset to the empty state and `connect()` must be called again before
-    /// using MCP tools.
+    /// reset to the empty state. Call
+    /// [`connect_mcp_with_reconcile_and_filter`] and [`Self::set_registry`]
+    /// again before using MCP tools.
     pub async fn disconnect(&mut self) {
         if let Some(registry) = self.registry.take() {
             registry.disconnect().await;
@@ -217,19 +91,6 @@ mod tests {
         let mgr = McpManager::default();
         assert!(!mgr.is_connected());
         assert!(mgr.registry().is_none());
-    }
-
-    #[tokio::test]
-    async fn connect_empty_yields_empty_registry() {
-        let mut mgr = McpManager::new();
-        let (registry, wrappers, specs, failures) = mgr
-            .connect(&[], &crate::agent_config::AgentMcpToolsConfig::default())
-            .await;
-        assert!(registry.is_empty());
-        assert!(wrappers.is_empty());
-        assert!(specs.is_empty());
-        assert!(failures.is_empty());
-        assert!(!mgr.is_connected());
     }
 
     #[test]

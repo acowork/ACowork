@@ -392,6 +392,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
             available_cache: cache.clone(),
             control_tx,
             identity_update_tx: Some(identity_update_tx),
+            mcp_notifier: Some(mcp_notifier.clone()),
             provider_update_tx: Some(provider_update_tx),
             search_update_tx: Some(search_update_tx),
             embedding_update_tx: Some(embedding_update_tx),

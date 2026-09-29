@@ -371,6 +371,13 @@ pub struct MqttConnectConfig<'a> {
     #[cfg_attr(not(test), allow(dead_code))]
     pub identity_update_tx:
         Option<tokio::sync::mpsc::UnboundedSender<acowork_core::protocol::UserProfile>>,
+    /// ADR-040 follow-up: shared MCP config notifier. The MQTT event
+    /// loop fires it after persisting a new catalog from
+    /// `acowork/global/mcps` so `gateway_loop` reconnects MCP servers
+    /// instead of waiting for the next `PUT /mcp-servers` or restart.
+    /// Optional: when None, the catalog is still persisted (startup
+    /// reads it from disk; hot reload simply doesn't trigger).
+    pub mcp_notifier: crate::mcp_notify::McpNotifyRef,
     /// Sink for provider list updates. The MQTT event loop sends
     /// `ProviderUpdate` here whenever `acowork/global/providers` retained
     /// is received. The receiver (held by `agent_init.rs` → `gateway_loop`)
@@ -602,6 +609,9 @@ struct RuntimeHandler {
     /// Sink for user-profile updates (ADR-042).
     identity_update_tx:
         Option<tokio::sync::mpsc::UnboundedSender<acowork_core::protocol::UserProfile>>,
+    /// Shared MCP config notifier — fired after `acowork/global/mcps`
+    /// persists a new catalog so gateway_loop hot-reloads MCP servers.
+    mcp_notifier: crate::mcp_notify::McpNotifyRef,
     /// Sink for provider list updates.
     provider_update_tx: Option<tokio::sync::mpsc::UnboundedSender<ProviderUpdate>>,
     /// Sink for search updates.
@@ -727,6 +737,20 @@ impl MqttClientHandler for RuntimeHandler {
                         },
                     })
                     .collect();
+                // Hot-reload only when the catalog actually changed:
+                // retained `acowork/global/mcps` is redelivered on every
+                // MQTT reconnect, and an unconditional notify() would
+                // reconnect every MCP server (respawning stdio children)
+                // on each broker flap.
+                let prev_catalog = crate::agent_config::load_agent_mcp_config(&self.work_dir)
+                    .ok()
+                    .flatten()
+                    .map(|c| c.catalog)
+                    .unwrap_or_default();
+                let catalog_changed = serde_json::to_string(&prev_catalog)
+                    .ok()
+                    .and_then(|p| serde_json::to_string(&defs).ok().map(|n| p != n))
+                    .unwrap_or(true);
                 if let Err(e) =
                     crate::agent_config::save_agent_mcp_config_catalog(&self.work_dir, &defs)
                 {
@@ -741,6 +765,11 @@ impl MqttClientHandler for RuntimeHandler {
                         catalog_count = defs.len(),
                         "Synced MCP catalog from acowork/global/mcps into agent_mcp.json::catalog"
                     );
+                    if catalog_changed
+                        && let Some(notifier) = &self.mcp_notifier
+                    {
+                        notifier.notify();
+                    }
                 }
             } else if topic == "acowork/global/providers" {
                 // Persist provider list to agent_provider.json so the
@@ -1061,6 +1090,7 @@ impl RuntimeMqttClient {
             available_cache: cfg.available_cache.clone(),
             control_tx: cfg.control_tx.clone(),
             identity_update_tx: cfg.identity_update_tx.clone(),
+            mcp_notifier: cfg.mcp_notifier.clone(),
             provider_update_tx: cfg.provider_update_tx.clone(),
             search_update_tx: cfg.search_update_tx.clone(),
             embedding_update_tx: cfg.embedding_update_tx.clone(),
@@ -2572,6 +2602,7 @@ mod tests {
             available_cache: cache,
             control_tx,
             identity_update_tx: None,
+            mcp_notifier: None,
             provider_update_tx: None,
             search_update_tx: None,
             embedding_update_tx: None,
@@ -2672,6 +2703,7 @@ mod tests {
             available_cache: cache,
             control_tx,
             identity_update_tx: None,
+            mcp_notifier: None,
             provider_update_tx: None,
             search_update_tx: None,
             embedding_update_tx: None,
@@ -2772,6 +2804,7 @@ mod tests {
             available_cache: cache,
             control_tx,
             identity_update_tx: None,
+            mcp_notifier: None,
             provider_update_tx: None,
             search_update_tx: None,
             embedding_update_tx: None,

@@ -128,6 +128,7 @@ fn runtime_connect_cfg<'a>(
         available_cache: new_shared_cache(),
         control_tx,
         identity_update_tx: None,
+        mcp_notifier: None,
         provider_update_tx: None,
         search_update_tx: None,
         embedding_update_tx: None,
