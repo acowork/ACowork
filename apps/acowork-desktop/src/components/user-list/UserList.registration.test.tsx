@@ -87,10 +87,6 @@ describe("UserList invite affordance (ADR-076 §决策 6)", () => {
     await act(async () => {
       render(<UserList />);
     });
-    // Expand the group so rows render.
-    await act(async () => {
-      fireEvent.click(screen.getByTestId("user-group-header"));
-    });
     const selfRow = screen.getByTestId(`user-row-${useAuthStore.getState().account!.user_id}`);
     const peerRow = screen.getByTestId(`user-row-${peer.user_id}`);
     // Clicking yourself is a no-op (you can't DM yourself).
@@ -135,9 +131,6 @@ describe("UserList invite affordance (ADR-076 §决策 6)", () => {
     });
     await act(async () => {
       render(<UserList />);
-    });
-    await act(async () => {
-      fireEvent.click(screen.getByTestId("user-group-header"));
     });
     const peerRow = screen.getByTestId(`user-row-${peer.user_id}`);
     await act(async () => {
@@ -185,9 +178,6 @@ describe("UserList invite affordance (ADR-076 §决策 6)", () => {
     await act(async () => {
       render(<UserList />);
     });
-    await act(async () => {
-      fireEvent.click(screen.getByTestId("user-group-header"));
-    });
     // Directory excludes the caller themselves, so the peer row is the
     // only one rendered — and is clickable to open an inbox thread.
     const peerRow = screen.getByTestId(`user-row-${peer.user_id}`);
@@ -224,9 +214,6 @@ describe("UserList invite affordance (ADR-076 §决策 6)", () => {
     });
     await act(async () => {
       render(<UserList />);
-    });
-    await act(async () => {
-      fireEvent.click(screen.getByTestId("user-group-header"));
     });
     const peerRowA = screen.getByTestId(`user-row-${peer.user_id}`);
     // The default-locale i18n resolves `userList.roleUser` to "user" and
@@ -268,9 +255,6 @@ describe("UserList invite affordance (ADR-076 §决策 6)", () => {
     });
     await act(async () => {
       render(<UserList />);
-    });
-    await act(async () => {
-      fireEvent.click(screen.getByTestId("user-group-header"));
     });
     const peerRow = screen.getByTestId(`user-row-${peer.user_id}`);
     expect(peerRow.textContent).toContain("Hello from peer");
