@@ -184,7 +184,7 @@ ACowork 是一个"**Agent as APP**"平台。核心隐喻借鉴 Android：Agent �
 
 | 编号 | 需求 | 优先级 | 说明 |
 |------|------|--------|------|
-| SYS-01 | 系统 Agent 随 Gateway 分发，不可卸载，自动启动 | P0 | 系统级服务 |
+| SYS-01 | 系统 Agent 随 Gateway 分发（bundled default），经标准安装/启动/卸载流程管理 | P0 | 系统级服务；ADR-077 取消启动特权 |
 | SYS-02 | 身份信息由 Gateway 的 `UserProfile` HTTP API（`/api/users`）统一管理；`acowork-system` 仅作为启动时的入口 Agent | P0 | 跨 Agent 身份一致——不暴露 `identity:query` / `identity:observe` Intent 接口（已从 system-agent manifest 删除） |
 | SYS-03 | 接收身份提报，用 LLM 做二次判断（替代用户确认弹窗） | P3 | 自动化决策——当前身份确认直接由 Gateway `createUser` / `updateUser` 同步落库，**无 LLM 二次判断**，待 Phase 6 |
 | SYS-04 | 默认交互入口——无第三方 Agent 时的唯一界面 | P1 | 首次使用体验 |

@@ -4,8 +4,8 @@
  * Regression: `App.tsx` used to read `sessionStorage` on every render. The
  * recovery effect clears the flag mid-mount, so React.StrictMode's dev-only
  * remount (and store-driven re-renders) re-read a deleted flag → left the
- * recovery branch → `gatewayReady=false` → SplashScreen → `ensure_system_agent`
- * without a bearer token → 5/5 401 → back on LoginView.
+ * recovery branch → `gatewayReady=false` → SplashScreen → boot-time Rust
+ * commands without a bearer token → 5/5 401 → back on LoginView.
  *
  * The contract under test: the flag is read ONCE per module load and never
  * re-read, so clearing it cannot flip a live boot back onto the splash path.

@@ -93,8 +93,9 @@ function reloadApp(): void {
  * `init()` is the only caller that needs the tokens for the auth gate itself,
  * but the Tauri auth bridge (`lib/gatewayAuthBridge.ts`) needs the pair
  * *before* `init()` runs: boot-time Rust commands (SplashScreen →
- * `ensure_system_agent`, agent installs) only carry credentials if the
- * access token is already mirrored, and the 401 rotation path reads the
+ * `init_local_gateway` / `connect_mqtt`, agent installs) only carry
+ * credentials if the access token is already mirrored, and the 401 rotation
+ * path reads the
  * refresh token from the store. Exposed read-only on purpose — adopting the
  * pair is `init()`'s job.
  */

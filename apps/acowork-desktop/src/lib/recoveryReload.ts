@@ -12,7 +12,7 @@
  * effect clears the flag mid-mount, so React's dev-only React.StrictMode
  * remount (and any store-driven re-render after the effect runs) re-read a
  * deleted flag, fell out of the recovery branch into `gatewayReady=false`,
- * and booted the SplashScreen — whose `ensure_system_agent` ran without a
+ * and booted the SplashScreen — whose boot-time Rust commands ran without a
  * bearer token and 401'd 5/5, dumping the user back on LoginView. Caching
  * here keeps the branch selection stable for the whole webview lifetime.
  */

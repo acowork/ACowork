@@ -184,7 +184,7 @@ The developer toolchain is complete: `acowork-sign` (with `keygen / sign / verif
 
 | ID | Requirement | Priority | Notes |
 |----|-------------|----------|-------|
-| SYS‑01 | System Agent ships with Gateway, cannot be uninstalled, auto‑starts | P0 | System‑level service |
+| SYS‑01 | System Agent ships with Gateway as a bundled default agent, managed through the standard install/start/uninstall paths | P0 | System‑level service; ADR‑077 drops the boot privilege |
 | SYS‑02 | Identity information is centrally managed by Gateway's `UserProfile` HTTP API (`/api/users`); `acowork-system` is only the entry Agent at startup | P0 | Cross‑Agent identity consistency – `identity:query`/`identity:observe` Intent interfaces not exposed (removed from system‑agent manifest) |
 | SYS‑03 | Receive identity reports, use LLM for secondary judgement (replacing user confirmation popups) | P3 | Automated decision – currently identity confirmation directly sync‑persisted by Gateway `createUser`/`updateUser`, **no LLM secondary judgement**, pending Phase 6 |
 | SYS‑04 | Default interaction entry – the only interface when no third‑party Agent is available | P1 | First‑use experience |

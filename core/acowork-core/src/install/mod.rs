@@ -61,9 +61,11 @@ pub enum InstallKind {
     /// The existence precondition is applied at execution time: if any
     /// instance of the package is already installed, the request is a
     /// no-op ([`super::InstallOutcome::AlreadySatisfied`]) instead of
-    /// landing a second copy. Used by the bundled System Agent
-    /// bootstrap and the Desktop's `ensure_system_agent` — both of
-    /// which are "ensure" calls, not "install one more" calls.
+    /// landing a second copy. Used by `POST /api/agents/ensure` and the
+    /// Desktop onboarding wizard — both are "ensure" calls, not "install
+    /// one more" calls. (ADR-077 removed the two boot-time callers that
+    /// used to land here: the Gateway's System Agent auto-start task and
+    /// the Desktop's `ensure_system_agent` Tauri command.)
     Ensure,
 }
 
@@ -74,8 +76,12 @@ pub enum InstallKind {
 /// scheduler the comparison it needs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum InstallPriority {
-    /// System packages (ADR-073 `manifest.system = true`), including
-    /// the bundled System Agent bootstrap. Sorted first.
+    /// System packages (ADR-073 `manifest.system = true`). Sorted first.
+    ///
+    /// ADR-077 dropped `system = true` from the bundled System Agent
+    /// manifest, so that agent now schedules on the User lane like every
+    /// other package; the lane itself stays for genuinely system-critical
+    /// installs.
     ///
     /// Priority affects *dequeue order only* — a running job is never
     /// preempted, so a partially extracted package directory can never

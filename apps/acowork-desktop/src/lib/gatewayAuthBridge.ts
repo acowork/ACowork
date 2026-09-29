@@ -46,7 +46,8 @@ export function installGatewayAuthBridge(): void {
   installed = true;
 
   // Adopt the persisted pair before `authStore.init()` gets to run. The boot
-  // commands (SplashScreen → `ensure_system_agent`, agent installs) execute
+  // commands (SplashScreen → `init_local_gateway` / `connect_mqtt`, agent
+  // installs) execute
   // before the App-level auth gate resolves, and under `multi_user` they must
   // carry a token — otherwise every one of them answers 401. The same
   // reasoning applies to `refreshTokens()`: the rotation path has to be

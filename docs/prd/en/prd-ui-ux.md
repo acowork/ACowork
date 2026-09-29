@@ -277,7 +277,7 @@ Rendered only when `gatewayStatus === "error"` (steady‑state offline; startup 
 | Details | Always | Open `AgentDetailDialog` |
 | Clone | Always | Open `CloneDialog`, auto‑select cloned Agent on success |
 | Publish | Always | Open `PublishWizard` (export .agent package) |
-| 🗑 Uninstall | Non‑system Agent (`agent_id !== "com.acowork.system"`) | Uninstall after confirmation |
+| 🗑 Uninstall | Every agent, System Agent included (ADR‑077 drops the privilege) | Uninstall after confirmation |
 
 **Stop / Uninstall / dangerous action confirmation dialogs**: unified `ConfirmDialog` component with `destructive` red styling; Esc closes, Cancel is default focus.
 
@@ -292,7 +292,7 @@ Rendered only when `gatewayStatus === "error"` (steady‑state offline; startup 
 
 - Multi‑node scenario: before install, `fetchNodes()` resolves online nodes; if >1 online node, the menu switches to a **node selector** (ADR‑055 §6.13.3)
 - While installing, button shows loading state; on success, Toast + auto‑select new Agent
-- `com.acowork.system` is system Agent, cannot be uninstalled (Toast warning)
+- `com.acowork.system` ships as the bundled default agent and installs/starts/uninstalls like any other agent (ADR‑077)
 
 ### 4.3 Chat Panel (`ChatPanel.tsx`, elastic width)
 
@@ -608,7 +608,7 @@ All non‑fatal errors and successes are shown via Toast.
 | Publish/export | `prepare_publish` / `build_publish` / `export_package` | |
 | Vault Keys | `list_keys` / `add_key` / `remove_key` / `update_key` / `list_search_keys` / `add_search_key` | |
 | Debug | `enable_agent_debug` / `disable_agent_debug` / `debug_rpc` | |
-| Gateway | `set_gateway_config` / `get_gateway_config` / `init_local_gateway` / `start_local_gateway` / `stop_local_gateway` / `get_local_gateway_status` / `get_bootstrap` / `ensure_system_agent` | |
+| Gateway | `set_gateway_config` / `get_gateway_config` / `init_local_gateway` / `start_local_gateway` / `stop_local_gateway` / `get_local_gateway_status` / `get_bootstrap` | |
 | MQTT | `connect_mqtt` / `disconnect_mqtt` / `force_reconnect_mqtt` / `get_mqtt_status` / `mqtt_subscribe_agent_session` / `mqtt_unsubscribe_agent_session` / `mqtt_publish_control` | Real‑time messages/control go via MQTT (ADR‑033), **not WebSocket** |
 | File | `upload_file` / `get_file_size` / `upload_agent_file` / `upload_user_avatar_file` / `update_agent_manifest_avatar` | |
 | System | `reveal_in_file_explorer` / `set_window_effect` / clipboard | |

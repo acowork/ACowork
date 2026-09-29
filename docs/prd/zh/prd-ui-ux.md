@@ -277,7 +277,7 @@
 | Details | 始终 | 打开 `AgentDetailDialog` |
 | Clone | 始终 | 打开 `CloneDialog`，成功后自动选中克隆体 |
 | Publish | 始终 | 打开 `PublishWizard`（导出 .agent 包） |
-| 🗑 Uninstall | 非系统 Agent（`agent_id !== "com.acowork.system"`） | 确认后卸载 |
+| 🗑 Uninstall | 所有 Agent（含 System Agent，ADR-077 取消其特权） | 确认后卸载 |
 
 **Stop / Uninstall / 危险操作确认对话框**：统一 `ConfirmDialog` 组件，`destructive` 红色样式，Esc 关闭，取消为默认焦点。
 
@@ -292,7 +292,7 @@
 
 - 多节点场景：安装前先 `fetchNodes()` 解析在线节点；>1 个在线节点时菜单切换为**节点选择器**（ADR-055 §6.13.3）
 - 安装中按钮显示加载态，成功后 Toast + 自动选中新 Agent
-- `com.acowork.system` 为系统 Agent，禁止卸载（Toast warning）
+- `com.acowork.system` 是随 Gateway 分发的默认 Agent，与普通 Agent 一样走安装/启动/卸载流程（ADR-077）
 
 ### 4.3 Chat Panel（`ChatPanel.tsx`，弹性宽度）
 
@@ -608,7 +608,7 @@ Step 1: 欢迎 ──→ Step 2: Gateway ──→ Step 3: API Key ──→ Ste
 | 发布/导出 | `prepare_publish` / `build_publish` / `export_package` | |
 | Vault Key | `list_keys` / `add_key` / `remove_key` / `update_key` / `list_search_keys` / `add_search_key` | |
 | 调试 | `enable_agent_debug` / `disable_agent_debug` / `debug_rpc` | |
-| Gateway | `set_gateway_config` / `get_gateway_config` / `init_local_gateway` / `start_local_gateway` / `stop_local_gateway` / `get_local_gateway_status` / `get_bootstrap` / `ensure_system_agent` | |
+| Gateway | `set_gateway_config` / `get_gateway_config` / `init_local_gateway` / `start_local_gateway` / `stop_local_gateway` / `get_local_gateway_status` / `get_bootstrap` | |
 | MQTT | `connect_mqtt` / `disconnect_mqtt` / `force_reconnect_mqtt` / `get_mqtt_status` / `mqtt_subscribe_agent_session` / `mqtt_unsubscribe_agent_session` / `mqtt_publish_control` | 实时消息/控制走 MQTT（ADR-033），**非 WebSocket** |
 | 文件 | `upload_file` / `get_file_size` / `upload_agent_file` / `upload_user_avatar_file` / `update_agent_manifest_avatar` | |
 | 系统 | `reveal_in_file_explorer` / `set_window_effect` / 剪贴板 | |
