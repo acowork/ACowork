@@ -160,6 +160,13 @@ fn build_trusted_headers(
         if is_hop_by_hop_header(name) {
             continue;
         }
+        // The node credential authenticates the caller at the Gateway's own
+        // `auth_middleware` gate — Doc identifies callers via `X-MCP-Actor`
+        // / `X-Actor` and has no use for it, so the machine token must not
+        // travel past the reverse proxy (least privilege).
+        if name == acowork_core::auth::NODE_TOKEN_HEADER {
+            continue;
+        }
         if is_mcp {
             // MCP path: only pass through trusted X-MCP-Actor.
             if name == "x-mcp-actor" {
@@ -665,6 +672,29 @@ mod tests {
         assert!(
             echoed.get("x-mcp-actor").is_none(),
             "untrusted X-MCP-Actor must be stripped (anonymous), got: {echoed}"
+        );
+    }
+
+    /// ADR-076 least privilege: the node machine credential authenticates
+    /// the caller at the Gateway's own `auth_middleware` gate and MUST NOT
+    /// be forwarded to the Doc backend — it unlocks every Gateway `/api/*`
+    /// route, and Doc identifies callers via `X-MCP-Actor` / `X-Actor`.
+    #[tokio::test]
+    async fn node_token_is_stripped_before_forwarding() {
+        let state = test_app_state();
+        let port = start_echo_doc_server().await;
+        set_doc_process(&state, port).await;
+
+        let echoed = proxy_echo_headers(
+            state,
+            "/api/doc/mcp",
+            &[("X-ACowork-Node-Token", "tok-abc"), ("X-MCP-Actor", "ghost")],
+        )
+        .await;
+
+        assert!(
+            echoed.get("x-acowork-node-token").is_none(),
+            "node credential must be stripped at the reverse proxy, got: {echoed}"
         );
     }
 

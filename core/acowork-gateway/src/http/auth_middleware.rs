@@ -160,9 +160,12 @@ pub async fn auth_middleware(
     // accepts it here instead of forcing the Node to obtain a
     // user-level Bearer token (which it has no use for), and the
     // per-route `node_tokens.any_token_matches` check still applies as
-    // a defense-in-depth gate at the route entry. The check is
-    // opt-in: when `mqtt.auth_enabled` is false the Gateway has no
-    // node-token store to consult, so the header is simply ignored.
+    // a defense-in-depth gate at the route entry. The store is consulted
+    // regardless of `mqtt.auth_enabled`: enrollment mints a node token in
+    // both modes (`decide_enroll` only makes the *enrollment* token
+    // mandatory under auth), so an enrolled Node authenticates over HTTP
+    // even when the broker itself is permissive. With no enrollment ever
+    // performed the store is empty and the header simply falls through.
     if let Some(node_token) = req
         .headers()
         .get("X-ACowork-Node-Token")

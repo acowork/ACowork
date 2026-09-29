@@ -162,6 +162,13 @@ fn build_trusted_headers(
         if is_hop_by_hop_header(name) {
             continue;
         }
+        // The node credential authenticates the caller at the Gateway's own
+        // `auth_middleware` gate — PM identifies callers via `X-MCP-Actor`
+        // / `X-Actor` and has no use for it, so the machine token must not
+        // travel past the reverse proxy (least privilege).
+        if name == acowork_core::auth::NODE_TOKEN_HEADER {
+            continue;
+        }
         if is_mcp {
             // MCP 路径：只透传可信 X-MCP-Actor。
             if name == "x-mcp-actor" {
@@ -617,10 +624,32 @@ mod tests {
         );
     }
 
+    /// ADR-076 least privilege: the node machine credential authenticates
+    /// the caller at the Gateway's own `auth_middleware` gate and MUST NOT
+    /// be forwarded to the PM backend — it unlocks every Gateway `/api/*`
+    /// route, and PM identifies callers via `X-MCP-Actor` / `X-Actor`.
+    #[tokio::test]
+    async fn node_token_is_stripped_before_forwarding() {
+        let state = test_app_state();
+        let port = start_echo_pm_server().await;
+        set_pm_process(&state, port).await;
+
+        let echoed = proxy_echo_headers(
+            state,
+            "/api/pm/mcp",
+            &[("X-ACowork-Node-Token", "tok-abc"), ("X-MCP-Actor", "ghost")],
+        )
+        .await;
+
+        assert!(
+            echoed.get("x-acowork-node-token").is_none(),
+            "node credential must be stripped at the reverse proxy, got: {echoed}"
+        );
+    }
+
     /// MCP 路径：无 `X-MCP-Actor` 保持匿名（不注入）。
     #[tokio::test]
-    async fn mcp_path_keeps_anonymous_when_absent() {
-        let state = test_app_state();
+    async fn mcp_path_keeps_anonymous_when_absent() {        let state = test_app_state();
         let port = start_echo_pm_server().await;
         set_pm_process(&state, port).await;
 

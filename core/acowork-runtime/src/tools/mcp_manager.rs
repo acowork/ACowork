@@ -357,13 +357,26 @@ pub fn reconcile_and_persist_mcp_tools(
 ///
 /// ## Why it is safe
 ///
-/// The resolved value is a `String` in a `McpServerConfigDef` that lives
-/// only for the duration of this call. It is deliberately **never**
-/// written back to `agent_mcp.json`: that file is persisted to the agent's
-/// workspace *and* surfaced in the Tools panel, so a token landing there
-/// would be readable by anything that can read the workspace. The
-/// placeholder itself is all that ever reaches disk (the MQTT handler
-/// substitutes only `{instance_id}` when it writes the catalog).
+/// Two boundaries keep the credential from leaking:
+///
+/// 1. The resolved value is a `String` in a `McpServerConfigDef` that
+///    lives only for the duration of this call. It is deliberately
+///    **never** written back to `agent_mcp.json`: that file is persisted
+///    to the agent's workspace *and* surfaced in the Tools panel, so a
+///    token landing there would be readable by anything that can read
+///    the workspace. The placeholder itself is all that ever reaches
+///    disk (the MQTT handler substitutes only `{instance_id}` when it
+///    writes the catalog).
+/// 2. Substitution is anchored to the **catalog section** of
+///    `agent_mcp.json` — the part written solely by the MQTT handler
+///    from the Gateway-published `acowork/global/mcps` — and requires
+///    the entry to match a catalog entry on name AND url. A `local`
+///    entry (Tools panel / `PUT /mcp-servers` / workspace edit) that
+///    hand-types the placeholder must never be substituted: the node
+///    credential is node-scoped and unlocks every Gateway `/api/*`
+///    route, so a user-chosen URL carrying the template would
+///    otherwise exfiltrate it (privilege escalation). The url match
+///    also defeats a `local` entry shadowing a catalog name.
 ///
 /// ## Why the template and not a direct value
 ///
@@ -373,6 +386,7 @@ pub fn reconcile_and_persist_mcp_tools(
 /// Runtime — which received the real value from the Node at spawn — fills
 /// it in. This mirrors the existing `{instance_id}` convention.
 fn resolve_node_token_template(
+    work_dir: &Path,
     configs: &[McpServerConfigDef],
     node_token: Option<&str>,
 ) -> Vec<McpServerConfigDef> {
@@ -384,11 +398,37 @@ fn resolve_node_token_template(
         // fail somewhere less legible.
         return configs.to_vec();
     };
+    // Trust anchor: only entries the Gateway itself published into the
+    // catalog section of agent_mcp.json may receive the credential. The
+    // catalog is written solely by the MQTT handler from
+    // `acowork/global/mcps`; `local` entries are user- or agent-authored
+    // and must never be substituted even when they hand-type the
+    // placeholder — the node token unlocks every Gateway `/api/*` route,
+    // so leaking it to a user-chosen URL is privilege escalation.
+    // Matching on name AND url also defeats a `local` entry shadowing a
+    // catalog name with a different endpoint.
+    let catalog: Vec<McpServerConfigDef> = crate::agent_config::load_agent_mcp_config(work_dir)
+        .ok()
+        .flatten()
+        .map(|c| c.catalog)
+        .unwrap_or_default();
+    let is_gateway_published = |c: &McpServerConfigDef| {
+        catalog.iter().any(|cat| {
+            cat.name == c.name
+                && cat.url == c.url
+                && cat
+                    .headers
+                    .get(acowork_core::auth::NODE_TOKEN_HEADER)
+                    .map(String::as_str)
+                    == Some(acowork_core::auth::NODE_TOKEN_TEMPLATE)
+        })
+    };
     configs
         .iter()
         .map(|c| {
             let mut c = c.clone();
-            if let Some(v) = c.headers.get_mut(acowork_core::auth::NODE_TOKEN_HEADER)
+            if is_gateway_published(&c)
+                && let Some(v) = c.headers.get_mut(acowork_core::auth::NODE_TOKEN_HEADER)
                 && v == acowork_core::auth::NODE_TOKEN_TEMPLATE
             {
                 *v = token.to_string();
@@ -411,7 +451,7 @@ pub async fn connect_mcp_with_reconcile_and_filter(
     configs: &[McpServerConfigDef],
     node_token: Option<&str>,
 ) -> McpConnectResult {
-    let configs = resolve_node_token_template(configs, node_token);
+    let configs = resolve_node_token_template(work_dir, configs, node_token);
     let (registry, failures) = McpRegistry::connect_all(&configs)
         .await
         .expect("connect_all is non-fatal and should never fail");
@@ -532,14 +572,26 @@ mod filter_tests {
         }
     }
 
+    /// work_dir whose config/agent_mcp.json carries `catalog` — the shape
+    /// the MQTT handler writes when it persists `acowork/global/mcps`.
+    fn work_dir_with_catalog(catalog: Vec<McpServerConfigDef>) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cfg = crate::agent_config::AgentMcpConfig {
+            catalog,
+            local: vec![],
+            active_names: None,
+        };
+        crate::agent_config::save_agent_mcp_config(dir.path(), &cfg).expect("save catalog");
+        dir
+    }
+
     /// The happy path: pm / doc stop 401-ing at `auth_middleware` and the
     /// `tools/list` that drives the whole ADR-069 tool list works again.
     #[test]
     fn node_token_template_is_resolved_for_gateway_hosted_mcps() {
-        let out = resolve_node_token_template(
-            &[gateway_hosted_def("pm"), gateway_hosted_def("doc")],
-            Some("tok-abc"),
-        );
+        let defs = vec![gateway_hosted_def("pm"), gateway_hosted_def("doc")];
+        let dir = work_dir_with_catalog(defs.clone());
+        let out = resolve_node_token_template(dir.path(), &defs, Some("tok-abc"));
         for s in &out {
             assert_eq!(
                 s.headers
@@ -560,41 +612,51 @@ mod filter_tests {
         }
     }
 
-    /// Security assertion. A third-party MCP server (user-added via the
-    /// Tools panel) must never receive the node credential: it is node-scoped
-    /// and unlocks the whole Gateway API, so handing it to an arbitrary
-    /// remote endpoint the user configured would be a privilege escalation.
-    /// Only entries carrying the Gateway-published placeholder are touched.
+    /// P1 regression: substitution is anchored to the Gateway-published
+    /// catalog section — NOT to the header value alone. A `local` entry
+    /// (Tools panel / `PUT /mcp-servers` / workspace edit) that hand-types
+    /// the placeholder must never receive the real credential: the node
+    /// token is node-scoped and unlocks every Gateway `/api/*` route, so
+    /// sending it to a user-chosen URL would be privilege escalation.
+    /// Covers both the foreign-name attack and the catalog-name shadow.
     #[test]
-    fn node_token_is_not_injected_into_third_party_mcp_servers() {
-        let mut third_party = McpServerConfigDef {
+    fn hand_typed_template_in_a_non_catalog_entry_is_not_resolved() {
+        let dir = work_dir_with_catalog(vec![gateway_hosted_def("pm")]);
+
+        // Attacker server the user added: not in the catalog at all,
+        // header hand-typed with the exact Gateway template.
+        let mut evil = McpServerConfigDef {
             name: "playwright".to_string(),
             transport: McpTransportDef::Http,
-            url: Some("https://third-party.example.com/mcp".to_string()),
+            url: Some("https://attacker.example.com/mcp".to_string()),
             ..Default::default()
         };
-        // A user could even hand-type the placeholder — only the exact
-        // template on the exact header is substituted.
-        third_party.headers.insert(
+        evil.headers.insert(
             acowork_core::auth::NODE_TOKEN_HEADER.to_string(),
-            "user-supplied".to_string(),
+            acowork_core::auth::NODE_TOKEN_TEMPLATE.to_string(),
         );
 
-        let out = resolve_node_token_template(&[third_party], Some("tok-abc"));
-        assert_eq!(
-            out[0]
-                .headers
-                .get(acowork_core::auth::NODE_TOKEN_HEADER)
-                .map(String::as_str),
-            Some("user-supplied"),
-            "a server without the Gateway-published template must not be \
-             given the node credential"
-        );
-        assert!(
-            !out.iter()
-                .any(|s| s.headers.values().any(|v| v == "tok-abc")),
-            "the node token must not reach any third-party MCP config"
-        );
+        // Shadow attack: catalog name reused, endpoint swapped.
+        let mut shadow = gateway_hosted_def("pm");
+        shadow.url = Some("https://attacker.example.com/api/pm/mcp".to_string());
+
+        let out = resolve_node_token_template(dir.path(), &[evil, shadow], Some("tok-abc"));
+        for s in &out {
+            assert_eq!(
+                s.headers
+                    .get(acowork_core::auth::NODE_TOKEN_HEADER)
+                    .map(String::as_str),
+                Some(acowork_core::auth::NODE_TOKEN_TEMPLATE),
+                "{}: an entry absent from the catalog (or with a non-catalog \
+                 url) must keep the placeholder, never the credential",
+                s.name
+            );
+            assert!(
+                !s.headers.values().any(|v| v == "tok-abc"),
+                "the node token must never reach a user-authored entry ({})",
+                s.name
+            );
+        }
     }
 
     /// Standalone Runtime: no node credential exists, so the placeholder is
@@ -602,8 +664,10 @@ mod filter_tests {
     /// look like a present-but-wrong credential and fail less legibly).
     #[test]
     fn node_token_template_left_intact_without_credential() {
+        let defs = vec![gateway_hosted_def("pm")];
+        let dir = work_dir_with_catalog(defs.clone());
         for tok in [None, Some("")] {
-            let out = resolve_node_token_template(&[gateway_hosted_def("pm")], tok);
+            let out = resolve_node_token_template(dir.path(), &defs, tok);
             assert_eq!(
                 out[0]
                     .headers
@@ -621,7 +685,8 @@ mod filter_tests {
     #[test]
     fn resolving_does_not_mutate_the_caller_s_config() {
         let input = vec![gateway_hosted_def("pm")];
-        let _ = resolve_node_token_template(&input, Some("tok-abc"));
+        let dir = work_dir_with_catalog(input.clone());
+        let _ = resolve_node_token_template(dir.path(), &input, Some("tok-abc"));
         assert_eq!(
             input[0]
                 .headers
