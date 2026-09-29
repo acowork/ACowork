@@ -608,24 +608,11 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
   },
 
   uninstallAgent: async (agentId) => {
-    // ADR-077: System Agent is a regular bundled agent — no uninstall
-    // guard. `meta` is read before the call because the store entry is gone
-    // once the removal below commits.
+    // `meta` is read before the call because the store entry is gone once
+    // the removal below commits.
     const meta = get().agents[agentId]?.meta;
     try {
       await invoke("uninstall_agent", { agentId });
-
-      // ADR-077 Q4: the user chose not to keep System Agent installed, so
-      // the next onboarding run defaults it to unchecked. Recorded only after
-      // the uninstall actually succeeded — a failed attempt must not silently
-      // opt the agent out of onboarding.
-      if (meta?.agent_id === "com.acowork.system") {
-        try {
-          localStorage.setItem("acowork.onboarding.skipSystemAgent", "1");
-        } catch {
-          // localStorage unavailable (private mode / quota) — ignore.
-        }
-      }
 
       // Clean up profile from localStorage (keyed by instance id, with
       // legacy package-id fallback).

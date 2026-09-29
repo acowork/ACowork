@@ -25,12 +25,6 @@ const TOTAL_STEPS = 5;
 
 const RECOMMENDED_AGENTS = [
   {
-    resourceName: "system-agent",
-    name: "ACowork",
-    role: "System Agent",
-    description: "User identity, preferences, and system-level memory for all other agents",
-  },
-  {
     resourceName: "software-architect-agent",
     name: "Architect",
     role: "Software Architect",
@@ -67,22 +61,6 @@ const RECOMMENDED_AGENTS = [
     description: "Document collection, organization, writing, conversion, and knowledge base maintenance",
   },
 ];
-
-// ADR-077 Q4: remember whether the user previously chose NOT to install
-// System Agent (uninstalled it at some point). Read once at onboarding
-// mount; updated by the uninstall path in agentStore.
-const SKIP_SYSTEM_AGENT_KEY = "acowork.onboarding.skipSystemAgent";
-function shouldSkipSystemAgent(): boolean {
-  try {
-    return localStorage.getItem(SKIP_SYSTEM_AGENT_KEY) === "1";
-  } catch {
-    return false;
-  }
-}
-function defaultSelectedAgents(): string[] {
-  const all = RECOMMENDED_AGENTS.map((agent) => agent.resourceName);
-  return shouldSkipSystemAgent() ? all.filter((n) => n !== "system-agent") : all;
-}
 
 interface OnboardingState {
   completed: boolean;
@@ -754,7 +732,6 @@ async function runBounded<T>(
  * onboarding step shows "waiting" even after a successful install. */
 function bundledAgentId(resourceName: string): string {
   switch (resourceName) {
-    case "system-agent": return "com.acowork.system";
     case "software-architect-agent": return "com.acowork.software-architect";
     case "senior-engineer-agent": return "com.acowork.senior-engineer";
     case "quality-assurance-agent": return "com.acowork.quality-assurance";
@@ -776,7 +753,7 @@ function InstallAgentStep({ onComplete, onPrev }: { onComplete: () => void; onPr
   // surfaces the Gateway's own phase_detail ("3/5 required ready" etc.)
   // instead of a generic "waiting for node" message.
   const [bootstrap, setBootstrap] = useState<BootstrapStateView | null>(null);
-  const [selectedAgents, setSelectedAgents] = useState<string[]>(defaultSelectedAgents);
+  const [selectedAgents, setSelectedAgents] = useState<string[]>(() => RECOMMENDED_AGENTS.map((agent) => agent.resourceName));
 
   interface InstallOp {
     resourceName: string;

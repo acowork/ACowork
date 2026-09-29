@@ -373,7 +373,6 @@ fn bundled_agent_package_path(
     resource_name: &str,
 ) -> std::path::PathBuf {
     let package_name = match resource_name {
-        "system-agent" => "com.acowork.system.agent",
         "software-architect-agent" => "com.acowork.software-architect.agent",
         "senior-engineer-agent" => "com.acowork.senior-engineer.agent",
         "quality-assurance-agent" => "com.acowork.quality-assurance.agent",
