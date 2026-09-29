@@ -66,19 +66,23 @@ const API_KEY_VALUE: &str = "sk-minimax-secret-12345";
 const PASSWORD: &str = "bootstrap-integration-test-password";
 const NODE_ID: &str = "verify-node";
 
-/// Absolute path to the bundled System Agent package under `examples/`.
+/// Path to a real bundled `.agent` package, used as an install fixture.
+///
+/// Any bundled package works: these tests exercise the install / retained
+/// inventory wire path, not one package's semantics. (ADR-077 removed the
+/// bundled System Agent, which previously served as the fixture.)
 ///
 /// Resolves from `CARGO_MANIFEST_DIR` (core/acowork-gateway) up to the
 /// workspace root, then down into `examples/agent-packages/`. Keeps the
 /// test runnable on any machine (previously hardcoded to a Windows path).
-fn system_agent_package_path() -> std::path::PathBuf {
+fn bundled_package_path() -> std::path::PathBuf {
     let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     manifest_dir
         .parent()
         .expect("core/")
         .parent()
         .expect("workspace root")
-        .join("examples/agent-packages/com.acowork.system.agent")
+        .join("examples/agent-packages/com.acowork.senior-engineer.agent")
 }
 
 /// Pick a fresh MQTT port per test invocation (broker threads never
@@ -656,7 +660,7 @@ async fn early_install_returns_dependency_not_ready_then_succeeds() {
         .registry
         .register(format!("node.{NODE_ID}"), ReadinessKind::Required);
 
-    let package_bytes = std::fs::read(system_agent_package_path()).expect("read test package");
+    let package_bytes = std::fs::read(bundled_package_path()).expect("read test package");
 
     // Early install → 409 dependency_not_ready.
     let (status, body) = post_install(&surface.app_state, NODE_ID, &package_bytes, None).await;
@@ -702,7 +706,7 @@ async fn early_install_returns_dependency_not_ready_then_succeeds() {
         result_json: None,
     };
     node.publish(
-        node_agent_events_topic(NODE_ID, "com.acowork.system"),
+        node_agent_events_topic(NODE_ID, "com.acowork.senior-engineer"),
         QoS::AtLeastOnce,
         false,
         DataEnvelope {
@@ -820,7 +824,7 @@ async fn concurrent_installs_unique_ids_and_aggregate_inventory() {
     let broker = start_broker("127.0.0.1", port).expect("broker should start");
     let surface = build_surface(port, "instance-inventory").await;
 
-    let manifest = manifest_toml_from_package(system_agent_package_path().as_path());
+    let manifest = manifest_toml_from_package(bundled_package_path().as_path());
     let node = node_publisher(port, "node:verify-node-inv").await;
     for (agent_id, instance_id) in [
         ("com.acowork.a", "1a1a1a1a-0000-4000-8000-000000000001"),
