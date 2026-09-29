@@ -892,30 +892,6 @@ def test_tc_mqtt_broker(http, base):
         mq.disconnect()
 
 
-def test_boot_02_system_agent_auto_ready(mqtt_port):
-    """TC-BOOT-02: System Agent comes up by itself — no user action.
-
-    The desktop boot flow waits for com.acowork.system to reach ready
-    without any click; a regression here stalls the whole app start.
-    The ready topic carries the plaintext "true"/"false" (Retained).
-    """
-    print("\n── TC-BOOT-02: System Agent auto-ready ──")
-    mq = MqttClient()
-    if not mq.connect(port=mqtt_port):
-        fail("MQTT broker refused")
-        return
-    mq.subscribe("acowork/agents/com.acowork.system/ready", qos=1)
-    payload = mq.wait_for("acowork/agents/com.acowork.system/ready", timeout=20,
-                          predicate=lambda p: b"true" in p)
-    if payload:
-        ok("System Agent auto-started and ready (no user action)")
-    else:
-        mq.subscribe("acowork/agents/com.acowork.system/status", qos=1)
-        status = mq.wait_for("acowork/agents/com.acowork.system/status", timeout=5)
-        fail(f"System Agent not ready within 20s (last status: {status and status[:100]!r})")
-    mq.disconnect()
-
-
 def test_tc_harness_08_provider_key_mqtt_sync(http, base, mqtt_port):
     """TC-HARNESS-08: provider API key must ride the MQTT providers payload.
 
@@ -1925,20 +1901,22 @@ def run_recovery_suite(gw_bin, node_bin, http):
             ok("node identity.json converged to the gateway token")
         else:
             fail(f"identity.json token {identity_token and identity_token[:8]!r} != store {store_token[:8]!r}")
-        # 3. Proxied request must be 200 (the frontend 'loading session' path).
-        #    The System Agent is auto-installed + auto-started on this home.
+        # 3. An authenticated API call must answer 200 again (the frontend's
+        #    post-reload path). `/api/agents` is the lightest one that needs
+        #    no agent on this home — ADR-077 removed the auto-installed
+        #    System Agent this probe used to rely on.
         base = f"http://127.0.0.1:{AUTH_HTTP_PORT}"
         deadline = time.time() + TIMEOUT
         last = None
         while time.time() < deadline:
-            last = http.get(f"{base}/api/agents/com.acowork.system/latest-session")
+            last = http.get(f"{base}/api/agents")
             if last.status_code == 200:
                 break
             time.sleep(0.5)
         if last and last.status_code == 200:
-            ok("proxied latest-session recovered (HTTP 200)")
+            ok("agent list answers over the restored token (HTTP 200)")
         else:
-            fail(f"proxied latest-session never 200 (last HTTP {last.status_code}) — stale token not recovered")
+            fail(f"agent list never 200 (last HTTP {last.status_code}) — stale token not recovered")
     finally:
         gw.stop()
 
@@ -2247,9 +2225,6 @@ def main():
         if not ensure_agent_installed(http, base):
             fail("aborting: agent not installed")
             sys.exit(1)
-
-        # ── Boot link (desktop contract) ──
-        test_boot_02_system_agent_auto_ready(DEFAULT_MQTT_PORT)
 
         # ── Read-only (Gateway native) ──
         test_tc_chat_01_agent_list(http, base)

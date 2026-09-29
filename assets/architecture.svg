@@ -101,7 +101,7 @@
 
   <!-- Local Runtime -->
   <rect x="40" y="580" width="520" height="100" rx="8" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1.5" />
-  <text x="60" y="602" fill="#334155" font-family="system-ui, sans-serif" font-size="13" font-weight="700">acowork-runtime  ·  Agent "com.acowork.system"</text>
+  <text x="60" y="602" fill="#334155" font-family="system-ui, sans-serif" font-size="13" font-weight="700">acowork-runtime  ·  Agent "com.acowork.senior-engineer"</text>
   <text x="60" y="617" fill="#64748b" font-family="system-ui, sans-serif" font-size="10">loopback HTTP  ·  direct LLM API  ·  private Grafeo  ·  spawned by local Node Agent</text>
 
   <g transform="translate(60, 630)">

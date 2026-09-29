@@ -9,7 +9,7 @@
 #>
 param(
     [string]$GatewayUrl = "http://127.0.0.1:19885",
-    [string]$AgentId = "com.acowork.system"
+    [string]$AgentId = "com.acowork.senior-engineer"
 )
 
 $ErrorActionPreference = "Stop"

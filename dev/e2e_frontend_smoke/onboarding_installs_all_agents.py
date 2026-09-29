@@ -26,7 +26,7 @@ onboarding, but drives it against the ADR-059 readiness contract:
 Scenarios (--scenario, default all):
   * cold      — clean HOME: 409 probe → READY → HTTP/MQTT consistency
                 → §8.3 subscriber rules → operation_id install round
-                trip for every package → N+1 inventory
+                trip for every package → full inventory
   * warm      — same HOME restart: install one package, stop, restart,
                 assert instance_id rotated, stale snapshots rejected,
                 inventory recovered
@@ -75,14 +75,13 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 DEFAULT_GATEWAY_BIN = REPO_ROOT / "target" / "debug" / "acowork-gateway.exe"
 
 # Default 3 user-chosen packages — same set the README's onboarding
-# screenshot picks. Kept as `com.acowork.system`-free (system is
-# auto-installed by the Gateway at startup and would skew N+1 counts).
+# screenshot picks. ADR-077 removed the auto-installed System Agent, so the
+# inventory is exactly what the user picked.
 DEFAULT_PACKAGES = [
     "com.acowork.senior-engineer",
     "com.acowork.product-manager",
     "com.acowork.software-architect",
 ]
-SYSTEM_AGENT_ID = "com.acowork.system"
 
 # ── Wire constants (mqtt_payload.proto) ────────────────────────────────
 
@@ -773,18 +772,12 @@ def test_cold_start(http, base, mq, packages):
         if not install_and_await_ack(http, base, mq, pkg_path):
             return False
 
-    # 6. N+1 inventory invariant (user packages + auto-installed system).
+    # 6. Inventory holds exactly the packages that were installed.
     got, installed = await_inventory(http, base, packages)
     if not got:
         fail(f"inventory never showed all packages: {packages}")
         return False
-    if SYSTEM_AGENT_ID not in installed:
-        fail(f"system agent missing from inventory: {sorted(installed)}")
-        return False
-    ok(
-        f"inventory N+1 holds: {len(packages)} user + 1 system = "
-        f"{len(installed)} entries"
-    )
+    ok(f"inventory holds every installed package: {len(installed)} entries")
     return True
 
 
