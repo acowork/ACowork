@@ -680,7 +680,6 @@ Gateway:
 
 ### 7.3 克隆限制
 
-- 系统 Agent（`com.acowork.system`）不可克隆——无 Platform 签名，无法获得系统特权
 - 克隆体与源 Agent 独立，后续源 Agent 更新不会同步
 - 完整克隆的 SQLite 记忆层 快照是克隆时刻的副本，之后双方各自演化
 

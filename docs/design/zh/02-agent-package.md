@@ -349,7 +349,6 @@ progressive = false
 **关键字段说明：**
 
 - `runtime_version`：声明兼容的 Agent Runtime 版本。当前为 `"0.1.0"`。
-- `system`：是否为系统 Agent。`true` 时进入 system 安装 lane（优先出队）。ADR-077 起内置 System Agent 不再声明该标记，字段留给真正系统级的包。
 - `dev`：是否为开发者模式。用于本地开发测试。
 - `display_name` / `role`：UI 展示用的短名称和角色标题。`display_name` 默认为 `name`。
 - `avatar`：可选，包内头像图片路径（如 `"assets/avatar.png"`）。优先级最高。

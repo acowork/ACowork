@@ -349,7 +349,6 @@ progressive = false
 **Key Field Descriptions:**
 
 - `runtime_version`: Declares compatible Agent Runtime version. Currently `"0.1.0"`.
-- `system`: Whether this is a system Agent. `true` schedules the package on the system install lane (dequeued first). Since ADR-077 the bundled System Agent no longer declares it; the field is reserved for genuinely system-critical packages.
 - `dev`: Whether this is a development mode Agent. Used for local development and testing.
 - `display_name` / `role`: Short name and role title for UI display. `display_name` defaults to `name`.
 - `avatar`: Optional, in-package avatar image path (e.g. `"assets/avatar.png"`). Highest priority.

@@ -194,6 +194,8 @@ ADR-075 D6 与 [gateway/state.rs](../../../core/acowork-gateway/src/gateway/stat
 | `core/acowork-core/src/permission.rs` `IdentityRead` / `IdentityWrite` | 不动（权限定义与 agent 实现解耦） |
 | `intent/privacy.rs` | 不动 |
 
+> **实施修订（§8.1 / §8.2）**：本节所列 `examples/system-agent/*` 各项在实施中被整体删除，`manifest.system` 字段连同其安装 lane 机制一并移除。
+
 ---
 
 ## 5. 收益
@@ -215,6 +217,8 @@ ADR-075 D6 与 [gateway/state.rs](../../../core/acowork-gateway/src/gateway/stat
 | Q3 | System Agent 是否仍注册为 Optional 子系统 | **不注册**。其 readiness 由自身 Runtime `acowork/agents/{agent_id}/ready` retained 表达，Desktop 走常规 agent status 路径消费，不进 BootstrapState |
 | Q4 | onboarding 是否默认勾选安装 System Agent | **默认勾选**（多数用户需要 identity 记忆），但可取消；需持久化"用户上次卸了它则不自动勾选" |
 
+> **实施修订（§8.2 / §8.3）**：Q1 的删除范围扩大到整条 `InstallPriority` lane 机制（含 proto 字段与克隆守卫）；Q4 随 bundled 包删除而回退，onboarding 不再列出 System Agent。
+
 ---
 
 ## 7. 实施顺序（ADR 定稿后）
@@ -227,3 +231,58 @@ ADR-075 D6 与 [gateway/state.rs](../../../core/acowork-gateway/src/gateway/stat
 6. 同步 ADR-059 / ADR-055 / ADR-075 引用点
 7. 更新 e2e / bootstrap 测试
 8. `cargo test` + `cargo clippy -- -D warnings` + e2e smoke
+
+
+---
+
+## 8. 实施记录（2026-11-12，`feature/adr077`）
+
+实施时按"项目开发期、无兼容负担、清理力度更大"的指示，删除范围超出本 ADR 原定边界。以下是对 §1 / §4 / §6 / §7 的**修订**，以本节为准。
+
+### 8.1 System Agent 包整体退出仓库（修订 §1.1「仍然 bundled」）
+
+`examples/system-agent/`（manifest + prompts + skills + assets）与打包产物 `examples/agent-packages/com.acowork.system.agent` 一并删除，`com.acowork.system` 不再以任何形态存在于代码库。§1.1 中"它仍然 bundled（随 Gateway 分发）"作废：Gateway 不再内置任何 agent 包，bundled 目录只剩 7 个与普通 agent 同级的示例包。
+
+连带删除：
+
+| 位置 | 删除内容 |
+|---|---|
+| `src-tauri/src/commands/agent.rs` | bundled 包名映射中的 `"system-agent"` 分支 |
+| `src-tauri/src/commands/gateway.rs` | `ensure_system_agent` Tauri command（~167 行）+ `SYSTEM_AGENT_ID` 常量 |
+| `gateway/state.rs` | `SYSTEM_AGENT_ID` 常量 + `find_instance_by_agent_id`（auto-start task 专用，删除后零消费者） |
+
+§4.4「不变」表中列出的 `examples/system-agent/*` 各项因此不复存在。
+
+### 8.2 `manifest.system` 字段与安装 lane 机制整体删除（超出 §4.1 边界）
+
+Q1 只决策了"删除 `system = true` 这一行"。实施时把该字段背后的整条机制一并删除：删掉唯一的声明者之后，`InstallPriority::System` 已无任何生产者，调度器在真实部署里本来就严格 FIFO，却仍携带一个排序键、一个 wire 标志和一个克隆守卫。
+
+| 层 | 删除内容 |
+|---|---|
+| `acowork-core/src/manifest.rs` | `pub system: bool` 字段 |
+| `acowork-core/src/install/mod.rs` | `InstallPriority` 枚举、`from_system_flag`、request / ticket 上的 `priority` 字段、两个构造函数的 `is_system` 参数 |
+| `acowork-core/src/install/scheduler.rs` | 出队键 `(priority, seq)` → 纯 `seq`（FIFO） |
+| `acowork-core/proto/mqtt_payload.proto` | `NodeInstall.system`；field 6 以 `reserved` 占位，防止未来以不同语义复用同一字段号 |
+| `acowork-gateway/src/mqtt/node_control.rs` | `NodeInstallDispatch.system` 字段及其 `to_proto` 传递 |
+| `acowork-node/src/package/clone.rs` | "system agent 不可克隆"守卫（lane 标志在调度之外的唯一读者） |
+| 7 个 `examples/*/manifest.toml` | `system = false` 行 |
+
+### 8.3 Q4 回退
+
+Q4 的"onboarding 默认勾选 + 上次卸载则不再勾选"随包删除一并回退：没有 bundled System Agent 可勾，`RECOMMENDED_AGENTS` 不含该条目，`acowork.onboarding.skipSystemAgent` localStorage 键及其读写代码全部移除。
+
+### 8.4 §7 第 5 项跳过
+
+"启动清理陈旧 `node_id == "local"` 的 System Agent 记录"未实施——auto-start task 删除后已无代码路径创建特权记录，残留的 `"local"` 全部是合法的本机簿记哨兵。
+
+### 8.5 e2e 脚本
+
+| 脚本 | 变化 |
+|---|---|
+| `dev/e2e_frontend_smoke/smoke_test.py` | TC-BOOT-02（System Agent 自动 ready）用例删除：启动链路不再自动拉起任何 agent，被测行为不存在。recovery suite 的 `latest-session` 探针改用 `GET /api/agents`——该 suite 用干净临时 home，不安装任何 agent |
+| `dev/e2e_frontend_smoke/onboarding_installs_all_agents.py` | `N+1` 库存不变式（N 个用户包 + 1 个自动装 system）改为 `N` |
+| `dev/e2e_stop_test.ps1` | 默认 `-AgentId` 改为 `com.acowork.senior-engineer` |
+
+### 8.6 其余文档同步
+
+`docs/design/{zh,en}/02-agent-package.md`（`system` 字段说明删除）、`docs/design/zh/10-debug-protocol.md`（克隆限制删除）、`docs/prd/{zh,en}/prd.md` 与 `prd-ui-ux.md`、`docs/adr/zh/ADR-059`、`docs/adr/zh/ADR-075`、`assets/architecture.svg`。
