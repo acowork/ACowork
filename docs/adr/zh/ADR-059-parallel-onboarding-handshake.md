@@ -62,7 +62,7 @@ Gateway process
 
 1. Publisher 在 Vault 尚未解锁时先发布首个 retained provider snapshot，Runtime 收到空 `api_key` 后，后续 republish 也不会自动刷新该 Runtime。
 2. Desktop 在 `local` Node 尚未完成 enroll、尚未建立控制订阅时发起安装，Gateway 只能返回 503，Desktop 再依赖 `time.sleep` 和有限次数重试。
-3. Desktop 看到 `/health` 可达后继续执行 onboarding，但这只证明 HTTP server 存活，不证明后续安装所需的 Node 和 System Agent 已经就绪。
+3. Desktop 看到 `/health` 可达后继续执行 onboarding，但这只证明 HTTP server 存活，不证明后续安装所需的 Node 已经就绪。（**ADR-077**：System Agent 已不再是 Gateway 启动链路的一部分；其安装由 Desktop onboarding 直接发起，不参与该就绪协议。）
 
 现有修复已经通过 `watch::Sender<bool>` 等本地 ready barrier 解决 publisher 的首个快照竞态，并通过 Node online 检查和重试缓解安装竞态。它们是重要的过渡性修复，但还不是一套跨 Desktop、Gateway、Node、Runtime 的通用协议契约。
 
@@ -152,7 +152,7 @@ Gateway process
 
 ### 4.3 启动场景与协议复用矩阵
 
-`acowork/global/bootstrap`、`operation_id`、结构化错误码必须被以下场景共用，避免出现“冷启动 onboarding 用 A 协议，热启动日常操作用 B 协议”的双栈重复造轮子。本矩阵不罗列内部 capability（Vault / Publisher / Node / System Agent / Embedding 等），仅描述外部可见的 phase 序列。内部子系统清单请见 §5.4。
+`acowork/global/bootstrap`、`operation_id`、结构化错误码必须被以下场景共用，避免出现“冷启动 onboarding 用 A 协议，热启动日常操作用 B 协议”的双栈重复造轮子。本矩阵不罗列内部 capability（Vault / Publisher / Node / Embedding 等），仅描述外部可见的 phase 序列。内部子系统清单请见 §5.4。（**ADR-077**：System Agent 不再是内部 Required capability —— 见 §6.1 / §7.5 / §12.2 修订。）
 
 | 场景 | 协议事实源 | 典型 phase 序列 | 触发条件 | operation contract |
 | --- | --- | --- | --- | --- |
@@ -187,7 +187,7 @@ Gateway process
 不被复用的部分（仅在冷启动需要，热启动已默认满足）：
 
 - 各内部子系统的“首次 ready 信号”（由 Gateway 内部 CapabilityRegistry 处理，外部不可见）。
-- Vault 首次解锁、Publisher 首次 retained publish、System Agent 首次 install + ready ack 等首次过渡行为。
+- Vault 首次解锁、Publisher 首次 retained publish 等首次过渡行为。（**ADR-077**：System Agent 首次 install + ready ack 已不再属于冷启动流程——其安装由 Desktop onboarding 触发，与 Gateway 启动链路解耦。）
 
 这些首次过渡行为在冷启动下必须从 0 走到 ready；在热启动下只需验证它们仍 ready。复用 `BootstrapState` 与 operation contract 可以让冷启动代码同时被热启动代码以相同路径复用，而不是在两处重复实现 readiness 判断。外部协议上，Gateway 内部增加任何子系统（包括未来的 HSM 集成、LLM health check、远程 SDK 热加载等）都不要求 Desktop / Runtime / Node 侧任何代码变动。
 
@@ -410,13 +410,12 @@ graph TD
     BROKER --> NODE_ENROLL["Node enroll + control subscription"]
     NODE_ENROLL --> NODE_READY["local Node ready"]
     NODE_SPAWN --> NODE_ENROLL
-    VAULT --> SYS_PREPARE["准备 System Agent 资源"]
-    NODE_READY --> SYS_INSTALL["安装 / 启动 System Agent"]
     PUBLISHER --> BOOTSTRAP["生成 BootstrapState"]
-    SYS_INSTALL --> BOOTSTRAP
     EMBED -. "optional" .-> BOOTSTRAP
     BOOTSTRAP --> DESKTOP["Desktop 启用依赖 Gateway 的 onboarding 动作"]
 ```
+
+> **ADR-077**：原 `SYS_PREPARE` / `SYS_INSTALL` 节点及关联边已删除。System Agent 是普通 bundled agent，安装由 onboarding（`POST /api/agents/ensure`）触发，不再是 BootstrapState 前置依赖。其 readiness 由自身 Runtime `acowork/agents/{id}/ready` retained 表达，Desktop 走常规 agent status 路径消费。
 
 ### 6.2 可并行工作
 
@@ -426,13 +425,12 @@ graph TD
 - MQTT broker 启动和 Gateway MQTT client 建立。
 - embed 进程启动或复用已有 embed。
 - local Node 进程 spawn。
-- 已安装 System Agent 的运行时恢复。
 - 静态 resource cache 的只读加载和校验。
+- （**ADR-077**：System Agent 安装已迁出此层，由 Desktop onboarding 触发；不再是 Gateway 启动链路的一部分。）
 
 以下工作不能提前：
 
 - Publisher 不得在 Vault 尚未解锁时发布带 key 的 provider snapshot。
-- `system_agent` 不得在目标 Node 尚未具备控制通道时开始 install/start。
 - Desktop 不得在 `BootstrapState` 显示 required capabilities ready 之前提交依赖它们的动作。
 - 多个 Agent package 的安装可以在同一个 Node、同一 generation 和同一资源预算下并行，但它们不能绕过 `node.local` 和 operation ack。
 - Provider key 更新、MCP 资源更新、identity profile 更新等互不依赖的写入可以并行；需要同一份资源快照一致性的更新必须进入同一串行资源队列。
@@ -572,13 +570,13 @@ Gateway → Desktop: operation state = completed/failed
 
 Desktop 可以并发提交多个 install operation，但必须使用有界并发（默认建议 2～4），避免冷启动时同时 spawn 多个 embed、Runtime 或大量文件 I/O。`JoinSet` / `FuturesUnordered` 只负责并发调度，operation ack 仍负责结果确认。
 
-### 7.5 Runtime / System Agent ready
+### 7.5 Runtime ready
 
 沿用现有 `acowork/agents/{agent_id}/ready` retained 语义，但升级为 Gateway → Desktop 可见的能力确认：
 
 - Runtime 只有在 HTTP server、memory、workspace、MQTT 初始化和必要 provider snapshot 均满足运行时策略后，才发布 `ready=true`。
 - Runtime 从 offline 变为 ready 或 ready generation 变化时，必须保留旧的 agent status 诊断字段，但 Desktop 不得用旧的 `running` / `connected` 字段代替 AgentReady。
-- System Agent 作为冷启动 required capability 时，Gateway 必须获得 Runtime ready ack 或明确的不可用错误；不能只根据 spawn 返回码宣布成功。
+- （**ADR-077**：本节原 §7.5 第二条 "System Agent 作为冷启动 required capability 时…" 已删除。System Agent 不再是 BootstrapState required capability；其 readiness 走常规 agent status 路径消费，延迟 / 失败不阻塞 Desktop 主聊天区就绪。）
 - Runtime 收到 provider retained snapshot 后按 `version` 拒绝陈旧消息；Gateway 必须在同一 resource mutation operation 内提供足够信息，使 Desktop 能判断快照是否对应当前操作。
 
 ### 7.6 正常启动与重连握手
@@ -869,10 +867,11 @@ gate 会 latch false 导致死等）。
    - assert 早期只收到 `dependency_not_ready`，错误中不含 capability 列表、仅含 `current_phase` 与 `phase_detail`。
    - NodeReady 后 per-node control gate 放行，operation 可完成；聚合 phase 不因 node readiness 变化（node 为 Optional 子系统，见 §7.2）。
 
-3. **System Agent**
-   - System Agent 延迟完成 Runtime ready。
-   - assert BootstrapState 保持 BOOTING，直到 System Agent ready 后 phase 转 READY。
-   - assert Desktop 不显示主聊天区 ready。
+3. **System Agent 不再阻塞 BootstrapState**（**ADR-077**）
+   - 不注册 `system_agent` Required 子系统；System Agent 安装 / 启动被刻意延迟或彻底缺席。
+   - assert BootstrapState 在 Required 子系统（Vault / MQTT / Publisher / `node.{node_id}`）就绪后即转 READY，**不等待** System Agent。
+   - assert Desktop 主聊天区在 BootstrapState READY 后即可用，System Agent 是否 ready 由 `/api/agents` 常规 agent status 路径独立表达。
+   - 落地测试：`acowork-gateway/tests/bootstrap_integration.rs::bootstrap_succeeds_without_system_agent`。
 
 4. **并发安装**
    - 冷启动准备三个 package。
@@ -1046,6 +1045,6 @@ gate 会 latch false 导致死等）。
 
 - 某 Node 离线 / 重连不再改变聚合 phase（READY 保持 READY），只推进 `version` 并重发 retained snapshot，驱动 Desktop 实时刷新 node 在线状态（§7.2 / §7.6.2）。
 - per-node control gate 语义不变：control 投递仍需 `NodeReady` 确认，未就绪时按 §7.4 进入 per-node pending queue 或返回 `dependency_not_ready`；该 gate 与子系统 kind 无关。
-- 平台级必需子系统（Vault / MQTT / Publisher / System Agent）保持 Required；它们失效时仍按原规则影响聚合 phase。
+- 平台级必需子系统（Vault / MQTT / Publisher）保持 Required；它们失效时仍按原规则影响聚合 phase。（**ADR-077**：System Agent 已从此 Required 集合中删除 — 见 §6.1 / §7.5 修订；其 readiness 走常规 agent status 路径。）
 
 **同步修订**：§4.3 场景矩阵、§5.1、§5.4.3、§7.2、§7.6.2、§11（Phase 5）、§12.1、§12.2、§12.3、§14。
