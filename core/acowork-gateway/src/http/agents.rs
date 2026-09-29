@@ -25,7 +25,6 @@ use crate::error::GatewayError;
 use crate::http::routes::{ApiError, AppState, OperationAck};
 use crate::gateway::state::GatewayState;
 use crate::mqtt::node_control::{NodeControlClient, NodeInstallDispatch, NodePackageSource};
-use crate::gateway::state::SYSTEM_AGENT_ID;
 use acowork_core::error_codes::StructuredErrorBody;
 use acowork_core::operation::{OperationId, OperationRecord};
 use acowork_core::AgentManifest;
@@ -369,17 +368,7 @@ pub async fn list_agents(
 /// Stable sidebar sort. See [`list_agents`] docstring for ordering rules.
 fn sort_agent_list(agents: &mut [AgentListResponse]) {
     agents.sort_by(|a, b| {
-        // 1) System agent always first.
-        let a_sys = a.agent_id == SYSTEM_AGENT_ID;
-        let b_sys = b.agent_id == SYSTEM_AGENT_ID;
-        if a_sys != b_sys {
-            return if a_sys {
-                std::cmp::Ordering::Less
-            } else {
-                std::cmp::Ordering::Greater
-            };
-        }
-        // 2) Alive group above dead group (alive = MQTT network signal,
+        // 1) Alive group above dead group (alive = MQTT network signal,
         //    same contract as the sidebar's per-agent dot / name styling).
         if a.alive != b.alive {
             return if a.alive {
@@ -388,7 +377,7 @@ fn sort_agent_list(agents: &mut [AgentListResponse]) {
                 std::cmp::Ordering::Greater
             };
         }
-        // 3) Within a group: by last_interaction_at DESC; None last;
+        // 2) Within a group: by last_interaction_at DESC; None last;
         //    fall back to name for stable, predictable ordering.
         match (&a.last_interaction_at, &b.last_interaction_at) {
             (Some(ta), Some(tb)) => tb.cmp(ta),
@@ -2672,17 +2661,6 @@ mod tests {
             debug_port: None,
             last_interaction_at: ts.map(|s| s.to_string()),
         }
-    }
-
-    #[test]
-    fn sort_pins_system_agent_first() {
-        let mut list = vec![
-            entry("com.acowork.alice", "Alice", true, None),
-            entry("com.acowork.system", "System", false, None),
-            entry("com.acowork.bob", "Bob", true, Some("2026-06-18T00:00:00Z")),
-        ];
-        sort_agent_list(&mut list);
-        assert_eq!(list[0].agent_id, "com.acowork.system");
     }
 
     #[test]

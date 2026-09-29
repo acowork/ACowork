@@ -148,7 +148,7 @@ mod tests {
         // / remote topology it is no longer a Required subsystem (the
         // local node subsumes the old `node.local` role via its
         // machine-slug entry, e.g. `node.nytb`).
-        for id in ["vault", "mqtt", "publisher", "node.nytb", "system_agent"] {
+        for id in ["vault", "mqtt", "publisher", "node.nytb"] {
             registry.register(id, ReadinessKind::Required).mark_ready(None);
         }
         // The orchestrator's background listener recomputes
@@ -167,7 +167,7 @@ mod tests {
     #[tokio::test]
     async fn optional_failure_yields_degraded() {
         let (state, registry) = test_state().await;
-        for id in ["vault", "mqtt", "publisher", "node.nytb", "system_agent"] {
+        for id in ["vault", "mqtt", "publisher", "node.nytb"] {
             registry.register(id, ReadinessKind::Required).mark_ready(None);
         }
         registry

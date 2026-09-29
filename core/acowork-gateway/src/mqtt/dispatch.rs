@@ -825,7 +825,6 @@ pub fn handle_plaintext_message(topic: &str, payload: &[u8], ctx: &DispatchConte
         let state_for_installed = ctx.state.clone();
         let payload_owned = payload.to_vec();
         let node_id_owned = node_id.clone();
-        let bootstrap_registry_for_installed = ctx.bootstrap_registry.clone();
         // Inventory-change signal: every mutation to installed_agents
         // (install complete / retained replay / empty-payload clear)
         // must wake the publisher so subscribers (Desktop) refresh.
@@ -875,27 +874,6 @@ pub fn handle_plaintext_message(topic: &str, payload: &[u8], ctx: &DispatchConte
                         }
 
                         tracing::info!(node_id = %node_id_owned, agent_id = %aid, "Aggregated installed agent from node");
-
-                        // ADR-059 Phase 1.2: the System Agent's readiness
-                        // is signalled by the local node's retained
-                        // installed inventory — once com.acowork.system
-                        // is aggregated, the bootstrap can reach READY.
-                        // Idempotent: the node re-publishes retained
-                        // inventory on every (re)connect.
-                        if aid == crate::gateway::state::SYSTEM_AGENT_ID
-                            && let Some(registry) = bootstrap_registry_for_installed.as_ref()
-                        {
-                            let handle = registry.register(
-                                "system_agent",
-                                crate::bootstrap::ReadinessKind::Required,
-                            );
-                            handle.mark_ready(Some(
-                                "system agent installed inventory aggregated".to_string(),
-                            ));
-                            tracing::info!(
-                                "System Agent ready — bootstrap can reach READY (ADR-059)"
-                            );
-                        }
 
                         // Wake the inventory-change notifier — the
                         // Desktop listens on `acowork/desktop/inventory`

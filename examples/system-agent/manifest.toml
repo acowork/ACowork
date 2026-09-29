@@ -1,6 +1,7 @@
 # System Agent — com.acowork.system
 # The "system app" of ACowork, analogous to Android's Settings/Contacts.
-# Always started with Gateway, cannot be uninstalled.
+# Bundled default agent shipped with the Gateway binary; installed and
+# managed via the standard install/start/uninstall paths (ADR-077).
 
 agent_id = "com.acowork.system"
 version = "1.0.0"
@@ -10,7 +11,6 @@ role = "System Agent"
 description = "ACowork system agent: manages user identity, preferences, and system-level services"
 author = "ACowork Team"
 runtime_version = "0.1.0"
-system = true
 dev = false
 avatar = "assets/avatar.png"
 

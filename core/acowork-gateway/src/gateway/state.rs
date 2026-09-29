@@ -45,8 +45,9 @@ pub struct AgentInfo {
     /// Which node hosts this installed agent (ADR-055 §6.5) — the node's
     /// routing key, i.e. its UUID since ADR-075. Populated from the node's
     /// retained installed-package inventory, so the Gateway's own-machine
-    /// node carries its UUID here too, NOT the `"local"` bookkeeping
-    /// anchor reserved for Gateway-direct agents.
+    /// node carries its UUID here too. `"local"` is a bookkeeping sentinel
+    /// meaning "host node not yet known" (ADR-075 D6, narrowed by
+    /// ADR-077 §3.4); it does NOT identify any Runtime's host.
     pub node_id: String,
 }
 
@@ -103,9 +104,10 @@ pub struct RunningAgentInfo {
     pub pid: u32,
     pub started_at: chrono::DateTime<chrono::Utc>,
     pub workspace: String,
-    /// Which node hosts this running Runtime (ADR-055 §6.5). `"local"`
-    /// while the Gateway spawns Runtimes directly; a remote node_id once
-    /// lifecycle is delegated to the Node control plane (Phase 2b.3).
+    /// Which node hosts this running Runtime (ADR-055 §6.5). `"local"` is a
+    /// bookkeeping sentinel meaning "host node not yet known" (ADR-075 D6,
+    /// narrowed by ADR-077 §3.4); once the install record is aggregated
+    /// this is overwritten with the host node's UUID.
     pub node_id: String,
     /// Whether the Agent has completed SessionTask initialization and is ready to receive messages
     pub ready: bool,
