@@ -472,17 +472,22 @@ impl AgentLoop {
         let mut out: Vec<ResolvedDistill> = Vec::new();
 
         // Global tier expands to the user's whole ordered list (filtered by
-        // provider availability), not just the single head. When `top` is
-        // itself a global pick it leads the chain; the remaining global
-        // candidates follow in the user's order.
-        let globals = self.try_global_default_targets();
-        if matches!(top.tier, DistillTier::GlobalDefault) {
-            out.push(top.clone());
-            out.extend(globals);
-        } else {
-            out.extend(globals);
-            out.push(top.clone());
-        }
+        // provider availability), not just the single head. `top` always
+        // leads the chain; the remaining global candidates follow in the
+        // user's order.
+        //
+        // When `top` is NOT a global pick, the selection phase rejected
+        // every global candidate it evaluated — provider unavailable, or
+        // model missing from `capabilities` — and picked a lower tier
+        // instead. `try_global_default_targets` filters on provider
+        // availability only, so it can still return a candidate the
+        // selection phase threw out. Appending those after `top` (rather
+        // than prepending) keeps the chain consistent with the tier
+        // `resolve_distill_model` reported, while still letting a later
+        // call failure fall through to another user pick — strictly
+        // better than skipping it outright.
+        out.push(top.clone());
+        out.extend(self.try_global_default_targets());
 
         // Provider-compact tier: appended unless `top` already chose it.
         if !matches!(top.tier, DistillTier::ProviderCompact)
@@ -2352,6 +2357,39 @@ mod tests {
         let resolved = loop_.resolve_distill_model("hi");
         assert!(matches!(resolved.tier, DistillTier::ProviderCompact));
         assert_eq!(resolved.model_id, "deepseek-v4-flash");
+    }
+
+    #[test]
+    fn targets_list_does_not_promote_global_rejected_by_selection_phase() {
+        // The selection phase (`resolve_distill_model`) rejects a global
+        // candidate whose model_id is missing from every provider's
+        // `models[]` (capabilities lookup fails) and falls through to
+        // ProviderCompact. The call-phase chain must honour that verdict:
+        // `try_global_default_targets` only filters on *provider*
+        // availability, so without an explicit guard the rejected
+        // candidate would be re-promoted to the head of the chain — the
+        // chain would then contradict the tier `resolve_distill_model`
+        // reported, and `compact_history_if_needed` would log a
+        // GlobalDefault tier the selection phase never chose.
+        let mut loop_ = build_loop();
+        seed_providers(&loop_);
+        set_session(&mut loop_, "deepseek", "deepseek-v4-pro");
+        set_provider_compact(&mut loop_, "deepseek", Some("deepseek-v4-flash"));
+        *loop_.core.default_compact_models.write().unwrap() =
+            vec![("ollama-local".to_string(), "ghost-model-99".to_string())];
+
+        // Selection phase rejects the ghost model and picks provider tier.
+        let resolved = loop_.resolve_distill_model("hi");
+        assert!(
+            matches!(resolved.tier, DistillTier::ProviderCompact),
+            "precondition: selection phase must reject the unknown model, got {resolved:?}"
+        );
+
+        let targets = loop_.resolve_distill_targets();
+        assert!(
+            !matches!(targets.first().map(|t| t.tier), Some(DistillTier::GlobalDefault)),
+            "call-phase chain must not lead with a global the selection phase rejected, got {targets:?}"
+        );
     }
 
     #[test]

@@ -33,8 +33,12 @@ pub struct DefaultCompactModelResponse {
 #[derive(Debug, Deserialize)]
 pub struct PutDefaultCompactModelRequest {
     /// Ordered candidate list. `[]` clears the global override.
+    ///
+    /// `Option` so "field absent" stays distinguishable from "field
+    /// present but empty" — a `Vec` alone cannot express an explicit
+    /// clear that must beat the legacy field below.
     #[serde(default)]
-    pub default_compact_models: Vec<CompactModelRef>,
+    pub default_compact_models: Option<Vec<CompactModelRef>>,
     /// Legacy single-value form, still accepted for older Desktop builds:
     /// `Some(r)` → `[r]`, `null` → `[]` (only when the list field is absent).
     #[serde(default)]
@@ -43,11 +47,15 @@ pub struct PutDefaultCompactModelRequest {
 }
 
 impl PutDefaultCompactModelRequest {
-    /// Effective list: new field wins; legacy field is folded in when the
-    /// new field was omitted entirely.
+    /// Effective list: the new field wins whenever it is *present*; the
+    /// legacy field is folded in only when the new one was omitted entirely.
+    ///
+    /// Presence, not emptiness, is the rule: a client that sends both
+    /// dialects at once (so an old Gateway also understands it) must still
+    /// be able to clear the setting with an explicit `[]`.
     fn effective_list(&self) -> Vec<CompactModelRef> {
-        if !self.default_compact_models.is_empty() {
-            return self.default_compact_models.clone();
+        if let Some(list) = &self.default_compact_models {
+            return list.clone();
         }
         match &self.default_compact_model {
             Some(Some(r)) => vec![r.clone()],
@@ -180,6 +188,31 @@ mod tests {
         let json = r#"{"default_compact_model":null}"#;
         let req: PutDefaultCompactModelRequest = serde_json::from_str(json).unwrap();
         assert!(req.effective_list().is_empty());
+    }
+
+    #[test]
+    fn request_deserialization_explicit_empty_list_wins_over_legacy_field() {
+        // A client that speaks both dialects (sends the new list AND the
+        // legacy single value, so an old Gateway also understands it) must
+        // still be able to CLEAR the setting. "New field wins" is a
+        // presence rule, not a non-emptiness rule: an explicit
+        // `[]` has to win over a stale legacy value, otherwise clearing
+        // silently resurrects the legacy pick.
+        let json = r#"{"default_compact_models":[],"default_compact_model":{"provider_id":"ollama","model_id":"qwen2.5:0.5b"}}"#;
+        let req: PutDefaultCompactModelRequest = serde_json::from_str(json).unwrap();
+        assert!(
+            req.effective_list().is_empty(),
+            "explicit empty list must clear, not fold the legacy value back in"
+        );
+    }
+
+    #[test]
+    fn request_deserialization_new_list_wins_over_legacy_field() {
+        let json = r#"{"default_compact_models":[{"provider_id":"ds","model_id":"flash"}],"default_compact_model":{"provider_id":"ollama","model_id":"qwen2.5:0.5b"}}"#;
+        let req: PutDefaultCompactModelRequest = serde_json::from_str(json).unwrap();
+        let list = req.effective_list();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].provider_id, "ds");
     }
 
     #[test]
