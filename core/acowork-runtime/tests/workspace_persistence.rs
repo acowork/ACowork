@@ -66,8 +66,8 @@ fn created_id(resp: &WorkspaceMutationResponse) -> String {
 ///
 /// Before Fix 3: the mutation service wrote to one path (the run-time's
 /// `work_dir`) while the desktop expected the resolver to read from a
-/// different one (the `com.acowork.system/workspace/` work_dir of the
-/// system agent runtime). After Fix 3 both halves agree on the same
+/// different one (a `workspace/` subdirectory belonging to a different
+/// runtime). After Fix 3 both halves agree on the same
 /// canonical `<work_dir>/config/agent_workspaces.json` path. This test
 /// pins that down with two separate `Work_dir`-style runs that share the
 /// exact same `agent_workspaces.json` on disk.

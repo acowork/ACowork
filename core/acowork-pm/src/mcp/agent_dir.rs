@@ -396,7 +396,7 @@ mod tests {
                 // 只含 agent_id，没有 instance_id — 模拟旧 Gateway 形状
                 axum::Json(vec![
                     serde_json::json!({ "agent_id": "com.acowork.architect" }),
-                    serde_json::json!({ "agent_id": "com.acowork.system" }),
+                    serde_json::json!({ "agent_id": "com.test.agent" }),
                 ])
             }),
         );
@@ -420,7 +420,7 @@ mod tests {
         // 走即时兜底 → Gateway 详情路由 `{id}` 用 instance_id 查，
         // 包 ID 不是 instance_id，所以也 miss
         assert!(!dir.agent_exists("com.acowork.architect").await);
-        assert!(!dir.agent_exists("com.acowork.system").await);
+        assert!(!dir.agent_exists("com.test.agent").await);
     }
 
     /// ADR-073 关键场景：同包多 instance 必须共存。

@@ -297,7 +297,7 @@ mod tests {
     #[test]
     fn test_inbound_message_serde_roundtrip() {
         let msg = InboundMessage::IntentMessage {
-            from: "com.acowork.system".to_string(),
+            from: "com.test.agent".to_string(),
             action: "update_identity".to_string(),
             params: serde_json::json!({"key": "value"}),
         };
@@ -309,7 +309,7 @@ mod tests {
             params,
         } = decoded
         {
-            assert_eq!(from, "com.acowork.system");
+            assert_eq!(from, "com.test.agent");
             assert_eq!(action, "update_identity");
             assert_eq!(params["key"], "value");
         } else {
@@ -413,7 +413,7 @@ mod tests {
     fn test_enforce_size_limit_intent_message() {
         let big_params = serde_json::json!({"data": "B".repeat(MAX_INBOUND_PAYLOAD_SIZE + 500)});
         let msg = InboundMessage::IntentMessage {
-            from: "com.acowork.system".to_string(),
+            from: "com.test.agent".to_string(),
             action: "ping".to_string(),
             params: big_params,
         };

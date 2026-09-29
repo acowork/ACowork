@@ -2391,7 +2391,7 @@ mod tests {
 
         inbound_tx
             .try_send(InboundMessage::IntentMessage {
-                from: "com.acowork.system".to_string(),
+                from: "com.test.agent".to_string(),
                 action: "ping".to_string(),
                 params: serde_json::json!({}),
             })
@@ -2404,7 +2404,7 @@ mod tests {
         let messages = agent_loop.history().messages();
         let intent: Vec<_> = messages
             .iter()
-            .filter(|m| m.content.contains("[intent:com.acowork.system:ping]"))
+            .filter(|m| m.content.contains("[intent:com.test.agent:ping]"))
             .collect();
         assert!(
             !intent.is_empty(),
