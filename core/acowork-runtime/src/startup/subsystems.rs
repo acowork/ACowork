@@ -257,6 +257,11 @@ pub(crate) async fn phase_c_spawn_subsystems(
             // Owned copy so the spawned task does not borrow `config`
             // (which is only valid for this function body).
             let reload_work_dir = work_dir_path.to_path_buf();
+            // ADR-076: `--mqtt-password` already carries the node_token
+            // (the Node passes the same value for MQTT CONNECT auth), so
+            // reuse it as the machine credential that lets pm / doc MCP
+            // pass the Gateway's `auth_middleware`. `None` standalone.
+            let node_token = config.mqtt_password.clone();
             tokio::spawn(async move {
                 // ADR-069: startup MCP auto-connect goes through the
                 // reconcile+filter path — reconcile agent_mcp_tools.json
@@ -266,6 +271,7 @@ pub(crate) async fn phase_c_spawn_subsystems(
                     crate::tools::mcp_manager::connect_mcp_with_reconcile_and_filter(
                         &reload_work_dir,
                         &mcp_configs,
+                        node_token.as_deref(),
                     )
                     .await;
                 let _ = tx.send((registry, wrappers, specs, failures)).await;

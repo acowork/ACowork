@@ -69,6 +69,15 @@
 //! 5. **Backs off on transient errors.** Connection refused, request
 //!    timeouts, and `5xx` non-`503 responses use exponential backoff
 //!    capped at [`PULL_BACKOFF_MAX`]. The first attempt is immediate.
+//! 6. **Presents the node credential (ADR-076).** `/api/global-resources`
+//!    sits behind the same `auth_middleware` gate as everything else, so
+//!    under `AUTH_MODE=multi_user` an unauthenticated pull gets a `401` —
+//!    which is [`PullOutcome::Fatal`], i.e. the pull **aborts on the very
+//!    first attempt** and the Runtime silently degrades to MQTT-retained
+//!    only. The node token the Node injected at spawn is attached as
+//!    [`acowork_core::auth::NODE_TOKEN_HEADER`], for the same reason the
+//!    MCP path carries it: without it this call is dead weight in every
+//!    `multi_user` deployment.
 //!
 //! Order of operations on a successful `200`:
 //! 1. Detect ADR-059 §5.3 **generation switch** (compare `instance_id`):
@@ -208,7 +217,7 @@ pub(crate) async fn pull_global_resources_from_gateway(
         }
 
         attempt += 1;
-        match try_pull_once(&client, &url, cache).await {
+        match try_pull_once(&client, &url, cache, config.mqtt_password.as_deref()).await {
             PullOutcome::Applied => {
                 info!(
                     url = %url,
@@ -287,8 +296,17 @@ async fn try_pull_once(
     client: &reqwest::Client,
     url: &str,
     cache: &SharedAvailableCache,
+    node_token: Option<&str>,
 ) -> PullOutcome {
-    let resp = match client.get(url).send().await {
+    let mut req = client.get(url);
+    // ADR-076: `multi_user` gates this route like any other, and a 401 is
+    // Fatal (abort) rather than retryable — so the credential is attached
+    // here or the whole pull is skipped. Omitted in standalone mode, where
+    // no Gateway credential exists.
+    if let Some(token) = node_token.filter(|t| !t.is_empty()) {
+        req = req.header(acowork_core::auth::NODE_TOKEN_HEADER, token);
+    }
+    let resp = match req.send().await {
         Ok(r) => r,
         Err(e) => {
             // Connection refused / DNS / timeout — Gateway is either
@@ -570,7 +588,7 @@ mod tests {
 
         let client = reqwest::Client::new();
         let url = format!("{}/api/global-resources", server.url());
-        let outcome = try_pull_once(&client, &url, &cache).await;
+        let outcome = try_pull_once(&client, &url, &cache, None).await;
 
         assert!(matches!(outcome, PullOutcome::NotReady(2)));
         // The critical invariant: a 503 must NOT touch the cache.
@@ -596,7 +614,7 @@ mod tests {
         let cache = new_shared_cache();
         let client = reqwest::Client::new();
         let url = format!("{}/api/global-resources", server.url());
-        let outcome = try_pull_once(&client, &url, &cache).await;
+        let outcome = try_pull_once(&client, &url, &cache, None).await;
 
         // Header says 1s, body says 10s — the LONGER hint wins so we
         // never retry before the Gateway is actually ready.
@@ -621,7 +639,7 @@ mod tests {
         let cache = new_shared_cache();
         let client = reqwest::Client::new();
         let url = format!("{}/api/global-resources", server.url());
-        let outcome = try_pull_once(&client, &url, &cache).await;
+        let outcome = try_pull_once(&client, &url, &cache, None).await;
 
         assert!(matches!(
             outcome,
@@ -645,7 +663,7 @@ mod tests {
         let cache = new_shared_cache();
         let client = reqwest::Client::new();
         let url = format!("{}/api/global-resources", server.url());
-        let outcome = try_pull_once(&client, &url, &cache).await;
+        let outcome = try_pull_once(&client, &url, &cache, None).await;
 
         assert!(matches!(outcome, PullOutcome::NotReady(2)));
     }
@@ -670,7 +688,7 @@ mod tests {
         let cache = new_shared_cache();
         let client = reqwest::Client::new();
         let url = format!("{}/api/global-resources", server.url());
-        let outcome = try_pull_once(&client, &url, &cache).await;
+        let outcome = try_pull_once(&client, &url, &cache, None).await;
 
         assert!(matches!(outcome, PullOutcome::Applied));
         let guard = cache.read().await;
@@ -724,7 +742,7 @@ mod tests {
 
         let client = reqwest::Client::new();
         let url = format!("{}/api/global-resources", server.url());
-        let outcome = try_pull_once(&client, &url, &cache).await;
+        let outcome = try_pull_once(&client, &url, &cache, None).await;
 
         assert!(matches!(outcome, PullOutcome::Applied));
         let guard = cache.read().await;
@@ -747,8 +765,78 @@ mod tests {
         let cache = new_shared_cache();
         let client = reqwest::Client::new();
         let url = format!("{}/api/global-resources", server.url());
-        let outcome = try_pull_once(&client, &url, &cache).await;
+        let outcome = try_pull_once(&client, &url, &cache, None).await;
 
+        assert!(matches!(outcome, PullOutcome::Fatal(_)));
+    }
+
+    /// ADR-076 regression: the pull must present the node credential.
+    ///
+    /// A 401 is `Fatal`, so an unauthenticated pull gives up on the *first*
+    /// attempt and the Runtime silently falls back to MQTT-retained only —
+    /// no error anywhere, just a permanently thinner resource view. Assert
+    /// the header actually goes out, since the mock below matches on it
+    /// and returns 401 when it is absent.
+    #[tokio::test]
+    async fn try_pull_once_presents_the_node_credential() {
+        let mut server = Server::new_async().await;
+        let body = serde_json::json!({
+            "instance_id": "gen-A",
+            "topics": {
+                "acowork/global/providers": providers_topic_payload(3),
+            }
+        })
+        .to_string();
+        server
+            .mock("GET", "/api/global-resources")
+            .match_header(acowork_core::auth::NODE_TOKEN_HEADER, "tok-abc")
+            .with_status(200)
+            .with_body(body)
+            .create_async()
+            .await;
+        // Same route, but a request arriving without the credential is
+        // rejected the way `auth_middleware` would — so this mock only
+        // matches if the header was actually attached.
+        server
+            .mock("GET", "/api/global-resources")
+            .with_status(401)
+            .with_body(r#"{"error":"missing bearer token"}"#)
+            .create_async()
+            .await;
+
+        let cache = new_shared_cache();
+        let client = reqwest::Client::new();
+        let url = format!("{}/api/global-resources", server.url());
+        let outcome = try_pull_once(&client, &url, &cache, Some("tok-abc")).await;
+
+        assert!(
+            matches!(outcome, PullOutcome::Applied),
+            "the node credential must be attached or the pull 401s and \
+             aborts as Fatal: {outcome:?}"
+        );
+    }
+
+    /// No credential (standalone Runtime) must simply omit the header
+    /// rather than send an empty one — an empty value would reach the
+    /// Gateway's middleware and be compared against every node token.
+    #[tokio::test]
+    async fn try_pull_once_omits_empty_node_credential() {
+        let mut server = Server::new_async().await;
+        server
+            .mock("GET", "/api/global-resources")
+            .with_status(401)
+            .with_body(r#"{"error":"unauthorized"}"#)
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        let cache = new_shared_cache();
+        let client = reqwest::Client::new();
+        let url = format!("{}/api/global-resources", server.url());
+        // Standalone: no credential → the request still goes out (and the
+        // 401 is the pre-ADR-076 behaviour this test pins), just without a
+        // bogus header.
+        let outcome = try_pull_once(&client, &url, &cache, Some("")).await;
         assert!(matches!(outcome, PullOutcome::Fatal(_)));
     }
 
@@ -765,7 +853,7 @@ mod tests {
         let cache = new_shared_cache();
         let client = reqwest::Client::new();
         let url = format!("{}/api/global-resources", server.url());
-        let outcome = try_pull_once(&client, &url, &cache).await;
+        let outcome = try_pull_once(&client, &url, &cache, None).await;
 
         assert!(matches!(outcome, PullOutcome::Transient(_)));
     }
@@ -776,8 +864,13 @@ mod tests {
         // time, which must map to Transient (retryable), never Fatal.
         let cache = new_shared_cache();
         let client = reqwest::Client::new();
-        let outcome =
-            try_pull_once(&client, "http://127.0.0.1:1/api/global-resources", &cache).await;
+        let outcome = try_pull_once(
+            &client,
+            "http://127.0.0.1:1/api/global-resources",
+            &cache,
+            None,
+        )
+        .await;
 
         assert!(matches!(outcome, PullOutcome::Transient(_)));
     }

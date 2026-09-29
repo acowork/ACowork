@@ -146,6 +146,7 @@ pub(crate) async fn phase_d_run(
         ctx.embedding_update_rx.take(),
         ctx.lsps_update_rx.take(),
         &config.work_dir,
+        config.mqtt_password.as_deref(),
     )
     .await;
 
@@ -243,6 +244,11 @@ async fn mqtt_only_loop(
         tokio::sync::mpsc::UnboundedReceiver<crate::mqtt::client::LspRelayUpdate>,
     >,
     work_dir: &str,
+    // ADR-076: the node_token the Node injected at spawn (carried on
+    // `--mqtt-password`). Threaded in only so the MCP hot-reload branch
+    // below can authenticate to Gateway-hosted MCP (pm / doc) the same
+    // way the startup connect does. `None` standalone.
+    node_token: Option<&str>,
 ) -> Result<()> {
     tracing::info!("MQTT-only gateway loop started");
     let work_dir = std::path::PathBuf::from(work_dir);
@@ -315,6 +321,8 @@ async fn mqtt_only_loop(
                 );
                 let tx = mcp_runtime_tx.clone();
                 let reload_work_dir = std::path::PathBuf::from(&work_dir);
+                // Owned so the spawned task outlives the `&str` borrow.
+                let node_token = node_token.map(str::to_string);
                 tokio::spawn(async move {
                     // ADR-069: hot reload goes through the same
                     // reconcile+filter path as startup — reconcile
@@ -324,6 +332,7 @@ async fn mqtt_only_loop(
                         crate::tools::mcp_manager::connect_mcp_with_reconcile_and_filter(
                             &reload_work_dir,
                             &merged,
+                            node_token.as_deref(),
                         )
                         .await;
                     let _ = tx.send((registry, wrappers, specs, failures)).await;

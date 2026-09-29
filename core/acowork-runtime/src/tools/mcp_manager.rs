@@ -341,16 +341,81 @@ pub fn reconcile_and_persist_mcp_tools(
     merged
 }
 
+/// Resolve the Gateway-published `{node_token}` placeholder into a real
+/// credential, on the in-memory copy of the MCP config only.
+///
+/// ## Why this exists
+///
+/// Under `AUTH_MODE=multi_user` the Gateway's `auth_middleware` gates every
+/// `/api/*` route, and the pm / doc MCP endpoints are no exception — they
+/// are Gateway reverse-proxies like any other. A Runtime that connects
+/// without a machine credential gets a 401 on `tools/list`, which the
+/// failure path swallows: the tool list comes back empty,
+/// `agent_mcp_tools.json` reconciles to zero rows, and the Desktop Tools
+/// panel renders the server with **no expandable row and no error** — it
+/// just looks switched off. So the credential is not optional here.
+///
+/// ## Why it is safe
+///
+/// The resolved value is a `String` in a `McpServerConfigDef` that lives
+/// only for the duration of this call. It is deliberately **never**
+/// written back to `agent_mcp.json`: that file is persisted to the agent's
+/// workspace *and* surfaced in the Tools panel, so a token landing there
+/// would be readable by anything that can read the workspace. The
+/// placeholder itself is all that ever reaches disk (the MQTT handler
+/// substitutes only `{instance_id}` when it writes the catalog).
+///
+/// ## Why the template and not a direct value
+///
+/// The Gateway cannot substitute a real token: the credential is
+/// node-scoped and minted at enrollment, so the Gateway has no
+/// per-Runtime copy to send. It publishes the placeholder, and the
+/// Runtime — which received the real value from the Node at spawn — fills
+/// it in. This mirrors the existing `{instance_id}` convention.
+fn resolve_node_token_template(
+    configs: &[McpServerConfigDef],
+    node_token: Option<&str>,
+) -> Vec<McpServerConfigDef> {
+    let Some(token) = node_token.filter(|t| !t.is_empty()) else {
+        // No credential (standalone Runtime, or a node that never
+        // enrolled). Leave the placeholder in place: the request will 401
+        // and the existing failure reporting surfaces it. Substituting an
+        // empty string would be worse — it would look authenticated and
+        // fail somewhere less legible.
+        return configs.to_vec();
+    };
+    configs
+        .iter()
+        .map(|c| {
+            let mut c = c.clone();
+            if let Some(v) = c.headers.get_mut(acowork_core::auth::NODE_TOKEN_HEADER)
+                && v == acowork_core::auth::NODE_TOKEN_TEMPLATE
+            {
+                *v = token.to_string();
+            }
+            c
+        })
+        .collect()
+}
+
 /// Connect + reconcile + filter, all in one pass.
+///
+/// `node_token` is the machine credential the Node injected at spawn
+/// (`--mqtt-password`, which carries the same node_token value the Node
+/// itself uses). It is substituted into the Gateway-published
+/// `{node_token}` header placeholder so pm / doc MCP survive
+/// `AUTH_MODE=multi_user`; see [`resolve_node_token_template`]. Pass
+/// `None` in standalone mode, where no Gateway credential exists.
 pub async fn connect_mcp_with_reconcile_and_filter(
     work_dir: &Path,
     configs: &[McpServerConfigDef],
+    node_token: Option<&str>,
 ) -> McpConnectResult {
-    let (registry, failures) = McpRegistry::connect_all(configs)
+    let configs = resolve_node_token_template(configs, node_token);
+    let (registry, failures) = McpRegistry::connect_all(&configs)
         .await
         .expect("connect_all is non-fatal and should never fail");
     let registry = Arc::new(registry);
-
     let merged = reconcile_and_persist_mcp_tools(work_dir, &registry);
 
     let mut wrappers = Vec::new();
@@ -399,6 +464,7 @@ pub async fn connect_mcp_with_reconcile_and_filter(
 mod filter_tests {
     use super::*;
     use crate::agent_config::AgentMcpToolItem;
+    use acowork_core::protocol::McpTransportDef;
 
     #[test]
     fn tool_allowed_server_absent_is_permissive() {
@@ -445,5 +511,125 @@ mod filter_tests {
         );
         assert!(!tool_allowed(&cfg, "pm", "pm_claim_task"));
         assert!(tool_allowed(&cfg, "pm", "pm_submit_task"));
+    }
+
+    // ── ADR-076: `{node_token}` resolution ────────────────────────────
+
+    /// Build a def shaped like the ones the Gateway injects for pm / doc.
+    fn gateway_hosted_def(name: &str) -> McpServerConfigDef {
+        let mut headers = std::collections::HashMap::new();
+        headers.insert("X-MCP-Actor".to_string(), "{instance_id}".to_string());
+        headers.insert(
+            acowork_core::auth::NODE_TOKEN_HEADER.to_string(),
+            acowork_core::auth::NODE_TOKEN_TEMPLATE.to_string(),
+        );
+        McpServerConfigDef {
+            name: name.to_string(),
+            transport: McpTransportDef::Http,
+            url: Some("http://gw:19876/api/pm/mcp".to_string()),
+            headers,
+            ..Default::default()
+        }
+    }
+
+    /// The happy path: pm / doc stop 401-ing at `auth_middleware` and the
+    /// `tools/list` that drives the whole ADR-069 tool list works again.
+    #[test]
+    fn node_token_template_is_resolved_for_gateway_hosted_mcps() {
+        let out = resolve_node_token_template(
+            &[gateway_hosted_def("pm"), gateway_hosted_def("doc")],
+            Some("tok-abc"),
+        );
+        for s in &out {
+            assert_eq!(
+                s.headers
+                    .get(acowork_core::auth::NODE_TOKEN_HEADER)
+                    .map(String::as_str),
+                Some("tok-abc"),
+                "{} must carry the real credential, not the placeholder",
+                s.name
+            );
+            // The agent-identity template is a separate placeholder resolved
+            // elsewhere; it must survive untouched.
+            assert_eq!(
+                s.headers.get("X-MCP-Actor").map(String::as_str),
+                Some("{instance_id}"),
+                "{}: resolving the node token must not disturb X-MCP-Actor",
+                s.name
+            );
+        }
+    }
+
+    /// Security assertion. A third-party MCP server (user-added via the
+    /// Tools panel) must never receive the node credential: it is node-scoped
+    /// and unlocks the whole Gateway API, so handing it to an arbitrary
+    /// remote endpoint the user configured would be a privilege escalation.
+    /// Only entries carrying the Gateway-published placeholder are touched.
+    #[test]
+    fn node_token_is_not_injected_into_third_party_mcp_servers() {
+        let mut third_party = McpServerConfigDef {
+            name: "playwright".to_string(),
+            transport: McpTransportDef::Http,
+            url: Some("https://third-party.example.com/mcp".to_string()),
+            ..Default::default()
+        };
+        // A user could even hand-type the placeholder — only the exact
+        // template on the exact header is substituted.
+        third_party.headers.insert(
+            acowork_core::auth::NODE_TOKEN_HEADER.to_string(),
+            "user-supplied".to_string(),
+        );
+
+        let out = resolve_node_token_template(&[third_party], Some("tok-abc"));
+        assert_eq!(
+            out[0]
+                .headers
+                .get(acowork_core::auth::NODE_TOKEN_HEADER)
+                .map(String::as_str),
+            Some("user-supplied"),
+            "a server without the Gateway-published template must not be \
+             given the node credential"
+        );
+        assert!(
+            !out.iter()
+                .any(|s| s.headers.values().any(|v| v == "tok-abc")),
+            "the node token must not reach any third-party MCP config"
+        );
+    }
+
+    /// Standalone Runtime: no node credential exists, so the placeholder is
+    /// left in place rather than replaced with an empty string (which would
+    /// look like a present-but-wrong credential and fail less legibly).
+    #[test]
+    fn node_token_template_left_intact_without_credential() {
+        for tok in [None, Some("")] {
+            let out = resolve_node_token_template(&[gateway_hosted_def("pm")], tok);
+            assert_eq!(
+                out[0]
+                    .headers
+                    .get(acowork_core::auth::NODE_TOKEN_HEADER)
+                    .map(String::as_str),
+                Some(acowork_core::auth::NODE_TOKEN_TEMPLATE),
+                "no credential ({tok:?}) must leave the template, not blank it"
+            );
+        }
+    }
+
+    /// The caller's slice must not be mutated — the resolved copy is what
+    /// reaches the transport, and the original may be the on-disk config
+    /// that gets persisted.
+    #[test]
+    fn resolving_does_not_mutate_the_caller_s_config() {
+        let input = vec![gateway_hosted_def("pm")];
+        let _ = resolve_node_token_template(&input, Some("tok-abc"));
+        assert_eq!(
+            input[0]
+                .headers
+                .get(acowork_core::auth::NODE_TOKEN_HEADER)
+                .map(String::as_str),
+            Some(acowork_core::auth::NODE_TOKEN_TEMPLATE),
+            "the input config must be untouched so the token can never be \
+             written back to agent_mcp.json"
+        );
     }
 }

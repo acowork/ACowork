@@ -37,6 +37,51 @@ fn publish_keyless_provider(id: &str) -> bool {
     crate::http::models_api::is_local_provider(id)
 }
 
+/// Build the `McpRef` for an MCP server whose endpoint is **reverse-proxied
+/// by this Gateway** (pm / doc — ADR-064 / ADR-070).
+///
+/// Two identity headers travel with every such entry, and both are
+/// templates the Runtime resolves at connect time — the Gateway never holds
+/// a per-agent value to substitute:
+///
+/// - `X-MCP-Actor: {instance_id}` — **who the agent is** to PM / Doc
+///   (ADR-073 §1.3 invariant 1: every identity key is the instance UUID,
+///   never the package id). PM/Doc use it for member checks and `X-Actor`
+///   -style attribution.
+/// - `X-ACowork-Node-Token: {node_token}` — **that the caller is a trusted
+///   machine** (ADR-076). Without it the whole request dies at
+///   `auth_middleware` with 401 the moment `AUTH_MODE=multi_user`, and the
+///   failure is *silent at the UI layer*: `tools/list` never returns, so
+///   `agent_mcp_tools.json` reconciles to zero entries and the Desktop
+///   Tools panel renders no expandable row for the server at all. The
+///   Gateway cannot substitute a value here because the token is
+///   node-scoped and minted at enrollment; the Runtime resolves the
+///   template from the credential the Node injected at spawn.
+///
+/// Kept as one helper because pm and doc are byte-identical in shape — the
+/// two copies had already drifted once (doc lacked nothing, but nothing
+/// enforced that).
+fn gateway_hosted_mcp_ref(name: &str, url: String) -> McpRef {
+    let mut headers = std::collections::HashMap::new();
+    headers.insert("X-MCP-Actor".to_string(), "{instance_id}".to_string());
+    headers.insert(
+        acowork_core::auth::NODE_TOKEN_HEADER.to_string(),
+        acowork_core::auth::NODE_TOKEN_TEMPLATE.to_string(),
+    );
+    McpRef {
+        id: name.to_string(),
+        name: name.to_string(),
+        transport: map_mcp_transport(&McpTransportDef::Http).into(),
+        url,
+        command: String::new(),
+        args: Vec::new(),
+        env: std::collections::HashMap::new(),
+        headers,
+        tool_timeout_secs: 60,
+        auth_token: String::new(),
+    }
+}
+
 /// Build `AvailableProviders` from the GatewayState resource cache.
 ///
 /// "Available" = all providers in the cache. Phase 2+ will filter to only
@@ -242,50 +287,17 @@ pub(crate) fn build_available_mcps(gw: &GatewayState) -> AvailableMcps {
     // `pm_mcp_url` 在 `Gateway::run` 启动时设置（`Some` ⇔ PM 服务已启动且
     // `pm.auto_inject_mcp = true`）。注入后，每个 Agent 的 catalog 都会出现
     // `name = "pm"` 的 HTTP MCP server，Agent 启动即可调用 `pm_*` 工具。
-    //
-    // 身份：pm MCP 通过 `X-MCP-Actor` header 识别调用者。
-    // **ADR-073**：header 携带 `agent_instance_id`（UUID），不是 `agent_id`
-    // （包 ID）。设计 §9.2 / ADR-073 §1.3 不变量 1 — 所有身份 key 必须是
-    // instance_id。这里下发 `{instance_id}` 模板占位符，Runtime 收到
-    // `acowork/global/mcps` 时替换为 `self.instance_id`。
     let mut servers = servers;
     if let Some(pm_url) = &gw.pm_mcp_url {
-        let mut headers = std::collections::HashMap::new();
-        headers.insert("X-MCP-Actor".to_string(), "{instance_id}".to_string());
-        servers.push(McpRef {
-            id: "pm".to_string(),
-            name: "pm".to_string(),
-            transport: map_mcp_transport(&McpTransportDef::Http).into(),
-            url: pm_url.clone(),
-            command: String::new(),
-            args: Vec::new(),
-            env: std::collections::HashMap::new(),
-            headers,
-            tool_timeout_secs: 60,
-            auth_token: String::new(),
-        });
+        servers.push(gateway_hosted_mcp_ref("pm", pm_url.clone()));
     }
 
     // D3-4: 自动注入 doc MCP（设计 §6）。`doc_mcp_url` 在 `Gateway::run`
     // 启动时设置（`Some` ⇔ doc 服务已启动且 `doc.auto_inject_mcp = true`）。
     // 注入后 Agent catalog 出现 `name = "doc"` 的 HTTP MCP server，Agent
     // 启动即可调用 `doc_*` 工具（读写文档 + PR 式审核提交）。
-    // **ADR-073**：`X-MCP-Actor` 携带 `agent_instance_id`（UUID）。
     if let Some(doc_url) = &gw.doc_mcp_url {
-        let mut headers = std::collections::HashMap::new();
-        headers.insert("X-MCP-Actor".to_string(), "{instance_id}".to_string());
-        servers.push(McpRef {
-            id: "doc".to_string(),
-            name: "doc".to_string(),
-            transport: map_mcp_transport(&McpTransportDef::Http).into(),
-            url: doc_url.clone(),
-            command: String::new(),
-            args: Vec::new(),
-            env: std::collections::HashMap::new(),
-            headers,
-            tool_timeout_secs: 60,
-            auth_token: String::new(),
-        });
+        servers.push(gateway_hosted_mcp_ref("doc", doc_url.clone()));
     }
 
     AvailableMcps {
@@ -513,6 +525,45 @@ mod tests {
             "pm MCP must carry X-MCP-Actor identity template (ADR-073 instance_id)"
         );
         assert_eq!(pm.tool_timeout_secs, 60);
+    }
+
+    /// ADR-076 regression: every Gateway-hosted MCP entry (pm / doc) must
+    /// carry BOTH identity templates.
+    ///
+    /// Dropping `X-ACowork-Node-Token` does not fail loudly anywhere: the
+    /// Runtime's `tools/list` 401s, `agent_mcp_tools.json` reconciles to
+    /// zero rows, and the Desktop Tools panel simply renders no expandable
+    /// row — the server looks "off" with no error surfaced. So assert the
+    /// header on **every** injected entry rather than per-server, which is
+    /// also what keeps a future third Gateway-hosted service covered.
+    #[test]
+    fn gateway_hosted_mcps_carry_both_identity_templates() {
+        use acowork_core::auth::{NODE_TOKEN_HEADER, NODE_TOKEN_TEMPLATE};
+
+        let mut gw = GatewayState::new("/tmp/test-vault");
+        gw.pm_mcp_url = Some("http://192.168.1.50:19876/api/pm/mcp".to_string());
+        gw.doc_mcp_url = Some("http://192.168.1.50:19876/api/doc/mcp".to_string());
+
+        let payload = build_available_mcps(&gw);
+        for id in ["pm", "doc"] {
+            let s = payload
+                .servers
+                .iter()
+                .find(|s| s.id == id)
+                .unwrap_or_else(|| panic!("{id} MCP should be injected"));
+            assert_eq!(
+                s.headers.get("X-MCP-Actor").map(String::as_str),
+                Some("{instance_id}"),
+                "{id}: agent-identity template (ADR-073) must survive",
+            );
+            assert_eq!(
+                s.headers.get(NODE_TOKEN_HEADER).map(String::as_str),
+                Some(NODE_TOKEN_TEMPLATE),
+                "{id}: without the node-token template the Runtime 401s at \
+                 auth_middleware and the Tools panel shows no expandable row \
+                 (ADR-076)",
+            );
+        }
     }
 
     /// T4-1 反向：`pm_mcp_url` 为 None（PM 未启动 / auto_inject_mcp=false）时
