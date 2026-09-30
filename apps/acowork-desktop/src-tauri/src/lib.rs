@@ -645,10 +645,6 @@ pub fn run() {
             commands::vault::remove_key,
             commands::vault::update_key,
             commands::vault::update_account_key,
-            commands::vault::list_search_keys,
-            commands::vault::add_search_key,
-            commands::vault::remove_search_key,
-            commands::vault::update_search_key,
             commands::publish::prepare_publish,
             commands::publish::build_publish,
             commands::publish::export_package,
@@ -817,7 +813,7 @@ pub fn run() {
 
                 let main_window = app.get_webview_window("main").expect("no main window");
                 if let Ok(hwnd) = main_window.hwnd() {
-                    let raw = hwnd.0 as *mut c_void;
+                    let raw = hwnd.0;
                     unsafe {
                         let style = GetWindowLongPtrW(raw, GWL_STYLE);
                         let needed = WS_SYSMENU | WS_MINIMIZEBOX;
@@ -846,8 +842,7 @@ pub fn run() {
             {
                 let main_window = app.get_webview_window("main").expect("no main window");
                 if let Ok(hwnd) = main_window.hwnd() {
-                    let raw = hwnd.0 as *mut std::ffi::c_void;
-                    let _ = unsafe { crate::win_wndproc::install(raw) };
+                    let _ = unsafe { crate::win_wndproc::install(hwnd.0) };
                 }
             }
 

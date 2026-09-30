@@ -178,7 +178,12 @@ pub unsafe fn install(hwnd: *mut c_void) -> Result<(), String> {
         if g.is_some() {
             return Ok(());
         }
-        *g = Some(unsafe { std::mem::transmute(prev) });
+        *g = Some(unsafe {
+            std::mem::transmute::<
+                isize,
+                unsafe extern "system" fn(*mut c_void, u32, usize, isize) -> isize,
+            >(prev)
+        });
     }
     if unsafe { SetWindowLongPtrW(hwnd, -4, wndproc as *const () as isize) } == 0 {
         return Err("SetWindowLongPtrW(GWL_WNDPROC) failed".into());
