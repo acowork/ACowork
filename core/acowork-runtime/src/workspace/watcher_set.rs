@@ -106,6 +106,55 @@ impl WorkspaceFsEventSink for MqttFsEventSink {
     }
 }
 
+/// Publish an ADR-078 `git-changed` nudge for one workspace.
+///
+/// Deliberately a free function rather than a method on
+/// [`WorkspaceWatcherSet`]: this signal has nothing to do with the
+/// watcher lifecycle (no watch target is added, no aggregation window,
+/// no `WatcherHandle`), and threading the set through the tool-execution
+/// path just to reach its `mqtt_slot` would couple the two systems for
+/// no gain. The set owns *watcher* state; this owns *git* signals.
+///
+/// Not a workspace-method either — it takes the late-bind MQTT slot the
+/// same way [`WorkspaceWatcherSet::new`] does, so it works before the
+/// watcher set exists (tool calls can precede Phase C).
+///
+/// Dropping on an unbound slot matches the fs-event sink: the Desktop
+/// re-reads git state on reconnect / panel expand anyway, so a lost
+/// nudge costs nothing.
+pub(crate) async fn publish_git_status_changed(
+    mqtt_slot: &SharedMqttClientSlot,
+    agent_id: &str,
+    workspace_id: &str,
+) {
+    let event = crate::security::git_mutate::changed_event(agent_id, workspace_id);
+    let envelope = DataEnvelope {
+        version: 1,
+        payload: Some(data_envelope::Payload::GitStatusChanged(event)),
+    };
+    let Some(client) = mqtt_slot.lock().await.clone() else {
+        tracing::debug!("MQTT client not ready — git-changed event dropped");
+        return;
+    };
+    let client: RuntimeMqttClient = client.lock().await.clone();
+    // ADR-073: instance id from the bound client, as with fs-changed.
+    let topic = format!(
+        "acowork/agents/{}/workspaces/{}/git-changed",
+        client.instance_id(),
+        workspace_id,
+    );
+    if let Err(e) = client
+        .publish_envelope(&topic, &envelope, MqttQoS::AtLeastOnce, false)
+        .await
+    {
+        tracing::warn!(
+            topic = %topic,
+            error = %e,
+            "failed to publish git-changed event"
+        );
+    }
+}
+
 impl WorkspaceWatcherSet {
     /// Create an empty set. `mqtt_slot` is the same late-bind slot the
     /// HTTP server holds — events published before the MQTT connection

@@ -302,6 +302,17 @@ pub(crate) async fn phase_b_init_session(
         active_tools,
     ));
 
+    // ADR-078 follow-up: bind the git-refresh nudge handles. Both Phase-A
+    // resources exist by now (the MQTT client slot is passed into the HTTP
+    // server in Phase A, and `workspace_resolver` is built before it), so
+    // this is the first point where a shell tool call can actually
+    // publish a `git-changed` event.
+    Arc::get_mut(&mut core).expect("AgentCore must be unshared at construction")
+        .set_git_nudge(crate::agent::git_nudge::GitNudgeSlots {
+            mqtt_slot: ctx.mqtt_client_slot.clone(),
+            resolver: ctx.workspace_resolver.clone(),
+        });
+
     // ADR-061 §13.4: warn (not reject) when the boot model's effective
     // input budget cannot run the 8-level compression loop. Warning only —
     // a hard rejection here would block agent startup entirely (e.g.

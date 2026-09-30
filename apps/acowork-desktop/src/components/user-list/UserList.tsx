@@ -67,7 +67,9 @@ export const UserList = forwardRef<UserListHandle>(function UserList(_props, ref
   // It calls into here via the imperative ref opened at the bottom of the
   // file (`UserListHandle.openCreate`) so the modal + invite flow stays
   // colocated with the rest of the user state.
-  const [collapsed, setCollapsed] = useState(true);
+  // ADR-076 §决策 7 banner. Default = expanded, same as the agent
+  // node groups in AgentList (empty set = nothing collapsed).
+  const [collapsed, setCollapsed] = useState(false);
   const [accounts, setAccounts] = useState<UserAccount[]>([]);
   const [loadFailed, setLoadFailed] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);

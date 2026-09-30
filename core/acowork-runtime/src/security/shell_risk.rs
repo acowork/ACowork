@@ -413,6 +413,25 @@ impl ShellRiskRules {
             Err(_) => false,
         }
     }
+
+    /// Every `git` subcommand named by a loaded rule, deduplicated and
+    /// sorted.
+    ///
+    /// Exists for the ADR-078 git-refresh drift guard
+    /// ([`crate::security::git_mutate`]), which asserts that list covers
+    /// anything the security rules know about. Read-only accessor: it
+    /// exposes no new state and changes no classification.
+    pub fn known_git_subcommands(&self) -> Vec<String> {
+        let mut subs: Vec<String> = self
+            .rules
+            .iter()
+            .filter(|r| r.command.eq_ignore_ascii_case("git"))
+            .filter_map(|r| r.subcommand.clone())
+            .collect();
+        subs.sort();
+        subs.dedup();
+        subs
+    }
 }
 
 /// Result of shell risk assessment.
@@ -914,7 +933,11 @@ fn risk_ordinal(r: ShellRisk) -> u8 {
 /// to be used as an evasion pattern while also being a legitimate shell idiom
 /// (e.g. `command_not_found || echo "ok"`). The blocked-pattern check on the
 /// full command string still catches blocked patterns in `||` chains.
-fn split_command_chain(command: &str) -> Vec<&str> {
+///
+/// Also used by [`crate::security::git_mutate`] so both modules agree on
+/// what a "sub-command" is — one definition, no chance of the refresh
+/// trigger and the risk classifier disagreeing on where commands begin.
+pub(crate) fn split_command_chain(command: &str) -> Vec<&str> {
     let mut result = Vec::new();
     for seg in command.split("&&") {
         for sub in seg.split(';') {

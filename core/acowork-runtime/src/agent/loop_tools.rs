@@ -102,6 +102,12 @@ impl AgentLoop {
                 let session_id = session_id.clone();
                 let chunk_tx = chunk_tx.clone();
                 let shell_risk_rules = self.core.shell_risk_rules.clone();
+                // ADR-078 git-refresh nudge. Cloned into the spawned task
+                // so the publish can happen inside `execute_single_tool`
+                // (where the arguments are already parsed) without
+                // borrowing `self` across the spawn.
+                let git_nudge = self.core.git_nudge.clone();
+                let agent_id = self.core.config.agent_id.clone();
 
                 // ADR-045: per-tool cancel token. Created BEFORE `spawn`
                 // so the sender is registered into `pending_tool_cancels`
@@ -115,10 +121,7 @@ impl AgentLoop {
                 tokio::spawn(async move {
                     // Shell risk check: if this is a shell command and risk >= threshold,
                     // request user approval before execution.
-                    let is_shell_tool = matches!(
-                        tc.function.name.as_str(),
-                        "bash" | "powershell" | "pwsh" | "shell"
-                    );
+                    let is_shell_tool = is_shell_tool(&tc.function.name);
                     if is_shell_tool {
                         let rules_snapshot = shell_risk_rules.clone();
                         // Gateway mode: use ApprovalHandle -> main loop routes
@@ -220,7 +223,13 @@ impl AgentLoop {
                         // Branch A: tool completes (or per-tool timeout fires)
                         res = tokio::time::timeout(
                             tool_timeout,
-                            execute_single_tool(&tools, &tc, work_dir.as_deref()),
+                            execute_single_tool(
+                                &tools,
+                                &tc,
+                                work_dir.as_deref(),
+                                git_nudge.as_ref(),
+                                &agent_id,
+                            ),
                         ) => {
                             match res {
                                 Ok((content, transient)) => (content, transient),
@@ -666,10 +675,21 @@ impl AgentLoop {
 /// is preserved for future hypothetical one-shot tools. Error paths
 /// that don't reach the tool's `execute()` method always return
 /// `is_transient = false`.
+///
+/// `git_nudge` / `agent_id` drive the ADR-078 git-refresh nudge. They
+/// are passed in (rather than read from a global) so the nudge reuses
+/// the `params` already parsed here — the same
+/// [`crate::tools::arguments::resolve`] result the tool itself sees,
+/// including its natural-language recovery. Re-parsing
+/// `tool_call.function.arguments` a second time would risk the nudge
+/// disagreeing with what actually ran. `None` disables the nudge
+/// (tests, CLI mode).
 pub(crate) async fn execute_single_tool(
     tools: &[Arc<dyn Tool>],
     tool_call: &ToolCall,
     work_dir: Option<&str>,
+    git_nudge: Option<&crate::agent::git_nudge::GitNudgeSlots>,
+    agent_id: &str,
 ) -> (String, bool) {
     let tool_name = &tool_call.function.name;
     let params_str = &tool_call.function.arguments;
@@ -728,8 +748,32 @@ pub(crate) async fn execute_single_tool(
     });
 
     match tool {
-        Some(tool) => match tool.execute(params, work_dir).await {
+        Some(tool) => match tool.execute(params.clone(), work_dir).await {
             Ok(result) => {
+                // ADR-078 git-refresh nudge. Fires for every shell tool
+                // whose command may have mutated index/HEAD — `git commit`
+                // writes solely inside the gitdir, which the workspace
+                // PollWatcher (ADR-058, NonRecursive) never observes, so
+                // without this the Git Status Bar kept a stale count.
+                //
+                // Deliberately not gated on `result.ok`: a `git commit`
+                // that failed partway (hook rejected, nothing staged)
+                // still leaves a mutated index behind, and a user staring
+                // at a wrong count deserves the refresh.
+                //
+                // Placement note: the shell tool is named by the
+                // *registry* entry, not by a hardcoded list, so an
+                // ADR-030 sidecar or a future shell alias is covered by
+                // construction. Read-only tools never reach here.
+                if is_shell_tool(&tool.name()) {
+                    crate::agent::git_nudge::maybe_nudge_after_shell(
+                        git_nudge,
+                        agent_id,
+                        work_dir,
+                        &params,
+                    )
+                    .await;
+                }
                 // ADR-052: All tools return non-transient results. The transient
                 // mechanism was specific to `context_recall` (ADR-032) to prevent a
                 // recall -> compress -> recall death loop. The compression surface
@@ -757,7 +801,6 @@ pub(crate) async fn execute_single_tool(
     }
 }
 
-/// Check if a shell command requires user approval based on risk assessment.
 ///
 /// Returns `Some(error_message)` if the command was rejected by the user,
 /// or `None` if the command can proceed (approved or below threshold).
@@ -883,6 +926,18 @@ fn risk_meets_threshold(risk: ShellRisk, threshold: ShellRisk) -> bool {
         }
     }
     risk_ordinal(risk) >= risk_ordinal(threshold)
+}
+
+/// True for the shell tool names registered by the Runtime.
+///
+/// Single source for two call sites that must agree: the approval gate
+/// (which decides whether to ask the user) and the ADR-078 git-refresh
+/// nudge (which decides whether to look at git state again). A shell
+/// reached by one and missed by the other would be a security gap or a
+/// stale-UI bug respectively, so the names live here once rather than
+/// being spelled out at both sites.
+fn is_shell_tool(name: &str) -> bool {
+    matches!(name, "bash" | "powershell" | "pwsh" | "shell")
 }
 
 /// Check if a shell command requires user approval via ApprovalHandle (Gateway mode).

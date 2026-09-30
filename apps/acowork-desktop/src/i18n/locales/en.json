@@ -116,7 +116,15 @@
     "create": "Create",
     "saving": "Saving…",
     "deleteProject": "Delete project",
-    "close": "Close"
+    "close": "Close",
+    "modelList": {
+      "empty": "Not configured (fallback chain applies)",
+      "add": "Add model…",
+      "moveUp": "Move up",
+      "moveDown": "Move down",
+      "remove": "Remove",
+      "unavailable": "no longer available"
+    }
   },
   "time": {
     "justNow": "Just now",
@@ -923,9 +931,7 @@
     "optional": "optional",
     "globalCompactModel": {
       "title": "Global Default Compact Model",
-      "description": "Cross-provider default for summarization / distillation. Falls back to the current provider's compact_model, then to the current chat model.",
-      "noneLabel": "— Not configured",
-      "unavailable": "unavailable",
+      "description": "Ordered cross-provider candidate list for summarization / distillation. Entries are tried top to bottom; when all are unavailable the runtime falls back to the session provider’s compact_model, then the current chat model.",
       "saveFailed": "Save failed: {{error}}"
     }
   },
@@ -1236,8 +1242,7 @@
     "rebuildIndexInProgress": "Rebuilding…",
     "distillerTitle": "Memory Distiller",
     "distillerEnabled": "Enable memory distiller",
-    "distillerModel": "Distiller model",
-    "distillerModelPlaceholder": "Follow global default (auto)",
+    "distillerModel": "Distiller models (tried in order)",
     "distillerInterval": "Interval (min)",
     "distillerAccumulation": "Backlog (episodes)",
     "distillerIdle": "Idle (min)",

@@ -13,6 +13,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import {
     handleFsChanged,
+    handleGitStatusChanged,
     isWakeTransition,
     scheduleFullTreeSync,
     FS_REFRESH_DEBOUNCE_MS,
@@ -475,6 +476,86 @@ describe("ADR-078: fs-changed → git status refresh wiring", () => {
         await handleFsChanged(
             fsEvent([{ kind: "modified", path: "src/a.ts" }]),
         );
+        await flushRefreshDebounce();
+        expect(fetchUrls.some((u) => u.includes("/git/status"))).toBe(false);
+    });
+});
+
+describe("ADR-078 follow-up: git-changed nudge → git status refresh", () => {
+    beforeEach(() => {
+        useGitStore.setState({
+            expandedKey: null,
+            status: {},
+            _inflight: {},
+            _fsTimer: {},
+        });
+    });
+
+    it("debounced-refreshes status on the expanded group", async () => {
+        useGitStore.setState({ expandedKey: gitGroupKey("agent-1", "ws-1") });
+        handleGitStatusChanged({
+            instance_id: "agent-1",
+            workspace_id: "ws-1",
+            window_end_ms: Date.now(),
+        });
+        // Debounced, like the fs path.
+        expect(fetchUrls.some((u) => u.includes("/git/status"))).toBe(false);
+        // Drain the pending timer: the store's debounce lives outside
+        // Zustand's state, so a timer left running here would fire
+        // during a later test and be counted against it.
+        await flushRefreshDebounce();
+    });
+
+    it("coalesces a burst of nudges into ONE status refresh", async () => {
+        useGitStore.setState({ expandedKey: gitGroupKey("agent-1", "ws-1") });
+        for (let i = 0; i < 3; i++) {
+            handleGitStatusChanged({
+                instance_id: "agent-1",
+                workspace_id: "ws-1",
+                window_end_ms: Date.now(),
+            });
+        }
+        await flushRefreshDebounce();
+        expect(
+            fetchUrls.filter((u) => u.includes("/git/status")),
+        ).toHaveLength(1);
+    });
+
+    // The nudge carries no git state; the refresh re-reads GET /git/status,
+    // which is the authoritative source. Guards the regression where
+    // someone "helpfully" threads the proto's agent_id in instead of the
+    // topic-derived instance_id (ADR-073) — that addresses a group that
+    // never matches, and the banner silently stops refreshing.
+    it("addresses the group by topic instance_id, not the proto agent_id", async () => {
+        useGitStore.setState({ expandedKey: gitGroupKey("agent-1", "ws-1") });
+        handleGitStatusChanged({
+            instance_id: "agent-1",
+            workspace_id: "ws-1",
+            window_end_ms: Date.now(),
+        });
+        await flushRefreshDebounce();
+        const statusFetches = fetchUrls.filter((u) => u.includes("/git/status"));
+        expect(statusFetches).toHaveLength(1);
+        expect(statusFetches[0]).toContain("agent-1");
+    });
+
+    it("ignores nudges while the panel is collapsed", async () => {
+        handleGitStatusChanged({
+            instance_id: "agent-1",
+            workspace_id: "ws-1",
+            window_end_ms: Date.now(),
+        });
+        await flushRefreshDebounce();
+        expect(fetchUrls.some((u) => u.includes("/git/status"))).toBe(false);
+    });
+
+    it("ignores nudges for a different workspace than the expanded group", async () => {
+        useGitStore.setState({ expandedKey: gitGroupKey("agent-1", "ws-2") });
+        handleGitStatusChanged({
+            instance_id: "agent-1",
+            workspace_id: "ws-1",
+            window_end_ms: Date.now(),
+        });
         await flushRefreshDebounce();
         expect(fetchUrls.some((u) => u.includes("/git/status"))).toBe(false);
     });

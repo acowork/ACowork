@@ -3466,7 +3466,7 @@ mod tests {
             },
         };
 
-        let (result, _transient) = execute_single_tool(&raw_tools(&tools), &tc, None).await;
+        let (result, _transient) = execute_single_tool(&raw_tools(&tools), &tc, None, None, "test-agent").await;
 
         // Must NOT contain "Echo:" — tool was never called
         assert!(
@@ -3510,7 +3510,7 @@ mod tests {
             },
         };
 
-        let (result, _transient) = execute_single_tool(&raw_tools(&tools), &tc, None).await;
+        let (result, _transient) = execute_single_tool(&raw_tools(&tools), &tc, None, None, "test-agent").await;
 
         // Must NOT execute the tool
         assert!(
@@ -3556,7 +3556,7 @@ mod tests {
             },
         };
 
-        let (result, _transient) = execute_single_tool(&raw_tools(&tools), &tc, None).await;
+        let (result, _transient) = execute_single_tool(&raw_tools(&tools), &tc, None, None, "test-agent").await;
 
         // Tool WAS executed because we recovered the JSON
         assert!(
@@ -3581,7 +3581,7 @@ mod tests {
             },
         };
 
-        let (result, _transient) = execute_single_tool(&raw_tools(&tools), &tc, None).await;
+        let (result, _transient) = execute_single_tool(&raw_tools(&tools), &tc, None, None, "test-agent").await;
         assert_eq!(
             result, "Echo: hello world",
             "Valid tool call should execute normally, got: {}",

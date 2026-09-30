@@ -145,6 +145,16 @@ pub const ALL_TOPIC_FILTERS: &[(&str, MqttQoS)] = &[
     // mandatory (same reason as messages/#: a lost event desyncs the
     // Desktop FileTree until the reconnect full-sync fallback fires).
     ("acowork/agents/+/workspaces/+/fs-changed", MqttQoS::AtLeastOnce),
+    // ── Git state changed (ADR-078 follow-up) ──
+    // Runtime publishes a bare "re-read git status" nudge on
+    // `acowork/agents/{id}/workspaces/{wid}/git-changed` after a shell
+    // tool call that may have mutated index/HEAD. This signal is NOT
+    // derivable from fs-changed: a `git commit` writes only inside the
+    // gitdir, which the workspace PollWatcher never observes (and in a
+    // worktree checkout that directory is outside the workspace
+    // entirely). QoS 1 for the same reason as fs-changed — a lost nudge
+    // leaves a stale Git Status Bar, with panel-expand as the fallback.
+    ("acowork/agents/+/workspaces/+/git-changed", MqttQoS::AtLeastOnce),
     // ── Doc library tree changes ──
     // acowork-doc publishes after every structural mutation on
     // `acowork/doc/tree/changed` (QoS 1, non-retained); the DocTreeStore

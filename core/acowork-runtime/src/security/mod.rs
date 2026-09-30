@@ -7,4 +7,5 @@ pub mod approval_gate;
 pub mod audit_log;
 pub mod file_provenance;
 pub mod fs_watcher;
+pub mod git_mutate;
 pub mod shell_risk;

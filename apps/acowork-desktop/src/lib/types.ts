@@ -939,9 +939,10 @@ export interface CompactModelRef {
   model_id: string;
 }
 
-/** Response from `GET /api/settings/default-compact-model`. */
+/** Response from `GET /api/settings/default-compact-model`.
+ *  Ordered candidate list — the runtime tries entries top to bottom. */
 export interface DefaultCompactModelResponse {
-  default_compact_model: CompactModelRef | null;
+  default_compact_models: CompactModelRef[];
 }
 
 // ── Memory types ──────────────────────────────────────────────────────

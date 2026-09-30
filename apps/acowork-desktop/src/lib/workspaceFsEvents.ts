@@ -27,6 +27,12 @@
  *    - agent `status` offline → online transition (Runtime wake —
  *      rare; auto-sleep was retired in Sept 2026, but a crash + restart
  *      can still produce this same shape)
+ *
+ * Plus a fourth, git-specific channel — see
+ * `acowork:workspace-git-changed` in `doInit`. It is a bare
+ * "re-read git status" nudge that CANNOT ride on fs-changed: a
+ * `git commit` writes only inside the gitdir, which the workspace
+ * watcher never observes (ADR-078 follow-up).
  */
 
 import { listen } from "@tauri-apps/api/event";
@@ -53,6 +59,23 @@ export interface WorkspaceFsChangeEvent {
     instance_id: string;
     workspace_id: string;
     changes: FsChange[];
+    window_end_ms: number;
+}
+
+/**
+ * Payload of the `acowork:workspace-git-changed` Tauri event
+ * (ADR-078 follow-up).
+ *
+ * Deliberately carries NO git state — no branch, no index, no HEAD. The
+ * Runtime only knows *that* something may have changed; the actual
+ * state is read back from `GET /git/status`, which keeps git semantics
+ * on the server (ADR-009 v2). Adding git fields here later would be a
+ * layering regression, not a feature.
+ */
+export interface WorkspaceGitChangeEvent {
+    /** ADR-073: instance identity (UUID) — the store addressing key. */
+    instance_id: string;
+    workspace_id: string;
     window_end_ms: number;
 }
 
@@ -132,6 +155,7 @@ function clearPendingRefreshes(): void {
 }
 
 let _fsUnlisten: (() => void) | null = null;
+let _gitUnlisten: (() => void) | null = null;
 let _statusUnlisten: (() => void) | null = null;
 let _agentEventUnlisten: (() => void) | null = null;
 let _initPromise: Promise<void> | null = null;
@@ -200,6 +224,26 @@ async function doInit(): Promise<void> {
         },
     );
 
+    // ── Git state changed (ADR-078 follow-up) ──
+    //
+    // The Runtime publishes this after a shell tool call that may have
+    // mutated index/HEAD. It exists because fs-changed CANNOT carry the
+    // signal: `git commit` writes only inside the gitdir, and in a
+    // worktree checkout that directory is outside the workspace, so the
+    // PollWatcher never sees a byte of it.
+    //
+    // The payload has no git state — we forward it straight to the same
+    // debounced refresh the fs path uses, which re-reads
+    // `GET /git/status` (the authoritative source). The store's
+    // `notifyFsChanged` already drops events for groups that are not
+    // expanded, so a collapsed banner costs one comparison here.
+    _gitUnlisten = await listen<WorkspaceGitChangeEvent>(
+        "acowork:workspace-git-changed",
+        (event) => {
+            handleGitStatusChanged(event.payload);
+        },
+    );
+
     // Fallback trigger 1: Desktop MQTT reconnect (also covers Gateway
     // restarts — broker comes back, client re-CONNACKs).
     _statusUnlisten = await listen<{ connected: boolean }>("mqtt-status", (event) => {
@@ -236,6 +280,10 @@ export function disposeWorkspaceFsListener(): void {
         _fsUnlisten();
         _fsUnlisten = null;
     }
+    if (_gitUnlisten) {
+        _gitUnlisten();
+        _gitUnlisten = null;
+    }
     if (_statusUnlisten) {
         _statusUnlisten();
         _statusUnlisten = null;
@@ -260,6 +308,23 @@ export function disposeWorkspaceFsListener(): void {
  * @internal Exported for tests — production entry is the Tauri listener
  * registered by [`initWorkspaceFsListener`].
  */
+/**
+ * ADR-078 follow-up: handle a Runtime "git state may have changed" nudge.
+ *
+ * Exported for the same reason as [`handleFsChanged`] — the listener
+ * wiring itself is untestable without a Tauri host, and the part that
+ * can actually be wrong (addressing the right store group) is this body.
+ *
+ * Note the address comes from the Tauri event, which fills
+ * `instance_id` from the MQTT *topic* path (ADR-073) — NOT from the
+ * proto's `agent_id` field, which is package metadata used for display
+ * only. Using `agent_id` here would address a group that never matches
+ * the expanded one, and the refresh would silently never fire.
+ */
+export function handleGitStatusChanged(ev: WorkspaceGitChangeEvent): void {
+    useGitStore.getState().notifyFsChanged(ev.instance_id, ev.workspace_id);
+}
+
 export async function handleFsChanged(ev: WorkspaceFsChangeEvent): Promise<void> {
     if (!ev.changes?.length) return;
     // ADR-078 decision 8: a fs-changed event that hits the currently

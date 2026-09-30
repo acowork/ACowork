@@ -593,6 +593,30 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
                 let _ = app_handle.emit("acowork:workspace-fs-changed", event);
             }
 
+            // ── Git state changed (ADR-078 follow-up) ──
+            //
+            // Runtime publishes a bare "re-read git status" nudge on
+            // `acowork/agents/{id}/workspaces/{wid}/git-changed` after a
+            // shell tool call that may have mutated index/HEAD. The
+            // payload deliberately carries NO git state — the frontend
+            // re-reads `GET /git/status`, keeping git semantics
+            // server-side (ADR-009 v2).
+            //
+            // Re-emitted on its own Tauri channel (same channel-
+            // separation rationale as fs-changed / debug-event): the
+            // chatStore's `handleMessageEvent` must not know about it.
+            data_envelope::Payload::GitStatusChanged(ev) => {
+                let event = serde_json::json!({
+                    // ADR-073: the topic path carries the instance identity;
+                    // the payload `agent_id` is package metadata (display only)
+                    // and must not be used for store addressing.
+                    "instance_id": topic_instance_id,
+                    "workspace_id": ev.workspace_id,
+                    "window_end_ms": ev.window_end_ms,
+                });
+                let _ = app_handle.emit("acowork:workspace-git-changed", event);
+            }
+
             // ── Doc library tree changes ──
             //
             // acowork-doc publishes on `acowork/doc/tree/changed`
