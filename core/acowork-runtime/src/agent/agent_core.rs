@@ -324,6 +324,20 @@ pub struct AgentCore {
     pub(crate) shell_approval_threshold: ShellApprovalThreshold,
     /// Shell risk rules (loaded from config dir on startup).
     pub(crate) shell_risk_rules: crate::security::shell_risk::ShellRiskRules,
+    /// ADR-078 follow-up: slots the git-refresh nudge needs to publish.
+    ///
+    /// `None` until Phase B binds them (same late-bind pattern as
+    /// [`Self::approval_gate`]); the tool-execution path treats `None`
+    /// as "publish nothing", which is correct for CLI mode and for the
+    /// window before Phase B finishes.
+    ///
+    /// Kept as slots rather than constructor arguments because the MQTT
+    /// client and the workspace resolver are both created in Phase A,
+    /// *before* `AgentCore` is built — but they reach the tool path only
+    /// through this struct, and threading them through
+    /// `new_with_observer` would touch every construction site (tests
+    /// included) for no ordering benefit.
+    pub(crate) git_nudge: Option<crate::agent::git_nudge::GitNudgeSlots>,
     /// Memory session handle — shared between agent loop and memory tools.
     pub(crate) memory_session: Option<Arc<crate::memory::MemorySessionHandle>>,
     /// Embedding provider for vector-based memory retrieval.
@@ -602,6 +616,9 @@ impl AgentCore {
                 std::path::Path::new(&config.work_dir),
             )
             .unwrap_or_default(),
+            // Bound by Phase B via `set_git_nudge` once the MQTT client
+            // slot and the workspace resolver are both available.
+            git_nudge: None,
             embedding_provider: None,
             metrics_aggregator: Arc::new(std::sync::Mutex::new(
                 crate::memory::RetrievalMetricsAggregator::with_defaults(1.0),
@@ -1851,6 +1868,13 @@ impl AgentCore {
         self.approval_gate = Some(gate);
     }
 
+    /// ADR-078 follow-up: bind the handles the git-refresh nudge needs.
+    /// Called from Phase B once the MQTT client slot and the workspace
+    /// resolver both exist.
+    pub(crate) fn set_git_nudge(&mut self, slots: crate::agent::git_nudge::GitNudgeSlots) {
+        self.git_nudge = Some(slots);
+    }
+
     /// ADR-046: bind the blob store used to read uploaded files. Called
     /// from Phase B of `session_init` once the workspace services are
     /// in place. `None` means image uploads are silently dropped at the
@@ -1976,6 +2000,9 @@ impl Clone for AgentCore {
             approval_gate: self.approval_gate.clone(),
             shell_approval_threshold: self.shell_approval_threshold,
             shell_risk_rules: self.shell_risk_rules.clone(),
+            // Agent-scoped: every session clone shares the same handles,
+            // so a nudge from one session is published exactly once.
+            git_nudge: self.git_nudge.clone(),
             embedding_provider: self.embedding_provider.clone(),
             metrics_aggregator: self.metrics_aggregator.clone(),
             consolidation_bg_task: None, // sessions don't own bg task

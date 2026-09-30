@@ -118,7 +118,35 @@ message DataEnvelope {
     // DocTreeStore can force-refresh its visible tree layers instead
     // of waiting for the 30s poll. Field 88 occupied, never reused.
     DocTreeChangedEvent      doc_tree_changed          = 35;
+
+    // ADR-078 follow-up: "git state may have changed" nudge. Topic:
+    // acowork/agents/{id}/workspaces/{wid}/git-changed. Published by
+    // the Runtime after a shell tool call that may have mutated git
+    // state. Field 89 occupied, never reused.
+    GitStatusChanged         git_status_changed        = 36;
   }
+}
+
+// ── Git state changed (Runtime → Desktop, QoS 1, non-retained) ──────────
+//
+// A bare "re-read git status" signal, carrying NO git semantics: the
+// Runtime does not know the branch, the index, or the HEAD — it only
+// knows that something the agent ran may have changed them. The actual
+// state is always read back over the HTTP `GET /git/status` endpoint,
+// which keeps git semantics entirely server-side (ADR-009 v2).
+//
+// Why this exists: `git commit` writes only inside the repo's gitdir
+// (`.git/index`, `.git/HEAD`, the reflog). In a worktree checkout
+// `.git` is a pointer FILE to a directory outside the workspace, and
+// the workspace-root PollWatcher (ADR-058, NonRecursive) never sees
+// any of it — so the Git Status Bar had no event to refresh on. The
+// fs-changed topic cannot carry this signal by construction.
+message GitStatusChanged {
+  string agent_id = 1;
+  string workspace_id = 2;
+  // Publish time (epoch ms). Diagnostic / staleness only — never used
+  // for ordering (MQTT is naturally ordered within one topic).
+  uint64 window_end_ms = 3;
 }
 
 // ── Global resources: available state (§3.1.1) ────────────────────────

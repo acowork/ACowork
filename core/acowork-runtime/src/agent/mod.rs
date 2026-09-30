@@ -6,8 +6,10 @@ pub mod bootstrap_autobio;
 pub mod budget_guard;
 pub mod compression_constants;
 pub mod context;
+
 #[cfg(test)]
 mod e2e_prompt_cache;
+pub mod git_nudge;
 pub mod history;
 pub mod inbound;
 pub mod llm_availability;
