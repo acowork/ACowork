@@ -77,7 +77,7 @@ pub struct ProviderEntryResponse {
 }
 
 /// Default max output tokens when gateway config doesn't specify a limit.
-const DEFAULT_MAX_OUTPUT_TOKENS: u64 = 32_768;
+const DEFAULT_MAX_OUTPUT_TOKENS: u64 = 16_384;
 
 /// One API key entry inside an `AddProviderRequest.keys` array.
 #[derive(Deserialize)]

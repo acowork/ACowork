@@ -111,8 +111,8 @@ pub struct UpdateAgentConfigRequest {
 }
 
 /// Default global values used as fallback when no override exists.
-pub const DEFAULT_MAX_OUTPUT_TOKENS: u64 = 32_768;
-pub const DEFAULT_MAX_ITERATIONS: u32 = 200;
+pub const DEFAULT_MAX_OUTPUT_TOKENS: u64 = 16_384;
+pub const DEFAULT_MAX_ITERATIONS: u32 = 500;
 /// Default LLM temperature (final fallback in the chain
 /// session → agent_config.json → manifest.toml [llm].temperature → here).
 /// **Keep aligned** with `acowork_runtime::config::DEFAULT_TEMPERATURE`
@@ -123,5 +123,5 @@ pub const DEFAULT_TEMPERATURE: f32 = 0.3;
 /// chain: agent_config.json → manifest.llm.context_window → here.
 /// **Keep aligned** with `acowork_runtime::config::DEFAULT_CONTEXT_WINDOW`.
 pub const DEFAULT_CONTEXT_WINDOW: u64 = 200_000;
-pub const DEFAULT_SHELL_APPROVAL_THRESHOLD: ShellApprovalThreshold = ShellApprovalThreshold::Medium;
+pub const DEFAULT_SHELL_APPROVAL_THRESHOLD: ShellApprovalThreshold = ShellApprovalThreshold::High;
 

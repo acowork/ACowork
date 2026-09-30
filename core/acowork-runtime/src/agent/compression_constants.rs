@@ -35,12 +35,12 @@ pub(crate) const SUMMARY_TOKEN_BUDGET: u64 = 4_096;
 ///
 /// Below this, level 8 (system + summary + current user) dominates the
 /// context and the mechanism degenerates (ADR-061 §19.3). 128K/200K/1M
-/// mainstream models all pass (128K - 32K output = 96K >= 64K).
+/// mainstream models all pass (128K - 16K output = 112K >= 64K).
 pub(crate) const MIN_BUDGET_FOR_AGENT: u64 = 65_536;
 
 /// Output-token reserve used when validating a model's effective input
-/// budget (mirrors `max_output_tokens_limit`'s default of 32K).
-pub(crate) const DEFAULT_OUTPUT_RESERVE: u64 = 32_768;
+/// budget (mirrors `max_output_tokens_limit`'s default of 16K = 1024×16).
+pub(crate) const DEFAULT_OUTPUT_RESERVE: u64 = 16_384;
 
 /// Validate that a model's effective input budget clears the agent
 /// rejection line.

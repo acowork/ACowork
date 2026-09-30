@@ -512,10 +512,10 @@ impl<'de> Deserialize<'de> for Permission {
 pub enum ShellApprovalThreshold {
     /// Prompt for Low risk and above (most conservative).
     Low,
-    /// Prompt for Medium risk and above (default).
-    #[default]
+    /// Prompt for Medium risk and above.
     Medium,
-    /// Prompt for High risk only.
+    /// Prompt for High risk only (default).
+    #[default]
     High,
     /// Never prompt — auto-approve all shell commands.
     ///

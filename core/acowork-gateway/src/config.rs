@@ -97,7 +97,7 @@ pub struct GatewayConfig {
     pub default_model: Option<String>,
     /// Global max output tokens limit for all agents.
     /// When a model's max_output_tokens exceeds this value, the value is capped.
-    /// Default: 32768 (32K). Set to 0 to disable the limit.
+    /// Default: 16384 (16K = 1024×16). Set to 0 to disable the limit.
     #[serde(default = "default_max_output_tokens_limit")]
     pub max_output_tokens_limit: u64,
     /// HuggingFace mirror URLs for model downloads (tried in order before
@@ -613,7 +613,7 @@ fn default_max_iterations() -> u32 {
     20
 }
 fn default_max_output_tokens_limit() -> u64 {
-    32_768
+    16_384
 }
 
 impl GatewayConfig {

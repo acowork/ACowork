@@ -884,7 +884,7 @@ export function AgentSetupTab() {
             <StyledInput
               type="number"
               min={0}
-              max={200}
+              max={500}
               value={profile.maxIterations && profile.maxIterations > 0 ? profile.maxIterations : ""}
               onChange={(e) => {
                 const v = e.target.value;
@@ -961,7 +961,7 @@ export function AgentSetupTab() {
                 // profiles saved before the rename still show the right option.
                 profile.shellApprovalThreshold === "never"
                   ? "auto_approve"
-                  : (profile.shellApprovalThreshold ?? "medium")
+                  : (profile.shellApprovalThreshold ?? "high")
               }
               onChange={(v) => saveField("shellApprovalThreshold", v)}
               options={[
@@ -1076,7 +1076,7 @@ export function AgentSetupTab() {
                   v === "" ? undefined : Math.max(0, parseInt(v, 10) || 0),
                 );
               }}
-              placeholder={`${profile.globalMaxTokens ?? 32768} ${t("agentSetup.defaultModelLimit")}`}
+              placeholder={`${profile.globalMaxTokens ?? 16384} ${t("agentSetup.defaultModelLimit")}`}
               className="rounded-md"
             />
             <p className="text-[9px] text-text-tertiary ">

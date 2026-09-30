@@ -122,9 +122,9 @@ pub struct RuntimeConfig {
     /// Maximum history tokens
     #[serde(default = "default_history_max_tokens")]
     pub history_max_tokens: u64,
-    /// Shell approval threshold: Low / Medium / High / Never
+    /// Shell approval threshold: Low / Medium / High / Auto-approve.
     /// Controls which shell commands require user confirmation.
-    /// Default: "medium" — Medium and High risk commands need approval.
+    /// Default: "high" — only High risk commands need approval.
     #[serde(default = "default_shell_approval_threshold")]
     pub shell_approval_threshold: String,
 
@@ -222,7 +222,7 @@ fn default_debug_port() -> u16 {
 }
 
 fn default_max_iterations() -> u32 {
-    200
+    500
 }
 
 fn default_history_max_tokens() -> u64 {
@@ -230,7 +230,7 @@ fn default_history_max_tokens() -> u64 {
 }
 
 fn default_shell_approval_threshold() -> String {
-    "medium".to_string()
+    "high".to_string()
 }
 
 fn default_max_sessions() -> usize {
@@ -357,5 +357,64 @@ mod tests {
             ..RuntimeConfig::default()
         };
         assert!(config.validate().is_err());
+    }
+
+    /// The three Agent Setup panel defaults are duplicated as bare literals
+    /// across `acowork-runtime`, `acowork-gateway` and `acowork-core` (the
+    /// Runtime seeds them into `agent_config.json` at first boot, the
+    /// Gateway returns them as `AgentConfigResponse` fallbacks, the core
+    /// enum carries the `#[default]`). Changing one side silently left the
+    /// others stale — the panel then displayed a default the Runtime never
+    /// applied. Pin the cross-crate agreement here so a change to any one
+    /// copy fails the build.
+    #[test]
+    fn agent_setup_panel_defaults_stay_aligned_across_crates() {
+        use acowork_core::ShellApprovalThreshold;
+        use acowork_gateway::http::agent_config::{
+            DEFAULT_MAX_ITERATIONS, DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_SHELL_APPROVAL_THRESHOLD,
+        };
+
+        let config = RuntimeConfig::default();
+        assert_eq!(
+            config.max_iterations, DEFAULT_MAX_ITERATIONS,
+            "RuntimeConfig::default().max_iterations must match the Gateway \
+             AgentConfigResponse fallback"
+        );
+        assert_eq!(
+            ShellApprovalThreshold::from_str_loose(&config.shell_approval_threshold),
+            Some(DEFAULT_SHELL_APPROVAL_THRESHOLD),
+            "RuntimeConfig::default().shell_approval_threshold must match the \
+             Gateway fallback"
+        );
+        // The core enum's `#[default]` is what `AgentCore::new_with_observer`
+        // lands on when the config string is missing or unparseable
+        // (`unwrap_or_default()`), so it is a third copy of the same fact.
+        assert_eq!(
+            ShellApprovalThreshold::default(),
+            DEFAULT_SHELL_APPROVAL_THRESHOLD,
+            "ShellApprovalThreshold's #[default] must match the Gateway fallback"
+        );
+
+        // `max_output_tokens_limit` is yet another copy: the `#[serde(default)]`
+        // on `acowork_core::protocol::ProviderModelEntry` is what a provider
+        // list written before the Gateway sent a limit deserializes to. If
+        // that diverges from the Gateway config default, an old on-disk
+        // provider list silently reinstates a different cap.
+        let entry: acowork_core::protocol::ProviderModelEntry = serde_json::from_value(
+            serde_json::json!({
+                "id": "test-model",
+                "capabilities": {
+                    "context_window": 128000,
+                    "max_output_tokens": 16384,
+                    "supports_tool_calling": true
+                }
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            entry.max_output_tokens_limit, DEFAULT_MAX_OUTPUT_TOKENS,
+            "ProviderModelEntry's serde default for max_output_tokens_limit \
+             must match the Gateway config default"
+        );
     }
 }

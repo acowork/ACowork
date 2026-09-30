@@ -842,7 +842,7 @@ impl AgentCore {
                 }
             }
         }
-        32_768
+        16_384
     }
 
     pub fn update_provider(&mut self, new_provider: Arc<dyn Provider>, model: String) {

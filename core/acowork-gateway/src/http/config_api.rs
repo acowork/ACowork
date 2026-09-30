@@ -43,7 +43,7 @@ pub struct ConfigResponse {
     /// Default LLM model (if configured)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_model: Option<String>,
-    /// Global max output tokens limit (default 32768)
+    /// Global max output tokens limit (default 16384)
     pub max_output_tokens_limit: u64,
     /// HuggingFace mirror URLs for model downloads
     #[serde(skip_serializing_if = "Vec::is_empty")]
