@@ -14,6 +14,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useDragResize } from "../hooks/useDragResize";
 import { SplitHandle } from "../components/common/SplitHandle";
+import { CAPSULE_PANE_CN } from "../components/common/capsule";
+import { cn } from "../lib/utils";
 import { usePmProjectStore } from "../stores/pm/projectStore";
 import { usePmBoardStore } from "../stores/pm/boardStore";
 import { usePmTaskDetailStore } from "../stores/pm/taskDetailStore";
@@ -108,16 +110,16 @@ export function ProjectsView() {
   // 三态：加载骨架
   if (loadingProjects && projects.length === 0) {
     return (
-      <div className="flex h-full w-full overflow-hidden rounded-xl bg-page-bg">
+      <div className="flex h-full w-full overflow-hidden">
         <div
-          className="shrink-0 animate-pulse space-y-2 rounded-xl bg-nav-surface p-3"
+          className={cn(CAPSULE_PANE_CN, "shrink-0 animate-pulse space-y-2 bg-nav-surface p-3")}
           style={{ width: sidebar.width }}
         >
           {[0, 1, 2, 3, 4].map((i) => (
             <div key={i} className="h-9 rounded-md bg-zinc-100 dark:bg-zinc-800" />
           ))}
         </div>
-        <div className="flex-1 p-6">
+        <div className={cn(CAPSULE_PANE_CN, "min-w-0 flex-1 bg-page-bg p-6")}>
           <div className="h-8 w-48 animate-pulse rounded-md bg-zinc-100 dark:bg-zinc-800" />
           <div className="mt-6 flex gap-4">
             {[0, 1, 2, 3].map((i) => (
@@ -135,7 +137,7 @@ export function ProjectsView() {
   // 不再依赖脆弱的 `document.getElementById(...)?.click()` DOM 反查。
   if (projects.length === 0 && !loadingProjects) {
     return (
-      <div className="flex h-full w-full flex-col overflow-hidden rounded-xl bg-page-bg">
+      <div className="flex h-full w-full flex-col overflow-hidden">
         <ServiceOfflineBanner />
         <div className="flex min-h-0 flex-1">
           <ProjectSidebar width={sidebar.width} />
@@ -169,7 +171,7 @@ export function ProjectsView() {
   }
 
   return (
-    <div className="flex h-full w-full flex-col overflow-hidden rounded-xl bg-page-bg">
+    <div className="flex h-full w-full flex-col overflow-hidden">
       <ServiceOfflineBanner />
       <div className="flex min-h-0 flex-1">
         {/* 左侧项目列表 — 宽度与聊天 AgentList 一致、可拖动 */}

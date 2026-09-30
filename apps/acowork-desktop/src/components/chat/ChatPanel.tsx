@@ -10,6 +10,7 @@ import { useTranslation } from "../../i18n/useTranslation";
 import type { ToolApprovalNeededEvent, AttachedItem } from "../../lib/types";
 import { isProcessing, getProcessingPhase } from "../../lib/types";
 import { cn } from "../../lib/utils";
+import { CAPSULE_PANE_CN } from "../common/capsule";
 import { fetchProviderModels } from "../../lib/gateway-api";
 import { startAgentAndSyncUI } from "../../lib/agent-start";
 import { toolbarButton } from "../../lib/ui-styles";
@@ -100,8 +101,7 @@ const EMPTY_MESSAGES: ChatMessage[] = [];
 // panel slot as the chat view, so when the session finally hydrates there is
 // no transparent gap to "fill in". Mirrors the file-editor suspense shell in
 // AppLayout.tsx for the same reason.
-const CHAT_PANEL_SHELL_CN =
-  "flex flex-1 min-w-[288px] flex-col overflow-hidden rounded-xl border border-border-outer bg-chat-body";
+const CHAT_PANEL_SHELL_CN = cn(CAPSULE_PANE_CN, "min-w-[288px] flex-1 bg-chat-body");
 
 // Monaco-style top-edge shadow: the messages area shows a soft gradient
 // under the session tab bar's hairline whenever it is scrolled away from

@@ -15,6 +15,8 @@ import { useDocHealthStore } from "../stores/doc/healthStore";
 import { useDocTreeStore } from "../stores/doc/treeStore";
 import { useDocRequestStore } from "../stores/doc/requestStore";
 import { DocTreeSidebar } from "./doc/DocTreeSidebar";
+import { CAPSULE_PANE_CN } from "../components/common/capsule";
+import { cn } from "../lib/utils";
 import { ReviewQueue } from "./doc/ReviewQueue";
 import { DocEditor } from "./doc/DocEditor";
 import { DOC_ROOT_DIR_ID } from "../lib/doc-types";
@@ -67,7 +69,13 @@ export function DocsView() {
   const offline = healthy === false;
 
   return (
-    <div className="flex h-full overflow-hidden rounded-xl bg-page-bg">
+    // `w-full` is load-bearing: this root is a flex item of AppLayout's
+    // wrapper, and without it the default `flex: 0 1 auto` sizes the view
+    // to its CONTENT — with no doc open that collapsed the whole layout to
+    // the tree's width and left a wide strip of bare vibrancy on the right.
+    // It was invisible while the wrapper painted the same `bg-page-bg`;
+    // transparent wrappers expose it. ProjectsView already had w-full.
+    <div className="flex h-full w-full overflow-hidden">
       {/* 左侧目录树（离线也可浏览缓存） */}
       <DocTreeSidebar width={sidebar.width} />
       <SplitHandle
@@ -76,7 +84,7 @@ export function DocsView() {
       />
 
       {/* 右侧列 */}
-      <div className="flex h-full min-w-0 flex-1 flex-col">
+      <div className={cn(CAPSULE_PANE_CN, "h-full min-w-0 flex-1 bg-page-bg")}>
         {offline ? (
           <OfflinePanel
             checking={checking}

@@ -12,6 +12,7 @@ import { useEditorStatusStore } from "../../stores/editorStatusStore";
 import { useLspClientPool } from "../../hooks/useLspClientPool";
 import { useReportFilePanelBounds } from "../../hooks/useReportFilePanelBounds";
 import { cn } from "../../lib/utils";
+import { CAPSULE_PANE_CN } from "../common/capsule";
 import { getGatewayUrl } from "../../lib/config";
 import { X, Save, Loader2, FileText, MessageSquarePlus, Eye, Code2, Locate, RefreshCw, XSquare, Files, AlertCircle } from "lucide-react";
 import Editor, { DiffEditor, type OnMount } from "@monaco-editor/react";
@@ -1301,7 +1302,7 @@ export function FileEditorPanel({ width }: { width: number }) {
         <div
             ref={rootRef}
             data-panel="file-editor"
-            className="relative flex flex-col shrink-0 rounded-xl overflow-hidden border border-right-panel-border bg-right-panel"
+            className={cn(CAPSULE_PANE_CN, "relative shrink-0 bg-right-panel")}
             style={{ width }}
         >
             {/* Tab bar — bg must match the Monaco editor surface (vs=#FFFFFF in

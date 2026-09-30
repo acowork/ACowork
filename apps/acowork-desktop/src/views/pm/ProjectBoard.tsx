@@ -8,6 +8,8 @@
  */
 
 import { useTranslation } from "../../i18n/useTranslation";
+import { CAPSULE_PANE_CN } from "../../components/common/capsule";
+import { cn } from "../../lib/utils";
 import { ProjectHeader } from "./ProjectHeader";
 import { KanbanBoard } from "./KanbanBoard";
 import type { PmProject } from "../../lib/pm-types";
@@ -37,7 +39,7 @@ export function ProjectBoard({
   // 未选中项目 → 空提示
   if (!project) {
     return (
-      <main className="flex min-w-0 flex-1 items-center justify-center bg-page-bg">
+      <main className={cn(CAPSULE_PANE_CN, "min-w-0 flex-1 items-center justify-center bg-page-bg")}>
         <div className="text-center">
           <div className="text-3xl">📋</div>
           <p className="mt-2 text-xs text-text-tertiary ">
@@ -51,7 +53,7 @@ export function ProjectBoard({
   // 加载骨架
   if (loading) {
     return (
-      <main className="flex min-w-0 flex-1 flex-col">
+      <main className={cn(CAPSULE_PANE_CN, "min-w-0 flex-1 bg-page-bg")}>
         <div className="shrink-0 border-b border-border-divider px-4 py-3">
           <div className="h-5 w-40 animate-pulse rounded bg-zinc-100 dark:bg-zinc-800" />
           <div className="mt-2 h-3 w-64 animate-pulse rounded bg-zinc-100 dark:bg-zinc-800" />
@@ -66,7 +68,7 @@ export function ProjectBoard({
   }
 
   return (
-    <main className="flex min-w-0 flex-1 flex-col bg-page-bg">
+    <main className={cn(CAPSULE_PANE_CN, "min-w-0 flex-1 bg-page-bg")}>
       <ProjectHeader project={project} onNewTask={newTask} />
       {error && (
         <div className="flex shrink-0 items-center justify-between gap-2 border-b border-border-divider bg-amber-50 px-4 py-2 text-xs text-amber-700 dark:bg-amber-950/40 dark:text-amber-300">

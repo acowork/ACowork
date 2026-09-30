@@ -33,6 +33,7 @@ import { CompressionHistoryCard } from "../debug/CompressionHistoryCard";
 // stays reachable once DevMode is on).
 import { PromptList } from "../debug/PromptList";
 import { ListBox, ExpandableRow } from "../common/list";
+import { CAPSULE_PANE_CN } from "../common/capsule";
 import { Switch } from "../common/Switch";
 import { getGatewayUrl } from "../../lib/config";
 
@@ -427,7 +428,7 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
           with the top-left. The resize handle sits ABOVE it (absolute at
           -left-1), so it must stay outside this clipping box or it would be
           cut off and resizing would break. */}
-      <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-right-panel-border bg-right-panel">
+      <div className={cn(CAPSULE_PANE_CN, "flex-1 bg-right-panel")}>
       {/* Tab title header */}
       <div className="border-b border-border-divider px-3 pt-[10px] pb-[7px] text-xs font-medium text-text-tertiary ">
         {t(`rightPanel.${activeTab}`)}

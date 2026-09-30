@@ -17,6 +17,7 @@ import { ConfirmDialog } from "../../components/common/ConfirmDialog";
 import { StyledInput } from "../../components/common/StyledInput";
 import { showToast } from "../../components/common/ToastProvider";
 import { cn } from "../../lib/utils";
+import { CAPSULE_PANE_CN } from "../../components/common/capsule";
 import { useTranslation } from "../../i18n/useTranslation";
 import type { PmProject } from "../../lib/pm-types";
 
@@ -79,7 +80,7 @@ export function ProjectSidebar({ width }: { width?: number }) {
 
   return (
     <aside
-      className="flex shrink-0 flex-col rounded-xl bg-nav-surface"
+      className={cn(CAPSULE_PANE_CN, "shrink-0 bg-nav-surface")}
       style={{ width: width ?? 240 }}
     >
       {/* Header — search input (与 AgentList 同款) */}

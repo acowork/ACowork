@@ -5,6 +5,7 @@ import { NavBar } from "./NavBar";
 import { TitleBar } from "./TitleBar";
 import { AgentList } from "../agent-list/AgentList";
 import { ChatPanel } from "../chat/ChatPanel";
+import { EmptyChatPane, EmptyRightPane } from "../chat/EmptyChatPane";
 import { InboxPanel } from "../../views/InboxPanel";
 import { RightPanel } from "../right-panel/RightPanel";
 import { RightNavBar } from "./RightNavBar";
@@ -59,6 +60,7 @@ import { GlobalSearchDialog } from "../search/GlobalSearchDialog";
 import { useTranslation } from "../../i18n/useTranslation";
 import { AlertTriangle, Bot, Check, Cpu, RefreshCw } from "lucide-react";
 import { ChunkLoadBoundary } from "../common/ErrorBoundary";
+import { CAPSULE_PANE_CN } from "../common/capsule";
 import { log } from "../../lib/logger";
 
 /** Settings tab type — keep in sync with SettingsPage */
@@ -1055,8 +1057,7 @@ export function AppLayout() {
                 >
                   {/*
                    * Suspense fallback mirrors the FileEditorPanel shell
-                   * (relative flex flex-col shrink-0 rounded-xl overflow-hidden
-                   * border border-right-panel-border bg-right-panel) so the
+                   * (CAPSULE_PANE_CN + shrink-0 + bg-right-panel) so the
                    * lazy chunk paints into an opaque panel-shaped slot
                    * instead of an empty <div>. Without this the file pane
                    * flashed transparent glass for one frame the first time
@@ -1067,7 +1068,7 @@ export function AppLayout() {
                     fallback={
                       <div
                         aria-hidden="true"
-                        className="relative flex flex-col shrink-0 rounded-xl overflow-hidden border border-right-panel-border bg-right-panel"
+                        className={cn(CAPSULE_PANE_CN, "shrink-0 bg-right-panel")}
                         style={{ width: fileWidth }}
                       />
                     }
@@ -1079,9 +1080,17 @@ export function AppLayout() {
             )}
 
             {/* Right panel — unified tabs, collapsible, resizable. Hidden in
-                inbox mode since user↔user chat has no agent session config. */}
-            {selectedAgentId && !rightPanelCollapsed && (
-              <RightPanel width={rightWidth} onCollapse={toggleRightPanel} isDebugMode={isDebugMode} onResizeStart={handleMouseDownRight} activeTab={activeTab} onTabChange={setActiveTab} />
+                inbox mode since user↔user chat has no agent session config.
+                With no agent selected the panel's own data is agent-scoped, so
+                an outlined placeholder of the same width stands in — the
+                four-capsule layout stays intact instead of leaving raw
+                vibrancy where the panel would be (see EmptyRightPane). */}
+            {selectedAgentId ? (
+              !rightPanelCollapsed && (
+                <RightPanel width={rightWidth} onCollapse={toggleRightPanel} isDebugMode={isDebugMode} onResizeStart={handleMouseDownRight} activeTab={activeTab} onTabChange={setActiveTab} />
+              )
+            ) : (
+              !rightPanelCollapsed && <EmptyRightPane width={rightWidth} />
             )}
           </div>
         )}
@@ -1129,20 +1138,28 @@ export function AppLayout() {
           </div>
         )}
 
+        {/* pm / docs / extensions share the chat view's capsule layout
+            (rounded panes on the window's vibrancy, see the chat branch
+            above), so the wrapper is transparent — each view paints its own
+            panes via CAPSULE_PANE_CN. They used to carry `bg-page-bg` here,
+            which walled the whole view off from the desktop and read as a
+            different app. settings / harness keep their solid page: they are
+            modal-surface card flows, deliberately a separate visual
+            language. */}
         {currentView === "projects" && (
-          <div className="flex flex-1 overflow-hidden rounded-xl bg-page-bg">
+          <div className="flex flex-1 overflow-hidden rounded-xl">
             <ProjectsView />
           </div>
         )}
 
         {currentView === "docs" && (
-          <div className="flex flex-1 overflow-hidden rounded-xl bg-page-bg">
+          <div className="flex flex-1 overflow-hidden rounded-xl">
             <DocsView />
           </div>
         )}
 
         {currentView === "extensions" && (
-          <div className="flex flex-1 overflow-hidden rounded-xl bg-page-bg">
+          <div className="flex flex-1 overflow-hidden rounded-xl">
             <ExtensionsView />
           </div>
         )}
@@ -1290,14 +1307,4 @@ function formatTokenCount(n: number | null | undefined): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
   return n.toString();
-}
-
-/** Empty middle-pane state when neither an agent nor a peer is selected. */
-function EmptyChatPane() {
-  const { t } = useTranslation();
-  return (
-    <div className="flex flex-1 items-center justify-center p-8 text-center text-xs text-text-tertiary">
-      {t("chatPanel.selectAgentOrPeer")}
-    </div>
-  );
 }

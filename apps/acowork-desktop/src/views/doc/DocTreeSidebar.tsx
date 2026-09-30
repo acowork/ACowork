@@ -30,6 +30,7 @@ import { useDocHealthStore } from "../../stores/doc/healthStore";
 import { useToast } from "../../components/common/ToastProvider";
 import { ConfirmDialog } from "../../components/common/ConfirmDialog";
 import { cn } from "../../lib/utils";
+import { CAPSULE_PANE_CN } from "../../components/common/capsule";
 import { DOC_ROOT_DIR_ID } from "../../lib/doc-types";
 import type { DirMeta, DocMeta } from "../../lib/doc-types";
 import { TrashDialog } from "./TrashDialog";
@@ -94,7 +95,7 @@ export function DocTreeSidebar({ width }: { width?: number }) {
 
   return (
     <aside
-      className="flex h-full shrink-0 flex-col rounded-xl bg-nav-surface text-xs"
+      className={cn(CAPSULE_PANE_CN, "h-full shrink-0 bg-nav-surface text-xs")}
       style={{ width: width ?? 240 }}
       aria-label={t("doc.sidebarLabel")}
     >
