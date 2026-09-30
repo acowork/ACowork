@@ -267,6 +267,24 @@ fn init_stderr_only(env_filter: EnvFilter) -> Option<LogReloadHandle> {
     Some(reload_handle)
 }
 
+/// ADR-085 D3: stamp FAILED + the failure reason on the retained
+/// `AgentStatus` envelope before a startup error tears the process
+/// down. Best-effort — if the publish itself fails there is nothing
+/// left to salvage (the LWT / heartbeat surface OFFLINE anyway).
+async fn publish_startup_failed(
+    agent_ctx: &crate::startup::context::AgentBootContext,
+    e: &crate::error::RuntimeError,
+) {
+    if let Some(client) = agent_ctx.mqtt_client.as_ref() {
+        let _ = client
+            .publish_lifecycle(
+                acowork_core::mqtt_proto::AgentLifecycleState::Failed,
+                &e.to_string(),
+            )
+            .await;
+    }
+}
+
 /// Async entry point after tokio runtime is initialized.
 ///
 /// Acts as the top-level phase orchestrator.  All logic lives in the
@@ -290,10 +308,27 @@ async fn async_main(
     if agent_ctx.mqtt_client.is_some() {
         // ── Gateway mode ────────────────────────────────────────────────────
         // Phase B: per-session initialization (conversation, AgentCore, SessionManager).
-        let mut session_ctx = phase_b_init_session(&mut agent_ctx, &config).await?;
+        // ADR-085 D3: a failed startup phase is stamped FAILED + detail on
+        // the retained status envelope before the process exits, so the
+        // user sees "startup failed: <reason>" instead of an endless
+        // STARTING / HTTP_READY spinner.
+        let mut session_ctx = match phase_b_init_session(&mut agent_ctx, &config).await {
+            Ok(ctx) => ctx,
+            Err(e) => {
+                publish_startup_failed(&agent_ctx, &e).await;
+                return Err(e);
+            }
+        };
 
         // Phase C: spawn subsystems (chunk_relay, MCP auto-connect, DevMode).
-        let handles = phase_c_spawn_subsystems(&mut agent_ctx, &mut session_ctx, &config).await?;
+        let handles = match phase_c_spawn_subsystems(&mut agent_ctx, &mut session_ctx, &config).await
+        {
+            Ok(h) => h,
+            Err(e) => {
+                publish_startup_failed(&agent_ctx, &e).await;
+                return Err(e);
+            }
+        };
 
         // ADR-065 §2.5/§5.4: in never-sleep mode the Runtime is a resident
         // process with no parent to restart it after an OS sleep/wake, so

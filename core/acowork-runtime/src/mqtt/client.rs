@@ -23,7 +23,7 @@ use tokio::sync::{Mutex, oneshot};
 
 use acowork_core::defaults;
 use acowork_core::mqtt_proto::{
-    AgentConfig, AgentMeta, AgentStatus, AskQuestionPayload, ChunkPayload,
+    AgentConfig, AgentLifecycleState, AgentMeta, AgentStatus, AskQuestionPayload, ChunkPayload,
     CompactionCancelledPayload, CompactingPayload,
     CompactionCancelReason as ProtoCompactionCancelReason, ContextUsagePayload, DataEnvelope,
     DonePayload, ErrorPayload, IterationLimitPausedPayload, LoopDetectedPausedPayload,
@@ -38,6 +38,15 @@ use acowork_mqtt_session::{
 use crate::mqtt::available_cache::SharedAvailableCache;
 use acowork_core::protocol::McpTransportDef;
 
+/// ADR-085 invariant 3: the lifecycle only moves forward (or re-stamps
+/// the current value). `cur == 0` means "never stamped" (fresh process,
+/// before the first connect) and accepts any target. FAILED is the
+/// highest value, so the guard never blocks it — and once FAILED is
+/// stamped, nothing below it can be published again.
+pub(crate) fn lifecycle_regression_rejected(cur: u8, target: u8) -> bool {
+    cur != 0 && target < cur
+}
+
 /// Encode an `AgentStatus` envelope into bytes for the
 /// `acowork/agents/{id}/status` topic.
 ///
@@ -47,17 +56,26 @@ use acowork_core::protocol::McpTransportDef;
 /// the `online` flag and the `instance_id`/`node_id` location should
 /// prefer this helper so the field set stays in sync across the three
 /// publish sites.
+///
+/// ADR-085: `state` carries the capability progression (replacing the
+/// retired plaintext `agents/{id}/ready` topic) and `detail` the
+/// failure reason when `state == FAILED`. Invariant 6: senders passing
+/// `online == false` must pass `AgentLifecycleState::Offline`.
 pub(crate) fn encode_agent_status_payload(
     agent_id: &str,
     instance_id: &str,
     node_id: &str,
     online: bool,
+    state: AgentLifecycleState,
+    detail: &str,
 ) -> Vec<u8> {
     let status = AgentStatus {
         agent_id: agent_id.to_string(),
         online,
         instance_id: instance_id.to_string(),
         node_id: node_id.to_string(),
+        state: state as i32,
+        detail: detail.to_string(),
     };
     prost::Message::encode_to_vec(&DataEnvelope {
         version: 1,
@@ -513,26 +531,20 @@ struct BootstrapData {
     /// re-publish its own `http_endpoint` when the node changes
     /// network (self-healing without a restart).
     node_info_topic: Option<String>,
-    /// ADR-039 Phase 3 follow-up (post-2026-09-07 incident): the
-    /// `acowork/agents/{id}/ready` topic. Republished on every
-    /// (re)connect so a Gateway that reconnects after a sleep/wake —
-    /// or a fresh Gateway that subscribes mid-flight — sees the
-    /// Runtime's session-ready state without waiting for the next
-    /// heartbeat. Without this the `running_agents[id].ready` flag can
-    /// stay `false` until the Phase B/C work finishes again, which is
-    /// the exact divergence the post-wake bug depends on.
-    ready_topic: String,
-    /// Whether the session has EVER reached `ready=true` — set by
-    /// `RuntimeMqttClient::publish_ready` once Phase A completes.
-    /// Step 7 of `run_bootstrap` re-stamps the retained
-    /// `ready=true` on (re)connects only after this flag is set: on
-    /// the very first connect Phase A owns the ready signal, and
-    /// re-publishing it from Step 7 would open the Gateway's
-    /// `running && ready` gate up to `PULL_MAX_DURATION` before the
-    /// session can actually serve. Atomic — shared through
-    /// `Arc<BootstrapData>` between the handler task (Step 7) and the
-    /// `publish_ready` caller.
-    ready_ever: std::sync::atomic::AtomicBool,
+    /// ADR-085 D3b: the most recent lifecycle state this process has
+    /// published (an `AgentLifecycleState` discriminant; `0` = not yet
+    /// initialised). Replaces the retired `ready_topic` + `ready_ever`
+    /// pair. `run_bootstrap` re-stamps this value into the retained
+    /// `AgentStatus` on every (re)connect — a reconnect is not a
+    /// process restart, so the capability state must never regress to
+    /// STARTING. Also the input to `publish_lifecycle`'s monotonicity
+    /// guard. Atomic — shared through `Arc<BootstrapData>` between the
+    /// handler task (bootstrap) and the `publish_lifecycle` caller.
+    current_lifecycle: std::sync::atomic::AtomicU8,
+    /// ADR-085: the `detail` string that accompanies `current_lifecycle`
+    /// (non-empty only for FAILED). Kept so (re)connect re-stamps do
+    /// not silently drop the failure reason from the retained envelope.
+    lifecycle_detail: std::sync::Mutex<String>,
     /// §6.3.3 / ADR-055 D3: the node reverse-proxy base URL injected
     /// at spawn time (`--http-advertise-endpoint`), and the Runtime's
     /// own loopback HTTP port. `run_bootstrap` re-publishes the
@@ -961,8 +973,8 @@ impl RuntimeMqttClient {
             control_filter_prefix: format!("acowork/agents/{}/sessions/control/", instance_id),
             node_lsps_topic: cfg.node_id.map(acowork_core::node::node_lsps_topic),
             node_info_topic: cfg.node_id.map(acowork_core::node::node_info_topic),
-            ready_topic: format!("acowork/agents/{}/ready", instance_id),
-            ready_ever: std::sync::atomic::AtomicBool::new(false),
+            current_lifecycle: std::sync::atomic::AtomicU8::new(0),
+            lifecycle_detail: std::sync::Mutex::new(String::new()),
             http_advertise_endpoint: cfg.http_advertise_endpoint.map(|s| s.to_string()),
             http_port: cfg.http_port,
         });
@@ -984,7 +996,8 @@ impl RuntimeMqttClient {
                 .zip(cfg.password)
                 .map(|(u, p)| (u.to_string(), p.to_string())),
             // Last Will: if Runtime crashes/disconnects, broker
-            // publishes a retained `AgentStatus{online=false}` envelope.
+            // publishes a retained `AgentStatus{online=false,
+            // state=OFFLINE}` envelope (ADR-085 invariant 6).
             last_will: Some(LastWill::new(
                 &bootstrap_data.status_topic,
                 encode_agent_status_payload(
@@ -992,6 +1005,8 @@ impl RuntimeMqttClient {
                     &bootstrap_data.instance_id,
                     bootstrap_data.node_id.as_deref().unwrap_or(""),
                     false,
+                    AgentLifecycleState::Offline,
+                    "",
                 ),
                 QoS::AtLeastOnce,
                 true,
@@ -1026,10 +1041,11 @@ impl RuntimeMqttClient {
             node_proxy_update_tx: cfg.node_proxy_update_tx.clone(),
             last_node_proxy_base: std::sync::Arc::new(std::sync::Mutex::new(None)),
             first_conn_tx: tokio::sync::Mutex::new(Some(first_conn_tx)),
-            // ready_topic is not cloned into the handler struct — it
-            // lives on `bootstrap_data` (an `Arc<BootstrapData>` clone
-            // is held by the handler via `self.bootstrap_data` below)
-            // and `run_bootstrap` consumes only `bootstrap_data`.
+            // The lifecycle stamp (current_lifecycle / lifecycle_detail)
+            // is not cloned into the handler struct — it lives on
+            // `bootstrap_data` (an `Arc<BootstrapData>` clone is held by
+            // the handler via `self.bootstrap_data` below) and
+            // `run_bootstrap` consumes only `bootstrap_data`.
         };
 
         let inner = MqttClient::connect(config, handler, None)
@@ -1110,9 +1126,15 @@ impl RuntimeMqttClient {
     /// and persistent subscriptions.
     ///
     /// Implements the "Bootstrap seven-step contract" of ADR-039
-    /// (Step 7 added in the post-2026-09-07 incident follow-up):
+    /// (ADR-085: the post-2026-09-07 Step 7 `ready` re-publish is
+    /// retired — the lifecycle re-stamp it provided now rides Step 1's
+    /// `AgentStatus` envelope):
     /// 1. PUBLISH `status = online` (Retained) - overrides the Last
-    ///    Will payload (`offline`) set during `connect()`.
+    ///    Will payload (`offline`) set during `connect()`. Also the
+    ///    ADR-085 D3b lifecycle re-stamp site: the first connect of
+    ///    the process stamps STARTING, every later (re)connect
+    ///    re-stamps the current value (a reconnect is not a process
+    ///    restart and must not regress the state).
     /// 2. PUBLISH `meta` (Retained) - agent capability descriptor.
     /// 3. PUBLISH `config` (Retained) - agent runtime configuration.
     /// 4. SUBSCRIBE `acowork/global/#` - global resources.
@@ -1122,21 +1144,31 @@ impl RuntimeMqttClient {
     ///    (re)connect - the symptom that prompted ADR-039.
     /// 6. SUBSCRIBE `acowork/nodes/{node_id}/lsps` - node LSP relay
     ///    state (ADR-055 §6.7, only when `--node-id` is set).
-    /// 7. PUBLISH `ready = true` (Retained) - idempotent re-publish
-    ///    so a reconnecting Gateway sees the Runtime's session-ready
-    ///    state immediately. Phase A publishes `ready=true` on first
-    ///    start; without Step 7 here, a Runtime that reconnects after
-    ///    an OS sleep/wake (the wake path that previously dropped
-    ///    `running_agents[id].ready`) would leave the Gateway with
-    ///    `ready=false` until the next Phase A → publish_ready cycle,
-    ///    which does not run on a (re)connect.
-    /// 8. SUBSCRIBE `acowork/nodes/{node_id}/info` - node reverse-proxy
+    /// 7. SUBSCRIBE `acowork/nodes/{node_id}/info` - node reverse-proxy
     ///    base URL watch (§6.3.3, only when `--node-id` is set).
     async fn run_bootstrap(
         client: &AsyncClient,
         data: &BootstrapData,
     ) -> Result<(), RuntimeMqttClientError> {
         // Step 1: PUBLISH status (Retained) — `DataEnvelope<AgentStatus>`.
+        // ADR-085 D3/D3b: first connect stamps STARTING; reconnects
+        // re-stamp the current lifecycle (plus FAILED detail, if any).
+        let (lifecycle, detail) = {
+            let cur = data.current_lifecycle.load(std::sync::atomic::Ordering::Acquire);
+            if cur == 0 {
+                data.current_lifecycle.store(
+                    AgentLifecycleState::Starting as u8,
+                    std::sync::atomic::Ordering::Release,
+                );
+                (AgentLifecycleState::Starting, String::new())
+            } else {
+                (
+                    AgentLifecycleState::try_from(cur as i32)
+                        .unwrap_or(AgentLifecycleState::Unspecified),
+                    data.lifecycle_detail.lock().unwrap().clone(),
+                )
+            }
+        };
         client
             .publish(
                 &data.status_topic,
@@ -1147,6 +1179,8 @@ impl RuntimeMqttClient {
                     &data.instance_id,
                     data.node_id.as_deref().unwrap_or(""),
                     true,
+                    lifecycle,
+                    &detail,
                 ),
             )
             .await
@@ -1217,48 +1251,7 @@ impl RuntimeMqttClient {
                 .map_err(|e| RuntimeMqttClientError::Subscribe(format!("node lsps: {}", e)))?;
         }
 
-        // Step 7: PUBLISH `ready = true` (Retained) — gated on the
-        // session having been ready once.
-        //
-        // Phase A publishes `ready=true` after the first connect's
-        // global-resource pull completes and sets `ready_ever`. On any
-        // LATER (re)connect — OS sleep/wake, a dropped link — Phase A
-        // does not run again, so this step re-stamps the retained bit
-        // and the Gateway's `running_agents[id].ready` self-heals.
-        // Publishing on the very FIRST ConnAck would flip `ready=true`
-        // up to `PULL_MAX_DURATION` before the session can actually
-        // serve, so the gate keeps first-connect semantics with Phase
-        // A (the Desktop's `running && ready` gate stays closed until
-        // the pull completes).
-        //
-        // The payload is the plain text `"true"` / `"false"` shape the
-        // Gateway's `acowork/agents/+/ready` dispatch handler expects
-        // (see `core/acowork-gateway/src/mqtt/dispatch.rs::handle_plaintext_message`).
-        //
-        // Error semantics: a failed publish here MUST NOT abort the
-        // bootstrap. Steps 1–6 have already established status / meta /
-        // config / subscriptions; rolling them back because the ready
-        // bit could not be re-stamped would leave the Runtime in a
-        // strictly worse state than the one we entered with. We log
-        // at WARN and let the next (re)connect retry — the
-        // exponential backoff shared client guarantees there will be
-        // a next one. This is the canonical "recoverable error →
-        // automatic retry, user-invisible" pattern from the 2026-09-07
-        // incident review.
-        if data.ready_ever.load(std::sync::atomic::Ordering::Acquire)
-            && let Err(e) = client
-                .publish(&data.ready_topic, QoS::AtLeastOnce, true, "true")
-                .await
-        {
-            tracing::warn!(
-                agent_id = %data.agent_id,
-                error = %e,
-                "Step 7 (ready) republish failed; bootstrap continues, \
-                 Gateway will see ready=true on the next reconnect"
-            );
-        }
-
-        // Step 8: SUBSCRIBE the node's retained info topic (§6.3.3,
+        // Step 7: SUBSCRIBE the node's retained info topic (§6.3.3,
         // only when `--node-id` is set). Lets the Runtime watch the
         // node's reverse-proxy base URL and re-publish its own
         // `http_endpoint` when the node changes network — self-healing
@@ -1369,15 +1362,35 @@ impl RuntimeMqttClient {
     }
 
     /// Publish agent status as a Retained `DataEnvelope<AgentStatus>`
-/// message. `online=true` is the presence heartbeat; `online=false`
-/// is published by [`Self::shutdown`] before disconnect.
+    /// message. `online=true` is the presence heartbeat; `online=false`
+    /// is published by [`Self::shutdown`] before disconnect.
+    ///
+    /// ADR-085: the heartbeat re-stamps the current lifecycle state so
+    /// a Gateway that restarts (its embedded broker is in-memory and
+    /// loses retained state) self-heals within one heartbeat, and
+    /// `online=false` always carries `state=OFFLINE` (invariant 6).
     pub async fn publish_status(&self, online: bool) -> Result<(), RuntimeMqttClientError> {
         let topic = format!("acowork/agents/{}/status", self.instance_id);
+        let (state, detail) = if online {
+            let cur = self
+                .bootstrap_data
+                .current_lifecycle
+                .load(std::sync::atomic::Ordering::Acquire);
+            (
+                AgentLifecycleState::try_from(cur.max(AgentLifecycleState::Starting as u8) as i32)
+                    .unwrap_or(AgentLifecycleState::Unspecified),
+                self.bootstrap_data.lifecycle_detail.lock().unwrap().clone(),
+            )
+        } else {
+            (AgentLifecycleState::Offline, String::new())
+        };
         let payload = encode_agent_status_payload(
             &self.agent_id,
             &self.instance_id,
             self.bootstrap_data.node_id.as_deref().unwrap_or(""),
             online,
+            state,
+            &detail,
         );
         self.client()
             .await
@@ -1387,37 +1400,79 @@ impl RuntimeMqttClient {
         Ok(())
     }
 
-    /// Publish the agent's HTTP-ready signal as a plain text Retained message.
+    /// Publish a lifecycle state transition (ADR-085 D3).
     ///
-    /// Tells the Gateway that the Runtime has finished Phase A through Phase C
-    /// (HTTP server bound, session metadata slot populated, subsystems spawned)
-    /// and is ready to serve `/agents/{id}/*` requests. The Gateway pins
-    /// `running_agents[id].ready` to this value and only flips it back to
-    /// `false` on `status="offline"` or a crash — `subsystems.rs:47` is the
-    /// historical note that originally motivated this signal under gRPC
-    /// (ADR-033 §3 carried it over to MQTT but the publish was dropped).
+    /// Replaces the retired plaintext `publish_ready`: the state rides
+    /// the retained `AgentStatus` envelope (`online=true` + `state` +
+    /// `detail`). Capability states advance monotonically — the
+    /// built-in guard rejects a target numerically below the current
+    /// stamp with a WARN instead of publishing a regression
+    /// (invariant 3; reconnect re-stamps go through `run_bootstrap`,
+    /// not here). FAILED is the highest value, so the guard never
+    /// blocks it; once FAILED is stamped nothing below it can be
+    /// published again.
     ///
-    /// Like [`publish_status`], the payload is Retained so a Gateway that
-    /// restarts after the Runtime is already up will see the latest ready
-    /// state on its first subscribe.
-    pub async fn publish_ready(&self, ready: bool) -> Result<(), RuntimeMqttClientError> {
-        // Mark the session's ready history BEFORE publishing: once
-        // Phase A has completed, Step 7 of `run_bootstrap` may
-        // re-stamp the retained bit on any later reconnect, so the
-        // flag must not depend on this single publish succeeding (a
-        // failed publish means the link is about to retry anyway, and
-        // Step 7 will cover it then).
+    /// The stamp is stored BEFORE publishing: a failed publish means
+    /// the link is about to retry anyway, and Step 1 of
+    /// `run_bootstrap` re-stamps the retained envelope on the next
+    /// (re)connect — the canonical "recoverable error → automatic
+    /// retry, user-invisible" pattern from the 2026-09-07 incident
+    /// review.
+    pub async fn publish_lifecycle(
+        &self,
+        state: AgentLifecycleState,
+        detail: &str,
+    ) -> Result<(), RuntimeMqttClientError> {
+        let cur = self
+            .bootstrap_data
+            .current_lifecycle
+            .load(std::sync::atomic::Ordering::Acquire);
+        let target = state as u8;
+        if lifecycle_regression_rejected(cur, target) {
+            tracing::warn!(
+                agent_id = %self.agent_id,
+                current = cur,
+                rejected = target,
+                "lifecycle regression rejected (ADR-085 invariant 3)"
+            );
+            return Ok(());
+        }
         self.bootstrap_data
-            .ready_ever
-            .store(ready, std::sync::atomic::Ordering::Release);
-        let topic = format!("acowork/agents/{}/ready", self.instance_id);
-        let payload = if ready { "true" } else { "false" };
+            .current_lifecycle
+            .store(target, std::sync::atomic::Ordering::Release);
+        let stored_detail = if matches!(state, AgentLifecycleState::Failed) {
+            detail.to_string()
+        } else {
+            String::new()
+        };
+        *self.bootstrap_data.lifecycle_detail.lock().unwrap() = stored_detail;
+        let topic = format!("acowork/agents/{}/status", self.instance_id);
+        let payload = encode_agent_status_payload(
+            &self.agent_id,
+            &self.instance_id,
+            self.bootstrap_data.node_id.as_deref().unwrap_or(""),
+            true,
+            state,
+            detail,
+        );
         self.client()
             .await
             .publish(topic, QoS::AtLeastOnce, true, payload)
             .await
-            .map_err(|e| RuntimeMqttClientError::Publish(format!("ready: {}", e)))?;
+            .map_err(|e| RuntimeMqttClientError::Publish(format!("lifecycle: {}", e)))?;
         Ok(())
+    }
+
+    /// ADR-085: the lifecycle discriminant most recently stamped by
+    /// this process (`0` = never stamped). Read by the HTTP session
+    /// layer to keep `404 no_session` honest: the SESSIONS_READY stamp
+    /// is set only after the startup scan seeded `latest_session`, so
+    /// an empty cache before the stamp means "not known yet" (→ 503),
+    /// never "zero sessions" (D4 table, "扫描未完成" row).
+    pub fn current_lifecycle(&self) -> u8 {
+        self.bootstrap_data
+            .current_lifecycle
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Gracefully disconnect from the MQTT broker.
@@ -1554,6 +1609,8 @@ impl RuntimeMqttClient {
             &self.instance_id,
             self.bootstrap_data.node_id.as_deref().unwrap_or(""),
             false,
+            AgentLifecycleState::Offline,
+            "",
         );
         let _ = client
             .publish(status_topic, QoS::AtLeastOnce, true, payload)
@@ -2402,6 +2459,61 @@ mod tests {
     use rumqttc::Event;
     use std::time::Duration;
 
+    // ── ADR-085 lifecycle guard + status encoding ──────────────────────
+
+    #[test]
+    fn lifecycle_guard_allows_forward_and_restamps_only() {
+        // Never stamped (fresh process): anything is accepted.
+        assert!(!lifecycle_regression_rejected(0, AgentLifecycleState::Starting as u8));
+        assert!(!lifecycle_regression_rejected(0, AgentLifecycleState::SessionsReady as u8));
+        // Forward transitions accepted.
+        assert!(!lifecycle_regression_rejected(
+            AgentLifecycleState::Starting as u8,
+            AgentLifecycleState::HttpReady as u8
+        ));
+        // Re-stamp (equal) accepted — reconnect path re-publishes the current value.
+        assert!(!lifecycle_regression_rejected(
+            AgentLifecycleState::HttpReady as u8,
+            AgentLifecycleState::HttpReady as u8
+        ));
+        // Regressions rejected (invariant 3).
+        assert!(lifecycle_regression_rejected(
+            AgentLifecycleState::SessionsReady as u8,
+            AgentLifecycleState::HttpReady as u8
+        ));
+        // FAILED never blocked (highest value), and it locks out everything below.
+        assert!(!lifecycle_regression_rejected(
+            AgentLifecycleState::HttpReady as u8,
+            AgentLifecycleState::Failed as u8
+        ));
+        assert!(lifecycle_regression_rejected(
+            AgentLifecycleState::Failed as u8,
+            AgentLifecycleState::SessionsReady as u8
+        ));
+    }
+
+    #[test]
+    fn status_envelope_roundtrips_state_and_detail() {
+        use prost::Message as _;
+        let bytes = encode_agent_status_payload(
+            "com.test.agent",
+            "3f8c2a1b-4d5e-6f7a-8b9c-0d1e2f3a4b5c",
+            "node-1",
+            true,
+            AgentLifecycleState::Failed,
+            "session init: sqlite open failed",
+        );
+        let envelope = acowork_core::mqtt_proto::DataEnvelope::decode(bytes.as_slice()).unwrap();
+        let acowork_core::mqtt_proto::data_envelope::Payload::AgentStatus(status) =
+            envelope.payload.unwrap()
+        else {
+            panic!("envelope must carry AgentStatus");
+        };
+        assert!(status.online);
+        assert_eq!(status.state, AgentLifecycleState::Failed as i32);
+        assert_eq!(status.detail, "session init: sqlite open failed");
+    }
+
     // ── decode_lsps_payload (ADR-055 §6.7) ────────────────────────────
 
     fn encode_available_lsps(endpoint: &str, ready: bool) -> Vec<u8> {
@@ -2651,8 +2763,22 @@ mod tests {
             .await
             .unwrap();
 
-        let online_payload = encode_agent_status_payload("com.test.agent", instance_id, "", true);
-        let offline_payload = encode_agent_status_payload("com.test.agent", instance_id, "", false);
+        let online_payload = encode_agent_status_payload(
+            "com.test.agent",
+            instance_id,
+            "",
+            true,
+            AgentLifecycleState::Starting,
+            "",
+        );
+        let offline_payload = encode_agent_status_payload(
+            "com.test.agent",
+            instance_id,
+            "",
+            false,
+            AgentLifecycleState::Offline,
+            "",
+        );
 
         // 1) Wait for the initial retained `online=true` from bootstrap.
         //    (rumqttd forwards retained publishes to live subscribers

@@ -102,8 +102,19 @@ pub struct RunningAgentInfo {
     /// narrowed by ADR-077 §3.4); once the install record is aggregated
     /// this is overwritten with the host node's UUID.
     pub node_id: String,
-    /// Whether the Agent has completed SessionTask initialization and is ready to receive messages
-    pub ready: bool,
+    /// ADR-085: capability progression state of the Runtime, mirrored
+    /// from the retained `AgentStatus.state` field (replaces the old
+    /// `ready: bool` that the plaintext `agents/{id}/ready` topic
+    /// pinned). Absence of the entry itself means OFFLINE.
+    pub lifecycle: acowork_core::mqtt_proto::AgentLifecycleState,
+    /// ADR-085: failure reason accompanying `lifecycle == FAILED`.
+    /// Surfaced on REST only while the Runtime is still alive — the
+    /// FAILED stamp is transient (the process exits right after
+    /// publishing it and the LWT OFFLINE removes this entry), so the
+    /// Desktop latches the reason from the MQTT status event
+    /// (`lastStartupFailure` in agentStore) instead of relying on a
+    /// later REST read.
+    pub lifecycle_detail: String,
     /// Whether the agent was started in developer mode (Debug Protocol enabled at boot).
     ///
     /// ADR-048 follow-up: this is now **startup intent**, not current
@@ -454,11 +465,21 @@ impl GatewayState {
     }
 
     /// Set the ready state of a running agent
-    pub fn set_agent_ready(&mut self, id: &str, ready: bool) {
+    /// ADR-085: mirror the Runtime's lifecycle state (from the retained
+    /// `AgentStatus.state`) into the running_agents entry. Replaces the
+    /// old `set_agent_ready` fed by the plaintext `agents/{id}/ready`
+    /// topic.
+    pub fn set_agent_lifecycle(
+        &mut self,
+        id: &str,
+        lifecycle: acowork_core::mqtt_proto::AgentLifecycleState,
+        detail: &str,
+    ) {
         if let Some(key) = self.resolve_running_key(id)
             && let Some(info) = self.running_agents.get_mut(&key)
         {
-            info.ready = ready;
+            info.lifecycle = lifecycle;
+            info.lifecycle_detail = detail.to_string();
         }
     }
 
@@ -721,7 +742,8 @@ mod tests {
             started_at: chrono::Utc::now(),
             workspace: "/tmp/weather-workspace".to_string(),
             node_id: "local".to_string(),
-            ready: false,
+            lifecycle: acowork_core::mqtt_proto::AgentLifecycleState::Offline,
+            lifecycle_detail: String::new(),
             dev_mode: false,
             debug_state: DebugState::Disabled,
             debug_port: None,

@@ -1135,7 +1135,13 @@ pub struct AgentListEntry {
     /// Gateway's `AgentListResponse.alive`; the only field the UI gates
     /// "agent is alive" on.
     pub alive: bool,
-    pub ready: bool,
+    /// ADR-085: lifecycle capability state ("unspecified" | "offline" |
+    /// "starting" | "http_ready" | "sessions_ready" | "failed") —
+    /// replaces the retired `ready` bool.
+    pub lifecycle: String,
+    /// ADR-085: failure reason when lifecycle == "failed".
+    #[serde(default)]
+    pub lifecycle_detail: Option<String>,
     pub dev_mode: bool,
     /// Whether DevMode is live right now (ADR-048 follow-up; can be enabled
     /// at runtime via POST /api/agents/{id}/debug/enable without restarting
@@ -1170,7 +1176,10 @@ pub struct AgentDetailResponse {
     /// Distributed liveness verdict — same semantics as
     /// [`AgentListEntry::alive`] (MQTT network signal, never a PID probe).
     pub alive: bool,
-    pub ready: bool,
+    /// ADR-085: lifecycle capability state — see [`AgentListEntry::lifecycle`].
+    pub lifecycle: String,
+    #[serde(default)]
+    pub lifecycle_detail: Option<String>,
     pub pid: Option<u32>,
     pub started_at: Option<String>,
     /// Whether DevMode is live right now (ADR-048 follow-up; can be enabled
@@ -1443,7 +1452,7 @@ mod tests {
             "builtin_avatar": null,
             "version": "1.0.0",
             "alive": true,
-            "ready": true,
+            "lifecycle": "sessions_ready",
             "dev_mode": false,
             "debug_state": "disabled",
             "debug_port": null
@@ -1451,7 +1460,7 @@ mod tests {
         let entry: AgentListEntry =
             serde_json::from_str(json).expect("Gateway list entry must decode");
         assert!(entry.alive);
-        assert!(entry.ready);
+        assert_eq!(entry.lifecycle, "sessions_ready");
     }
 
     /// Detail endpoint shares the rename — `pid` stays as a diagnostic-only

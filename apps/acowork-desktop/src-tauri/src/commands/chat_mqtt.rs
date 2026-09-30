@@ -25,7 +25,7 @@ use prost::Message;
 use tauri::Emitter;
 
 use acowork_core::mqtt_proto::{
-    BootstrapState, DataEnvelope,
+    AgentLifecycleState, BootstrapState, DataEnvelope,
     data_envelope, session_message,
 };
 use crate::mqtt_client::{DesktopMqttClient, MqttMessage, MqttStatus};
@@ -135,6 +135,8 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
                 "instance_id": parsed.instance_id,
                 "online": parsed.online,
                 "node_id": parsed.node_id,
+                "state": parsed.state,
+                "detail": parsed.detail,
             });
             let _ = app_handle.emit("agent-event", event);
             return;
@@ -426,6 +428,10 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
                     },
                     "online": status.online,
                     "node_id": status.node_id,
+                    // ADR-085: same shape as the dedicated status branch
+                    // above — `state` + `detail` ride the same envelope.
+                    "state": agent_lifecycle_state_name(status.state),
+                    "detail": status.detail,
                 });
                 let _ = app_handle.emit("agent-event", event);
             }
@@ -1268,7 +1274,29 @@ fn parse_agent_status_envelope(topic: &str, payload: &[u8]) -> Option<ParsedAgen
         instance_id,
         online: status.online,
         node_id: status.node_id,
+        // ADR-085: capability state travels on the same envelope — the
+        // frontend gates on `state` instead of the retired `ready` flag.
+        state: agent_lifecycle_state_name(status.state).to_string(),
+        detail: status.detail,
     })
+}
+
+/// ADR-085: map the protobuf `AgentLifecycleState` number to the wire
+/// name the frontend uses. Unknown values degrade to "unspecified" —
+/// same forward-compat rule as the Gateway (unknown enum ≠ error).
+fn agent_lifecycle_state_name(value: i32) -> &'static str {
+    // Match on the enum (not raw discriminants) so a proto renumbering
+    // surfaces as a compile error here instead of a silent wrong label.
+    match AgentLifecycleState::try_from(value) {
+        Ok(AgentLifecycleState::Offline) => "offline",
+        Ok(AgentLifecycleState::Starting) => "starting",
+        Ok(AgentLifecycleState::HttpReady) => "http_ready",
+        Ok(AgentLifecycleState::SessionsReady) => "sessions_ready",
+        Ok(AgentLifecycleState::Failed) => "failed",
+        // Unspecified (0) and unknown future values — same forward-compat
+        // rule as the Gateway: unknown enum ≠ error, gates like offline.
+        _ => "unspecified",
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1276,6 +1304,8 @@ struct ParsedAgentStatus {
     instance_id: String,
     online: bool,
     node_id: String,
+    state: String,
+    detail: String,
 }
 
 #[cfg(test)]
@@ -1322,6 +1352,8 @@ mod tests {
                 online: true,
                 instance_id: "uuid-online".to_string(),
                 node_id: "local".to_string(),
+                state: 4,
+                detail: String::new(),
             })),
         };
         let bytes = prost::Message::encode_to_vec(&env);
@@ -1333,6 +1365,7 @@ mod tests {
         assert_eq!(p.instance_id, "uuid-online");
         assert!(p.online);
         assert_eq!(p.node_id, "local");
+        assert_eq!(p.state, "sessions_ready");
     }
 
     #[test]
@@ -1347,6 +1380,8 @@ mod tests {
                 online: false,
                 instance_id: "uuid-offline".to_string(),
                 node_id: "remote-node".to_string(),
+                state: 1,
+                detail: String::new(),
             })),
         };
         let bytes = prost::Message::encode_to_vec(&env);
@@ -1358,6 +1393,7 @@ mod tests {
         assert_eq!(p.instance_id, "uuid-offline");
         assert!(!p.online);
         assert_eq!(p.node_id, "remote-node");
+        assert_eq!(p.state, "offline");
     }
 
     /// Regression: a non-status topic (e.g. `acowork/agents/{id}/sessions/x/...`)
@@ -1376,6 +1412,8 @@ mod tests {
                 online: true,
                 instance_id: "x".to_string(),
                 node_id: "local".to_string(),
+                state: 0,
+                detail: String::new(),
             })),
         };
         let bytes = prost::Message::encode_to_vec(&env);

@@ -122,6 +122,7 @@ describe("initSessionForAgent — fetchSessions retry", () => {
     it("retries fetchSessions until the latest session appears in agents[id].sessions", async () => {
         // fetchLatestSession resolves immediately with the target session.
         mockFetchLatestSession.mockResolvedValue({
+            status: "ok",
             session_id: SESSION_ID,
             title: "Hello world",
         });
@@ -171,7 +172,7 @@ describe("initSessionForAgent — no readable latest session (ADR-076)", () => {
      * list can answer immediately, so it is consulted inside the loop.
      */
     it("opens the caller's newest readable session instead of retrying", async () => {
-        mockFetchLatestSession.mockResolvedValue(null);
+        mockFetchLatestSession.mockResolvedValue({ status: "no_session" });
         mockFetchSessions.mockImplementation(() => {
             mockAgentsState[AGENT_ID] = {
                 sessions: [{ session_id: SESSION_ID, title: "Mine" }],
@@ -196,7 +197,7 @@ describe("initSessionForAgent — no readable latest session (ADR-076)", () => {
     it("creates a session when the account genuinely has none", async () => {
         vi.useFakeTimers();
         try {
-            mockFetchLatestSession.mockResolvedValue(null);
+            mockFetchLatestSession.mockResolvedValue({ status: "no_session" });
             mockFetchSessions.mockImplementation(() => {
                 mockAgentsState[AGENT_ID] = { sessions: [] };
             });
@@ -207,6 +208,36 @@ describe("initSessionForAgent — no readable latest session (ADR-076)", () => {
             await started;
 
             expect(mockCreateSession).toHaveBeenCalledWith(AGENT_ID);
+            expect(mockOpenSession).not.toHaveBeenCalled();
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    /**
+     * ADR-085 D4/D7: `unavailable` (503 boot window / network) is NOT
+     * "zero sessions". The orchestrator must exhaust its retry budget
+     * and then fail — never invent a session that races the Runtime's
+     * own startup (the duplicate-session bug this ADR removes).
+     */
+    it("does not create a session when the state is unavailable", async () => {
+        vi.useFakeTimers();
+        try {
+            mockFetchLatestSession.mockResolvedValue({ status: "unavailable" });
+            mockFetchSessions.mockImplementation(() => {
+                mockAgentsState[AGENT_ID] = { sessions: [] };
+            });
+
+            const started = startAgentAndSyncUI(AGENT_ID);
+            // Attach the rejection handler BEFORE advancing timers so the
+            // rejection is never "unhandled" mid-drain.
+            const assertion = expect(started).rejects.toThrow(/unavailable/);
+            await vi.advanceTimersByTimeAsync(15_000);
+            // startAgentAndSyncUI wraps initSessionForAgent in try/catch
+            // and rethrows — expect the rejection, not a silent create.
+            await assertion;
+
+            expect(mockCreateSession).not.toHaveBeenCalled();
             expect(mockOpenSession).not.toHaveBeenCalled();
         } finally {
             vi.useRealTimers();

@@ -1002,48 +1002,157 @@ struct ListSessionsQuery {
 ///
 /// This is the backend for `GET /api/agents/{id}/sessions` via the
 /// Gateway reverse proxy.
+///
+/// ADR-085 D4: an unfilled `session_metadata` slot is answered with
+/// `503 {"error":"session_not_ready"}` + `Retry-After: 2` — the
+/// startup window must be protocol-level distinguishable from "this
+/// agent has zero sessions" (a bare 404 here is what the Desktop used
+/// to misread as "no session" and answer with a spurious
+/// `POST /sessions`, leaving orphan sessions behind).
 async fn list_sessions(
     State(state): State<HttpState>,
     headers: HeaderMap,
     Query(query): Query<ListSessionsQuery>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
+) -> Result<Json<serde_json::Value>, SessionHttpError> {
     let page = query.page.unwrap_or(1).max(1);
     let size = query.size.unwrap_or(20).clamp(1, 200);
     let scope = crate::http::session_control::scope_from_headers(&headers);
 
     // ADR-040: usecase trait is the sole implementation path.
     let svc = state.session_metadata.lock().await;
-    let svc = svc.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let svc = svc.as_ref().ok_or_else(session_not_ready)?;
     let resp = svc
         .list_sessions(page, size, &scope)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_| session_http_error(StatusCode::INTERNAL_SERVER_ERROR))?;
     Ok(Json(
-        serde_json::to_value(resp).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+        serde_json::to_value(resp).map_err(|_| session_http_error(StatusCode::INTERNAL_SERVER_ERROR))?,
     ))
+}
+
+/// Error tuple for the session read endpoints: status + optional
+/// `Retry-After` header + JSON body (`{"error": "<code>"}`).
+type SessionHttpError = (
+    StatusCode,
+    axum::http::HeaderMap,
+    Json<serde_json::Value>,
+);
+
+fn session_http_error(status: StatusCode) -> SessionHttpError {
+    (
+        status,
+        axum::http::HeaderMap::new(),
+        Json(serde_json::json!({ "error": status.canonical_reason().unwrap_or("error") })),
+    )
+}
+
+/// ADR-085 D4: the "not yet, ask again shortly" answer for session
+/// interfaces — `503 {"error":"session_not_ready"}` + `Retry-After: 2`.
+fn session_not_ready() -> SessionHttpError {
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        axum::http::header::RETRY_AFTER,
+        axum::http::HeaderValue::from_static("2"),
+    );
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        headers,
+        Json(serde_json::json!({ "error": "session_not_ready" })),
+    )
+}
+
+/// ADR-085 D4: the honest "ready, and there is no session" answer —
+/// `404 {"error":"no_session"}`. The same body is used for
+/// "session exists but this caller may not read it", so the two are
+/// indistinguishable on the wire (no existence leak).
+fn no_session() -> SessionHttpError {
+    (
+        StatusCode::NOT_FOUND,
+        axum::http::HeaderMap::new(),
+        Json(serde_json::json!({ "error": "no_session" })),
+    )
+}
+
+/// ADR-085 D4 ("扫描未完成" row): whether an empty `latest_session`
+/// cache is a definitive "zero sessions" verdict (→ 404) or merely
+/// "not known yet" (→ 503 session_not_ready).
+///
+/// The definitive 404 requires the startup scan to have landed. The
+/// process-level proxy for that is the SESSIONS_READY lifecycle stamp:
+/// `publish_lifecycle(SessionsReady)` runs only after the scan seeded
+/// `latest_session`, so before the stamp an empty cache can still mean
+/// "sessions exist on disk but the scan has not found them yet" — the
+/// orphan-session seed this ADR removes. FAILED is deliberately NOT
+/// definitive: the session subsystem never became ready, so the honest
+/// answer stays 503 (callers must not create sessions against it).
+///
+/// Standalone mode has no MQTT client and therefore no lifecycle
+/// authority (ADR-085 §10 Q3: the state machine only constrains
+/// Gateway mode); it keeps the immediate-404 behavior.
+pub(crate) fn empty_cache_is_definitive(cur_lifecycle: u8, has_mqtt_client: bool) -> bool {
+    !has_mqtt_client
+        || cur_lifecycle == acowork_core::mqtt_proto::AgentLifecycleState::SessionsReady as u8
+}
+
+/// Read the process lifecycle stamp through the late-bind MQTT slot.
+/// Returns `(has_client, current_lifecycle)`; the slot is empty in
+/// standalone mode and during the pre-connect window of Phase A.
+async fn mqtt_lifecycle_stamp(state: &HttpState) -> (bool, u8) {
+    let slot = state.mqtt_client.lock().await;
+    match slot.as_ref() {
+        Some(client) => (true, client.lock().await.current_lifecycle()),
+        None => (false, 0),
+    }
 }
 
 /// `GET /sessions/latest` — single latest session.
 ///
-/// Reads from the shared `latest_session` Arc (updated by SessionManager),
-/// so it always reflects the authoritative latest session without any
-/// file-system scanning. Returns 404 if no session has been created yet.
+/// Reads from the shared `latest_session` Arc (updated by SessionManager
+/// and seeded by the startup scan), so it always reflects the
+/// authoritative latest session without any file-system scanning.
+///
+/// ADR-085 D4 status semantics:
+/// - `session_metadata` slot unfilled → `503 session_not_ready`
+///   (+ `Retry-After: 2`). The slot check is the protocol-level
+///   self-defense for callers that ignore lifecycle state.
+/// - slot filled but the startup scan has not landed yet (no
+///   SESSIONS_READY stamp) and the cache is empty → also `503
+///   session_not_ready`: an empty cache before the scan is "not known
+///   yet", never "zero sessions" (see `empty_cache_is_definitive`).
+/// - ready, no session (or not readable by this scope) →
+///   `404 {"error":"no_session"}` — a legitimate zero-session agent.
 ///
 /// This is the backend for `GET /api/agents/{id}/latest-session` via Gateway proxy.
 async fn get_latest_session(
     State(state): State<HttpState>,
     headers: HeaderMap,
-) -> Result<Json<serde_json::Value>, StatusCode> {
+) -> Result<Json<serde_json::Value>, SessionHttpError> {
     let scope = crate::http::session_control::scope_from_headers(&headers);
+
+    // ADR-085 D4: readiness gate — see `list_sessions` for the rationale.
+    {
+        let svc = state.session_metadata.lock().await;
+        if svc.is_none() {
+            return Err(session_not_ready());
+        }
+    }
 
     let latest = state
         .latest_session
         .read()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|_| session_http_error(StatusCode::INTERNAL_SERVER_ERROR))?
         .clone();
 
     let Some((session_id, title)) = latest else {
-        return Err(StatusCode::NOT_FOUND);
+        // ADR-085 D4: an empty cache is only a definitive "no session"
+        // once the startup scan has landed (SESSIONS_READY stamp);
+        // before that, answer 503 so no caller can misread the boot
+        // window as "zero sessions" and create an orphan.
+        let (has_client, cur) = mqtt_lifecycle_stamp(&state).await;
+        if !empty_cache_is_definitive(cur, has_client) {
+            return Err(session_not_ready());
+        }
+        return Err(no_session());
     };
 
     // ADR-076 §决策 4: the cached value is agent-wide (written at startup),
@@ -1051,8 +1160,17 @@ async fn get_latest_session(
     // the client fall back to the filtered list rather than leak the id —
     // ponytail: for a non-owner this costs one extra round trip; the
     // alternative is a full scan on every startup call.
-    crate::http::session_control::authorize_read(&state, &session_id, &scope)
-        .map_err(|(status, _)| status)?;
+    // ADR-085 D4: the body is the same `no_session` as the zero-session
+    // case, so the two remain indistinguishable.
+    if let Err((status, _)) =
+        crate::http::session_control::authorize_read(&state, &session_id, &scope)
+    {
+        return Err(if status == StatusCode::NOT_FOUND {
+            no_session()
+        } else {
+            session_http_error(status)
+        });
+    }
 
     Ok(Json(serde_json::json!({
         "session_id": session_id,
@@ -4047,6 +4165,27 @@ async fn post_rag_query(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ADR-085 D4 ("扫描未完成" row): an empty `latest_session` cache
+    /// is only a definitive 404 once the SESSIONS_READY stamp landed
+    /// (the stamp is set after the startup scan seeded the cache).
+    /// Before it — and on FAILED — the honest answer is 503.
+    #[test]
+    fn empty_cache_gate_follows_sessions_ready_stamp() {
+        use acowork_core::mqtt_proto::AgentLifecycleState as S;
+        // Standalone mode (no MQTT client, no lifecycle authority):
+        // the immediate 404 behavior is preserved.
+        assert!(empty_cache_is_definitive(0, false));
+        // Gateway mode: only the SESSIONS_READY stamp makes the empty
+        // cache definitive.
+        assert!(!empty_cache_is_definitive(0, true));
+        assert!(!empty_cache_is_definitive(S::Starting as u8, true));
+        assert!(!empty_cache_is_definitive(S::HttpReady as u8, true));
+        assert!(empty_cache_is_definitive(S::SessionsReady as u8, true));
+        // FAILED: the session subsystem never became ready — 503, not
+        // 404, so no caller creates a session against a failed startup.
+        assert!(!empty_cache_is_definitive(S::Failed as u8, true));
+    }
 
     /// Stable instance identity used by all in-process HTTP tests.
     /// Pre-ADR-073 these tests used the package id `com.test.agent`

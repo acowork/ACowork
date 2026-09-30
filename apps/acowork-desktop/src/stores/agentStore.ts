@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import { BUILTIN_ICON_IDS } from "../components/common/UserAvatar";
-import type { AgentInfo, AgentDetail, SessionInfo, SessionStatus, NodeInfo } from "../lib/types";
+import type { AgentInfo, AgentDetail, SessionInfo, SessionStatus, NodeInfo, AgentLifecycleState, LatestSessionResult } from "../lib/types";
 import { instanceIdOf, isProcessing } from "../lib/types";
 import { getGatewayUrl } from "../lib/config";
 import { fetchNodes as fetchNodesApi } from "../lib/gateway-api";
@@ -243,6 +243,16 @@ interface AgentStoreState {
    *  so a rapid second click (button mash / right-click + big button /
    *  double-click) never reaches the backend "already running" branch. */
   startingAgentIds: Set<string>;
+  /** ADR-085: last FAILED lifecycle detail per agent, latched.
+   *  The FAILED stamp is transient — the Runtime publishes it and exits,
+   *  and the LWT OFFLINE landing milliseconds later forces
+   *  `meta.lifecycle` back to "offline" and wipes `lifecycle_detail`
+   *  (the Gateway also drops its running_agents entry, so REST cannot
+   *  recover it either). Polling consumers (`waitForAgentReady`) would
+   *  only ever see a generic offline; this latch keeps the reason.
+   *  Cleared on the next successful start (`sessions_ready` observed)
+   *  or when a fresh `startAgent` attempt begins. */
+  lastStartupFailure: Record<string, string>;
 
   // ── Agent meta actions ──
 
@@ -286,12 +296,13 @@ interface AgentStoreState {
   // ── Session actions (write to agents[agentId].*) ──
 
   fetchSessions: (agentId: string, page?: number) => Promise<void>;
-  /** Fetch the latest session (by last_active_at desc) and persist its title
-   *  into `agents[agentId].sessionTitle` so the AgentList sidebar reflects it
-   *  without a separate title-only fetch. Returns null if the agent has no
-   *  sessions, is not connected, or the Runtime HTTP server is not yet
-   *  listening. */
-  fetchLatestSession: (agentId: string) => Promise<{ session_id: string; title: string | null } | null>;
+  /** Fetch the latest session (by last_active_at desc) without a full disk scan.
+   *  The Runtime caches this during startup. Persists the returned title into
+   *  `agents[agentId].sessionTitle` so the AgentList sidebar reflects it
+   *  without a separate title-only fetch. ADR-085 D4: returns a tri-state —
+   *  `no_session` (ready, none exist) is NOT the same as `unavailable`
+   *  (still booting / unreachable). */
+  fetchLatestSession: (agentId: string) => Promise<LatestSessionResult>;
   /**
    * Activate a session that has just been created (Runtime has already
    * confirmed via `session_created` event that the session exists and is
@@ -327,10 +338,17 @@ interface AgentStoreState {
   // ── Agent lifecycle (MQTT-driven) ──
 
   /** Update agent liveness from the MQTT `agent_status` event
-   *  (protobuf `DataEnvelope<AgentStatus>::online`, Sept 2026 —
-   *  auto-sleep retired). Writes the authoritative `alive` verdict
-   *  into `meta` — the single field every UI consumer gates on. */
-  updateAgentLiveness: (agentId: string, alive: boolean) => void;
+   *  (protobuf `DataEnvelope<AgentStatus>`, ADR-085). Writes the
+   *  authoritative `alive` verdict plus the `lifecycle` capability
+   *  state into `meta` — UI consumers gate on
+   *  `lifecycle === "sessions_ready"`. `offline` (online=false) also
+   *  forces `lifecycle = "offline"` (invariant 6). */
+  updateAgentLiveness: (
+    agentId: string,
+    alive: boolean,
+    lifecycle?: AgentLifecycleState,
+    detail?: string,
+  ) => void;
   /** Patch specific meta fields without a full state reload.
    *  `debug_state` is writable because the debug flow (exit DevMode)
    *  may need to align the local cache to the Gateway's confirmed
@@ -366,6 +384,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
   nodes: [],
   isSessionPanelOpen: false,
   startingAgentIds: new Set<string>(),
+  lastStartupFailure: {},
 
   // ════════════════════════════════════════════════════════════════════════
   // Agent meta actions
@@ -380,7 +399,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       const sr = list.find((a: AgentInfo) => a.agent_id === "com.acowork.senior-engineer");
       if (sr) {
         log.debug(
-          `[AgentStore] fetchAgents took ${(t1 - t0).toFixed(0)}ms | senior-engineer: alive=${sr.alive} ready=${sr.ready}`,
+          `[AgentStore] fetchAgents took ${(t1 - t0).toFixed(0)}ms | senior-engineer: alive=${sr.alive} lifecycle=${sr.lifecycle}`,
         );
       }
 
@@ -557,7 +576,12 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
     if (!chat.agentStates[id]?.activeSessionId) {
       void (async () => {
         const latest = await get().fetchLatestSession(id);
-        let target = latest?.session_id ?? null;
+        // ADR-085 D4: tri-state. `unavailable` (still booting / proxy
+        // 503 after the retry budget) must NOT fall through to
+        // createSession — that is the duplicate-session race D7 removes.
+        // The retained status envelope or the next select retries.
+        if (latest.status === "unavailable") return;
+        let target = latest.status === "ok" ? latest.session_id : null;
 
         if (!target) {
           // ADR-076 §决策 4: `/latest-session` answers from an agent-wide
@@ -661,6 +685,14 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
   },
 
   startAgent: async (agentId, devMode) => {
+    // ADR-085: a fresh start attempt invalidates the latched failure —
+    // a stale reason must never be presented as this attempt's failure.
+    set((state) => {
+      if (!(agentId in state.lastStartupFailure)) return state;
+      const next = { ...state.lastStartupFailure };
+      delete next[agentId];
+      return { lastStartupFailure: next };
+    });
     try {
       await invoke("start_agent", { agentId, devMode: devMode ?? false });
       // Gateway /start 只等到 Node 接受控制命令就返回（node_control
@@ -735,11 +767,28 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       console.warn(
         `[agentStore] waitForAgentReady attempt=${attempt} ` +
           `after ${Math.round(performance.now() - __w0)}ms ` +
-          `alive=${storage?.meta.alive} ready=${storage?.meta.ready}`,
+          `alive=${storage?.meta.alive} lifecycle=${storage?.meta.lifecycle}`,
       );
-      if (storage?.meta.ready) return;
+      // ADR-085: readiness is the SESSIONS_READY capability, not the
+      // retired `ready` bool — HTTP listening (http_ready) is NOT
+      // enough: the session slots may still be filling.
+      if (storage?.meta.lifecycle === "sessions_ready") return;
       if (!storage?.meta.alive) {
-        throw new Error("Agent is no longer alive before becoming ready");
+        // ADR-085: the FAILED stamp is transient — the LWT OFFLINE lands
+        // milliseconds after it and wipes both the retained state and the
+        // Gateway's running_agents entry. Prefer the latched reason so the
+        // user sees the actual startup failure, not a generic offline.
+        const failure = get().lastStartupFailure[agentId];
+        throw new Error(
+          failure
+            ? `Agent failed to start: ${failure}`
+            : "Agent is no longer alive before becoming ready",
+        );
+      }
+      if (storage?.meta.lifecycle === "failed") {
+        throw new Error(
+          `Agent failed to start: ${storage.meta.lifecycle_detail || get().lastStartupFailure[agentId] || "unknown error"}`,
+        );
       }
       await new Promise((resolve) => setTimeout(resolve, 500));
     }
@@ -875,7 +924,11 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
         return;
       }
       log.error("[AgentStore] Failed to fetch sessions:", e);
-      set((state) => patchAgent(state, agentId, { sessions: [], isLoading: false }));
+      // ADR-085: a failed fetch (503 startup window, network blip) is
+      // NOT evidence of "zero sessions" — keep the previous list so a
+      // transient failure cannot erase the sidebar or invite a
+      // duplicate createSession.
+      set((state) => patchAgent(state, agentId, { isLoading: false }));
     }
   },
 
@@ -884,7 +937,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
    *  `agents[agentId].sessionTitle` so the AgentList sidebar reflects it
    *  without a separate title-only fetch. Returns null if no sessions exist
    *  or the agent is not connected. */
-  fetchLatestSession: async (agentId: string) => {
+  fetchLatestSession: async (agentId: string): Promise<LatestSessionResult> => {
     try {
       // Bug B v3 fix: this endpoint proxies through the Runtime and
       // 503s during the window between Gateway discovering the agent
@@ -897,11 +950,17 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
         { tag: `AgentStore.fetchLatestSession(${agentId})`, logger: log },
       );
       if (!resp.ok) {
-        // ponytail: diagnostic — 404 here is the startup-window race.
+        // ADR-085 D4: 404 now has a canonical meaning — the Runtime is
+        // SESSIONS_READY and there is no readable session. Everything
+        // else (503 session_not_ready / agent_not_running, network) is
+        // `unavailable`, never "zero sessions".
+        if (resp.status === 404) {
+          return { status: "no_session" };
+        }
         console.warn(
           `[AgentStore] fetchLatestSession(${agentId}) HTTP ${resp.status} @${performance.now().toFixed(0)}ms`,
         );
-        return null;
+        return { status: "unavailable" };
       }
       const data = (await resp.json()) as {
         session_id: string;
@@ -915,10 +974,10 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       // untitled, `null` → idle animation). Only running agents reach
       // this branch.
       set((state) => patchAgent(state, agentId, { sessionTitle: title ?? "" }));
-      return { session_id: data.session_id, title };
+      return { status: "ok", session_id: data.session_id, title };
     } catch (e) {
       log.error(`[AgentStore] fetchLatestSession(${agentId}) failed:`, e);
-      return null;
+      return { status: "unavailable" };
     }
   },
 
@@ -1173,18 +1232,43 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
 
   // ── Agent lifecycle (MQTT-driven) ──
 
-  updateAgentLiveness: (agentId: string, alive: boolean) => {
-    // `alive` is the network-level verdict from `acowork/agents/{id}/status`
-    // — protobuf `DataEnvelope<AgentStatus>::online` (Sept 2026). Auto-sleep
-    // was retired alongside the plaintext wire, so the only transitions
-    // are `start_agent` / `stop_agent`. Patch `meta` because that is the
-    // single field every UI consumer reads.
+  updateAgentLiveness: (
+    agentId: string,
+    alive: boolean,
+    lifecycle?: AgentLifecycleState,
+    detail?: string,
+  ) => {
+    // ADR-085: `alive` is the network-level verdict from
+    // `acowork/agents/{id}/status` (protobuf `DataEnvelope<AgentStatus>`);
+    // `lifecycle` is the capability state riding the SAME envelope
+    // (starting → http_ready → sessions_ready, failed terminal).
+    // Invariant 6: online=false always means lifecycle=offline.
     set((state) => {
       const existing = state.agents[agentId];
       if (!existing) return state;
-      return patchAgent(state, agentId, {
-        meta: { ...existing.meta, alive },
+      const patched = patchAgent(state, agentId, {
+        meta: {
+          ...existing.meta,
+          alive,
+          lifecycle: alive ? (lifecycle ?? existing.meta.lifecycle) : "offline",
+          lifecycle_detail: alive ? (detail ?? existing.meta.lifecycle_detail) : "",
+        },
       });
+      // ADR-085: latch the FAILED reason — the stamp is transient (the
+      // Runtime publishes it and exits; the LWT OFFLINE milliseconds
+      // later wipes meta.lifecycle_detail and the Gateway drops its
+      // running_agents entry, so neither meta nor REST keeps it). A
+      // successful start (sessions_ready) invalidates the old reason.
+      let lastStartupFailure = state.lastStartupFailure;
+      if (lifecycle === "failed" && detail) {
+        lastStartupFailure = { ...lastStartupFailure, [agentId]: detail };
+      } else if (lifecycle === "sessions_ready" && agentId in lastStartupFailure) {
+        lastStartupFailure = { ...lastStartupFailure };
+        delete lastStartupFailure[agentId];
+      }
+      return lastStartupFailure === state.lastStartupFailure
+        ? patched
+        : { ...patched, lastStartupFailure };
     });
     // One-shot online event for startAgent's waiter (no polling).
     if (alive) notifyAgentOnline(agentId);

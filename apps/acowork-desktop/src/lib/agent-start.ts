@@ -32,10 +32,18 @@ async function initSessionForAgent(agentId: string): Promise<void> {
     // The scan runs in a background task and may not have finished yet.
     const maxRetries = 10;
     let latestSession: { session_id: string; title: string | null } | null = null;
+    // ADR-085 D4/D7: `createSession` may only fire when the Runtime has
+    // CONFIRMED "ready and zero sessions" (404 no_session is answered
+    // exclusively from the SESSIONS_READY state). `unavailable` (503 /
+    // network) never justifies creating a session.
+    let confirmedEmpty = false;
 
     for (let i = 0; i < maxRetries; i++) {
         const __t0 = performance.now();
-        latestSession = await useAgentStore.getState().fetchLatestSession(agentId);
+        const result = await useAgentStore.getState().fetchLatestSession(agentId);
+        latestSession = result.status === "ok"
+            ? { session_id: result.session_id, title: result.title }
+            : null;
         // ponytail: diagnostic
         console.warn(
             `[agent-start] initSessionForAgent retry=${i} ` +
@@ -45,40 +53,51 @@ async function initSessionForAgent(agentId: string): Promise<void> {
         );
         if (latestSession) break;
 
-        // ADR-076 §决策 4: `/latest-session` answers from an agent-wide
-        // cache, so under `multi_user` it names a session the caller may
-        // not read as soon as a second account has used this agent — and
-        // it answers 404 for that, by design, rather than leak the id.
-        // Retrying cannot fix that: the call is wrong, not early. The
-        // caller's own list is scope-filtered by the Runtime, so if it has
-        // rows they are readable *now* and the newest one is the answer.
-        // This is the "fall back to the filtered list" the Runtime's 404
-        // is documented to invite.
-        await useAgentStore.getState().fetchSessions(agentId);
-        const mine = useAgentStore.getState().agents[agentId]?.sessions ?? [];
-        if (mine.length > 0) {
-            // `fetchSessions` sorts by `created_at` desc → [0] is newest.
-            latestSession = {
-                session_id: mine[0]!.session_id,
-                title: mine[0]!.title ?? null,
-            };
+        if (result.status === "no_session") {
+            // ADR-076 §决策 4: `/latest-session` answers from an agent-wide
+            // cache, so under `multi_user` it can 404 for a session the
+            // caller may not read — and by ADR-085 D4 a 404 is only ever
+            // answered once the Runtime is SESSIONS_READY, so it is
+            // definitive, not early. The caller's own list is
+            // scope-filtered by the Runtime, so if it has rows they are
+            // readable *now* and the newest one is the answer.
+            await useAgentStore.getState().fetchSessions(agentId);
+            const mine = useAgentStore.getState().agents[agentId]?.sessions ?? [];
+            if (mine.length > 0) {
+                // `fetchSessions` sorts by `created_at` desc → [0] is newest.
+                latestSession = {
+                    session_id: mine[0]!.session_id,
+                    title: mine[0]!.title ?? null,
+                };
+            } else {
+                // Ready + zero readable sessions: the only state that
+                // justifies creating one (D7 single-writer).
+                confirmedEmpty = true;
+            }
             break;
         }
 
+        // `unavailable` (503 boot window / network) — retry.
         if (i < maxRetries - 1) {
             await new Promise((resolve) => setTimeout(resolve, 1000));
         }
     }
 
     if (!latestSession) {
-        // Both sources agree and the startup scan had its whole budget to
-        // say otherwise: this account has no session for this agent. That
-        // is the normal first-run state under `multi_user` (the agent's
-        // cold-start session belongs to nobody, so it is not ours either).
-        // Create one — owned by the caller, private from birth — instead of
-        // leaving the chat panel blank. Activation rides the same
-        // `session_created` MQTT event the toolbar's "+" relies on, so
-        // there is nothing to open here.
+        if (!confirmedEmpty) {
+            // Never reached SESSIONS_READY within the retry budget. Do
+            // NOT create a session here — that is exactly the duplicate
+            // race ADR-085 D7 removes. Surface the failure; the start
+            // flow's caller shows it and the user can retry.
+            throw new Error(
+                `Agent ${agentId} session state unavailable (still starting or unreachable)`,
+            );
+        }
+        // The Runtime confirmed SESSIONS_READY with no readable session:
+        // normal first-run state. Create one — owned by the caller,
+        // private from birth — instead of leaving the chat panel blank.
+        // Activation rides the same `session_created` MQTT event the
+        // toolbar's "+" relies on, so there is nothing to open here.
         await useAgentStore.getState().createSession(agentId);
         return;
     }

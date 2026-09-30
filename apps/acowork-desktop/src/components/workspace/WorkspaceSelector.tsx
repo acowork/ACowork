@@ -31,14 +31,14 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden, readOnly }
     selectedAgentId ? s.agents[selectedAgentId]?.meta?.node_id : undefined,
   );
   // Note: we intentionally do NOT gate `fetchWorkspaces` on
-  // `s.agents[selectedAgentId]?.meta?.ready` here. Bug B v3 fix —
-  // the meta.ready flag is pushed by MQTT retained messages whose
-  // arrival is asynchronous to Runtime HTTP readiness. Gating on
-  // ready caused the workspace dropdown to flash "Loading…" forever
-  // when the user opened the workspace panel during the first second
-  // after agent start. Instead, the store's `fetchWorkspaces` now
-  // owns the 503 retry loop (see `lib/httpRetry.ts`) so transient
-  // 503s during Runtime port registration recover transparently.
+  // `s.agents[selectedAgentId]?.meta?.lifecycle` here (ADR-085;
+  // formerly `meta.ready`). Bug B v3 fix — the lifecycle push arrives
+  // asynchronously to Runtime HTTP readiness. Gating on it caused the
+  // workspace dropdown to flash "Loading…" forever when the user opened
+  // the workspace panel during the first second after agent start.
+  // Instead, the store's `fetchWorkspaces` now owns the 503 retry loop
+  // (see `lib/httpRetry.ts`) so transient 503s during Runtime port
+  // registration recover transparently.
   const { gatewayUrl, gatewayMode } = useSettingsStore();
   const { addToast } = useToast();
   const { workspaces, sessionWorkspaceMap, loading, fetchWorkspaces, setSessionWorkspace } =

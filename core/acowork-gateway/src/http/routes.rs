@@ -235,7 +235,6 @@ pub fn build_router(state: AppState) -> Router {
         // sequence (see vault_api.rs).
         .merge(crate::http::vault_api::vault_routes())
         .merge(crate::http::agents::agent_routes())
-        .merge(crate::http::chat::chat_routes())
         .merge(crate::http::provider_api::provider_routes())
         .merge(crate::http::config_api::config_routes())
         .merge(crate::http::cron_api::cron_routes())

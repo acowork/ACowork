@@ -217,7 +217,8 @@ export function ToolsTab() {
     // Bug B v3 fix: the merged `/tools` endpoint proxies through the
     // Runtime and 503s during the boot window. `with503Retry` rides out
     // the transient 503 so the RightPanel/Tools tab does not have to
-    // gate on `meta.ready` — same root-cause as `fetchWorkspaces` /
+    // gate on `meta.lifecycle` (ADR-085; formerly `meta.ready`) — same
+    // root-cause as `fetchWorkspaces` /
     // `fetchTree` / `fetchNodes` / `fetchLatestSession`.
     (async () => {
       try {

@@ -378,14 +378,14 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
   // agent, this selector re-fires the effect.
   useEffect(() => {
     if (!selectedAgentId) return;
-    if (!selectedAgent?.alive || !selectedAgent?.ready) return;
+    if (selectedAgent?.lifecycle !== "sessions_ready") return; // ADR-085: capability gate
     fetch(`${getGatewayUrl()}/api/agents/${selectedAgentId}/status`)
       .then((r) => r.ok ? r.json() : null)
       .then((data) => {
         if (data) log.debug("[RightPanel] Agent status:", data);
       })
       .catch(() => {/* ignore */});
-  }, [selectedAgentId, selectedAgent?.alive, selectedAgent?.ready]);
+  }, [selectedAgentId, selectedAgent?.alive, selectedAgent?.lifecycle]);
 
   // Context-snapshots level-1 collapse (whole card body toggles from the
   // card header — same interaction as the PROMPT card). Default open.

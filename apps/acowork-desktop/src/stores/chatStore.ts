@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { ChatMessage, ContextUsageInfo, TokenUsage, ToolApprovalNeededEvent, PaginatedMessages, ConversationEntry, SessionStatus, AskQuestionEvent, EventClearedEvent, ModelEntry, TodoItem, AttachedItem, ProviderAccount } from "../lib/types";
+import type { ChatMessage, ContextUsageInfo, TokenUsage, ToolApprovalNeededEvent, PaginatedMessages, ConversationEntry, SessionStatus, AskQuestionEvent, EventClearedEvent, ModelEntry, TodoItem, AttachedItem, ProviderAccount, AgentLifecycleState } from "../lib/types";
 import { toWireAttachedItems } from "../lib/types";
 import { isAtTail } from "../lib/paginationUtils";
 import { useAgentStore } from "./agentStore";
@@ -3917,12 +3917,17 @@ export function handleMessageEvent(
     case "agent_status": {
       const aid = data.instance_id as string | undefined;
       const online = data.online as boolean | undefined;
+      // ADR-085: `state` + `detail` ride the same status envelope —
+      // zero new subscriptions. Unknown/missing state degrades to
+      // "unspecified" (chat_mqtt.rs normalizes), never an error.
+      const lifecycle = data.state as AgentLifecycleState | undefined;
+      const detail = typeof data.detail === "string" ? data.detail : undefined;
       if (aid && online !== undefined) {
         // `alive` mirrors `online` — the MQTT payload is the protobuf
         // `DataEnvelope<AgentStatus>::online` (Sept 2026; auto-sleep was
         // retired so the only transitions are start/stop). The
         // `node_id` rides along for per-node grouping.
-        useAgentStore.getState().updateAgentLiveness(aid, online);
+        useAgentStore.getState().updateAgentLiveness(aid, online, lifecycle, detail);
         // HTTP health double-check on MQTT disconnect (distributed liveness):
         // the Runtime may run on a remote node, and its MQTT connection can
         // drop (e.g. system sleep → KeepAlive timeout → Gateway marks the

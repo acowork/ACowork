@@ -8,7 +8,6 @@ pub mod agents;
 pub mod auth;
 pub mod auth_middleware;
 pub mod bootstrap_api;
-pub mod chat;
 pub mod config_api;
 pub mod cron_api;
 pub mod debug_mqtt;

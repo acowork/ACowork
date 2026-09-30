@@ -75,7 +75,7 @@ function makeMeta(): AgentInfo {
         display_name: null,
         role: null,
         alive: true,
-        ready: true,
+        lifecycle: "sessions_ready",
         debug_state: "disabled",
         debug_port: null,
         workspace: "",

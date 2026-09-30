@@ -19,11 +19,12 @@ import { cn } from "../../lib/utils";
 export function MemoryPanel() {
   const { t } = useTranslation();
   const { selectedAgentId } = useAgentStore();
-  // We intentionally do NOT gate data fetching on `meta.ready`. The
-  // ready flag is pushed via MQTT retained and arrives asynchronously
-  // to Runtime HTTP readiness — gating on it caused the MemoryPanel
-  // to flash "Loading…" forever when the user opened it during the
-  // first second after agent start. The store fetchers
+  // We intentionally do NOT gate data fetching on `meta.lifecycle`
+  // (ADR-085; formerly `meta.ready`). The lifecycle push arrives
+  // asynchronously to Runtime HTTP readiness — gating on it caused the
+  // MemoryPanel to flash "Loading…" forever when the user opened it
+  // during the first second after agent start. Memory endpoints are
+  // Phase-A (HTTP_READY) capabilities anyway. The store fetchers
   // (`memoryStore.fetchNodes` / `fetchStats`) now own the 503 retry
   // loop via `with503Retry`, so a transient 503 recovers
   // transparently.

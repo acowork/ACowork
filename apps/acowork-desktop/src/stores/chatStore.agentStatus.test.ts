@@ -110,7 +110,7 @@ describe("agent_status handler: HTTP double-check on offline events", () => {
         expect(mockVerifyAgentHealth).not.toHaveBeenCalled();
         // updateAgentLiveness must still be called once (with online=true).
         expect(mockUpdateAgentLiveness).toHaveBeenCalledTimes(1);
-        expect(mockUpdateAgentLiveness).toHaveBeenCalledWith(AGENT, true);
+        expect(mockUpdateAgentLiveness).toHaveBeenCalledWith(AGENT, true, undefined, undefined);
     });
 
     it("probes /health on online=false AND overrides back to online when the Runtime is alive", async () => {
@@ -129,7 +129,7 @@ describe("agent_status handler: HTTP double-check on offline events", () => {
 
         // First call: the agent_status event itself.
         expect(mockUpdateAgentLiveness).toHaveBeenCalledTimes(1);
-        expect(mockUpdateAgentLiveness).toHaveBeenLastCalledWith(AGENT, false);
+        expect(mockUpdateAgentLiveness).toHaveBeenLastCalledWith(AGENT, false, undefined, undefined);
 
         // Let the probe's promise resolve.
         await vi.waitFor(() => {
@@ -162,7 +162,7 @@ describe("agent_status handler: HTTP double-check on offline events", () => {
 
         // Only the initial offline update — no override back to online.
         expect(mockUpdateAgentLiveness).toHaveBeenCalledTimes(1);
-        expect(mockUpdateAgentLiveness).toHaveBeenCalledWith(AGENT, false);
+        expect(mockUpdateAgentLiveness).toHaveBeenCalledWith(AGENT, false, undefined, undefined);
     });
 
     it("does not crash if the probe throws (network error, DNS, etc.)", async () => {
@@ -186,7 +186,7 @@ describe("agent_status handler: HTTP double-check on offline events", () => {
 
         // No override — only the initial offline update.
         expect(mockUpdateAgentLiveness).toHaveBeenCalledTimes(1);
-        expect(mockUpdateAgentLiveness).toHaveBeenCalledWith(AGENT, false);
+        expect(mockUpdateAgentLiveness).toHaveBeenCalledWith(AGENT, false, undefined, undefined);
     });
 
     it("ignores malformed events without an instance_id", () => {

@@ -2521,7 +2521,11 @@ pub(crate) async fn proxy_to_runtime_with_method(
             let mut response = (
                 StatusCode::SERVICE_UNAVAILABLE,
                 axum::Json(serde_json::json!({
-                    "error": "Runtime HTTP endpoint not registered",
+                    // ADR-085 D4: machine-readable error code — the
+                    // Desktop distinguishes "wait for the lifecycle
+                    // status push" (agent_not_running) from "retry the
+                    // request" (session_not_ready) on this field.
+                    "error": "agent_not_running",
                     "id": id,
                     "message": "The Gateway has not yet discovered this Runtime's HTTP endpoint. The Runtime should publish a retained message on `acowork/agents/{id}/http_endpoint` at startup (ADR-033, ADR-055 D3). Verify the Runtime is running, has connected to the MQTT broker, and was started with `--http-port 0` so its localhost HTTP server is up."
                 })),
@@ -2636,77 +2640,6 @@ async fn resolve_node_token(state: &AppState, agent_id: &str) -> Option<String> 
         .or_else(|| gw.running(agent_id).map(|a| a.node_id.as_str()))?;
     let store = broker_auth.node_tokens.lock().ok()?;
     store.get_token(node_id).map(str::to_string)
-}
-
-/// Fetch JSON from a Runtime HTTP endpoint.
-///
-/// Looks up the Runtime's HTTP port from the registry, calls `GET {path}`,
-/// and returns the parsed JSON body. Used by handlers that need typed
-/// responses from Runtime endpoints (e.g. latest-session, session-state).
-pub(crate) async fn fetch_runtime_json(
-    state: &AppState,
-    id: &str,
-    path: &str,
-) -> Result<serde_json::Value, crate::http::routes::ApiError> {
-    send_runtime_json(state, id, path, reqwest::Method::GET, None).await
-}
-
-/// Send JSON to a Runtime HTTP endpoint with configurable method and body.
-///
-/// Looks up the Runtime's HTTP port from the registry, calls `{method} {path}`
-/// with optional JSON body, and returns the parsed response.
-pub(crate) async fn send_runtime_json(
-    state: &AppState,
-    id: &str,
-    path: &str,
-    method: reqwest::Method,
-    body: Option<&serde_json::Value>,
-) -> Result<serde_json::Value, crate::http::routes::ApiError> {
-    use crate::http::routes::ApiError;
-
-    let registry = state.runtime_http_registry.as_ref().ok_or_else(|| {
-        ApiError::service_unavailable("Runtime HTTP proxy registry not initialized")
-    })?;
-
-    let endpoint = {
-        let reg = registry.read().await;
-        reg.get_endpoint(id)
-    };
-
-    let endpoint = endpoint.ok_or_else(|| {
-        ApiError::not_found(&format!(
-            "Agent {} is not running (no Runtime HTTP endpoint registered)",
-            id
-        ))
-    })?;
-
-    let url = format!("{}{}", endpoint, path);
-
-    let client = runtime_http_client();
-    let mut req = client.request(method, &url);
-    if let Some(json_body) = body {
-        req = req.json(json_body);
-    }
-    let resp = req.send().await.map_err(|e| {
-        tracing::warn!(error = %e, url = %url, "Failed to fetch from Runtime");
-        ApiError::service_unavailable(&format!("Runtime not reachable: {}", e))
-    })?;
-
-    let status = resp.status();
-    let body: serde_json::Value = resp.json().await.map_err(|e| {
-        tracing::warn!(error = %e, url = %url, "Failed to parse Runtime JSON response");
-        ApiError::internal(&format!("Invalid Runtime response: {}", e))
-    })?;
-
-    if !status.is_success() {
-        let msg = body
-            .get("error")
-            .and_then(|v| v.as_str())
-            .unwrap_or("Unknown error");
-        return Err(ApiError::not_found(msg));
-    }
-
-    Ok(body)
 }
 
 /// HTTP client for making proxy requests to Runtime.
@@ -3270,7 +3203,8 @@ mod tests {
                 started_at: chrono::Utc::now(),
                 workspace: String::new(),
                 node_id: "local".to_string(),
-                ready: true,
+                lifecycle: acowork_core::mqtt_proto::AgentLifecycleState::SessionsReady,
+                lifecycle_detail: String::new(),
                 dev_mode: false,
                 debug_state: DebugState::Disabled,
                 debug_port: None,
@@ -3338,7 +3272,8 @@ mod tests {
                 started_at: chrono::Utc::now(),
                 workspace: String::new(),
                 node_id: "local".to_string(),
-                ready: true,
+                lifecycle: acowork_core::mqtt_proto::AgentLifecycleState::SessionsReady,
+                lifecycle_detail: String::new(),
                 dev_mode: true,
                 // Start in the Enabled state — that's the
                 // realistic precondition for a disable call.
@@ -3655,7 +3590,7 @@ mod tests {
             .unwrap();
         let body_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
         assert_eq!(
-            body_json["error"], "Runtime HTTP endpoint not registered",
+            body_json["error"], "agent_not_running",
             "503 body must explain why"
         );
         assert_eq!(body_json["id"], "com.acowork.never-registered");
@@ -3830,5 +3765,67 @@ mod tests {
             Some("2"),
             "503 must carry Retry-After: 2 to match the boot-window cadence"
         );
+        // ADR-085 D4b: machine-readable code so the Desktop can tell
+        // "wait for a lifecycle push" apart from "retry the request".
+        let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(body_json["error"], "agent_not_running");
+    }
+
+    /// ADR-085 D4b: a non-2xx from the Runtime (here 503
+    /// `session_not_ready`) must be passed through verbatim — status,
+    /// body, and `Retry-After` — never collapsed into a 404.
+    #[tokio::test]
+    async fn proxy_passes_through_runtime_503_verbatim() {
+        use tower::util::ServiceExt;
+
+        let runtime_app = axum::Router::new().fallback(|| async {
+            let mut resp = (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                axum::Json(serde_json::json!({"error": "session_not_ready"})),
+            )
+                .into_response();
+            resp.headers_mut().insert(
+                "retry-after",
+                axum::http::HeaderValue::from_static("2"),
+            );
+            resp
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move { axum::serve(listener, runtime_app).await.unwrap() });
+
+        let (state, _registry) =
+            build_proxy_state_with_agent("com.acowork.architect", port).await;
+        let app = super::proxy_routes().with_state(state);
+
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/api/agents/com.acowork.architect/tools")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resp.status(),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "Runtime 503 must survive the proxy as 503, not collapse to 404"
+        );
+        assert_eq!(
+            resp.headers().get("retry-after").map(|v| v.to_str().unwrap()),
+            Some("2"),
+            "Runtime's Retry-After must be forwarded"
+        );
+        let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(body_json["error"], "session_not_ready");
     }
 }

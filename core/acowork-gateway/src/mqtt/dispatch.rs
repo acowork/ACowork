@@ -266,7 +266,6 @@ pub fn topic_matches(filter: &str, topic: &str) -> bool {
 ///
 /// Topics with simple text payloads rather than protobuf envelopes:
 /// - `acowork/agents/+/http_endpoint` → registers Runtime HTTP port for reverse proxy
-/// - `acowork/agents/+/ready` → updates `running_agents[id].ready`
 /// - `acowork/nodes/+/status` → updates NodeRegistry online/offline
 ///   (ADR-055 §6.2; plain text + LWT, same shape as agent status).
 /// - `acowork/nodes/+/info` → protobuf `DataEnvelope<NodeInfo>`
@@ -376,9 +375,33 @@ pub fn handle_plaintext_message(topic: &str, payload: &[u8], ctx: &DispatchConte
                 .write()
                 .await
                 .update_from_mqtt(&topic_owned, &payload_owned);
+            // ADR-085: the envelope now carries the capability state
+            // (`state`/`detail`) that the retired plaintext
+            // `agents/{id}/ready` topic used to pin. Unknown enum values
+            // (encoder from a newer version) decode to UNSPECIFIED, which
+            // every consumer gates like OFFLINE.
+            let lifecycle =
+                acowork_core::mqtt_proto::AgentLifecycleState::try_from(status.state)
+                    .unwrap_or(acowork_core::mqtt_proto::AgentLifecycleState::Unspecified);
             // Drive running_agents to match the broker view.
             if status.online {
                 track_running_agent_for_status(&state, &id_for_task).await;
+                let mut gw = state.write().await;
+                gw.set_agent_lifecycle(
+                    &id_for_task,
+                    lifecycle,
+                    &status.detail,
+                );
+                if lifecycle == acowork_core::mqtt_proto::AgentLifecycleState::Failed {
+                    // D3: startup failure is user-visible — log it at
+                    // info (not just the UI) so server-side triage has
+                    // the reason on record.
+                    tracing::info!(
+                        agent_id = %id_for_task,
+                        detail = %status.detail,
+                        "Runtime reported FAILED lifecycle state via MQTT"
+                    );
+                }
             } else {
                 let mut gw = state.write().await;
                 if gw.running_agents.contains_key(&id_for_task) {
@@ -389,118 +412,6 @@ pub fn handle_plaintext_message(topic: &str, payload: &[u8], ctx: &DispatchConte
                     gw.running_agents.remove(&id_for_task);
                 }
             }
-        });
-    } else if topic_matches("acowork/agents/+/ready", topic) {
-        // Plain-text retained payload ("true" / "false") published by the
-        // Runtime after Phase A–C have all populated the HTTP server's
-        // late-bind slots and the runtime is ready to serve any
-        // `/agents/{id}/*` request. The Gateway pins
-        // `running_agents[id].ready` to this value so `/api/agents`
-        // reports it; the Desktop fast-path keeps its `running && ready`
-        // gate closed until the Gateway mirrors `ready=true`.
-        //
-        // Plain text (not `DataEnvelope`) is deliberate for this one: the
-        // value is a single boolean with no companion fields, and unlike
-        // `status` it never needed a structured shape. (`status` moved to
-        // `DataEnvelope<AgentStatus>` in Sept 2026.)
-        let agent_id = match topic
-            .strip_prefix("acowork/agents/")
-            .and_then(|s| s.strip_suffix("/ready"))
-        {
-            Some(id) if !id.is_empty() => id.to_string(),
-            _ => {
-                tracing::warn!(topic, "ready topic matched but agent_id extraction failed");
-                return;
-            }
-        };
-        let payload_str = match std::str::from_utf8(payload) {
-            Ok(s) => s.trim(),
-            Err(e) => {
-                tracing::warn!(
-                    topic,
-                    agent_id = %agent_id,
-                    error = %e,
-                    "ready payload is not valid UTF-8 — ignoring"
-                );
-                return;
-            }
-        };
-        let ready = match payload_str {
-            "true" => true,
-            "false" => false,
-            other => {
-                tracing::warn!(
-                    topic,
-                    agent_id = %agent_id,
-                    payload = %other,
-                    "ready payload is not 'true'/'false' — ignoring"
-                );
-                return;
-            }
-        };
-        let state_for_ready = ctx.state.clone();
-        let agent_id_for_log = agent_id.clone();
-        tokio::spawn(async move {
-            let mut gw = state_for_ready.write().await;
-            // ADR-055 node-hosted lifecycle: a Runtime that announces
-            // `ready` without having been started through POST /start
-            // (e.g. started by the Node at boot, or restarted after a
-            // reconnect) never enters `running_agents`, so its ready
-            // signal used to be dropped silently and the Desktop's
-            // `running && ready` gate never opened. Auto-track it as
-            // node-hosted (pid = 0) so GET /api/agents surfaces the
-            // live state and POST /start can short-circuit idempotently
-            // instead of paying a control/start round-trip.
-            if !gw.running_agents.contains_key(&agent_id_for_log) {
-                // ADR-073: the instance's install record is the
-                // authority for the hosting node (and workspace);
-                // fall back to the local node only for a Runtime with
-                // no aggregated inventory yet (legacy auto-track).
-                let (workspace, resolved_agent_id, hosting_node_id) =
-                    match gw.installed(&agent_id_for_log) {
-                        Some(i) => (
-                            std::path::PathBuf::from(&i.install_path)
-                                .join("workspace")
-                                .to_string_lossy()
-                                .to_string(),
-                            i.agent_id.clone(),
-                            i.node_id.clone(),
-                        ),
-                        None => (
-                            String::new(),
-                            agent_id_for_log.clone(),
-                            // ADR-075 D6: no install record yet (legacy
-                            // auto-track) → assume the local node.
-                            acowork_core::node::LOCAL_NODE_ID.to_string(),
-                        ),
-                    };
-                gw.add_running(crate::gateway::state::RunningAgentInfo {
-                    instance_id: agent_id_for_log.clone(),
-                    agent_id: resolved_agent_id,
-                    pid: 0,
-                    started_at: chrono::Utc::now(),
-                    workspace,
-                    node_id: hosting_node_id,
-                    ready,
-                    dev_mode: false,
-                    debug_state: crate::gateway::state::DebugState::Disabled,
-                    debug_port: None,
-                    workspace_config_json: None,
-                    current_embed_dim: None,
-                    migration: None,
-                });
-                tracing::info!(
-                    agent_id = %agent_id_for_log,
-                    ready,
-                    "Auto-tracked node-hosted Runtime from ready signal (pid=0)"
-                );
-            }
-            gw.set_agent_ready(&agent_id_for_log, ready);
-            tracing::info!(
-                agent_id = %agent_id_for_log,
-                ready,
-                "Runtime ready signal received via MQTT"
-            );
         });
     } else if topic_matches("acowork/nodes/+/status", topic) {
         // ADR-055 §6.2: node online/offline (plain text + LWT,
@@ -1439,10 +1350,10 @@ fn extract_agent_id_from_status_topic(topic: &str) -> Option<String> {
 /// ADR-055 idempotent fast-path (because `is_online` is true), and
 /// the user could not recover.
 ///
-/// Idempotent: preserves the existing entry's `ready`, `dev_mode`,
+/// Idempotent: preserves the existing entry's `lifecycle`, `dev_mode`,
 /// `debug_state` and `started_at` fields if the entry already
-/// exists. The `ready` topic handler refines `ready` separately, so
-/// this helper only needs to install the bare-minimum liveness shape.
+/// exists. The status dispatch handler refines `lifecycle` separately,
+/// so this helper only needs to install the bare-minimum liveness shape.
 ///
 /// Auto-sleep was removed in Sept 2026 — this helper now only handles
 /// the online transition; `sleeping` no longer exists as a state.
@@ -1492,16 +1403,15 @@ async fn track_running_agent_for_status(state: &SharedState, agent_id: &str) {
         // Hosting node from the install record, `"local"` only when the
         // record is missing (ADR-075 D6).
         node_id,
-        // `ready` defaults to false; the ready topic handler upgrades
-        // it the moment `ready=true` is observed. The Desktop's
-        // `running && ready` gate stays closed for ~1s after this
-        // point, which matches the Phase A→D window during normal
-        // startup (and is unavoidable when the process has truly
-        // just reconnected).
-        ready: false,
+        // ADR-085: the lifecycle starts at OFFLINE and is upgraded by
+        // the status envelope's `state` field the moment the next
+        // (retained) publish lands — Desktop capability gates read the
+        // state directly, no separate ready signal exists anymore.
+        lifecycle: acowork_core::mqtt_proto::AgentLifecycleState::Offline,
+        lifecycle_detail: String::new(),
         // Status is online-class; the Runtime's session has been resumed.
-        // dev_mode / debug_state default to off until the ready topic
-        // handler refines them.
+        // dev_mode / debug_state default to off until refined by the
+        // start path / debug flow.
         dev_mode: false,
         debug_state: crate::gateway::state::DebugState::Disabled,
         debug_port: None,
@@ -1575,7 +1485,8 @@ pub async fn reconcile_running_agents(state: &SharedState, agent_registry: &Shar
                 workspace,
                 // ADR-075 D6: fallback anchor for the local node.
                 node_id: acowork_core::node::LOCAL_NODE_ID.to_string(),
-                ready: false,
+                lifecycle: acowork_core::mqtt_proto::AgentLifecycleState::Offline,
+                lifecycle_detail: String::new(),
                 dev_mode: false,
                 debug_state: crate::gateway::state::DebugState::Disabled,
                 debug_port: None,
@@ -1696,6 +1607,28 @@ mod tests {
         let envelope = DataEnvelope {
             version: 1,
             payload: Some(data_envelope::Payload::NodeReady(ready)),
+        };
+        prost::Message::encode_to_vec(&envelope)
+    }
+
+    /// ADR-085: build an `AgentStatus` envelope for status-topic dispatch tests.
+    fn agent_status_payload(
+        agent_id: &str,
+        online: bool,
+        state: acowork_core::mqtt_proto::AgentLifecycleState,
+    ) -> Vec<u8> {
+        let envelope = DataEnvelope {
+            version: 1,
+            payload: Some(data_envelope::Payload::AgentStatus(
+                acowork_core::mqtt_proto::AgentStatus {
+                    agent_id: agent_id.to_string(),
+                    online,
+                    instance_id: agent_id.to_string(),
+                    node_id: acowork_core::node::LOCAL_NODE_ID.to_string(),
+                    state: state as i32,
+                    detail: String::new(),
+                },
+            )),
         };
         prost::Message::encode_to_vec(&envelope)
     }
@@ -1943,20 +1876,25 @@ mod tests {
         assert!(node_reg.read().await.is_online("local"));
     }
 
+    /// ADR-085: a node-hosted Runtime that announces an online status
+    /// envelope without having been started through POST /start must be
+    /// auto-tracked as pid=0 (so GET /api/agents surfaces it as running),
+    /// and the envelope's `state` mirrors into `RunningAgentInfo.lifecycle`.
     #[tokio::test]
-    async fn test_ready_topic_auto_tracks_node_hosted_runtime() {
+    async fn test_status_topic_auto_tracks_node_hosted_runtime() {
         let http_reg = crate::http::proxy::new_shared_registry();
         let agent_reg = crate::mqtt::agent_registry::new_shared_registry();
         let node_reg = crate::mqtt::node_registry::new_shared_registry();
         let state = test_state();
 
-        // A node-hosted Runtime announces `ready` without having been
-        // started through POST /start — it must be auto-tracked as
-        // pid=0 so GET /api/agents surfaces `running && ready` and
-        // POST /start can short-circuit idempotently.
+        let payload = agent_status_payload(
+            "com.acowork.senior-engineer",
+            true,
+            acowork_core::mqtt_proto::AgentLifecycleState::SessionsReady,
+        );
         handle_plaintext_message(
-            "acowork/agents/com.acowork.senior-engineer/ready",
-            b"true",
+            "acowork/agents/com.acowork.senior-engineer/status",
+            &payload,
             &DispatchContext {
                 runtime_http_registry: http_reg.clone(),
                 agent_registry: agent_reg.clone(),
@@ -1971,36 +1909,45 @@ mod tests {
         let entry = gw
             .running_agents
             .get("com.acowork.senior-engineer")
-            .expect("node-hosted Runtime must be auto-tracked from its ready signal");
+            .expect("node-hosted Runtime must be auto-tracked from its online status envelope");
         assert_eq!(entry.pid, 0, "node-hosted Runtime is tracked with pid=0");
-        assert!(entry.ready, "tracked ready must mirror the MQTT payload");
+        assert_eq!(
+            entry.lifecycle,
+            acowork_core::mqtt_proto::AgentLifecycleState::SessionsReady,
+            "status.state must mirror into RunningAgentInfo.lifecycle"
+        );
     }
 
+    /// ADR-085 D3 / §8.1: a status envelope from a newer encoder with an
+    /// unknown `state` discriminant must degrade to `UNSPECIFIED` (never
+    /// an error, never a capability state) — every consumer gates
+    /// UNSPECIFIED like OFFLINE, so an unknown value cannot be misread
+    /// as "ready". The `detail` field must still ride through.
     #[tokio::test]
-    async fn test_ready_false_keeps_auto_tracked_runtime() {
+    async fn test_status_unknown_state_degrades_to_unspecified() {
         let http_reg = crate::http::proxy::new_shared_registry();
         let agent_reg = crate::mqtt::agent_registry::new_shared_registry();
         let node_reg = crate::mqtt::node_registry::new_shared_registry();
         let state = test_state();
 
-        // A runtime that later reports not-ready must stay tracked but
-        // flip `ready` to false (the Gateway never spuriously removes a
-        // node-hosted entry on a transient not-ready signal).
+        // `state = 99` — a discriminant outside AgentLifecycleState
+        // (simulates an encoder from a newer protocol version).
+        let envelope = DataEnvelope {
+            version: 1,
+            payload: Some(data_envelope::Payload::AgentStatus(
+                acowork_core::mqtt_proto::AgentStatus {
+                    agent_id: "com.acowork.senior-engineer".to_string(),
+                    online: true,
+                    instance_id: "com.acowork.senior-engineer".to_string(),
+                    node_id: acowork_core::node::LOCAL_NODE_ID.to_string(),
+                    state: 99,
+                    detail: "from a newer runtime".to_string(),
+                },
+            )),
+        };
         handle_plaintext_message(
-            "acowork/agents/com.acowork.senior-engineer/ready",
-            b"true",
-            &DispatchContext {
-                runtime_http_registry: http_reg.clone(),
-                agent_registry: agent_reg.clone(),
-                node_registry: node_reg.clone(),
-                state: state.clone(),
-                ..Default::default()
-            },
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        handle_plaintext_message(
-            "acowork/agents/com.acowork.senior-engineer/ready",
-            b"false",
+            "acowork/agents/com.acowork.senior-engineer/status",
+            &prost::Message::encode_to_vec(&envelope),
             &DispatchContext {
                 runtime_http_registry: http_reg.clone(),
                 agent_registry: agent_reg.clone(),
@@ -2015,8 +1962,56 @@ mod tests {
         let entry = gw
             .running_agents
             .get("com.acowork.senior-engineer")
-            .expect("node-hosted Runtime must remain tracked after not-ready");
-        assert!(!entry.ready, "ready must mirror the latest MQTT payload");
+            .expect("unknown state must not reject the envelope — the Runtime stays tracked");
+        assert_eq!(
+            entry.lifecycle,
+            acowork_core::mqtt_proto::AgentLifecycleState::Unspecified,
+            "unknown discriminant must decode to UNSPECIFIED, never a capability state"
+        );
+    }
+
+    /// ADR-085 invariant 6: an `online=false` status envelope (the LWT path
+    /// — crash or clean exit) removes the tracked entry.
+    #[tokio::test]
+    async fn test_status_offline_envelope_removes_tracked_runtime() {
+        let http_reg = crate::http::proxy::new_shared_registry();
+        let agent_reg = crate::mqtt::agent_registry::new_shared_registry();
+        let node_reg = crate::mqtt::node_registry::new_shared_registry();
+        let state = test_state();
+
+        let ctx = DispatchContext {
+            runtime_http_registry: http_reg.clone(),
+            agent_registry: agent_reg.clone(),
+            node_registry: node_reg.clone(),
+            state: state.clone(),
+            ..Default::default()
+        };
+        handle_plaintext_message(
+            "acowork/agents/com.acowork.senior-engineer/status",
+            &agent_status_payload(
+                "com.acowork.senior-engineer",
+                true,
+                acowork_core::mqtt_proto::AgentLifecycleState::HttpReady,
+            ),
+            &ctx,
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        handle_plaintext_message(
+            "acowork/agents/com.acowork.senior-engineer/status",
+            &agent_status_payload(
+                "com.acowork.senior-engineer",
+                false,
+                acowork_core::mqtt_proto::AgentLifecycleState::Offline,
+            ),
+            &ctx,
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let gw = state.read().await;
+        assert!(
+            !gw.running_agents.contains_key("com.acowork.senior-engineer"),
+            "online=false must remove the tracked Runtime (invariant 6)"
+        );
     }
 
     #[tokio::test]
@@ -2824,6 +2819,8 @@ mod tests {
                         online: true,
                         instance_id: INSTANCE_ARCHITECT.to_string(),
                         node_id: acowork_core::node::LOCAL_NODE_ID.to_string(),
+                        state: 4,
+                        detail: String::new(),
                     },
                 ),
             ),
@@ -2876,7 +2873,8 @@ mod tests {
                 workspace: String::new(),
                 // ADR-075 D6: fallback anchor for the local node.
                 node_id: acowork_core::node::LOCAL_NODE_ID.to_string(),
-                ready: true,
+                lifecycle: acowork_core::mqtt_proto::AgentLifecycleState::SessionsReady,
+                lifecycle_detail: String::new(),
                 dev_mode: false,
                 debug_state: crate::gateway::state::DebugState::Disabled,
                 debug_port: None,
@@ -2918,7 +2916,8 @@ mod tests {
                 workspace: String::new(),
                 // ADR-075 D6: fallback anchor for the local node.
                 node_id: acowork_core::node::LOCAL_NODE_ID.to_string(),
-                ready: false,
+                lifecycle: acowork_core::mqtt_proto::AgentLifecycleState::Offline,
+                lifecycle_detail: String::new(),
                 dev_mode: false,
                 debug_state: crate::gateway::state::DebugState::Disabled,
                 debug_port: None,
@@ -2954,6 +2953,8 @@ mod tests {
                         online: true,
                         instance_id: INSTANCE_ARCHITECT.to_string(),
                         node_id: acowork_core::node::LOCAL_NODE_ID.to_string(),
+                        state: 4,
+                        detail: String::new(),
                     },
                 ),
             ),

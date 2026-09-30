@@ -170,6 +170,34 @@ export interface DiagnoseReport {
 }
 
 /** Agent list entry — matches Gateway API */
+/**
+ * ADR-085: agent lifecycle state names, mirroring the Gateway's
+ * `lifecycle_name()` and the protobuf `AgentLifecycleState` enum.
+ * Ordering is capability-monotonic: `sessions_ready` ⊇ `http_ready`
+ * ⊇ `starting`; `failed` is terminal, `offline` is the LWT value.
+ */
+export type AgentLifecycleState =
+    | "unspecified"
+    | "offline"
+    | "starting"
+    | "http_ready"
+    | "sessions_ready"
+    | "failed";
+
+/**
+ * ADR-085 D4: three-state result of `GET /latest-session`.
+ * - `ok` — a readable latest session exists.
+ * - `no_session` — the agent is SESSIONS_READY and has no session this
+ *   caller can read (Runtime answers 404 `no_session` only when ready).
+ * - `unavailable` — 503 (`session_not_ready` / `agent_not_running`) or
+ *   network failure after the boot-window retry budget. Callers must
+ *   NOT interpret this as "zero sessions" (no createSession trigger).
+ */
+export type LatestSessionResult =
+    | { status: "ok"; session_id: string; title: string | null }
+    | { status: "no_session" }
+    | { status: "unavailable" };
+
 export interface AgentInfo {
   /**
    * ADR-073: instance identity (UUID v4, immutable). Every agent list
@@ -207,7 +235,16 @@ export interface AgentInfo {
    * not, driven exclusively by `start_agent` / `stop_agent`.
    */
   alive: boolean;
-  ready: boolean;
+  /**
+   * ADR-085: agent lifecycle state (replaces the retired `ready` flag).
+   * Wire values: "unspecified" | "offline" | "starting" | "http_ready"
+   * | "sessions_ready" | "failed". Consumers gate on
+   * `lifecycle === "sessions_ready"` (capability: sessions addressable),
+   * never on `!== "offline"`.
+   */
+  lifecycle: AgentLifecycleState;
+  /** ADR-085: failure reason when lifecycle === "failed", else empty. */
+  lifecycle_detail?: string;
   dev_mode: boolean;
   /**
    * Whether DevMode is actually live for the running agent right now
@@ -258,7 +295,8 @@ export interface AgentDetail {
    * (MQTT network signal, topology independent, never a PID probe).
    */
   alive: boolean;
-  ready: boolean;
+  /** ADR-085: lifecycle name — see `AgentInfo.lifecycle`. */
+  lifecycle: AgentLifecycleState;
   /**
    * Local process id (diagnostic only — node-hosted Runtimes report 0).
    * NEVER used for liveness.

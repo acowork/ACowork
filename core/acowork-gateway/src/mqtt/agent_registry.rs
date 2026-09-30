@@ -223,6 +223,8 @@ mod tests {
                 online,
                 instance_id: instance_id.to_string(),
                 node_id: node_id.to_string(),
+                state: 0,
+                detail: String::new(),
             })),
         }
         .encode_to_vec()

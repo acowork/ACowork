@@ -20,11 +20,6 @@ use crate::error::Result;
 use crate::startup::context::{AgentBootContext, SessionBootContext, build_session_manager_config};
 use acowork_core::timeout_config::constants;
 
-/// Cached result of the background scan that finds the most recently active
-/// session — `(session_id, title)`. Held in an `Arc<RwLock<…>>` so the
-/// SessionManager can read it on the main thread after construction.
-type LatestSessionScan = Arc<std::sync::RwLock<Option<(String, Option<String>)>>>;
-
 /// Phase B: assemble per-session state on the main thread (Gateway mode).
 ///
 /// This must complete synchronously (no spawn) before Phase C so that
@@ -270,11 +265,14 @@ pub(crate) async fn phase_b_init_session(
     }
 
     // Spawn background session scan.
-    // The result (latest session by last_active_at) is stored in a shared
-    // Arc so SessionManager can read it after construction, avoiding a
-    // duplicate full scan when the frontend calls fetchLatestSession.
-    let latest_session_scan: LatestSessionScan = Arc::new(std::sync::RwLock::new(None));
-    let latest_session_scan_clone = latest_session_scan.clone();
+    // ADR-085: the result (latest session by `last_active_at`) is seeded
+    // straight into the shared `latest_session` Arc the HTTP server and
+    // SessionManager already read. Previously it landed in a separate
+    // slot that Phase B consumed exactly once — a scan finishing after
+    // that read was silently dropped and `/latest-session` answered
+    // 404 forever while sessions existed on disk (the orphan-session
+    // seed, paired with the D7 removal).
+    let latest_session_scan = ctx.latest_session.clone();
     let conversations_dir_clone = conversations_dir.clone();
     let _session_scan_handle = tokio::spawn(async move {
         let handle = crate::conversation::scan_sessions_async(
@@ -285,8 +283,14 @@ pub(crate) async fn phase_b_init_session(
         );
         let (sessions, _, _agent_totals) = handle.await.unwrap_or((Vec::new(), 0, (0, 0, 0, 0)));
         if let Some(s) = sessions.first() {
-            *latest_session_scan_clone.write().unwrap() =
-                Some((s.session_id.clone(), s.title.clone()));
+            let pair = (s.session_id.clone(), s.title.clone());
+            // Don't clobber a session the resume path already seeded (same
+            // lookup, but ordering between the two writers is not fixed).
+            let mut g = latest_session_scan.write().unwrap();
+            if g.is_none() {
+                *g = Some(pair);
+            }
+            drop(g);
         }
         tracing::info!(count = sessions.len(), "Background session scan complete");
     });
@@ -931,17 +935,20 @@ pub(crate) async fn phase_b_init_session(
         );
     }
 
-    // Seed the latest session from the background scan (if it has completed).
-    // If the scan hasn't finished yet, latest_session() returns None and the
-    // frontend will retry — the scan result is written atomically so a
-    // subsequent call will see it.
-    if let Some((session_id, title)) = latest_session_scan.read().unwrap().clone() {
-        session_manager.set_latest_session(session_id, title);
-        tracing::info!("SessionManager: seeded latest session from startup scan");
-    }
+    // (The background scan seeds `latest_session` directly — see Step 9
+    // above; no post-construction copy is needed anymore.)
 
-    // ── Step 9 (cont.): Create initial session ───────────────────────
-    let initial_session_id = if let Some(conv) = conversation_session {
+    // ── Step 9 (cont.): Resume latest session ────────────────────────
+    // ADR-085 D7: the `else` branch that pre-created an ownerless
+    // `initial session` when zero sessions were found on disk is
+    // removed. Zero sessions is a legitimate state — the "ensure a
+    // session exists" contract now has exactly one writer: the Desktop,
+    // which POSTs /sessions after observing SESSIONS_READY and a
+    // confirmed-empty list. The old dual-writer setup meant every
+    // mistaken 404-read ("no session" while the scan was still
+    // running, or while the slot was unfilled) left behind an orphan
+    // session the user never sees.
+    if let Some(conv) = conversation_session {
         // ADR-028 / ADR-066: merge the resumed session's persisted token
         // totals into the AgentCore counters so the live context_usage
         // WebSocket push doesn't report agent_total < session_total
@@ -962,38 +969,8 @@ pub(crate) async fn phase_b_init_session(
                 Some(committed_lines.clone()),
             )
             .await?;
-        sid
-    } else {
-        let sid = session_manager.create_session().await?;
-        // Register the new session as "latest" so that /latest-session
-        // (used by the frontend's selectAgent → loadLatestSession flow)
-        // returns it immediately on the next query, even before any
-        // message is sent.  Without this, a freshly started agent with
-        // zero sessions on disk returns found:false / 404 and the
-        // frontend ChatPanel stays blank.
-        session_manager.set_latest_session(sid.clone(), None);
-
-        // ADR-076 §决策 4: this session has **no owner** — it is created
-        // before any account has spoken to this process, and there is no
-        // request to take an identity from. Mark it `Private` so it reads
-        // as *unclaimed* rather than as *shared*: an ownerless session
-        // with an unset visibility is readable and writable by every
-        // account, which would put the first user and the second user in
-        // the same conversation. `Private` + no owner means "belongs to
-        // nobody", so no account gets it; the first account to open the
-        // frontend creates its own session through `POST /sessions`, owned
-        // and private from birth.
-        //
-        // Local mode is unaffected: there the caller's scope is always
-        // `Unfiltered`, which the predicate short-circuits before any of
-        // this matters.
-        session_manager.set_session_visibility(
-            &sid,
-            Some(crate::conversation::SessionVisibility::Private),
-        );
-        sid
-    };
-    tracing::info!(initial_session_id = %initial_session_id, "Initial session created");
+        tracing::info!(initial_session_id = %sid, "Resumed latest session at startup");
+    }
 
     // Workspace context and prompt file are applied inside
     // create_session_with_id_and_conversation (single source of truth from
@@ -1058,6 +1035,51 @@ pub(crate) async fn phase_b_init_session(
                 });
             }));
         }
+    }
+
+    // ADR-085 D3: SESSIONS_READY — the authoritative "chat can begin"
+    // signal, published at the end of Phase B once BOTH late-bind slots
+    // (session_metadata / session_config, filled above) and the
+    // SessionManager slot are populated. It additionally waits on the
+    // background session scan: until the scan lands, `/latest-session`
+    // cannot honestly distinguish "zero sessions" from "sessions exist
+    // but are still being walked" — a premature SESSIONS_READY would
+    // re-open the orphan-session window D7 just closed (D4 table,
+    // "扫描未完成" row). Detached so Phase C/D never block on a large
+    // conversations tree (ADR-058 §3.4 keeps the same rationale).
+    // Monotonicity + reconnect re-stamp live in `publish_lifecycle` /
+    // `run_bootstrap` (D3b); a failed publish self-heals via the 5 s
+    // heartbeat, which re-stamps `current_lifecycle`.
+    {
+        let slot = ctx.mqtt_client_slot.clone();
+        tokio::spawn(async move {
+            let _ = _session_scan_handle.await;
+            let Some(client) = slot.lock().await.as_ref().cloned() else {
+                // Unreachable in Gateway mode (Phase A fills the slot
+                // before Phase B runs); logged because a silent skip
+                // would leave the agent stuck at HTTP_READY with
+                // nothing on record to explain why.
+                tracing::warn!(
+                    "SESSIONS_READY skipped: MQTT client slot is empty \
+                     (standalone mode or Phase A connect failure)"
+                );
+                return;
+            };
+            if let Err(e) = client
+                .lock()
+                .await
+                .publish_lifecycle(
+                    acowork_core::mqtt_proto::AgentLifecycleState::SessionsReady,
+                    "",
+                )
+                .await
+            {
+                tracing::warn!(
+                    error = %e,
+                    "SESSIONS_READY publish failed; heartbeat will retry"
+                );
+            }
+        });
     }
 
     Ok(SessionBootContext {

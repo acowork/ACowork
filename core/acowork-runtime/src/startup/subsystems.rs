@@ -71,8 +71,10 @@ pub(crate) async fn phase_c_spawn_subsystems(
     });
 
     // ── Spawn chunk relay task first ─────────────────────────────────
-    // This must run before AgentReady is sent so the chunk channel is
-    // already being drained when the Gateway loop starts.
+    // This must run before the session-ready signal reaches the Desktop
+    // (ADR-085 `SESSIONS_READY`; historically the `AgentReady` message)
+    // so the chunk channel is already being drained when the Gateway
+    // loop starts and the first chat turn streams.
     //
     // ADR-033: MQTT chunk relay takes priority over gRPC when MQTT is
     // available. All chunk events are published to the MQTT broker as

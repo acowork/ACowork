@@ -1149,7 +1149,7 @@ export function ChatPanel() {
   useEffect(() => {
     if (!selectedAgentId) return;
     const agentMeta = useAgentStore.getState().agents[selectedAgentId]?.meta;
-    if (!agentMeta?.alive || !agentMeta?.ready) return;
+    if (agentMeta?.lifecycle !== "sessions_ready") return; // ADR-085: capability gate
 
     const currentSessId = useChatStore.getState().agentStates[selectedAgentId]?.activeSessionId;
     if (!currentSessId) {
@@ -1228,7 +1228,7 @@ export function ChatPanel() {
         messageCount: existingMessages.length,
       });
     }
-  }, [selectedAgentId, selectedAgent?.alive, selectedAgent?.ready]);
+  }, [selectedAgentId, selectedAgent?.alive, selectedAgent?.lifecycle]);
 
   // ── Session switch effect ─────────────────────────────────────────
   // When the user picks a different session from the session panel,
@@ -2101,13 +2101,16 @@ export function ChatPanel() {
   // ── Initializing session ──
   // Bug B v3 fix: the previous "agent not yet ready" gate (rendering
   // a "starting agent" spinner when `running && !ready`) has been
-  // removed. The `meta.ready` flag is pushed via MQTT retained and
-  // arrives asynchronously to Runtime HTTP readiness — gating the
-  // chat view on it caused the right pane to flash "starting…" for
-  // 2-3 seconds on every agent switch, with no progress signal. Now:
-  //   1. `selectAgent` (agentStore) drops the `ready` clause so it
-  //      fires `fetchLatestSession` + `openSession` regardless of
-  //      MQTT-retained readiness.
+  // removed. The retired `meta.ready` flag (ADR-085: replaced by
+  // `meta.lifecycle`) was pushed via MQTT retained and arrived
+  // asynchronously to Runtime HTTP readiness — gating the chat view on
+  // it caused the right pane to flash "starting…" for 2-3 seconds on
+  // every agent switch, with no progress signal. Now:
+  //   1. `selectAgent` (agentStore) gates only on `alive` — the
+  //      session fetchers ride out the boot window via `with503Retry`
+  //      and the Runtime's D4 gate (503 `session_not_ready` until the
+  //      startup scan lands) keeps the answers honest, so no store-side
+  //      lifecycle check is needed here.
   //   2. Every fetcher underneath the chat view (latest-session,
   //      loadSession, memory, workspace list, file tree, …) now
   //      routes through `with503Retry`, so a transient 503 during

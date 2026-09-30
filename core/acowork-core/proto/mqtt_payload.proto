@@ -435,6 +435,42 @@ message AgentStatus {
   string instance_id = 4;
   /// ADR-073: current location (mutable, updated on migration).
   string node_id = 5;
+  /// ADR-085: capability progression state. Replaces the plaintext
+  /// `acowork/agents/{id}/ready` topic. `online == false` implies
+  /// OFFLINE (invariant 6) — senders must set state accordingly.
+  AgentLifecycleState state = 6;
+  /// ADR-085: human-readable detail, currently only meaningful when
+  /// state == FAILED (startup failure reason shown to the user).
+  string detail = 7;
+}
+
+/// Agent lifecycle capability state (ADR-085).
+///
+/// Answers "what can this agent do right now" — NOT "which startup step
+/// has it reached". States are ordered by capability so the numeric
+/// values are monotonic: a receiver can compare `>=` to gate any
+/// capability. Never renumber these values; append only.
+enum AgentLifecycleState {
+  // Version-mismatch fallback (ADR-085 D3): an encoder that does not
+  // know this field, or a state value outside this enum, decodes to 0.
+  // Consumers must gate on `state >= SESSIONS_READY`, never on
+  // `state != OFFLINE` — UNSPECIFIED behaves like OFFLINE in the UI.
+  AGENT_LIFECYCLE_STATE_UNSPECIFIED    = 0;
+  /// Process not running. LWT payload, Gateway stop path, initial state.
+  AGENT_LIFECYCLE_STATE_OFFLINE        = 1;
+  /// MQTT connected; HTTP not listening yet. Cannot serve any request.
+  AGENT_LIFECYCLE_STATE_STARTING       = 2;
+  /// Phase A complete (HTTP listening + http_endpoint published).
+  /// Can serve: workspaces, config, LSP, skills, memory, debug.
+  /// CANNOT serve: any session interface (404 would be a lie).
+  AGENT_LIFECYCLE_STATE_HTTP_READY     = 3;
+  /// Phase B complete (session_metadata / session_config slots filled).
+  /// Can serve: all session interfaces. This is the Desktop's gate for
+  /// "chat can begin".
+  AGENT_LIFECYCLE_STATE_SESSIONS_READY = 4;
+  /// A startup phase failed. `detail` carries the reason. Desktop shows
+  /// it verbatim instead of a generic "starting…" spinner.
+  AGENT_LIFECYCLE_STATE_FAILED         = 5;
 }
 
 /// Agent metadata.

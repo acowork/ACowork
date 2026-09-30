@@ -35,14 +35,6 @@ const PERSISTENT_SUBSCRIPTIONS: &[(&str, QoS)] = &[
     // with the ADR-055 Phase 2a node subscriptions.
     ("acowork/agents/+/http_endpoint", QoS::AtLeastOnce),
     ("acowork/agents/+/status", QoS::AtLeastOnce),
-    // Runtime publishes "true" only after Phase A–C have all populated
-    // the HTTP server's late-bind slots; the Gateway pins
-    // `running_agents[id].ready` to this value so `/api/agents` reports
-    // it. Without this subscription the Desktop's `running && ready`
-    // gate stays open on stale spawn-time defaults, and every
-    // `/sessions/{sid}/messages` HTTP call from the ChatPanel races with
-    // Phase B and hits 503.
-    ("acowork/agents/+/ready", QoS::AtLeastOnce),
     // ADR-055 §6.2: node control plane — LWT-driven node online/offline
     // (plain text) + node metadata (protobuf NodeInfo envelope), both
     // retained so a fresh Gateway startup recovers the node view from

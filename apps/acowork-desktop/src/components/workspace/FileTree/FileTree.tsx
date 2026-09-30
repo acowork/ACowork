@@ -232,13 +232,13 @@ export function FileTree({
     // Selection is owned by WorkspaceExplorer now; nothing to reset locally.
 
     // Fetch root when agent or workspace changes. We deliberately do
-    // NOT gate on `meta.ready` here — Bug B v3 fix. The ready flag is
-    // pushed via MQTT retained and arrives asynchronously to Runtime
-    // HTTP readiness; gating on it caused the right pane to flash
-    // "Loading…" forever when the user opened the workspace tab during
-    // the first second after agent start. The fetcher in `treeClient`
-    // now owns the 503 retry loop (see `lib/httpRetry.ts`) so transient
-    // 503s recover transparently.
+    // NOT gate on `meta.lifecycle` (ADR-085; formerly `meta.ready`)
+    // here — Bug B v3 fix. The lifecycle push arrives asynchronously to
+    // Runtime HTTP readiness; gating on it caused the right pane to
+    // flash "Loading…" forever when the user opened the workspace tab
+    // during the first second after agent start. The fetcher in
+    // `treeClient` now owns the 503 retry loop (see `lib/httpRetry.ts`)
+    // so transient 503s recover transparently.
     //
     // Self-healing: the effect ALSO re-fetches when the root node
     // transitions back to `idle` (e.g. an in-flight fetch was aborted

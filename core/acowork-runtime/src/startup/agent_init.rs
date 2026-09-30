@@ -562,28 +562,29 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
                     );
                 }
 
-                // Publish `ready=true` as soon as Phase A completes — HTTP server
-                // is listening and `http_port` is already announced, so the
-                // Gateway can proxy `/workspaces`, `/workspaces/tree` and the
-                // other Phase-A-ready endpoints immediately. Phase B/C work
-                // (conversation resume, Grafeo store load, workspace FS
-                // watchers) continues asynchronously without blocking
-                // `ready=true`. Previously this signal was deferred to Phase
-                // D and waited on `sync_from_resolver()` → PollWatcher.watch
-                // recursively walking large workspace roots (e.g. a project
-                // tree with `target/`, `node_modules/`, etc. could delay
-                // `ready=true` by 6–8 seconds even though the HTTP server
-                // was up after ~35 ms). See ADR-058 §3.4 for the Desktop
-                // reconnect-driven full tree re-sync that makes late watcher
-                // events safe.
+                // ADR-085 D3: publish HTTP_READY as soon as Phase A
+                // completes — HTTP server is listening and `http_port`
+                // is already announced, so the Gateway can proxy
+                // `/workspaces`, `/workspaces/tree` and the other
+                // Phase-A-ready endpoints immediately. Session
+                // interfaces stay 503 until SESSIONS_READY (Phase B
+                // end, see `session_init::phase_b_init_session`).
+                // Previously this signal was deferred to Phase D and
+                // waited on `sync_from_resolver()` → PollWatcher.watch
+                // recursively walking large workspace roots (e.g. a
+                // project tree with `target/`, `node_modules/`, etc.
+                // could delay the ready signal by 6–8 seconds even
+                // though the HTTP server was up after ~35 ms). See
+                // ADR-058 §3.4 for the Desktop reconnect-driven full
+                // tree re-sync that makes late watcher events safe.
                 let _ = mqtt_client
                     .as_ref()
                     .expect("just initialized above")
-                    .publish_ready(true)
+                    .publish_lifecycle(acowork_core::mqtt_proto::AgentLifecycleState::HttpReady, "")
                     .await;
                 tracing::info!(
                     agent_id=%loaded.manifest.agent_id,
-                    "Phase A ready signal published; Phase B/C continue in background"
+                    "Phase A lifecycle (HTTP_READY) published; Phase B/C continue in background"
                 );
             }
             Err(e) => tracing::warn!(error=%e, "MQTT client connect failed"),

@@ -174,7 +174,7 @@ describe("verifyAgentHealth (HTTP double-check on MQTT disconnect)", () => {
     });
 
     it("returns false on a 503 response (Runtime not registered)", async () => {
-        mockFetchOnce({ error: "Runtime HTTP endpoint not registered" }, 503);
+        mockFetchOnce({ error: "agent_not_running" }, 503);
         const alive = await verifyAgentHealth("com.acowork.never-registered", 3000, "http://gw");
         expect(alive).toBe(false);
     });

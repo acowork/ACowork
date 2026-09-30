@@ -284,20 +284,6 @@ pub async fn handle_cron_list(
     GatewayResponse::CronListResult { entries }
 }
 
-/// Handle AgentReady — marks the agent as ready to receive messages.
-///
-/// Called by Runtime after SessionTask initialization is complete.
-/// This enables the Desktop App to know when it's safe to open WebSocket
-/// connections for chat streaming.
-pub async fn handle_agent_ready(agent_id: &str, state: &SharedState) -> GatewayResponse {
-    tracing::info!("AgentReady: agent_id={}", agent_id);
-
-    let mut gw = state.write().await;
-    gw.set_agent_ready(agent_id, true);
-
-    GatewayResponse::UsageReportAck {} // Simple acknowledgment
-}
-
 /// Resolved LLM configuration for an Agent.
 ///
 /// Returned by `resolve_llm_config_for_agent`, replaces the previous

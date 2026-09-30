@@ -108,6 +108,24 @@ pub fn agent_routes() -> Router<AppState> {
 
 // ── Response types ────────────────────────────────────────────────────
 
+/// ADR-085: short wire name for a lifecycle state in HTTP responses.
+/// The Desktop gates on these strings (`lifecycleAtLeast` in
+/// `agentStore`); keep in sync with `AgentLifecycleState` in
+/// `proto/mqtt_payload.proto` and the Tauri `agent_status` event.
+pub(crate) fn lifecycle_name(
+    state: acowork_core::mqtt_proto::AgentLifecycleState,
+) -> &'static str {
+    use acowork_core::mqtt_proto::AgentLifecycleState as S;
+    match state {
+        S::Unspecified => "unspecified",
+        S::Offline => "offline",
+        S::Starting => "starting",
+        S::HttpReady => "http_ready",
+        S::SessionsReady => "sessions_ready",
+        S::Failed => "failed",
+    }
+}
+
 /// Agent list entry
 #[derive(Serialize)]
 pub struct AgentListResponse {
@@ -138,8 +156,14 @@ pub struct AgentListResponse {
     /// Auto-sleep was retired in Sept 2026; the only on/off transition
     /// is now stop / start.
     pub alive: bool,
-    /// Whether the agent's SessionTask is initialized and ready to receive messages
-    pub ready: bool,
+    /// ADR-085: capability progression state — one of `"offline"`,
+    /// `"starting"`, `"http_ready"`, `"sessions_ready"`, `"failed"`,
+    /// `"unspecified"` (version-mismatch fallback, gates like offline).
+    /// Replaces the old `ready: bool`; `alive == false` always reports
+    /// `"offline"` (invariant 6).
+    pub lifecycle: String,
+    /// ADR-085: failure reason when lifecycle == "failed", else empty.
+    pub lifecycle_detail: String,
     /// Whether the agent was started with the `--dev-mode` flag (Debug
     /// Protocol enabled at boot).
     ///
@@ -196,8 +220,11 @@ pub struct AgentDetailResponse {
     /// [`AgentListResponse::alive`]: the Runtime's MQTT session is
     /// reachable. Never a process/PID probe (see `alive` doc above).
     pub alive: bool,
-    /// Whether the agent's SessionTask is initialized and ready to receive messages
-    pub ready: bool,
+    /// ADR-085: capability progression state — same vocabulary as
+    /// [`AgentListResponse::lifecycle`].
+    pub lifecycle: String,
+    /// ADR-085: failure reason when lifecycle == "failed", else empty.
+    pub lifecycle_detail: String,
     /// Local process id (diagnostic only — meaningful only when the
     /// Gateway spawned the Runtime on this machine; node-hosted
     /// Runtimes report `0`). NEVER used for liveness.
@@ -292,7 +319,23 @@ pub async fn list_agents(
             // metadata (pid/ready/dev_mode) and is populated by MQTT
             // events anyway.
             let alive = reg_state.map(|s| s.online).unwrap_or(false);
-            let ready = running_info.map(|r| r.ready).unwrap_or(false);
+            // ADR-085 invariant 6: `online == false` ⇒ OFFLINE — the
+            // lifecycle mirrors the registry verdict, `running_agents`
+            // only refines it while online.
+            let lifecycle = lifecycle_name(if alive {
+                running_info
+                    .map(|r| r.lifecycle)
+                    .unwrap_or(acowork_core::mqtt_proto::AgentLifecycleState::Offline)
+            } else {
+                acowork_core::mqtt_proto::AgentLifecycleState::Offline
+            });
+            // ADR-085: FAILED detail rides the list response so the
+            // sidebar can surface the reason after a page refresh.
+            let lifecycle_detail = if lifecycle == "failed" {
+                running_info.map(|r| r.lifecycle_detail.clone()).unwrap_or_default()
+            } else {
+                String::new()
+            };
             let last_interaction_at = gw
                 .get_interaction(&info.instance_id)
                 .map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
@@ -322,7 +365,8 @@ pub async fn list_agents(
                 builtin_avatar: eff_builtin,
                 version: info.version.clone(),
                 alive,
-                ready,
+                lifecycle: lifecycle.to_string(),
+                lifecycle_detail,
                 dev_mode: running_info.map(|r| r.dev_mode).unwrap_or(false),
                 debug_state: running_info
                     .map(|r| r.debug_state)
@@ -347,11 +391,11 @@ pub async fn list_agents(
         });
     }
     // Diagnostic: if senior-engineer is present, log its state to help
-    // trace why frontend polls may not see ready=true promptly.
+    // trace why frontend polls may not see sessions_ready promptly.
     if let Some(sr) = gw.running("com.acowork.senior-engineer") {
         tracing::info!(
-            "[DIAG] list_agents: senior-engineer running_agents entry present ready={}",
-            sr.ready
+            "[DIAG] list_agents: senior-engineer running_agents entry present lifecycle={:?}",
+            sr.lifecycle
         );
     }
     drop(gw);
@@ -403,7 +447,14 @@ pub async fn get_agent_detail(
     } else {
         false
     };
-    let ready = running_info.map(|r| r.ready).unwrap_or(false);
+    // ADR-085 invariant 6: `online == false` ⇒ OFFLINE.
+    let lifecycle = lifecycle_name(if alive {
+        running_info
+            .map(|r| r.lifecycle)
+            .unwrap_or(acowork_core::mqtt_proto::AgentLifecycleState::Offline)
+    } else {
+        acowork_core::mqtt_proto::AgentLifecycleState::Offline
+    });
     // ADR-009 §5: same override-first resolution as `list_agents` — the
     // detail panel and the sidebar must not disagree about the name.
     let overrides = gw.overrides_of(&info.instance_id);
@@ -430,7 +481,12 @@ pub async fn get_agent_detail(
         author: info.manifest.author.clone(),
         install_path: info.install_path.clone(),
         alive,
-        ready,
+        lifecycle: lifecycle.to_string(),
+        lifecycle_detail: if lifecycle == "failed" {
+            running_info.map(|r| r.lifecycle_detail.clone()).unwrap_or_default()
+        } else {
+            String::new()
+        },
         pid: running_info.map(|r| r.pid),
         started_at: running_info.map(|r| r.started_at.to_rfc3339()),
         dev_mode: running_info.map(|r| r.dev_mode).unwrap_or(false),
@@ -1233,7 +1289,10 @@ async fn track_running_agent(state: &AppState, agent_id: &str, dev_mode: bool) {
         started_at: chrono::Utc::now(),
         workspace,
         node_id,
-        ready: false,
+        // ADR-085: the process is spawned but has not announced any
+        // capability yet; the retained status envelope refines this.
+        lifecycle: acowork_core::mqtt_proto::AgentLifecycleState::Offline,
+        lifecycle_detail: String::new(),
         dev_mode,
         debug_state: if dev_mode {
             crate::gateway::state::DebugState::Enabled
@@ -1959,6 +2018,9 @@ pub async fn stop_agent(
                     online: false,
                     instance_id: instance_id.clone(),
                     node_id: node_id_owned,
+                    // ADR-085 invariant 6: offline ⇒ OFFLINE.
+                    state: acowork_core::mqtt_proto::AgentLifecycleState::Offline as i32,
+                    detail: String::new(),
                 },
             ),
         ),
@@ -2292,7 +2354,9 @@ mod tests {
                         online,
                         instance_id: instance_id.to_string(),
                         node_id: "local".to_string(),
-                    },
+                        state: if online { acowork_core::mqtt_proto::AgentLifecycleState::SessionsReady } else { acowork_core::mqtt_proto::AgentLifecycleState::Offline } as i32,
+                        detail: String::new(),
+                                            },
                 ),
             ),
         };
@@ -2388,7 +2452,8 @@ mod tests {
                 workspace: String::new(),
                 // ADR-075 D6: fallback anchor for the local node.
                 node_id: acowork_core::node::LOCAL_NODE_ID.to_string(),
-                ready: true,
+                lifecycle: acowork_core::mqtt_proto::AgentLifecycleState::SessionsReady,
+                lifecycle_detail: String::new(),
                 dev_mode: false,
                 debug_state: crate::gateway::state::DebugState::Disabled,
                 debug_port: None,
@@ -2414,7 +2479,7 @@ mod tests {
             entry.alive,
             "pid=0 node-hosted Runtime must report alive=true from the MQTT registry"
         );
-        assert!(entry.ready, "ready must mirror the tracked state");
+        assert_eq!(entry.lifecycle, "sessions_ready", "lifecycle must mirror the tracked state");
     }
 
     /// ADR-073: a single package may be installed as MULTIPLE instances
@@ -2523,7 +2588,8 @@ mod tests {
             builtin_avatar: Some("icon-05".to_string()),
             version: "1.0.0".to_string(),
             alive: false,
-            ready: false,
+            lifecycle: "offline".to_string(),
+            lifecycle_detail: String::new(),
             dev_mode: false,
             debug_state: crate::gateway::state::DebugState::Disabled,
             debug_port: None,
@@ -2599,7 +2665,8 @@ mod tests {
             builtin_avatar: None,
             version: "1.0.0".to_string(),
             alive,
-            ready: false,
+            lifecycle: "offline".to_string(),
+            lifecycle_detail: String::new(),
             dev_mode: false,
             debug_state: crate::gateway::state::DebugState::Disabled,
             debug_port: None,
@@ -2921,7 +2988,8 @@ mod tests {
                 workspace: String::new(),
                 // ADR-075 D6: fallback anchor for the local node.
                 node_id: acowork_core::node::LOCAL_NODE_ID.to_string(),
-                ready: true,
+                lifecycle: acowork_core::mqtt_proto::AgentLifecycleState::SessionsReady,
+                lifecycle_detail: String::new(),
                 dev_mode: false,
                 debug_state: crate::gateway::state::DebugState::Disabled,
                 debug_port: None,
