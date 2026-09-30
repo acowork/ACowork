@@ -132,7 +132,6 @@ ACowork 是一个"**Agent as APP**"平台。核心隐喻借鉴 Android：Agent �
 | 2 | `memory_store` | core | `memory:write` | 写入记忆 |
 | 3 | `http_request` | core | `network:<url>` | HTTP 请求 |
 | 4 | `web_fetch` | core | `network:<url>` | URL → 文本（带超时） |
-| 5 | `web_search` | conditional | `search:web` | 仅当至少配置一个搜索 Provider 时注册 |
 | 6 | `shell` | core × N | `filesystem:exec` | 按平台检测的 shell 工具集（Windows: bash + PowerShell，Unix: system shell） |
 | 7 | `file_read` | core | `filesystem:read:<path>` | 读文件 |
 | 8 | `file_write` | core | `filesystem:write:<path>` | 写文件 |
@@ -151,7 +150,7 @@ ACowork 是一个"**Agent as APP**"平台。核心隐喻借鉴 Android：Agent �
 **要点**：
 
 - 身份管理不暴露为独立工具 API：身份查询由 Gateway 的 `UserProfile`（`/api/users`）承载，`acowork-system` 通过普通 `memory_recall` / `memory_store` 暴露。
-- 实际工具数随配置变化：核心 16 + `web_search` + `rag_query` + `codebase` = 16 ~ 20。（`context_retrieve` / `context_abandon` 均已退役、不注册：前者实现已删除，后者源码作为死代码保留，见 ADR-061 §10.1。）
+- 实际工具数随配置变化：核心 16 + `rag_query` + `codebase` = 16 ~ 18。（`context_retrieve` / `context_abandon` 均已退役、不注册：前者实现已删除，后者源码作为死代码保留，见 ADR-061 §10.1。）
 - WASM 工具不在此清单：模块代码已实现（`core/acowork-runtime/src/tools/wasm/`），但 `wasm-tools` feature 默认未开启，**没有任何 Agent 使用 WASM 工具**——TOL-02~04 / TOL-08~09 在 Phase 6 之前实际不可用。
 
 ### 1.6 Skill 系统

@@ -132,7 +132,6 @@ The developer toolchain is complete: `acowork-sign` (with `keygen / sign / verif
 | 2 | `memory_store` | core | `memory:write` | Write memory |
 | 3 | `http_request` | core | `network:<url>` | HTTP request |
 | 4 | `web_fetch` | core | `network:<url>` | URL → text (with timeout) |
-| 5 | `web_search` | conditional | `search:web` | Registered only when at least one search Provider is configured |
 | 6 | `shell` | core × N | `filesystem:exec` | Platform‑detected shell tools (Windows: bash + PowerShell, Unix: system shell) |
 | 7 | `file_read` | core | `filesystem:read:<path>` | Read file |
 | 8 | `file_write` | core | `filesystem:write:<path>` | Write file |
@@ -151,7 +150,7 @@ The developer toolchain is complete: `acowork-sign` (with `keygen / sign / verif
 **Key points**:
 
 - Identity management is not exposed as a standalone tool API: identity is served via Gateway's `UserProfile` (`/api/users`), `acowork-system` exposes it through ordinary `memory_recall`/`memory_store`.
-- Actual tool count varies by configuration: core 16 + `web_search` + `rag_query` + `codebase` = 16 ~ 20. (`context_retrieve` / `context_abandon` are both retired and unregistered: the former's implementation has been deleted, the latter's source is kept as dead code — ADR-061 §10.1.)
+- Actual tool count varies by configuration: core 16 + `rag_query` + `codebase` = 16 ~ 18. (`context_retrieve` / `context_abandon` are both retired and unregistered: the former's implementation has been deleted, the latter's source is kept as dead code — ADR-061 §10.1.)
 - WASM tools not in this list: module code exists (`core/acowork-runtime/src/tools/wasm/`) but `wasm-tools` feature is off by default, **no Agent uses WASM tools** – TOL‑02~04/TOL‑08~09 are effectively unavailable before Phase 6.
 
 ### 1.6 Skill System

@@ -221,7 +221,6 @@ ACOWORK_GATEWAY_ALLOWED_NODE_IPS="192.168.1.20,192.168.1.0/24"
 | POST | `/api/agents/{id}/stop` | 停止 Agent |
 | POST | `/api/agents/{id}/restart-debug` | 重启为 debug 模式（开启 Debug 通道） |
 | GET | `/api/agents/{id}/model` | 当前使用的模型 / provider（Gateway 从 manifest 推导） |
-| GET | `/api/agents/{id}/search-providers` | 列出 Agent 可用的搜索 provider |
 
 ### 4.4 Avatar / Manifest 资源
 
@@ -252,10 +251,6 @@ Gateway 缓存了 avatar 资源（即便 Agent 停止也能读取）；通过 MQ
 | GET | `/api/models` | 所有 Provider 的模型（含本地 ollama / lmstudio） |
 | GET | `/api/models/{provider}` | 单一 Provider 的模型 |
 | POST | `/api/models/discover` | 自定义 base URL 发现模型（OpenAI-compatible） |
-| GET | `/api/search/keys` | 搜索 provider 密钥列表 |
-| POST | `/api/search/keys` | 新增搜索 provider 密钥 |
-| PUT | `/api/search/keys/{provider}` | 更新搜索 provider 密钥 |
-| DELETE | `/api/search/keys/{provider}` | 删除搜索 provider 密钥 |
 
 ### 4.6 MCP 目录
 
@@ -402,7 +397,6 @@ Runtime 端零特殊处理。
   "topics": {
     "acowork/global/providers":        "CgcKBXNrLXYx...",
     "acowork/global/mcps":             "CggKBmFkbWlu...",
-    "acowork/global/searches":         "CggK...",
     "acowork/global/embedding_models": "CggK...",
     "acowork/global/user_profile":     "CggK...",
     "acowork/global/bootstrap":        "CggK..."
@@ -421,7 +415,6 @@ Runtime 端零特殊处理。
 |---|---|---|
 | `acowork/global/providers` | `acowork/global/providers` | `AvailableProviders` |
 | `acowork/global/mcps` | `acowork/global/mcps` | `AvailableMcps` |
-| `acowork/global/searches` | `acowork/global/searches` | `AvailableSearches` |
 | `acowork/global/embedding_models` | `acowork/global/embedding_models` | `AvailableEmbeddingModels` |
 | `acowork/global/user_profile` | `acowork/global/user_profile` | `AvailableUsers`（ADR-042） |
 | `acowork/global/bootstrap` | `acowork/global/bootstrap` | `BootstrapState`（ADR-059） |
@@ -434,7 +427,7 @@ Runtime 端零特殊处理。
    switch 逻辑）。
 3. 比较 `instance_id` 与本地 `cache.bootstrap_instance_id()`：
    - 相等 → 无动作。
-   - 不等 → 先清空本地所有旧 snapshot（providers / mcps / searches / 
+   - 不等 → 先清空本地所有旧 snapshot（providers / mcps / 
      embedding_models / lsps / user_profile / bootstrap），再 apply 新
      快照。`bootstrap_state` 的 update_from_mqtt 也会触发其自带的 
      generation switch 逻辑（双重保险）。
@@ -590,11 +583,9 @@ Gateway 不解析 Runtime 响应的 body，所有读写都 verbatim 透传。这
 | GET | `/api/agents/{id}/status` | Runtime 视角的状态（累计 token、loop 状态等） | `/agents/{id}/status` |
 | GET | `/api/agents/{id}/mcp-servers` | 读取 Agent 的 MCP 服务配置 | `/agents/{id}/mcp-servers` |
 | PUT | `/api/agents/{id}/mcp-servers` | 写入 MCP 服务配置 | `/agents/{id}/mcp-servers` |
-| GET | `/api/agents/{id}/search-config` | 读取搜索配置 | `/agents/{id}/search-config` |
-| PUT | `/api/agents/{id}/search-config` | 写入搜索配置 | `/agents/{id}/search-config` |
 | GET | `/api/agents/{id}/providers` | 读取 Runtime 端的 Provider 列表（MQTT 同步后的实际数据） | `/agents/{id}/providers` |
 
-> **ADR-040 Win11-MCP-ToolsBugFix (2026-07)**：上述 `mcp-servers` / `search-config` / `providers` 
+> **ADR-040 Win11-MCP-ToolsBugFix (2026-07)**：上述 `mcp-servers` / `providers` 
 > 早期由 Gateway stub 返回 200 但不持久化，导致用户在 Tools Tab 切换 MCP server 选择后丢失。
 > 已统一改为反代到 Runtime 端 `get_agent_mcp_servers` / `put_agent_mcp_servers` 等。
 
@@ -903,7 +894,7 @@ snake_case：`document_id` / `size_bytes` / `abs_path` / `start_line` / `end_lin
 > Debug 面板可列出/编辑/保存/重载 — 重载端点走 `/debug/{*rest}` wildcard，由 R7（ADR-048 §D8）
 > 转发。
 >
-> 9 个 canonical 文件名：`summary`、`fallback`、`search`、`compact-template`、`title`、
+> 8 个 canonical 文件名：`summary`、`fallback`、`compact-template`、`title`、
 > `extraction`、`conflict-classification`、`generalization`、`abstention`（均位于包内
 > `prompts/` 子目录）。Runtime 是白名单 + 路径校验的唯一权威，Gateway 仅做透明反代。
 
@@ -1254,7 +1245,6 @@ Authorization: Bearer <token>
   "topics": {
     "acowork/global/providers":        "CgcKBXNrLXYxGgIIUg==",
     "acowork/global/mcps":             "CggKBmFkbWluGgIIUg==",
-    "acowork/global/searches":         "CggK...",
     "acowork/global/embedding_models": "CggK...",
     "acowork/global/user_profile":     "CggK...",
     "acowork/global/bootstrap":        "CggK..."
@@ -1287,7 +1277,7 @@ if body["instance_id"] != cache.bootstrap_instance_id().unwrap_or("") {
 2. **反代端点要求 Runtime 在线**：Runtime 未注册 / 已退出时返回 503；MQTT 通道
    `acowork/agents/{id}/http_port` 是 Gateway 反代发现 Runtime 端口的唯一来源，
    **retained publish** 是关键（Gateway 重启后 broker 会重放上一次的端口）。
-3. **多数写操作会触发热推送**：例如修改 Provider / MCP / Search 配置后，Gateway 通过
+3. **多数写操作会触发热推送**：例如修改 Provider / MCP 配置后，Gateway 通过
    MQTT **retained publish** 向所有已连接的 Runtime 同步最新可用列表，
    详见 [mqtt.md §全局资源可用性广播](./mqtt.md)。
 4. **CORS**：始终启用 `CorsLayer::permissive()`（任意 origin、任意 method、任意 header；不带

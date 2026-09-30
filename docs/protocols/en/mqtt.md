@@ -55,7 +55,7 @@ graph LR
 4. **Three-tier separation of global resources** (see §3.1):
    - **Full raw list**: HTTP only (`GET/POST/PUT/DELETE /api/global/{kind}`), used by Desktop Settings.
    - **Ready availability**: MQTT pub/sub (`acowork/global/{kind}` single topic, Retained), shared by all Runtimes. Gateway is the sole authority.
-   - **Runtime per-agent runtime data** (agent_config.json / agent_mcp.json / agent_search.json): Runtime local files, synchronized to Desktop via `agents/{id}/config` MQTT retained (no HTTP GET needed).
+   - **Runtime per-agent runtime data** (agent_config.json / agent_mcp.json): Runtime local files, synchronized to Desktop via `agents/{id}/config` MQTT retained (no HTTP GET needed).
 5. **Gateway does not forward business events**. Session events published by Runtime are **directly subscribed** by Desktop to `agents/{id}/sessions/{sid}/messages/...`; control commands from Desktop are **directly PUBLISHed** to `agents/{id}/sessions/control/...` (sid in payload), and Runtime itself SUBSCRIBES to `agents/{id}/sessions/control/#`.
 
 ---
@@ -64,7 +64,7 @@ graph LR
 
 ### 3.1 Full Global Resource List (Read-Only Static Data, HTTP Only)
 
-**The full global resource lists (provider list, mcp list, lsp list, search list, embedding model list) go over HTTP, not MQTT.**
+**The full global resource lists (provider list, mcp list, lsp list, embedding model list) go over HTTP, not MQTT.**
 
 These lists are the raw data managed by the user in Desktop Settings (configured but not necessarily "ready")—e.g., a provider added but API key not filled, or an MCP package still downloading. Desktop fetches the entire table via HTTP once to render the form, and submits modifications via HTTP POST; **no subscription/notification mechanism is needed**.
 
@@ -75,7 +75,6 @@ HTTP endpoints:
   GET    /api/global/providers           # full provider list
   GET    /api/global/mcps               # full MCP list
   GET    /api/global/lsps               # full LSP list
-  GET    /api/global/searches           # full search provider list
   GET    /api/global/embedding_models   # full embedding model list
   POST   /api/global/{kind}             # add one (Desktop Settings submission)
   PUT    /api/global/{kind}/{id}        # update one
@@ -114,9 +113,6 @@ acowork/global/
 │                              # Note: McpRef embeds `auth_token` field
 │                              # (extracted from catalog env/headers token-class keys)
 ├── lsps                       # [Retained] Currently ready LSP list
-├── searches                   # [Retained] Currently ready search provider list
-│                              # Note: SearchRef embeds `api_key` field
-│                              # (Gateway decrypts from Vault before PUBLISH)
 ├── embedding_models           # [Retained] Currently ready embedding model list
 └── user_profile               # [Retained, ADR-042] Current active user profile snapshot
                                # payload = AvailableUsers {
@@ -139,11 +135,11 @@ acowork/global/
 
 1. **Gateway is the broker's same-process host** (see §11), and the broker binds only to localhost (`127.0.0.1`), never leaving the host. PUBLISHed payloads (containing decrypted secrets) do not enter the network.
 2. **Runtime and Gateway share the same user**—Runtime is a child process spawned by Gateway; there is no "cross-tenant" secret leakage scenario.
-3. **Runtime change push**—when a user changes a provider's API key, adds a new MCP token, or changes a search key from Desktop, Gateway's health-check triggers the publisher to recompute and republish `acowork/global/{kind}` (retain=true). All subscribed Runtimes **immediately** receive the push with the new secrets, no restart or extra request/response round-trip required.
+3. **Runtime change push**—when a user changes a provider's API key, adds a new MCP token, or rotates an existing secret from Desktop, Gateway's health-check triggers the publisher to recompute and republish `acowork/global/{kind}` (retain=true). All subscribed Runtimes **immediately** receive the push with the new secrets, no restart or extra request/response round-trip required.
 
 Secrets are legitimate payloads on the **acowork/global/* retained push channel**, not a violation of §28 "MQTT does not carry req/res" (there is no req/res semantics here—just one-way PUBLISH pushing snapshots + subsequent changes).
 
-- **Owner**: **Gateway** (data source authority). Gateway's background health-check loop detects provider/mcp/lsp/search/embedding state changes (ready/failed/unloaded), recomputes the topic payload and PUBLISHes (retain=true).
+- **Owner**: **Gateway** (data source authority). Gateway's background health-check loop detects provider/mcp/lsp/embedding state changes (ready/failed/unloaded), recomputes the topic payload and PUBLISHes (retain=true).
 - **Subscribers**:
   - **All Runtimes** (`SUB acowork/global/#`) — Runtime receives the retained current snapshot immediately on startup, caches it in memory (no persistence needed). Subsequent changes are pushed directly.
   - **Desktop** (optional, SUB `acowork/global/#`) — used in Settings page to show real-time "provider temporarily unavailable" status, etc.
@@ -165,7 +161,7 @@ Secrets are legitimate payloads on the **acowork/global/* retained push channel*
 >
 > Furthermore, all Runtimes see the exact same data—this is the **fundamental reason it is not placed under `agents/{id}/`**: there is no per-agent difference.
 >
-> This layer also **carries decrypted secrets for each provider/MCP/search**—Runtime Phase A parses the retained payload, takes API keys from `ProviderRef.api_key` for OpenAI/Anthropic and other LLM providers, `McpRef.auth_token` for MCP bearer tokens, and `SearchRef.api_key` for search providers, filling them into the provider factory and MCP client. This is why in §5.1 startup flow, Runtime's single `SUB acowork/global/#` line gets all startup-required state.
+> This layer also **carries decrypted secrets for each provider/MCP**—Runtime Phase A parses the retained payload, takes API keys from `ProviderRef.api_key` for OpenAI/Anthropic and other LLM providers, `McpRef.auth_token` for MCP bearer tokens, filling them into the provider factory and MCP client. This is why in §5.1 startup flow, Runtime's single `SUB acowork/global/#` line gets all startup-required state.
 >
 > **Why not use `current` / `update` two sub-topics?**
 >
@@ -177,8 +173,8 @@ Secrets are legitimate payloads on the **acowork/global/* retained push channel*
 
 After Runtime obtains the available resources from §3.1.1, **which resources the user selected and how they are activated** is per-agent state persisted by Runtime itself—**not in the MQTT event bus**, but synchronized to Desktop via the `agents/{id}/config` retained topic:
 
-1. It is a local file in the Runtime workspace (`agent_config.json`, `agent_mcp.json`, `agent_search.json`, etc.), not "broadcast data"
-2. Runtime loads it on startup, merges with manifest defaults, and **PUBLISHes `agents/{id}/config` retained** (containing all agent_config fields + MCP selection + Search selection); Desktop subscribes to this topic to get the latest full configuration
+1. It is a local file in the Runtime workspace (`agent_config.json`, `agent_mcp.json`, etc.), not "broadcast data"
+2. Runtime loads it on startup, merges with manifest defaults, and **PUBLISHes `agents/{id}/config` retained** (containing all agent_config fields + MCP selection); Desktop subscribes to this topic to get the latest full configuration
 3. Desktop does not need to HTTP GET these data—MQTT retained ensures immediate receipt of the latest snapshot after subscription
 4. Gateway does not need to know how Runtime internally filters resources—it only cares about "which resources are ready"
 
@@ -186,7 +182,6 @@ After Runtime obtains the available resources from §3.1.1, **which resources th
 |------|----------|---------|-------------------|
 | `agent_config.json` | `<workspace>/agents/{id}/config/` | Per-agent runtime parameters (temperature, context_window, max_output_tokens, system_prompt_override, avatar, etc.), initialized from manifest.toml defaults | SUB `agents/{id}/config` retained (Runtime PUBLISHes on startup, republishes on change) |
 | `agent_mcp.json` | `<workspace>/agents/{id}/` | Subset of available mcps activated by user (per-agent) | Already included in `agents/{id}/config` retained (`active_mcp_servers` field) |
-| `agent_search.json` | `<workspace>/agents/{id}/` | Subset of available searches activated by user (per-agent) | Already included in `agents/{id}/config` retained (`search_config` field) |
 | `session_meta` | `<workspace>/agents/{id}/sessions/{sid}/` | Current session's selected provider/model/embedding model (per-session, not per-agent persistent state) | SUB `agents/{id}/sessions/{sid}/meta` retained (dynamic subscription) |
 
 **Resource Usage Layering Summary**:
@@ -195,7 +190,7 @@ After Runtime obtains the available resources from §3.1.1, **which resources th
 ┌─────────────────────────────────────────────────────────────────┐
 │  Layer 1: Full raw list (user-managed, HTTP only, no MQTT)     │
 │  Gateway / Vault → Desktop Settings (CRUD)                      │
-│  provider list, mcp list, lsp list, search list, embedding list │
+│  provider list, mcp list, lsp list, embedding list           │
 └─────────────────────────────────────────────────────────────────┘
                               │ Gateway background health-check
                               ▼
@@ -209,10 +204,10 @@ After Runtime obtains the available resources from §3.1.1, **which resources th
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │  Layer 3: Runtime per-agent runtime data (local files, MQTT retained sync) │
-│  agent_config.json (runtime params) + agent_mcp.json + agent_search.json │
+│  agent_config.json (runtime params) + agent_mcp.json                │
 │  session_meta's provider/model (per-session)                    │
 │  Desktop retrieves via MQTT retained:                          │
-│  SUB  agents/{id}/config (all config + MCP + Search)            │
+│  SUB  agents/{id}/config (all config + MCP)                │
 │  SUB  agents/{id}/sessions/{sid}/meta (dynamic subscription when entering session) │
 │  Write via: PUT /api/agents/{id}/config → Gateway MQTT control → │
 │            Runtime applies + saves + republishes retained       │
@@ -347,7 +342,7 @@ acowork/users/{user_id}/
 9. **Three-tier separation of global resources**:
    - **Layer 1 - Full raw list** (raw configurations user manages in Desktop Settings): HTTP only, no MQTT. Desktop Settings fetches and renders forms; modification submissions go over HTTP POST.
    - **Layer 2 - Ready availability** (resources verified by Gateway health-check): MQTT pub/sub, topic `acowork/global/{kind}` (single topic, Retained). **Not agent-distinguished**; all Runtimes share the same, because "resource ready" is a global fact.
-   - **Layer 3 - Runtime per-agent persisted selections** (`agent_mcp.json` / `agent_search.json`): local files; Desktop views via HTTP pull of agent config, not MQTT.
+   - **Layer 3 - Runtime per-agent persisted selections** (`agent_mcp.json`): local files; Desktop views via HTTP pull of agent config, not MQTT.
    - **Why can't Layer 2 be placed under `agents/{id}/`**: All agents see exactly the same available resources; placing under per-agent topics would cause redundant data; all Runtimes just `SUB acowork/global/#`.
 10. **Global resource raw list vs availability vs agent selection must not be confused**:
     - Raw list = user-managed, HTTP only
@@ -451,7 +446,7 @@ sequenceDiagram
     GW->>GW: Build rumqttd Config (port 19875, ACL load)
     GW->>BROKER: Broker::new(config).start() (embedded in-process)
     GW->>BROKER: CONNECT (client_id: "gateway:publisher")
-    Note over GW,BROKER: Gateway only connects here; Global Resources Publisher background loop detects provider/mcp/lsp/search/embedding state changes and PUBLISHes acowork/global/{kind} (Retained)
+    Note over GW,BROKER: Gateway only connects here; Global Resources Publisher background loop detects provider/mcp/lsp/embedding state changes and PUBLISHes acowork/global/{kind} (Retained)
 
     Note over GW,RT: 2. Gateway spawns Runtime process
     GW->>RT: spawn (command line/env: --agent-id, --package-path=.agent package, --work-dir, --config-dir, --mqtt-port, --http-port=0)
@@ -474,7 +469,7 @@ sequenceDiagram
     RT->>BROKER: PUBLISH acowork/agents/{id}/status = "online" (Retained)
     RT->>BROKER: PUBLISH acowork/agents/{id}/meta (Retained, full meta)
     RT->>BROKER: PUBLISH acowork/agents/{id}/config (Retained, Runtime current effective full agent_config.json)
-    RT->>BROKER: SUBSCRIBE acowork/global/# (immediately receives global resources retained snapshot—including decrypted keys for each provider/MCP/search)
+    RT->>BROKER: SUBSCRIBE acowork/global/# (immediately receives global resources retained snapshot—including decrypted keys for each provider/MCP)
     RT->>BROKER: SUBSCRIBE acowork/agents/{id}/sessions/control/#
     Note over RT: Receives acowork/global/providers retained → Phase A extracts keys from ProviderRef.api_key to create LLM provider
 
@@ -488,7 +483,7 @@ sequenceDiagram
     Note over DA: When entering a specific agent detail page, dynamically SUBSCRIBE that agent's sessions/+/...<br/>When user enters a specific session, dynamically SUBSCRIBE that session's meta/config/messages/control
 ```
 
-**Note**: The full global resource lists (provider/mcp/lsp/search/embedding) **are not in this startup sequence**—they are static full data; Desktop fetches via `GET /api/global/{kind}` HTTP once when loading the Settings page, no MQTT startup sync needed. Global resource **availability**, however, is pushed via Retained snapshot after Runtime starts, requiring no additional HTTP initialization.
+**Note**: The full global resource lists (provider/mcp/lsp/embedding) **are not in this startup sequence**—they are static full data; Desktop fetches via `GET /api/global/{kind}` HTTP once when loading the Settings page, no MQTT startup sync needed. Global resource **availability**, however, is pushed via Retained snapshot after Runtime starts, requiring no additional HTTP initialization.
 
 #### 5.1.1 Bootstrap Five-Step Contract (ADR-039)
 
@@ -640,7 +635,7 @@ sequenceDiagram
 
 ### 5.4 Global Resource Availability Change (Gateway Background Health-Check)
 
-**Scenario**: Gateway background loop detects state change in some provider/mcp/lsp/search/embedding (just installed / temporarily unavailable / uninstalled).
+**Scenario**: Gateway background loop detects state change in some provider/mcp/lsp/embedding (just installed / temporarily unavailable / uninstalled).
 
 ```mermaid
 sequenceDiagram
@@ -726,9 +721,9 @@ Each data resource chooses its channel based on its properties, **not by busines
 
 | Data Resource Type | Uses MQTT | Uses HTTP |
 |--------------------|-----------|-----------|
-| **Global resource full list** (providers/mcps/lsps/searches/embedding_models) | ❌ No (static full, only Desktop Settings use) | ✅ `GET/POST/PUT/DELETE /api/global/{kind}` (Settings page interaction) |
+| **Global resource full list** (providers/mcps/lsps/embedding_models) | ❌ No (static full, only Desktop Settings use) | ✅ `GET/POST/PUT/DELETE /api/global/{kind}` (Settings page interaction) |
 | **Global resource availability** (Gateway health-checked ready list) | `acowork/global/{kind}` (Retained, QoS 1) | — |
-| **Runtime per-agent resource activation selection** (agent_mcp.json / agent_search.json) | ❌ No (local files, not broadcast data) | `GET /api/agents/{id}` → config field |
+| **Runtime per-agent resource activation selection** (agent_mcp.json) | ❌ No (local files, not broadcast data) | `GET /api/agents/{id}` → config field |
 | **Session provider/model/embedding selection** (per-session) | Already in `sessions/{sid}/meta` | `GET /api/agents/{id}/sessions/{sid}/state` |
 | **Agent status** (status + meta) | `status` Retained+LWT (online/offline) + `meta` Retained (single topic) | `GET /api/agents/{id}` detail |
 | **Agent config** (Runtime current effective agent_config.json, merged manifest defaults) | `config` Retained (single topic, Runtime PUBLISHes itself) | — (Runtime loads locally on startup; Desktop changes via `PUT /api/agents/{id}/config`) |
@@ -781,20 +776,17 @@ Need to wait for explicit success/failure from the other side?
 | Provider list (full) | Gateway | KB | ❌ (static full, no MQTT) | `GET /api/global/providers` |
 | MCP list (full) | Gateway | KB | ❌ | `GET /api/global/mcps` |
 | LSP relay endpoint (node-local, ADR-055 §6.7) | Node | B | `acowork/nodes/{node_id}/lsps` (R, QoS 1) | `GET /api/agents/{id}/lsp-endpoint` (Gateway resolves agent → node) |
-| Search list (full) | Gateway | KB | ❌ | `GET /api/global/searches` |
 | Embedding model list (full) | Gateway | B-KB | ❌ | `GET /api/global/embedding_models` |
 | Provider available (Gateway health-checked) | Gateway | KB | `acowork/global/providers` (R, QoS 1) | — |
 | MCP available | Gateway | KB | `acowork/global/mcps` (R, QoS 1) | — |
-| Search available | Gateway | KB | `acowork/global/searches` (R, QoS 1) | — |
 | Embedding model available | Gateway | B-KB | `acowork/global/embedding_models` (R, QoS 1) | — |
 | Active user profile (ADR-042) | Gateway | B | `acowork/global/user_profile` (R, QoS 1) | — (Runtime waits for retained snapshot, 5s timeout fallback to None) |
 | Agent MCP selection (`agent_mcp.json`) | Runtime (local) | B-KB | Included in `agents/{id}/config` retained (`active_mcp_servers`) | — (Desktop SUB retained) |
-| Agent Search selection (`agent_search.json`) | Runtime (local) | B-KB | Included in `agents/{id}/config` retained (`search_config`) | — (same) |
 | Session provider/model selection (`session_meta`) | Runtime (local) | B | `agents/{id}/sessions/{sid}/meta` (R) | — (Desktop SUB retained when entering session) |
 | Agent status (online) | Runtime | B | `agents/{id}/status` (LWT+Retained) | `GET /api/agents/{id}/status` |
 | Agent ready (HTTP server bound, Phase A–C complete) | Runtime | B | `agents/{id}/ready` (R, QoS 1) | `GET /api/agents/{id}/ready` |
 | Agent meta | Runtime | KB | `agents/{id}/meta` (R, single topic) | `GET /api/agents/{id}` |
-| Agent config (Runtime workspace agent_config.json merged defaults, incl. MCP + Search) | Runtime (local) | KB | `agents/{id}/config` (R, single topic, Runtime PUBLISHes itself) | — (Desktop SUB retained; writes via `PUT /api/agents/{id}/config` → Gateway MQTT control) |
+| Agent config (Runtime workspace agent_config.json merged defaults, incl. MCP) | Runtime (local) | KB | `agents/{id}/config` (R, single topic, Runtime PUBLISHes itself) | — (Desktop SUB retained; writes via `PUT /api/agents/{id}/config` → Gateway MQTT control) |
 | Session list | Runtime | variable | ❌ only `created` / `deleted` increment notifications | ✅ `GET /api/agents/{id}/sessions` (Gateway reverse proxy to Runtime HTTP) |
 | Session messages increments | Runtime | KB | `agents/{id}/sessions/{sid}/messages/*` (QoS 0) | — |
 | Session messages full | Runtime | MB+ | ❌ | ✅ `GET /api/agents/{id}/sessions/{sid}/messages` (Gateway reverse proxy) |
@@ -849,7 +841,7 @@ Desktop ──HTTP──▶ Gateway (:19876) ──HTTP reverse proxy──▶ R
 
 | Scenario | Uses MQTT Retained | Uses HTTP Reverse Proxy |
 |----------|-------------------|-------------------------|
-| Agent config (incl. MCP/Search) | ✅ `agents/{id}/config` | ❌ (no HTTP GET needed) |
+│ Agent config (incl. MCP)     | ✅ `agents/{id}/config` | ❌ (no HTTP GET needed) |
 | Session meta | ✅ `agents/{id}/sessions/{sid}/meta` | ❌ |
 | Session list (full) | ❌ (only `created`/`deleted` increments) | ✅ `GET .../sessions` |
 | Message list (full) | ❌ (data MB+) | ✅ `GET .../messages` |
@@ -917,7 +909,7 @@ client.publish(
 - `agents/{id}/sessions/{sid}/config` (full session config)
 - `sidecar/{kind}/status` (sidecar endpoint)
 
-> Global resource full lists (provider/mcp/lsp/search/embedding) **do not** use MQTT retained—they are static full data, only fetched via HTTP `GET /api/global/{kind}`, not in MQTT scenarios.
+> Global resource full lists (provider/mcp/lsp/embedding) **do not** use MQTT retained—they are static full data, only fetched via HTTP `GET /api/global/{kind}`, not in MQTT scenarios.
 > Global resource **availability** uses MQTT retained (single topic `acowork/global/{kind}`), serving both snapshot and increment semantics—it is the only business topic actively published by Gateway.
 
 ### 8.3 QoS Selection
@@ -1162,7 +1154,7 @@ The Gateway process consists of **4 core components + 1 publisher**:
 | **HTTP Server** (`:19876`) | Provides CRUD, Runtime registration, global resource full CRUD interfaces; **HTTP reverse proxy** to Runtime localhost HTTP server (large data queries); **does not** forward business events, **does not** maintain session state |
 | **Runtime Registry** (in-memory) | Maintains Runtime registration info (agent_id → `{http_port, mqtt_client_id, online}`), for HTTP reverse proxy to look up target Runtime |
 | **rumqttd Broker** (`:19875`) | Embedded in-process MQTT broker, responsible for connection management, ACL, retained storage; receives and routes all MQTT messages |
-| **Global Resources Publisher** (`client_id: gateway:publisher`) | Background health-check loop detects provider/mcp/lsp/search/embedding state changes, recomputes payload and PUBLISHes `acowork/global/{kind}` Retained. Gateway is the sole authority, **not** agent-distinguished |
+| **Global Resources Publisher** (`client_id: gateway:publisher`) | Background health-check loop detects provider/mcp/lsp/embedding state changes, recomputes payload and PUBLISHes `acowork/global/{kind}` Retained. Gateway is the sole authority, **not** agent-distinguished |
 | **Global Resources Store** (JSON / Vault) | Persists global resource full raw lists (Desktop Settings CRUD) + availability cache (Publisher health-check computation) |
 
 **Process Component Relationship Diagram**:

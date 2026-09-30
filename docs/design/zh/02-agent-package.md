@@ -490,7 +490,6 @@ fn matches_permission(declared: &str, requested: &str) -> bool {
 | memory | `memory:read`, `memory:write` | memory_query, memory_store |
 | intent | `intent:send:com.example.calendar` | intent_send |
 | shell | （shell 工具无需声明 permission，由 Approval Gate 控制） | shell |
-| search | （search 工具无需声明 permission，只读公开数据） | web_search |
 | identity | （identity_store 仅系统 Agent 可用，通过 platform.system 声明授权） | identity_store |
 
 ## 4. 设计决策记录

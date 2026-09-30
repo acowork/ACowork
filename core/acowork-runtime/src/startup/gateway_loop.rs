@@ -142,7 +142,6 @@ pub(crate) async fn phase_d_run(
         ctx.mcp_notifier.subscribe(),
         ctx.identity_update_rx.take(),
         ctx.provider_update_rx.take(),
-        ctx.search_update_rx.take(),
         ctx.embedding_update_rx.take(),
         ctx.lsps_update_rx.take(),
         &config.work_dir,
@@ -227,9 +226,6 @@ async fn mqtt_only_loop(
     >,
     mut provider_update_rx: Option<
         tokio::sync::mpsc::UnboundedReceiver<crate::mqtt::client::ProviderUpdate>,
-    >,
-    mut search_update_rx: Option<
-        tokio::sync::mpsc::UnboundedReceiver<crate::mqtt::client::SearchUpdate>,
     >,
     // ADR-033: forwards `acowork/global/embedding_models` retained
     // updates to SessionManager::handle_embedding_config_update so
@@ -378,27 +374,6 @@ async fn mqtt_only_loop(
                         update.provider_list_version,
                         update.provider_key_vault,
                         update.default_compact_models,
-                    );
-                }
-            }
-
-            // `acowork/global/searches` retained update →
-            // SessionManager::update_search_config → broadcast to all sessions.
-            search = async {
-                match search_update_rx.as_mut() {
-                    Some(rx) => rx.recv().await,
-                    None => std::future::pending().await,
-                }
-            } => {
-                if let Some(update) = search {
-                    tracing::info!(
-                        search_count = update.search_list.len(),
-                        key_count = update.search_key_vault.len(),
-                        "Applying acowork/global/searches update to SessionManager"
-                    );
-                    session_manager.lock().await.update_search_config(
-                        update.search_key_vault,
-                        update.search_list,
                     );
                 }
             }

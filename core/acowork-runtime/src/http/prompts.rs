@@ -185,13 +185,6 @@ const PROMPT_ENTRIES: &[PromptEntry] = &[
         required: false,
     },
     PromptEntry {
-        name: "search",
-        file: "search.md",
-        purpose: "Guide the web-search backend (Perplexity Sonar) to return concise results with citations.",
-        fallback_constant: crate::prompt::SEARCH_SYSTEM_PROMPT,
-        required: false,
-    },
-    PromptEntry {
         name: "compact-template",
         file: "compact-template.md",
         purpose: "Template wrapping the conversation body before the compaction LLM call (must keep {messages_text}).",

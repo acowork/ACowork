@@ -110,19 +110,6 @@ pub struct AgentCore {
     pub(crate) provider_list_version: Arc<RwLock<u64>>,
     /// Provider key vault (in-memory only, never persisted).
     pub(crate) provider_key_vault: Arc<RwLock<HashMap<String, Vec<ProviderKeyEntry>>>>,
-    /// Search key vault (in-memory only, never persisted).
-    ///
-    /// Shared with `WebSearchEngine` - when `SessionManager::update_search_config`
-    /// writes to this Arc (triggered by MQTT `acowork/global/searches`), the
-    /// search engine reads the updated keys on the next `search()` call.
-    pub(crate) search_key_vault: Arc<RwLock<HashMap<String, String>>>,
-    /// Shared search provider list.
-    ///
-    /// Same sharing semantics as [`Self::search_key_vault`]. Read by
-    /// `WebSearchEngine` at search time to determine which providers are
-    /// configured and in what order.
-    pub(crate) search_provider_list:
-        Arc<RwLock<Vec<acowork_core::protocol::SearchProviderListItem>>>,
 
     /// Per-agent compatibility cache, shared across all provider instances
     /// (including those rebuilt by `build_provider_for`).  `None` when no
@@ -226,11 +213,6 @@ pub struct AgentCore {
     // Field naming maps 1-to-1 to entries in
     // `crate::package::prompt_builder::OVERRIDABLE_PROMPTS`; see ADR-063
     // §3.2 for the full list and resolution chain.
-    /// Override for `crate::prompt::SEARCH_SYSTEM_PROMPT`
-    /// (`prompts/search.md`). Inner `None` = use built-in Perplexity
-    /// search system prompt.
-    pub(crate) search_prompt: Arc<std::sync::RwLock<Option<String>>>,
-
     /// Override for `crate::prompt::COMPACT_PROMPT`
     /// (`prompts/compact-template.md`). Authors MUST preserve the
     /// `{messages_text}` placeholder — the runtime substitution is the
@@ -264,7 +246,7 @@ pub struct AgentCore {
     // LLM→memory boundary was rewritten to be Episode-only; ADR-071
     // re-adds two distiller overrides because the offline
     // `EpisodicDistiller` pipeline now needs per-agent prompt control
-    // (independent of the compaction/search/title prompts). Consumers
+    // (independent of the compaction/title prompts). Consumers
     // are the offline distiller Steps 2a / 4 — resolved via
     // `distiller_scheduler_config()` which projects these slots onto
     // `DistillerConfig.{extraction_prompt_override,judge_prompt_override}`.
@@ -462,7 +444,7 @@ impl AgentCore {
     //   3. Holds the lock only for the `clone()` — a few microseconds.
     //      LLM call sites do not hold the lock across network round-trips.
     //
-    // For the runtime-level 4 fields (fallback / search / compact-template /
+    // For the runtime-level 3 fields (fallback / compact-template /
     // title), the accessor is plumbed by the calling code at the LLM
     // invocation site. For the grafeo/memory 4 fields, the accessor is
     // **not yet consumed** — wiring those requires trait-level injection
@@ -474,12 +456,6 @@ impl AgentCore {
     /// `prompts/summary.md` accessor (ADR-053 + ADR-063 §3.7.5).
     pub fn compaction_prompt(&self) -> Option<String> {
         self.compaction_prompt.read().unwrap().clone()
-    }
-
-    /// Override accessor — `prompts/search.md` (runtime-level, used by
-    /// perplexity backend). See ADR-063 §3.7.5.
-    pub fn search_prompt(&self) -> Option<String> {
-        self.search_prompt.read().unwrap().clone()
     }
 
     /// Override accessor — `prompts/compact-template.md` (runtime-level,
@@ -552,8 +528,6 @@ impl AgentCore {
             global_provider_list: Arc::new(RwLock::new(Vec::new())),
             provider_list_version: Arc::new(RwLock::new(0)),
             provider_key_vault: Arc::new(RwLock::new(HashMap::new())),
-            search_key_vault: Arc::new(RwLock::new(HashMap::new())),
-            search_provider_list: Arc::new(RwLock::new(Vec::new())),
             compat_cache: None,
             provider_compact_models: Arc::new(RwLock::new(HashMap::new())),
             default_compact_models: Arc::new(RwLock::new(Vec::new())),
@@ -580,7 +554,6 @@ impl AgentCore {
             // `AgentBootContext.<field>` (loaded in Phase A from
             // `prompts/<file>.md`). The L2 reload (`reload_prompts`)
             // overwrites these via the `RwLock::write` guard.
-            search_prompt: Arc::new(std::sync::RwLock::new(None)),
             compact_template: Arc::new(std::sync::RwLock::new(None)),
             title_prompt: Arc::new(std::sync::RwLock::new(None)),
             abstention_prompt: Arc::new(std::sync::RwLock::new(None)),
@@ -1932,8 +1905,6 @@ impl Clone for AgentCore {
             global_provider_list: self.global_provider_list.clone(),
             provider_list_version: Arc::clone(&self.provider_list_version),
             provider_key_vault: self.provider_key_vault.clone(),
-            search_key_vault: self.search_key_vault.clone(),
-            search_provider_list: self.search_provider_list.clone(),
             compat_cache: self.compat_cache.clone(),
             provider_compact_models: Arc::clone(&self.provider_compact_models),
             default_compact_models: Arc::clone(&self.default_compact_models),
@@ -1955,7 +1926,6 @@ impl Clone for AgentCore {
             // session to re-derive its `Arc<AgentCore>` from the canonical
             // `AgentCore` in `SessionManager`.
             compaction_prompt: Arc::clone(&self.compaction_prompt),
-            search_prompt: Arc::clone(&self.search_prompt),
             compact_template: Arc::clone(&self.compact_template),
             title_prompt: Arc::clone(&self.title_prompt),
             abstention_prompt: Arc::clone(&self.abstention_prompt),
@@ -2989,10 +2959,6 @@ mod tests {
             "compaction_prompt must default to None"
         );
         assert!(
-            core.search_prompt().is_none(),
-            "search_prompt must default to None"
-        );
-        assert!(
             core.title_prompt().is_none(),
             "title_prompt must default to None"
         );
@@ -3036,9 +3002,9 @@ mod tests {
         );
 
         // Symmetry: write through the session clone, read from canonical.
-        *session_clone.search_prompt.write().unwrap() = Some("override-from-session".to_string());
+        *session_clone.title_prompt.write().unwrap() = Some("override-from-session".to_string());
         assert_eq!(
-            core.search_prompt().as_deref(),
+            core.title_prompt().as_deref(),
             Some("override-from-session"),
             "Write direction must be symmetric across all Arc clones"
         );
@@ -3098,7 +3064,7 @@ mod tests {
 
     #[test]
     fn test_prompt_accessor_reflects_write_through_lock() {
-        // ADR-063 §3.4 — the public accessor (e.g. `search_prompt`)
+        // ADR-063 §3.4 — the public accessor (e.g. `title_prompt`)
         // MUST read the RwLock on every call (no caching to a local
         // String), otherwise L2 reload would be silently broken for any
         // session that derived its `AgentCore` clone before the reload.
@@ -3106,17 +3072,17 @@ mod tests {
         let core = make_core(Some(8192), None, None, 0);
 
         // Initial read: None.
-        assert!(core.search_prompt().is_none());
+        assert!(core.title_prompt().is_none());
 
         // First reload: Some("first").
-        *core.search_prompt.write().unwrap() = Some("first".to_string());
-        assert_eq!(core.search_prompt().as_deref(), Some("first"));
+        *core.title_prompt.write().unwrap() = Some("first".to_string());
+        assert_eq!(core.title_prompt().as_deref(), Some("first"));
 
         // Second reload: Some("second"). The accessor must NOT have
         // memoized "first" — it must re-read through the lock.
-        *core.search_prompt.write().unwrap() = Some("second".to_string());
+        *core.title_prompt.write().unwrap() = Some("second".to_string());
         assert_eq!(
-            core.search_prompt().as_deref(),
+            core.title_prompt().as_deref(),
             Some("second"),
             "accessor must re-read RwLock every call; reload must be \
              observable without re-deriving AgentCore"
@@ -3126,9 +3092,9 @@ mod tests {
         // `prompts/<file>.md` file and clicking Reload. The accessor
         // must now return None again so the call site falls back to
         // the built-in constant.
-        *core.search_prompt.write().unwrap() = None;
+        *core.title_prompt.write().unwrap() = None;
         assert!(
-            core.search_prompt().is_none(),
+            core.title_prompt().is_none(),
             "clearing the RwLock must propagate to the accessor so the \
              built-in fallback constant takes effect again"
         );

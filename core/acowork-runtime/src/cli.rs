@@ -348,10 +348,9 @@ async fn async_main(
         // same L2 reload reasons documented in `session_init.rs`.
         *agent_loop.core.compaction_prompt.write().unwrap() = agent_ctx.compaction_prompt.clone();
 
-        // ADR-063: 7 additional overrides. Mirror the session_init.rs
+        // ADR-063: additional overrides. Mirror the session_init.rs
         // Phase B injection. Both Gateway and Standalone modes resolve
         // to the same package declaration because Phase A loaded once.
-        *agent_loop.core.search_prompt.write().unwrap() = agent_ctx.search_prompt.clone();
         *agent_loop.core.compact_template.write().unwrap() = agent_ctx.compact_template.clone();
         *agent_loop.core.title_prompt.write().unwrap() = agent_ctx.title_prompt.clone();
         *agent_loop.core.abstention_prompt.write().unwrap() = agent_ctx.abstention_prompt.clone();

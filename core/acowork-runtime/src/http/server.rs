@@ -317,9 +317,8 @@ pub(crate) struct HttpState {
     /// reverse-proxies these endpoints. Populated in Phase B.
     pub(crate) git_query:
         Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::GitQueryService>>>>,
-    /// ADR-040 follow-up: Tools-panel persistence (MCP + search active
-    /// state). The 4 new `/agents/{id}/mcp-servers` and
-    /// `/agents/{id}/search-config` HTTP handlers route through this
+    /// ADR-040 follow-up: Tools-panel persistence (MCP active state).
+    /// The `/agents/{id}/mcp-servers` HTTP handlers route through this
     /// trait instead of calling `agent_config::*` directly. Populated
     /// in Phase B (sync, no async resource dependency like memory).
     agent_tools: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AgentToolsService>>>>,
@@ -821,11 +820,9 @@ impl RuntimeHttpServer {
             //                                  (`agent_tools.json`)
             //   /agents/{id}/mcp-servers     — MCP active selection
             //                                  (`agent_mcp.json`)
-            //   /agents/{id}/search-config   — search providers
-            //                                  (`agent_search.json`)
             //
             // `/agents/{id}/tools` (GET only) remains a read-only merge
-            // of the three Tools-panel files — see `get_agent_tools`.
+            // of the two Tools-panel files — see `get_agent_tools`.
             .route(
                 "/agents/{id}/config",
                 get(get_agent_config).put(put_agent_config),
@@ -844,10 +841,6 @@ impl RuntimeHttpServer {
             .route(
                 "/agents/{id}/mcp-servers",
                 get(get_agent_mcp_servers).put(put_agent_mcp_servers),
-            )
-            .route(
-                "/agents/{id}/search-config",
-                get(get_agent_search_config).put(put_agent_search_config),
             )
             // ADR-069: per-tool MCP opt-in. GET returns the **full**
             // per-server tool list (name + enabled + description) that
@@ -3131,18 +3124,14 @@ async fn broadcast_builtin_tools_update(
     .await;
 }
 
-/// `GET /agents/{id}/tools` — Tools panel (merged: builtin + mcp + search).
+/// `GET /agents/{id}/tools` - Tools panel (merged: builtin + mcp).
 ///
 /// ADR-034 §7.6.5 defines the merged response schema:
-/// `{tools: [BuiltinToolEntry], mcp_servers: [server_name], search: {providers: [...]}}`
-/// `GET /agents/{id}/tools` - Tools panel (merged: builtin + mcp + search).
-///
-/// ADR-034 \u00a77.6.5 defines the merged response schema:
-/// `{tools: [BuiltinToolEntry], mcp_servers: [server_name], search: {providers: [...]}}`
-/// (panel 3 pulls all three sources in one HTTP call instead of 3 separate ones).
+/// `{tools: [BuiltinToolEntry], mcp_servers: [server_name]}`
+/// (panel 3 pulls both sources in one HTTP call instead of separate ones).
 ///
 /// ADR-040: delegates to [`AgentToolsService::get_merged_tools`] via
-/// the late-bind slot. All three `agent_*` config files are read inside
+/// the late-bind slot. Both `agent_*` config files are read inside
 /// the UseCase impl; the handler is a thin protocol converter.
 async fn get_agent_tools(
     State(state): State<HttpState>,
@@ -3157,7 +3146,6 @@ async fn get_agent_tools(
             "tools": [],
             "mcp_servers": [],
             "mcp_servers_defs": [],
-            "search": { "providers": [] },
         })));
     }
     let svc = state
@@ -3179,7 +3167,6 @@ async fn get_agent_tools(
         "tools": resp.tools,
         "mcp_servers": resp.mcp_servers,
         "mcp_servers_defs": resp.mcp_servers_defs,
-        "search": resp.search,
     })))
 }
 
@@ -3434,49 +3421,6 @@ async fn put_agent_mcp_tools(
     }
 }
 
-// ── Per-agent search config endpoints ────────────────────────────────
-//
-// Same pattern as MCP above: pre-fix the Gateway stub returned 200 without
-// persisting, losing the user's search-provider selection on next tab switch.
-
-/// `GET /agents/{id}/search-config` — read `agent_search.json` (active providers + priorities).
-async fn get_agent_search_config(
-    State(state): State<HttpState>,
-    Path(id): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    if !state.instance_matches(&id) {
-        return Err((
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({
-                "error": format!(
-                    "instance_id mismatch: path '{}' does not address this runtime instance '{}'",
-                    id, state.instance_id
-                ),
-            })),
-        ));
-    }
-    // ADR-040 follow-up: route through the trait (same pattern as
-    // `get_agent_mcp_servers` above). See module-level docs on
-    // `crate::usecases::agent_tools` for the rationale.
-    let svc = state
-        .agent_tools
-        .lock()
-        .await
-        .as_ref()
-        .ok_or((
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({
-                "error": "agent tools service not ready"
-            })),
-        ))?
-        .clone();
-    let resp = svc.get_search_config(&id).await;
-    Ok(Json(serde_json::json!({
-        "agent_id": resp.agent_id,
-        "providers": resp.providers,
-    })))
-}
-
 // ── Provider list endpoint ──────────────────────────────────────────────
 //
 // Read-through endpoint that returns the content of `agent_provider.json`
@@ -3484,7 +3428,7 @@ async fn get_agent_search_config(
 // (acowork/global/providers) and persisted by the MQTT handler in
 // [`crate::agent_config::save_agent_provider_config_from_available`].
 //
-// Unlike MCP / search / builtin-tools, there is no user-authorable subset
+// Unlike MCP / builtin-tools, there is no user-authorable subset
 // of the provider list; the entire file is Gateway-authored. The endpoint
 // exists so the frontend can verify what the Runtime actually has at any
 // given time — a diagnostic / consistency-check tool rather than a
@@ -3528,71 +3472,11 @@ async fn get_agent_providers(
     }
 }
 
-/// `PUT /agents/{id}/search-config` — write `agent_search.json`.
-///
-/// Body: `{"providers": [{"provider": "tavily", "priority": 1}, ...]}`.
-/// Wire shape matches `acowork_core::protocol::AgentSearchProvider` 1:1, so
-/// the proxy pass-through is transparent.
-async fn put_agent_search_config(
-    State(state): State<HttpState>,
-    Path(id): Path<String>,
-    Json(req): Json<UpdateAgentSearchConfigRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    if !state.instance_matches(&id) {
-        return Err((
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({
-                "error": format!(
-                    "instance_id mismatch: path '{}' does not address this runtime instance '{}'",
-                    id, state.instance_id
-                ),
-            })),
-        ));
-    }
-
-    // ADR-040 follow-up: persistence lives in
-    // [`crate::usecases::RuntimeAgentToolsService`].
-    let svc = state
-        .agent_tools
-        .lock()
-        .await
-        .as_ref()
-        .ok_or((
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({
-                "error": "agent tools service not ready"
-            })),
-        ))?
-        .clone();
-    let body = crate::usecases::PutSearchConfigBody {
-        providers: req.providers,
-    };
-    match svc.put_search_config(&id, body).await {
-        Ok(resp) => Ok(Json(serde_json::json!({
-            "agent_id": resp.agent_id,
-            "providers": resp.providers,
-        }))),
-        Err(crate::usecases::AgentToolsError::UnknownServers(unknown)) => Err((
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": "unknown search provider ids",
-                "unknown": unknown,
-            })),
-        )),
-        Err(crate::usecases::AgentToolsError::Persistence(msg)) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({
-                "error": format!("failed to persist agent_search.json: {}", msg),
-            })),
-        )),
-    }
-}
-
 // ── Builtin tools endpoint ─────────────────────────────────────────────
 //
-// Parallel structure to the MCP / search-config pair above, but
-// persists to `agent_tools.json`. Lives under the `AgentToolsService`
-// trait (the same one MCP / search use) because the persistence
+// Parallel structure to the MCP pair above, but persists to
+// `agent_tools.json`. Lives under the `AgentToolsService` trait
+// (the same one MCP uses) because the persistence
 // semantics — read-modify-write with `apply_builtin_tools_patch`,
 // PLATFORM_TOOLS force-enable, silent unknown-name dropping — are the
 // same shape, just a different file on disk.
@@ -3641,8 +3525,8 @@ async fn get_agent_builtin_tools(
 }
 
 /// `PUT /agents/{id}/builtin-tools` — persist the enabled-set for
-/// builtin tools. Same JSON 503 / 500 mapping as the MCP / search
-/// counterparts (no 400 — unknown tool names are silently dropped per
+/// builtin tools. Same JSON 503 / 500 mapping as the MCP
+/// counterpart (no 400 — unknown tool names are silently dropped per
 /// ADR-029 §7; see the `AgentToolsService` doc for rationale).
 async fn put_agent_builtin_tools(
     State(state): State<HttpState>,
@@ -3731,15 +3615,6 @@ struct UpdateMcpServersRequest {
     /// Empty/absent means "no servers active".
     #[serde(default)]
     servers: Vec<String>,
-}
-
-#[derive(serde::Deserialize)]
-struct UpdateAgentSearchConfigRequest {
-    /// Ordered list of active search providers (complete enabled set).
-    /// Empty/absent means "no providers selected" — distinct from
-    /// "config file missing" (a 500). See `SearchConfigResponse.providers`.
-    #[serde(default)]
-    providers: Vec<acowork_core::protocol::AgentSearchProvider>,
 }
 
 #[derive(serde::Deserialize)]
@@ -4239,9 +4114,9 @@ mod tests {
     }
 
     /// Build an agent-tools service backed by the test temp dir's
-    /// `agent_mcp.json` / `agent_search.json`. Used to exercise the
-    /// `/agents/{id}/mcp-servers` and `/agents/{id}/search-config`
-    /// handlers end-to-end through the trait path.
+    /// `agent_mcp.json`. Used to exercise the
+    /// `/agents/{id}/mcp-servers`
+    /// handler end-to-end through the trait path.
     fn new_test_agent_tools(
         temp_dir: std::path::PathBuf,
     ) -> Arc<dyn crate::usecases::AgentToolsService> {
@@ -5025,7 +4900,6 @@ mod tests {
             identity_update_tx: None,
             mcp_notifier: None,
             provider_update_tx: None,
-            search_update_tx: None,
             embedding_update_tx: None,
             node_id: None,
             lsps_update_tx: None,
@@ -5207,13 +5081,13 @@ mod tests {
 
     /// Win11-MCP-ToolsBugFix round-trip regression test.
     ///
-    /// Before the fix, `PUT /api/agents/{id}/mcp-servers` and
-    /// `PUT /api/agents/{id}/search-config` were Gateway stubs that
+    /// Before the fix, `PUT /api/agents/{id}/mcp-servers`
+    /// was a Gateway stub that
     /// returned 200 but never persisted — the user's selection was lost
     /// the next time the Tools tab remounted because `/tools` read the
     /// (empty) on-disk config and overwrote the in-memory Zustand store.
     ///
-    /// This test wires through the four endpoints the Desktop
+    /// This test wires through the endpoints the Desktop
     /// `ToolsTab` actually uses and asserts the round-trip survives a
     /// tab remount (modeled here as a fresh GET against the same agent).
     /// The contract being guarded:
@@ -5222,15 +5096,14 @@ mod tests {
     /// 2. Subsequent GET mcp-servers returns the same names.
     /// 3. The merged `/tools` endpoint reports them under
     ///    `data.mcp_servers` so the optimistic UI re-mount sees them.
-    /// 4. Identical round-trip for `search-config` providers.
-    /// 5. PUT mcp-servers with an unknown name returns 400 (the catalog
+    /// 4. PUT mcp-servers with an unknown name returns 400 (the catalog
     ///    filter at the runtime boundary — protects against direct
     ///    API calls that bypass the desktop's catalog list).
-    /// 6. `Some(vec![])` (explicitly cleared) round-trips as empty,
+    /// 5. `Some(vec![])` (explicitly cleared) round-trips as empty,
     ///    distinct from "never set anything" (auto-merged fallback).
     #[tokio::test]
-    async fn test_mcp_and_search_persistence_roundtrip() {
-        let temp_dir = std::env::temp_dir().join("acowork-test-runtime-http-mcp-search");
+    async fn test_mcp_persistence_roundtrip() {
+        let temp_dir = std::env::temp_dir().join("acowork-test-runtime-http-mcp");
         let _ = std::fs::remove_dir_all(&temp_dir);
         std::fs::create_dir_all(temp_dir.join("config")).unwrap();
 
@@ -5258,7 +5131,7 @@ mod tests {
             std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
         let mqtt_client: SharedMqttClientSlot = std::sync::Arc::new(tokio::sync::Mutex::new(None));
 
-        // ADR-040 follow-up: the mcp-servers + search-config handlers
+        // ADR-040 follow-up: the mcp-servers + builtin-tools handlers
         // route through the `AgentToolsService` trait; the slot must be
         // populated for the test to exercise the trait path. Mirrors
         // the wiring in `startup/session_init.rs` Phase B.
@@ -5374,35 +5247,7 @@ mod tests {
         assert_eq!(defs[1]["name"], "search");
         assert_eq!(defs[1]["active"], false);
 
-        // 4) PUT search-config — user activates `tavily` with priority 1.
-        let search_url = format!("{}/agents/{TEST_INSTANCE_ID}/search-config", base);
-        let resp = client
-            .put(&search_url)
-            .json(&serde_json::json!({
-                "providers": [{"provider": "tavily", "priority": 1}]
-            }))
-            .send()
-            .await
-            .unwrap();
-        assert!(resp.status().is_success());
-
-        let resp = client.get(&search_url).send().await.unwrap();
-        assert!(resp.status().is_success());
-        let body: serde_json::Value = resp.json().await.unwrap();
-        let providers = body["providers"].as_array().unwrap();
-        assert_eq!(providers.len(), 1);
-        assert_eq!(providers[0]["provider"], "tavily");
-        assert_eq!(providers[0]["priority"], 1);
-
-        // 5) The merged /tools `search.providers` now exposes the same
-        //    active list (single-shape, no separate `active_providers`).
-        let resp = reqwest::get(&tools_url).await.unwrap();
-        let tools: serde_json::Value = resp.json().await.unwrap();
-        let providers = tools["search"]["providers"].as_array().unwrap();
-        assert_eq!(providers.len(), 1);
-        assert_eq!(providers[0]["provider"], "tavily");
-
-        // 6) PUT mcp-servers with an unknown name → 400 (not 200 with
+        // 5) PUT mcp-servers with an unknown name → 400 (not 200 with
         //    silent drop, which was the pre-fix symptom at the
         //    security/UX layer).
         let bad_url = format!("{}/agents/{TEST_INSTANCE_ID}/mcp-servers", base);
@@ -5450,27 +5295,26 @@ mod tests {
     }
 
     /// Regression: bare `{}` (no keys) must be accepted for both
-    /// `PUT /agents/{id}/mcp-servers` and `PUT /agents/{id}/search-config`,
-    /// deserializing to the same empty list as `{"servers": []}` /
-    /// `{"providers": []}`. Both shapes reach the usecase layer (which
-    /// treats them as `Some(vec![])` — explicit "no servers/providers
+    /// `PUT /agents/{id}/mcp-servers`, deserializing to the same empty
+    /// list as `{"servers": []}`. Both shapes reach the usecase layer
+    /// (which treats them as `Some(vec![])` — explicit "no servers
     /// active"), distinct from "never set anything".
     ///
-    /// **Bug shape** (pre-fix): `UpdateMcpServersRequest.servers` and
-    /// `UpdateAgentSearchConfigRequest.providers` lacked `#[serde(default)]`,
+    /// **Bug shape** (pre-fix): `UpdateMcpServersRequest.servers`
+    /// lacked `#[serde(default)]`,
     /// so axum's `Json<...>` extractor returned 400 before reaching the
     /// handler when the request body was bare `{}`. The existing
-    /// `test_mcp_and_search_persistence_roundtrip` only tested
+    /// `test_mcp_persistence_roundtrip` only tested
     /// `{"servers": []}` (explicit empty list), which deserializes
     /// successfully whether or not `#[serde(default)]` is present —
     /// so the bug was silent.
     ///
-    /// Companion to `test_mcp_and_search_persistence_roundtrip`; uses
+    /// Companion to `test_mcp_persistence_roundtrip`; uses
     /// a stripped-down harness because empty bodies bypass the catalog
     /// validation in `put_mcp_servers` (impl.rs:99) so we don't need
     /// to seed `agent_mcp.json::catalog` here.
     #[tokio::test]
-    async fn test_put_mcp_and_search_accepts_empty_body() {
+    async fn test_put_mcp_accepts_empty_body() {
         let temp_dir = std::env::temp_dir().join("acowork-test-runtime-http-empty-body");
         let _ = std::fs::remove_dir_all(&temp_dir);
         std::fs::create_dir_all(temp_dir.join("config")).unwrap();
@@ -5529,7 +5373,6 @@ mod tests {
         let base = format!("http://127.0.0.1:{}", server.port);
         let client = reqwest::Client::new();
         let mcp_url = format!("{}/agents/{TEST_INSTANCE_ID}/mcp-servers", base);
-        let search_url = format!("{}/agents/{TEST_INSTANCE_ID}/search-config", base);
 
         // 1) Bare `{}` to mcp-servers must succeed (was 400 pre-fix).
         let resp = client
@@ -5541,66 +5384,6 @@ mod tests {
         assert!(
             resp.status().is_success(),
             "PUT mcp-servers with bare {{}} must succeed, got {}",
-            resp.status()
-        );
-
-        // 2) Bare `{}` to search-config must succeed (was 400 pre-fix).
-        let resp = client
-            .put(&search_url)
-            .json(&serde_json::json!({}))
-            .send()
-            .await
-            .unwrap();
-        assert!(
-            resp.status().is_success(),
-            "PUT search-config with bare {{}} must succeed, got {}",
-            resp.status()
-        );
-
-        // 3) Round-trip: GET sees the empty active set on both endpoints —
-        //    confirms the empty body reached the usecase (which wrote
-        //    `active_names = Some(vec![])` / `providers: vec![]`) rather
-        //    than being silently no-op'd at the deserialization layer.
-        let resp = client.get(&mcp_url).send().await.unwrap();
-        let body: serde_json::Value = resp.json().await.unwrap();
-        let active = body["active_servers"].as_array().unwrap();
-        assert!(
-            active.is_empty(),
-            "GET mcp-servers after empty-body PUT must report empty active set, got: {active:?}"
-        );
-
-        let resp = client.get(&search_url).send().await.unwrap();
-        let body: serde_json::Value = resp.json().await.unwrap();
-        let providers = body["providers"].as_array().unwrap();
-        assert!(
-            providers.is_empty(),
-            "GET search-config after empty-body PUT must report empty providers, got: {providers:?}"
-        );
-
-        // 4) Parity check: explicit `{"servers": []}` / `{"providers": []}`
-        //    also succeed (this was already working pre-fix; included here
-        //    so the test pins both wire shapes as equivalent).
-        let resp = client
-            .put(&mcp_url)
-            .json(&serde_json::json!({"servers": []}))
-            .send()
-            .await
-            .unwrap();
-        assert!(
-            resp.status().is_success(),
-            "explicit empty list must succeed (parity with bare {{}}), got {}",
-            resp.status()
-        );
-
-        let resp = client
-            .put(&search_url)
-            .json(&serde_json::json!({"providers": []}))
-            .send()
-            .await
-            .unwrap();
-        assert!(
-            resp.status().is_success(),
-            "explicit empty providers must succeed (parity with bare {{}}), got {}",
             resp.status()
         );
 

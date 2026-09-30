@@ -319,48 +319,6 @@ pub struct McpKeyEntry {
     pub api_key: Option<String>,
 }
 
-/// ── Web Search Provider types ──
-/// Search provider list item — delivered by Gateway to Runtime via AgentHelloResult.
-///
-/// Describes an available web search provider with its metadata.
-/// API keys are NOT included — see SearchKeyEntry.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SearchProviderListItem {
-    /// Provider identifier (e.g. "tavily", "brave", "firecrawl", "searxng")
-    pub id: String,
-    /// Display name (e.g. "Tavily Search")
-    pub name: String,
-    /// Human-readable description
-    pub description: String,
-    /// Whether this provider requires an API key
-    pub requires_api_key: bool,
-    /// Default API base URL
-    pub base_url: String,
-}
-
-/// Search key entry — delivered by Gateway to Runtime via AgentHelloResult.
-///
-/// Always delivered in full on every AgentHello (no version check).
-/// Runtime stores this ONLY in memory, never persisted to disk.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SearchKeyEntry {
-    /// Provider identifier (e.g. "tavily")
-    pub provider_id: String,
-    /// Decrypted API key
-    pub api_key: String,
-}
-
-/// Per-agent search provider configuration — persisted to agent_search.json.
-///
-/// Each agent selects a subset of available search providers with priority ordering.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AgentSearchProvider {
-    /// Provider identifier (e.g. "tavily")
-    pub provider: String,
-    /// Priority (1 = highest priority, lower number = tried first in fallback chain)
-    pub priority: u32,
-}
-
 /// Per-agent provider configuration — persisted to agent_provider.json.
 ///
 /// Contains the Gateway-pushed provider list (with models and capabilities).
@@ -402,22 +360,6 @@ impl AgentProviderConfig {
     }
 }
 
-/// Per-agent search configuration — persisted to agent_search.json.
-///
-/// Follows the same dual-source pattern as `AgentMcpConfig`:
-/// - `providers`: user-configured active search providers (written by PUT /search-config)
-/// - `catalog`: Gateway-pushed available search providers (written by MQTT handler)
-/// - API keys are NEVER stored here — they come via MQTT `AvailableSearches.api_key`.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct AgentSearchConfig {
-    /// Active search providers for this agent (user-configured, priority ordered)
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub providers: Vec<AgentSearchProvider>,
-    /// Gateway-provided search provider catalog (from acowork/global/searches).
-    /// Metadata like name, description, base_url — no API keys.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub catalog: Vec<SearchProviderListItem>,
-}
 
 /// ── Embedding Model types ──
 /// Pooling strategy for embedding models.
@@ -605,7 +547,7 @@ pub enum OnnxOutputKind {
 
 /// Versioned embedding model list persisted to disk.
 ///
-/// Follows the same pattern as ProviderListFile, McpListFile, SearchListFile.
+/// Follows the same pattern as ProviderListFile, McpListFile.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmbeddingModelsFile {
     /// Monotonic version counter — bumped on every change
@@ -807,7 +749,7 @@ pub struct UserProfile {
 
 /// Versioned user profile list persisted to disk.
 ///
-/// Follows the same pattern as ProviderListFile, McpListFile, SearchListFile.
+/// Follows the same pattern as ProviderListFile, McpListFile.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserProfileListFile {
     /// Monotonic version counter — bumped on every create/update/delete
@@ -1103,9 +1045,6 @@ pub enum GatewayRequest {
         /// Runtime's cached MCP server list version (0 = never synced)
         #[serde(default)]
         mcp_list_version: u64,
-        /// Runtime's cached search provider list version (0 = never synced)
-        #[serde(default)]
-        search_list_version: u64,
         /// Runtime's cached user profile version (0 = never synced)
         #[serde(default)]
         user_profile_version: u64,
@@ -1180,12 +1119,6 @@ pub enum GatewayRequest {
         /// Shell approval threshold
         #[serde(default, skip_serializing_if = "Option::is_none")]
         shell_approval_threshold: Option<String>,
-        /// Active MCP server configurations (full defs, from agent_config.json)
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        mcp_servers: Vec<McpServerConfigDef>,
-        /// Search provider config (JSON-serialized AgentSearchConfig from agent_search.json)
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        search_config_json: Option<String>,
         /// ADR-017: Avatar config from agent_config.json
         #[serde(default, skip_serializing_if = "Option::is_none")]
         avatar: Option<String>,
@@ -1263,18 +1196,6 @@ pub enum GatewayResponse {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         mcp_key_vault: Vec<McpKeyEntry>,
 
-        // ── Web Search Provider ──
-        /// Search provider list.
-        /// Only included when search_list_version in AgentHello < Gateway's current version.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        search_list: Option<Vec<SearchProviderListItem>>,
-        /// Gateway's current search list version
-        #[serde(default)]
-        search_list_version: u64,
-        /// Search provider API keys — NEVER persisted to workspace disk by Runtime.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        search_key_vault: Vec<SearchKeyEntry>,
-
         // ── User Identity ──
         /// Active user profile. Only included when user_profile_version in
         /// AgentHello request is stale. None when no active user exists.
@@ -1313,7 +1234,7 @@ pub enum GatewayResponse {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         embed_provider_id: Option<String>,
         /// Decrypted API key for `embed_provider_id`. NEVER persisted to
-        /// disk by Runtime — same security contract as the search / chat
+        /// disk by Runtime — same security contract as the chat
         /// provider keys in the same message.
         ///
         /// Empty when no key is configured (Runtime should treat the
@@ -1374,18 +1295,6 @@ pub enum GatewayResponse {
         provider_list_version: u64,
         /// Full provider key vault (in-memory only, never persisted)
         provider_key_vault: Vec<ProviderKeyEntry>,
-    },
-    /// Web Search configuration delivery (Gateway → Runtime, hot-push)
-    ///
-    /// Pushed after user modifies search vault keys via Harness/Search Tab.
-    /// Always delivers the full search_list + key vault (not version-diffed).
-    SearchConfigDelivery {
-        /// Full search provider list (with metadata)
-        search_list: Vec<SearchProviderListItem>,
-        /// Current search list version
-        search_list_version: u64,
-        /// Search provider API keys — NEVER persisted to workspace disk by Runtime
-        search_key_vault: Vec<SearchKeyEntry>,
     },
     /// User profile update (Gateway → Runtime, hot push)
     ///
@@ -1564,11 +1473,6 @@ pub enum GatewayResponse {
         /// When set together with `model`, the Runtime switches provider and model.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         provider: Option<String>,
-        /// Search provider config override (JSON-serialized AgentSearchConfig).
-        /// When Some, replaces the agent's agent_search.json completely.
-        /// Some("") means no search providers active.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        search_config_json: Option<String>,
         /// ADR-017: Custom avatar path override.
         /// Some("path") = set, Some("") = clear, None = don't change.
         #[serde(default, skip_serializing_if = "Option::is_none")]

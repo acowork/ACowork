@@ -283,7 +283,6 @@ name = "shell"
     { "name": "memory_store", "enabled": true },
     { "name": "http_request", "enabled": false },
     { "name": "web_fetch", "enabled": false },
-    { "name": "web_search", "enabled": false },
     { "name": "shell", "enabled": true },
     { "name": "file_read", "enabled": false },
     { "name": "file_write", "enabled": false },

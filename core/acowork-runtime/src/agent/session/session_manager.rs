@@ -12,7 +12,6 @@ use std::time::Duration;
 
 use acowork_core::Budget;
 use acowork_core::protocol::ProtocolType;
-use acowork_core::protocol::{SearchKeyEntry, SearchProviderListItem};
 use acowork_core::tools::traits::Tool;
 use futures_util::FutureExt;
 use tokio::sync::Notify;
@@ -2454,38 +2453,6 @@ After installation, ask the user to re-enable the MCP server.",
             conv.apply_config(&delta);
         }
         Ok(())
-    }
-
-    /// Update web search config from Gateway SearchConfigDelivery hot-push.
-    ///
-    /// Caches the search key vault and provider list (mirrors CachedLLMConfig pattern)
-    /// so that ConfigSnapshot can return current search provider metadata.
-    /// Search keys are NEVER persisted to disk — only held in memory.
-    pub fn update_search_config(
-        &mut self,
-        search_key_vault: Vec<SearchKeyEntry>,
-        search_list: Vec<SearchProviderListItem>,
-    ) {
-        tracing::info!(
-            provider_count = search_list.len(),
-            key_count = search_key_vault.len(),
-            "SessionManager: search config received (keys held in memory, not cached)"
-        );
-
-        // Update the shared search key vault so backends can resolve API keys.
-        {
-            let mut vault = self.core.search_key_vault.write().unwrap();
-            vault.clear();
-            for entry in &search_key_vault {
-                vault.insert(entry.provider_id.clone(), entry.api_key.clone());
-            }
-        }
-
-        // Update the shared search provider list.
-        {
-            let mut list = self.core.search_provider_list.write().unwrap();
-            *list = search_list;
-        }
     }
 
     /// Update user identity from Gateway UserProfileUpdate push.

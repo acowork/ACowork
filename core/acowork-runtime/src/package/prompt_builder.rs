@@ -8,7 +8,7 @@
 //!
 //! # Package-level prompt overrides (ADR-063)
 //!
-//! The 7 files listed in [`OVERRIDABLE_PROMPTS`] are the canonical
+//! The 6 files listed in [`OVERRIDABLE_PROMPTS`] are the canonical
 //! "package-declared overrides" for the hardcoded LLM prompt constants in
 //! [`crate::prompt`] and the downstream grafeo/memory modules. When a
 //! `.agent` package provides one of these files in `prompts/`, it
@@ -70,8 +70,7 @@ pub const OVERRIDABLE_PROMPTS: &[(&str, &str)] = &[
         "summary.md",
         "compaction/distillation system prompt (ADR-053)",
     ),
-    // ADR-063 — Runtime prompt.rs constants (3)
-    ("search.md", "SEARCH_SYSTEM_PROMPT"),
+    // ADR-063 — Runtime prompt.rs constants (2)
     (
         "compact-template.md",
         "COMPACT_PROMPT (must keep {messages_text} placeholder)",
@@ -219,9 +218,6 @@ pub fn reload_prompts_into_core(
         match *filename {
             "summary.md" => {
                 *core.compaction_prompt.write().unwrap() = loaded;
-            }
-            "search.md" => {
-                *core.search_prompt.write().unwrap() = loaded;
             }
             "compact-template.md" => {
                 *core.compact_template.write().unwrap() = loaded;
@@ -503,7 +499,6 @@ Be friendly and welcoming.
         // overwrites with `None` (rather than leaving the sentinel in
         // place because of a missed write).
         *core.compaction_prompt.write().unwrap() = Some("SENTINEL".into());
-        *core.search_prompt.write().unwrap() = Some("SENTINEL".into());
         *core.compact_template.write().unwrap() = Some("SENTINEL".into());
         *core.title_prompt.write().unwrap() = Some("SENTINEL".into());
         *core.abstention_prompt.write().unwrap() = Some("SENTINEL".into());
@@ -514,7 +509,6 @@ Be friendly and welcoming.
         // the loader returned `None` for each, and the reload wrote
         // that `None` into the slot (not the original sentinel).
         assert!(core.compaction_prompt.read().unwrap().is_none());
-        assert!(core.search_prompt.read().unwrap().is_none());
         assert!(core.compact_template.read().unwrap().is_none());
         assert!(core.title_prompt.read().unwrap().is_none());
         assert!(core.abstention_prompt.read().unwrap().is_none());
@@ -537,7 +531,6 @@ Be friendly and welcoming.
         // ADR-068: 3 grafeo overrides removed — see module docs.
         let fixtures: &[(&str, &str)] = &[
             ("summary.md", "summary-from-disk"),
-            ("search.md", "search-from-disk"),
             ("compact-template.md", "compact-template-from-disk"),
             ("title.md", "title-from-disk"),
             ("abstention.md", "abstention-from-disk"),
@@ -554,10 +547,6 @@ Be friendly and welcoming.
         assert_eq!(
             core.compaction_prompt.read().unwrap().as_deref(),
             Some("summary-from-disk")
-        );
-        assert_eq!(
-            core.search_prompt.read().unwrap().as_deref(),
-            Some("search-from-disk")
         );
         assert_eq!(
             core.compact_template.read().unwrap().as_deref(),
@@ -597,7 +586,6 @@ Be friendly and welcoming.
             core.compaction_prompt.read().unwrap().as_deref(),
             Some("summary-only")
         );
-        assert!(core.search_prompt.read().unwrap().is_none());
         assert!(core.compact_template.read().unwrap().is_none());
         assert_eq!(
             core.title_prompt.read().unwrap().as_deref(),
@@ -628,10 +616,12 @@ Be friendly and welcoming.
         // generalization).
         // ADR-071 D7/D9: count went 5 → 7 after adding the two distiller
         // overrides (distiller-extraction / distiller-judge).
+        // Web-search removal: count went 7 → 6 after dropping `search.md`
+        // (`SEARCH_SYSTEM_PROMPT` went with the built-in web-search module).
         assert_eq!(
             OVERRIDABLE_PROMPTS.len(),
-            7,
-            "OVERRIDABLE_PROMPTS must stay at 7 — every entry maps 1:1 to an AgentCore field; drift here breaks reload"
+            6,
+            "OVERRIDABLE_PROMPTS must stay at 6 — every entry maps 1:1 to an AgentCore field; drift here breaks reload"
         );
     }
 
@@ -805,14 +795,15 @@ Be friendly and welcoming.
     ///
     /// ADR-068: count is now 5 (was 8 before removing the 3 grafeo
     /// overrides).
-    /// ADR-071 D7/D9: count is now 7 (5 + distiller-extraction.md +
-    /// distiller-judge.md).
+    /// ADR-071 D7/D9: count was 7 (5 + distiller-extraction.md +
+    /// distiller-judge.md); the built-in web-search removal dropped
+    /// `search.md`, so it is now 6.
     #[test]
-    fn test_overridable_prompts_count_is_7() {
+    fn test_overridable_prompts_count_is_6() {
         assert_eq!(
             OVERRIDABLE_PROMPTS.len(),
-            7,
-            "OVERRIDABLE_PROMPTS must have 7 entries: 1 compaction (ADR-053) + 3 prompt.rs + 1 memory abstention + 2 distiller prompts (ADR-071). Update AgentCore fields, LLM call sites, and Debug panel list together."
+            6,
+            "OVERRIDABLE_PROMPTS must have 6 entries: 1 compaction (ADR-053) + 2 prompt.rs + 1 memory abstention + 2 distiller prompts (ADR-071). Update AgentCore fields, LLM call sites, and Debug panel list together."
         );
     }
 
@@ -903,8 +894,8 @@ Be friendly and welcoming.
         let dir = std::env::temp_dir().join("acowork-test-load-optional-whitespace");
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("prompts")).unwrap();
-        fs::write(dir.join("prompts").join("search.md"), "   \n\t\n  ").unwrap();
-        assert_eq!(load_optional_prompt(&dir, "search.md"), None);
+        fs::write(dir.join("prompts").join("title.md"), "   \n\t\n  ").unwrap();
+        assert_eq!(load_optional_prompt(&dir, "title.md"), None);
     }
 
     /// Backward-compat: `load_compaction_prompt` is still a valid public
@@ -995,8 +986,8 @@ Be friendly and welcoming.
             // Neighbour that LOOKS like an overridable filename but isn't:
             // same stem + `-case` suffix. Must pass the lowercase-extension
             // collector and the exact-match exclusion (because the
-            // canonical name is `summary.md` / `search.md`, not
-            // `summary-case.md` / `search-case.md`).
+            // canonical name is `summary.md` / `title.md`, not
+            // `summary-case.md` / `title-case.md`).
             let stem = filename.trim_end_matches(".md");
             let variant = format!("{stem}-case.md");
             fs::write(

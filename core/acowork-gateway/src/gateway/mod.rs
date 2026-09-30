@@ -713,8 +713,6 @@ impl Gateway {
                     &catalog,
                 );
             }
-            // Rebuild search_list cache from Vault search keys at startup
-            crate::resource_cache::rebuild_and_save_search_cache(&mut gw, &data_dir_path);
         }
 
         // S3.1: Load cron scheduler entries from store
@@ -1060,7 +1058,7 @@ impl Gateway {
         };
 
         // ADR-033: Start MQTT Global Resources Publisher.
-        // Publishes providers, models, MCP catalog, searches, embedding models
+        // Publishes providers, models, MCP catalog, embedding models
         // to acowork/global/* Retained topics so Runtime can discover them.
         //
         // The publisher defers its first Retained publish until a "ready"

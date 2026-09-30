@@ -27,15 +27,13 @@ Tool Dispatcher
 
 以下工具由 Agent Runtime 内置实现，Agent 可在 manifest 中声明使用，无需提供实现代码。
 
-**平台基础设施级工具定义：** 内置工具的范围仅限**平台基础设施级**——即调用开放协议（HTTP/DNS/文件系统/操作系统 API）或本地计算（WASM/Embedding），不依赖特定第三方服务的付费 API。SaaS 集成（Jira/Notion/LinkedIn 等）由独立 Agent 提供，不内置。`web_search` 虽然调用搜索引擎 API，但 API Key 由用户提供并通过 Vault 分发，平台仅做调用通道，不绑死特定服务商——因此归类为平台基础设施级工具。
-
+**平台基础设施级工具定义：** 内置工具的范围仅限**平台基础设施级**——即调用开放协议（HTTP/DNS/文件系统/操作系统 API）或本地计算（WASM/Embedding），不依赖特定第三方服务的付费 API。SaaS 集成（Jira/Notion/LinkedIn 等）由独立 Agent 提供，不内置。
 | 工具名                 | 功能                             | 所需权限                  | 说明                                                                                                                                                                                                                      |
 | ---------------------- | -------------------------------- | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `memory_recall`        | 语义检索私有 SQLite 记忆层              | `memory:read`             | 混合检索（HNSW + BM25）+ 关联扩散（1-2 跳图扩展），返回相关记忆片段                                                                                                                                                       |
 | `memory_store`         | 写入私有 SQLite 记忆层                  | `memory:write`            | 即时提取 Tool Call 机制：LLM 自主判断是否调用，支持 Fact/Preference/Relation/Procedural/Autobiographical 五种类型，带 importance（0-1）和 privacy（Public/Personal/Sensitive）参数。Fact 按 (subject, predicate) 语义去重 |
 | `http_request`         | HTTP 请求（GET/POST/PUT/DELETE） | `network:<url_pattern>`   | 支持 method 参数选择 HTTP 方法，JSON 响应自动解析，JSON body 和表单                                                                                                                                                       |
 | `web_fetch`            | 获取网页内容                     | `network:<url_pattern>`   | HTML → Markdown 转换，Agent 直接获得可读文本                                                                                                                                                                              |
-| `web_search`           | 网页搜索                         | `search:web`              | 调用搜索引擎 API，返回结构化结果；API Key 由 Vault 分发                                                                                                                                                                   |
 | `shell`                | 执行 shell 命令                  | `filesystem:exec`         | 受沙箱限制，超时可中断                                                                                                                                                                                                    |
 | `file_read`            | 读取文件                         | `filesystem:read:<path>`  | 限制在工作区和授权目录内                                                                                                                                                                                                  |
 | `file_write`           | 写入文件                         | `filesystem:write:<path>` | 限制在工作区和授权目录内                                                                                                                                                                                                  |
@@ -55,7 +53,6 @@ Tool Dispatcher
 | `memory_store`         |    ✅    |   ✅   |   ✅   |    ✅    |   ✅   | 全平台             |
 | `http_request`         |    ✅    |   ✅   |   ✅   |    ✅    |   ✅   | 全平台             |
 | `web_fetch`            |    ✅    |   ✅   |   ✅   |    ✅    |   ✅   | 全平台             |
-| `web_search`           |    ✅    |   ✅   |   ✅   |    ✅    |   ✅   | 全平台             |
 | `shell`                |    ✅    |   ✅   |   ✅   |    ❌    |   ❌   | 仅桌面端           |
 | `file_read`            |    ✅    |   ✅   |   ✅   |    ⚠️    |   ⚠️   | 全平台，移动端受限 |
 | `file_write`           |    ✅    |   ✅   |   ✅   |    ⚠️    |   ⚠️   | 全平台，移动端受限 |
@@ -521,7 +518,7 @@ LLM 输出 tool_calls: [{name, arguments}, ...]
 | API Key 对 WASM 不可见                    | secrecy::SecretString                                        | WASM 工具是不可信代码，绝不能拿到 LLM API Key                                                                                                                                                                           |
 | SDK 延后                                  | Phase 2+                                                     | Phase 1 手动导出函数足够，SDK 降低门槛但不阻塞核心功能                                                                                                                                                                  |
 | Builtin 范围                              | 仅平台基础设施级                                             | SaaS 集成（Jira/Notion/LinkedIn 等）由独立 Agent 提供，不内置；垂直能力走 WASM Tool 或独立 Agent                                                                                                                        |
-| web_fetch/web_search 内置                 | 是                                                           | 几乎所有 Agent 都需要，是平台级基础设施；web_search 的 Search API Key 由 Vault 分发                                                                                                                                     |
+| web_fetch 内置                             | 是                                                           | 几乎所有 Agent 都需要，是平台级基础设施                                                                                                                                     |
 | file_edit/glob_search/content_search 内置 | 是                                                           | 文件操作三件套（读+写+编辑+搜索），缺少任一个都会导致 Agent 用 file_write 模拟低效操作                                                                                                                                  |
 | RAG 工具类型                              | 独立 type="rag"，配置驱动 Opt-In                             | 企业 RAG 是外部服务接入，不是内置工具也不是 WASM 工具，需要独立的声明和执行模型；仅 manifest 声明时注册，无 RAG 的 Agent 零侵入                                                                                         |
 | RAG 凭据安全                              | Vault 引用，运行时获取                                       | 与内置工具 API Key 管理一致，不明文出现在 manifest 或进程环境变量                                                                                                                                                       |

@@ -1406,8 +1406,7 @@ mod tests {
     //
     // Covered tools are the ones whose per-tool truncate_output was
     // deleted (file_read, doc_reader paged path, glob_search,
-    // content_search). web_search needs a live backend mock and
-    // codebase needs a live LSP relay mock — both would require
+    // content_search). codebase needs a live LSP relay mock — which would require
     // spawning network servers for marginal coverage over the mock
     // tests above (the wrapper is inner-type-agnostic), so they are
     // intentionally not duplicated here. Their *semantic* truncation

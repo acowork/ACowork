@@ -10,9 +10,8 @@ use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 
 use acowork_core::mqtt_proto::{
-    AvailableMcps, AvailableProviders, AvailableSearches, ControlCommand,
-    DataEnvelope, Intent, LlmProtocol, McpRef, McpTransport as ProtoMcpTransport, ProviderRef,
-    SearchRef, control_command::Command, data_envelope::Payload,
+    AvailableMcps, AvailableProviders, ControlCommand, DataEnvelope, Intent, LlmProtocol, McpRef,
+    McpTransport as ProtoMcpTransport, ProviderRef, control_command::Command, data_envelope::Payload,
 };
 use acowork_gateway::mqtt::{GatewayMqttClient, start_broker};
 use acowork_runtime::mqtt::{MqttConnectConfig, RuntimeMqttClient, new_shared_cache};
@@ -95,7 +94,6 @@ fn integration_gateway_and_runtime_connect() {
             identity_update_tx: None,
             mcp_notifier: None,
             provider_update_tx: None,
-            search_update_tx: None,
             embedding_update_tx: None,
             node_id: None,
             lsps_update_tx: None,
@@ -152,7 +150,6 @@ fn integration_control_message_flow() {
             identity_update_tx: None,
             mcp_notifier: None,
             provider_update_tx: None,
-            search_update_tx: None,
             embedding_update_tx: None,
             node_id: None,
             lsps_update_tx: None,
@@ -243,7 +240,6 @@ fn integration_control_intent_flow() {
             identity_update_tx: None,
             mcp_notifier: None,
             provider_update_tx: None,
-            search_update_tx: None,
             embedding_update_tx: None,
             node_id: None,
             lsps_update_tx: None,
@@ -351,7 +347,6 @@ fn integration_multiple_messages() {
             identity_update_tx: None,
             mcp_notifier: None,
             provider_update_tx: None,
-            search_update_tx: None,
             embedding_update_tx: None,
             node_id: None,
             lsps_update_tx: None,
@@ -441,7 +436,6 @@ fn integration_lwt_offline_on_disconnect() {
                 identity_update_tx: None,
                 mcp_notifier: None,
                 provider_update_tx: None,
-                search_update_tx: None,
                 embedding_update_tx: None,
                 node_id: None,
                 lsps_update_tx: None,
@@ -572,7 +566,6 @@ fn integration_catalog_retained_persists_to_agent_mcp_json() {
             identity_update_tx: None,
             mcp_notifier: None,
             provider_update_tx: None,
-            search_update_tx: None,
             embedding_update_tx: None,
             node_id: None,
             lsps_update_tx: None,
@@ -747,7 +740,6 @@ fn integration_providers_retained_persists_to_agent_provider_json() {
             identity_update_tx: None,
             mcp_notifier: None,
             provider_update_tx: None,
-            search_update_tx: None,
             embedding_update_tx: None,
             node_id: None,
             lsps_update_tx: None,
@@ -877,136 +869,6 @@ fn integration_providers_retained_persists_to_agent_provider_json() {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// Search catalog retained -> agent_search.json persistence (I3)
-// ════════════════════════════════════════════════════════════════════════════
-
-#[test]
-fn integration_searches_retained_persists_to_agent_search_json() {
-    let port = fresh_broker_port();
-    let broker = start_broker("127.0.0.1", port).unwrap();
-
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    rt.block_on(async {
-        // ── 1. Spin up Runtime with a real work_dir ───────────────────
-        let work_dir =
-            std::env::temp_dir().join(format!("acowork-search-e2e-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&work_dir).expect("work_dir should be creatable");
-
-        let cache = new_shared_cache();
-        let (control_tx, _control_rx) = tokio::sync::mpsc::unbounded_channel();
-        let _rt = RuntimeMqttClient::connect(MqttConnectConfig {
-            host: "127.0.0.1",
-            port,
-            agent_id: "com.test.searches",
-            instance_id: TEST_INSTANCE_ID,
-            agent_name: "Search Test",
-            agent_version: "1.0.0",
-            config_json: "{}",
-            available_cache: cache,
-            control_tx,
-            identity_update_tx: None,
-            mcp_notifier: None,
-            provider_update_tx: None,
-            search_update_tx: None,
-            embedding_update_tx: None,
-            node_id: None,
-            lsps_update_tx: None,
-            node_proxy_update_tx: None,
-            http_advertise_endpoint: None,
-            http_port: None,
-            work_dir: work_dir.clone(),
-            username: None,
-            password: None,
-        })
-        .await
-        .unwrap();
-
-        // ── 2. Gateway publishes `acowork/global/searches` (retained) ─
-        let gw = GatewayMqttClient::new_publisher("127.0.0.1", port)
-            .await
-            .unwrap();
-
-        let payload = AvailableSearches {
-            version: 7,
-            providers: vec![
-                SearchRef {
-                    id: "tavily".into(),
-                    name: "Tavily Search".into(),
-                    description: "AI-optimized search".into(),
-                    requires_api_key: true,
-                    base_url: "https://api.tavily.com".into(),
-                    api_key: "tvly-secret-key".into(), // wire-only; must NOT persist
-                },
-                SearchRef {
-                    id: "searxng".into(),
-                    name: "SearXNG".into(),
-                    description: "Self-hosted meta search".into(),
-                    requires_api_key: false,
-                    base_url: "http://localhost:8080".into(),
-                    api_key: String::new(),
-                },
-            ],
-        };
-        let envelope = DataEnvelope {
-            version: 1,
-            payload: Some(Payload::AvailableSearches(payload)),
-        };
-        gw.publish_envelope(
-            "acowork/global/searches",
-            &envelope,
-            acowork_gateway::mqtt::MqttQoS::AtLeastOnce,
-            true,
-        )
-        .await
-        .expect("gateway publish should succeed");
-        eprintln!("[test] gateway published available_searches (retained)");
-
-        // ── 3. Wait for Runtime poll loop to persist ──────────────────
-        let search_path = work_dir.join("config").join("agent_search.json");
-        let mut written = false;
-        for _ in 0..20 {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            if search_path.exists() {
-                let raw = std::fs::read_to_string(&search_path).unwrap();
-                if raw.contains("tavily") && raw.contains("searxng") {
-                    written = true;
-                    break;
-                }
-            }
-        }
-        assert!(
-            written,
-            "Runtime should have written agent_search.json containing catalog entries. \
-             file={} exists={}",
-            search_path.display(),
-            search_path.exists(),
-        );
-
-        // ── 4. Verify catalog landed on disk ──────────────────────────
-        let cfg = acowork_runtime::agent_config::load_agent_search_config(&work_dir)
-            .expect("load should succeed")
-            .expect("file should now exist");
-        assert_eq!(cfg.catalog.len(), 2, "catalog should have both entries");
-        assert_eq!(cfg.catalog[0].id, "tavily");
-        assert_eq!(cfg.catalog[1].id, "searxng");
-
-        // ── 5. API key must NOT be persisted ──────────────────────────
-        let raw_json = std::fs::read_to_string(&search_path).unwrap();
-        assert!(
-            !raw_json.contains("tvly-secret-key"),
-            "API key leaked into agent_search.json (must be stripped before write); raw={}",
-            raw_json,
-        );
-
-        // ── 6. Cleanup ────────────────────────────────────────────────
-        drop(_rt);
-        drop(gw);
-        std::fs::remove_dir_all(&work_dir).ok();
-    });
-    drop(broker);
-}
-
-// ═══════════════════════════════════════════════════════════════════════
 // ADR-073 回归：Gateway 下发 `{instance_id}` 模板 → Runtime 收到
 // `acowork/global/mcps` 后把 headers/env 中的占位符替换为
 // `self.bootstrap_data.instance_id`，然后持久化到 `agent_mcp.json`。
@@ -1048,7 +910,6 @@ fn integration_mcp_template_instance_id_substituted_at_runtime() {
             identity_update_tx: None,
             mcp_notifier: None,
             provider_update_tx: None,
-            search_update_tx: None,
             embedding_update_tx: None,
             node_id: None,
             lsps_update_tx: None,

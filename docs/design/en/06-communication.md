@@ -177,8 +177,7 @@ message AgentHelloPayload {
     string runtime_version = 4;
     uint64 provider_list_version = 5;
     uint64 mcp_list_version = 6;
-    uint64 search_list_version = 7;
-    uint64 user_profile_version = 8;  // NEW: see 18-user-identity-simplified.md
+    uint64 user_profile_version = 7;  // NEW: see 18-user-identity-simplified.md
 }
 
 message AgentHelloResultPayload {
@@ -188,8 +187,6 @@ message AgentHelloResultPayload {
     uint64 provider_list_version = 11;
     repeated McpServerConfig mcp_servers = 20;
     uint64 mcp_list_version = 21;
-    repeated SearchProviderConfig search_providers = 30;
-    uint64 search_list_version = 31;
     VaultKeyReleases keys = 40;       // encrypted key release
     CapabilityOverview capability_overview = 50;
 }
@@ -293,11 +290,10 @@ After Runtime connects to MQTT broker, it publishes `AgentHello` to `acowork/age
 3. Gateway receives AgentHello, checks version differences:
    ├─ provider_list_version differs → push provider_list
    ├─ mcp_list_version differs → push mcp_list
-   ├─ search_list_version differs → push search_list
    ├─ user_profile_version differs → push user_identity
    └─ all match → only push CapabilityOverview
 4. Gateway publishes AgentHelloResult to acowork/agents/{agent_id}/lifecycle/ready
-   (contains user_identity, provider_list, mcp_list, search_list, encrypted keys, capability_overview)
+   (contains user_identity, provider_list, mcp_list, encrypted keys, capability_overview)
 5. Runtime receives AgentHelloResult, stores in AgentCore
 ```
 
@@ -312,8 +308,7 @@ message AgentHelloRequest {
     string runtime_version = 4;
     uint64 provider_list_version = 5;   // Runtime's cached version
     uint64 mcp_list_version = 6;
-    uint64 search_list_version = 7;
-    uint64 user_profile_version = 8;    // NEW: see 18-user-identity-simplified.md
+    uint64 user_profile_version = 7;    // NEW: see 18-user-identity-simplified.md
 }
 
 // AgentHelloResult (Gateway → Runtime)
@@ -329,10 +324,6 @@ message AgentHelloResult {
     // MCP servers (only when version differs)
     repeated McpServerConfig mcp_servers = 20;
     uint64 mcp_list_version = 21;
-
-    // Search providers (only when version differs)
-    repeated SearchProviderConfig search_providers = 30;
-    uint64 search_list_version = 31;
 
     // Encrypted Key release (only when needed)
     VaultKeyReleases keys = 40;

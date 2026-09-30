@@ -67,10 +67,6 @@ Every original user intent and explicit constraint from the conversation, even i
   - If the conversation is too short or too ambiguous to determine the language (e.g. only \"hi\", only \"hello\", a single emoji, or a single sentence that is identical in multiple languages), fall back to the Language field in the user identity context (provided as a separate \"About the user:\" block appended to this prompt). Use the code written there (e.g. \"zh-CN\" → Simplified Chinese, \"en-US\" → English).
   - If neither signal is available, default to English.";
 
-/// System prompt for the Perplexity (Sonar) web search integration.
-pub const SEARCH_SYSTEM_PROMPT: &str =
-    "You are a web search assistant. Search the web and return results with citations. Be concise.";
-
 /// Prompt for context compaction and episode distillation.
 ///
 /// Per [ADR-011], the LLM outputs a plain natural-language summary — not JSON.

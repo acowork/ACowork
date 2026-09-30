@@ -25,7 +25,6 @@ pub use agent_token::AgentTokenService;
 pub use agent_tools::{
     AgentToolsError, AgentToolsService, BuiltinToolsResponse, McpServerView, McpToolsResponse,
     MergedToolsResponse, PutBuiltinToolsBody, PutMcpServersBody, PutMcpToolsBody,
-    PutSearchConfigBody,
 };
 pub use attachment::{
     AttachmentError, AttachmentService, MAX_UPLOAD_BYTES, UploadFileParams, UploadedFileResponse,

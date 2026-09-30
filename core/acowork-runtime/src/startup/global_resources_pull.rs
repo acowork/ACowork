@@ -414,7 +414,6 @@ async fn apply_pull_body(
         );
         cache_guard.providers = None;
         cache_guard.mcps = None;
-        cache_guard.searches = None;
         cache_guard.embedding_models = None;
         cache_guard.lsps = None;
         cache_guard.user_profile = None;

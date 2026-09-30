@@ -34,7 +34,6 @@ graph LR
 | --- | --- | --- | --- |
 | `PROMPT_BUILDER_FALLBACK` | 包无 `prompts/*.md` 时的回退 system prompt | `package/prompt_builder.rs` | ✅ `prompts/fallback.md` |
 | `COMPACTION_SYSTEM_PROMPT` | 上下文压缩 / episode 蒸馏的 system prompt，强制 `<summary>` + `<user_intent>` 两块格式（ADR-061 §8.1） | `episode_distill.rs` | ✅ `prompts/summary.md`（[ADR-053](../../adr/zh/ADR-053-agent-specific-compaction-prompt.md)） |
-| `SEARCH_SYSTEM_PROMPT` | Perplexity Sonar 搜索的系统提示 | `tools/builtin/search_backends/perplexity.rs` | ✅ `prompts/search.md` |
 | `COMPACT_PROMPT` | 把对话文本包进 `<conversation>...</conversation>` 的 user prompt 模板（`{messages_text}` 占位符） | `episode_distill.rs` | ✅ `prompts/compact-template.md` |
 | `TITLE_PROMPT` | 生成 ≤60 字符会话标题的 prompt（`{language}` / `{user_message}` 占位符） | `episode_distill.rs::compact_session_title_with_llm` | ✅ `prompts/title.md` |
 | `build_compaction_system_prompt()` | 把 identity 上下文拼接到压缩 system prompt 后的辅助函数（含"Language field"指示语） | `episode_distill.rs` | —（结构性拼接，含协议边界，详见 §7） |
@@ -74,7 +73,6 @@ graph LR
 | `content_search` | `content_search.rs` | 强调 "use `include` glob + focused regex"，限制 1000 条 |
 | `glob_search` | `glob_search.rs` | 单行 glob 模式说明 |
 | `http_request` | `http_request.rs` | GET/POST/PUT/DELETE + 自动 JSON 解析 + 需 network 权限 |
-| `web_search` | `web_search.rs` | Tavily / Brave / Firecrawl / SearXNG + 自动 fallback |
 | `web_fetch` | `web_fetch.rs` | URL 抓取 + 剥标签 |
 | `doc_reader` | `doc_reader/mod.rs` | PDF / DOCX / PPTX / XLSX + 纯文本 |
 | `rag_query` | `rag_query.rs` | 企业知识库 RAG 深度查询 |
@@ -85,8 +83,6 @@ graph LR
 | `intent_send` | `intent_send.rs` | 跨 Agent Intent 路由 + permission 要求 |
 | `ask_user_question` | `ask_user_question.rs` | "Do NOT use for simple yes/no" |
 | `codebase` | `codebase.rs` | LSP 5 类操作说明 |
-
-> `tools/builtin/search_backends/mod.rs` 中的 8 个 search backend（Tavily / Brave / Serper / Perplexity / Exa / Google CSE / Firecrawl / SearXNG）也���有一行 `description`，更接近"配置项说明"而非指令性 prompt，未单独列项。
 
 ## 5. 运行时构造的 system-prompt 块
 
@@ -125,7 +121,7 @@ ADR-063 把"包级文件名覆盖"推广到全部指令性 prompt，但**以下�
 
 | 工具组 | 为什么不覆盖 |
 | --- | --- |
-| 22 个内置工具的 `description` 字段 | 多数为"功能说明"而非"任务指令"，与 ADR-053 / ADR-063 同构度低；部分 description 嵌入跨字段引用（如 `file_read` 强调"先 content_search 定位行号"），改写风险大于收益。留作未来按需扩展。 |
+| 内置工具的 `description` 字段 | 多数为"功能说明"而非"任务指令"，与 ADR-053 / ADR-063 同构度低；部分 description 嵌入跨字段引用（如 `file_read` 强调"先 content_search 定位行号"），改写风险大于收益。留作未来按需扩展。 |
 
 ### 7.3 协议格式（`format_messages` 行模板 / `output.rs` 截断 marker）
 

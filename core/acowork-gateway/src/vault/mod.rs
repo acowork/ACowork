@@ -50,11 +50,11 @@ fn parse_account_entry_name(name: &str) -> Option<(String, String)> {
         .map(|(p, a)| (p.to_string(), a.to_string()))
 }
 
-/// Vault namespaces that are NOT LLM provider accounts. Embedding and
-/// web-search credentials share the same encrypted directory (see
-/// `EMBEDDING_PREFIX` / `SEARCH_PREFIX`) but must never be indexed as
-/// providers nor pulled through the legacy-name migration.
-const RESERVED_VAULT_PREFIXES: [&str; 2] = ["_embedding_", "_search_"];
+/// Vault namespaces that are NOT LLM provider accounts. Embedding
+/// credentials share the same encrypted directory (see `EMBEDDING_PREFIX`)
+/// but must never be indexed as providers nor pulled through the
+/// legacy-name migration.
+const RESERVED_VAULT_PREFIXES: [&str; 1] = ["_embedding_"];
 
 fn is_reserved_vault_key(name: &str) -> bool {
     RESERVED_VAULT_PREFIXES.iter().any(|p| name.starts_with(p))
@@ -105,22 +105,6 @@ pub struct VaultKeyEntry {
     pub account_id: String,
     /// User-facing label.
     pub alias: String,
-    /// Masked key preview (first 3 + last 3 chars)
-    pub key_preview: String,
-}
-
-/// Search API key entry returned by Vault facade.
-#[derive(Debug, Clone)]
-pub struct SearchKeyStorageEntry {
-    /// Decrypted API key
-    pub api_key: String,
-}
-
-/// Masked search key preview for HTTP API (no decrypted key exposed).
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct SearchKeyPreview {
-    /// Search provider identifier (e.g. "tavily")
-    pub provider: String,
     /// Masked key preview (first 3 + last 3 chars)
     pub key_preview: String,
 }
@@ -188,8 +172,8 @@ impl VaultFacade {
             .map_err(|e| GatewayError::Vault(format!("Failed to list vault keys: {}", e)))?;
 
         // Pass 1: load everything that's already in the new shape.
-        // Reserved namespaces (`_embedding_*` / `_search_*`) share the
-        // directory but are not LLM accounts - never index them.
+        // The reserved `_embedding_*` namespace shares the
+        // directory but is not an LLM account - never index it.
         for name in &names {
             let Some((provider, _account)) = parse_account_entry_name(name) else {
                 continue; // legacy; handled in pass 2
@@ -679,89 +663,10 @@ impl VaultFacade {
         Ok(())
     }
 
-    // ── Search key CRUD (stored under "_search_" prefix) ─────────────
-
-    const SEARCH_PREFIX: &str = "_search_";
-
-    /// Store a web search provider API key.
-    pub fn store_search_key(&mut self, provider: &str, api_key: &str) -> Result<(), GatewayError> {
-        let key_name = format!("{}{provider}", Self::SEARCH_PREFIX);
-        if !self.vault.is_unlocked() {
-            return Err(GatewayError::Vault("Vault is locked".into()));
-        }
-        self.vault
-            .store(&key_name, api_key)
-            .map_err(|e| GatewayError::Vault(format!("Failed to store search key: {e}")))?;
-        Ok(())
-    }
-
-    /// Get a web search provider API key (decrypted).
-    pub fn get_search_key(&self, provider: &str) -> Result<SearchKeyStorageEntry, GatewayError> {
-        if !self.vault.is_unlocked() {
-            return Err(GatewayError::Vault("Vault is locked".into()));
-        }
-        let key_name = format!("{}{provider}", Self::SEARCH_PREFIX);
-        let secret = self
-            .vault
-            .retrieve(&key_name)
-            .map_err(|e| GatewayError::Vault(format!("No search key for '{provider}': {e}")))?;
-        Ok(SearchKeyStorageEntry {
-            api_key: secret.expose_secret().to_string(),
-        })
-    }
-
-    /// List all configured search providers with masked key previews.
-    /// Returns entries with provider name and masked API key (first 3 + last 3 chars).
-    pub fn list_search_keys(&self) -> Result<Vec<SearchKeyPreview>, GatewayError> {
-        if !self.vault.is_unlocked() {
-            return Err(GatewayError::Vault("Vault is locked".into()));
-        }
-        let all_keys = self
-            .vault
-            .list()
-            .map_err(|e| GatewayError::Vault(format!("Failed to list vault keys: {e}")))?;
-        let mut entries = Vec::new();
-        for key_name in &all_keys {
-            if let Some(provider) = key_name.strip_prefix(Self::SEARCH_PREFIX) {
-                let preview = match self.vault.retrieve(key_name) {
-                    Ok(secret) => {
-                        let key = secret.expose_secret();
-                        if key.len() > 6 {
-                            format!("{}...{}", &key[..3], &key[key.len() - 3..])
-                        } else {
-                            "***".to_string()
-                        }
-                    }
-                    Err(_) => "***".to_string(),
-                };
-                entries.push(SearchKeyPreview {
-                    provider: provider.to_string(),
-                    key_preview: preview,
-                });
-            }
-        }
-        Ok(entries)
-    }
-
-    /// Remove a web search provider API key.
-    pub fn remove_search_key(&mut self, provider: &str) -> Result<(), GatewayError> {
-        let key_name = format!("{}{provider}", Self::SEARCH_PREFIX);
-        if !self.vault.exists(&key_name) {
-            return Err(GatewayError::Vault(format!(
-                "No search key for '{provider}'"
-            )));
-        }
-        self.vault
-            .delete(&key_name)
-            .map_err(|e| GatewayError::Vault(format!("Failed to remove search key: {e}")))?;
-        Ok(())
-    }
-
     // ── Embedding provider key CRUD (stored under "_embedding_" prefix) ──
     //
-    // Separate namespace from `_search_` and the default provider namespace
-    // so embedding provider keys cannot collide with or be confused with
-    // chat / search keys. Pattern mirrors `search_*` exactly.
+    // Separate namespace from the default provider namespace so embedding
+    // provider keys cannot collide with or be confused with chat keys.
 
     const EMBEDDING_PREFIX: &str = "_embedding_";
 
@@ -1356,7 +1261,7 @@ mod tests {
 
     #[test]
     fn test_vault_reserved_namespaces_are_not_providers() {
-        // Embedding / search keys share the vault directory but must not
+        // Embedding keys share the vault directory but must not
         // be indexed as LLM providers, nor migrated into the `__legacy`
         // shape (that is how a stray `_embedding_volcengine` used to show
         // up in the configured-providers list).
@@ -1365,7 +1270,6 @@ mod tests {
             let mut v = acowork_vault::Vault::open(std::path::Path::new(&dir)).unwrap();
             v.unlock("password123").unwrap();
             v.store("_embedding_volcengine", "sk-embed").unwrap();
-            v.store("_search_tavily", "tvly-xyz").unwrap();
         }
         let mut facade = VaultFacade::new(&dir);
         facade.unlock("password123").unwrap();
@@ -1378,11 +1282,6 @@ mod tests {
         assert!(
             std::path::Path::new(&dir)
                 .join("_embedding_volcengine.enc")
-                .exists()
-        );
-        assert!(
-            std::path::Path::new(&dir)
-                .join("_search_tavily.enc")
                 .exists()
         );
 

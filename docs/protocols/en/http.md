@@ -154,7 +154,7 @@ Package-level CRUD and publishing. Packages are installed to `<packages_dir>`, a
 
 ### 4.3 Agent Lifecycle Control
 
-Subprocess-level control: start / stop / restart-debug / model & search provider probing.
+Subprocess-level control: start / stop / restart-debug / model provider probing.
 **Model/provider switching** is done via MQTT `sessions/control/model_switch`, not HTTP.
 
 | Method | Path | Purpose |
@@ -163,7 +163,6 @@ Subprocess-level control: start / stop / restart-debug / model & search provider
 | POST | `/api/agents/{id}/stop` | Stop Agent |
 | POST | `/api/agents/{id}/restart-debug` | Restart in debug mode (enables Debug channel) |
 | GET | `/api/agents/{id}/model` | Currently used model / provider (Gateway derives from manifest) |
-| GET | `/api/agents/{id}/search-providers` | List search providers available to the Agent |
 
 ### 4.4 Avatar / Manifest Resources
 
@@ -193,10 +192,6 @@ Global LLM resources. API keys are encrypted and stored in Gateway Vault; config
 | GET | `/api/models` | Models from all Providers (including local ollama / lmstudio) |
 | GET | `/api/models/{provider}` | Models from a single Provider |
 | POST | `/api/models/discover` | Discover models from custom base URL (OpenAI-compatible) |
-| GET | `/api/search/keys` | List search provider keys |
-| POST | `/api/search/keys` | Add search provider key |
-| PUT | `/api/search/keys/{provider}` | Update search provider key |
-| DELETE | `/api/search/keys/{provider}` | Delete search provider key |
 
 ### 4.6 MCP Catalog
 
@@ -324,7 +319,6 @@ Both channels share the same `update_from_mqtt` processing path ([`AvailableReso
   "topics": {
     "acowork/global/providers":        "CgcKBXNrLXYx...",
     "acowork/global/mcps":             "CggKBmFkbWlu...",
-    "acowork/global/searches":         "CggK...",
     "acowork/global/embedding_models": "CggK...",
     "acowork/global/user_profile":     "CggK...",
     "acowork/global/bootstrap":        "CggK..."
@@ -343,7 +337,6 @@ Both channels share the same `update_from_mqtt` processing path ([`AvailableReso
 |---|---|---|
 | `acowork/global/providers` | `acowork/global/providers` | `AvailableProviders` |
 | `acowork/global/mcps` | `acowork/global/mcps` | `AvailableMcps` |
-| `acowork/global/searches` | `acowork/global/searches` | `AvailableSearches` |
 | `acowork/global/embedding_models` | `acowork/global/embedding_models` | `AvailableEmbeddingModels` |
 | `acowork/global/user_profile` | `acowork/global/user_profile` | `AvailableUsers` (ADR-042) |
 | `acowork/global/bootstrap` | `acowork/global/bootstrap` | `BootstrapState` (ADR-059) |
@@ -354,7 +347,7 @@ Both channels share the same `update_from_mqtt` processing path ([`AvailableReso
 2. Call `cache.update_from_mqtt(topic, &bytes)` (the key `k` already includes the full topic name, so it goes through the same deserialization + version validation + generation switch logic as MQTT retained).
 3. Compare `instance_id` with local `cache.bootstrap_instance_id()`:
    - Equal → no action.
-   - Not equal → first clear all old snapshots (providers / mcps / searches / embedding_models / lsps / user_profile / bootstrap), then apply new snapshots. `bootstrap_state`'s `update_from_mqtt` also triggers its own generation switch logic (double safeguard).
+   - Not equal → first clear all old snapshots (providers / mcps / embedding_models / lsps / user_profile / bootstrap), then apply new snapshots. `bootstrap_state`'s `update_from_mqtt` also triggers its own generation switch logic (double safeguard).
 
 **Retry loop (Bug B fix v3)**
 
@@ -425,11 +418,9 @@ Gateway does not parse the Runtime response body; all reads and writes are verba
 | GET | `/api/agents/{id}/status` | Runtime‑perspective status (cumulative tokens, loop state, etc.) | `/agents/{id}/status` |
 | GET | `/api/agents/{id}/mcp-servers` | Read Agent's MCP service config | `/agents/{id}/mcp-servers` |
 | PUT | `/api/agents/{id}/mcp-servers` | Write MCP service config | `/agents/{id}/mcp-servers` |
-| GET | `/api/agents/{id}/search-config` | Read search configuration | `/agents/{id}/search-config` |
-| PUT | `/api/agents/{id}/search-config` | Write search configuration | `/agents/{id}/search-config` |
 | GET | `/api/agents/{id}/providers` | Read Runtime‑side Provider list (actual data after MQTT sync) | `/agents/{id}/providers` |
 
-> **ADR-040 Win11-MCP-ToolsBugFix (2026-07)**: the above `mcp-servers` / `search-config` / `providers` were previously stubbed by Gateway returning 200 without persistence, causing user selections in the Tools Tab MCP server to be lost. They are now uniformly reverse‑proxied to Runtime endpoints `get_agent_mcp_servers` / `put_agent_mcp_servers` etc.
+> **ADR-040 Win11-MCP-ToolsBugFix (2026-07)**: the above `mcp-servers` / `providers` were previously stubbed by Gateway returning 200 without persistence, causing user selections in the Tools Tab MCP server to be lost. They are now uniformly reverse‑proxied to Runtime endpoints `get_agent_mcp_servers` / `put_agent_mcp_servers` etc.
 
 ### 5.2 Session Read-Only Queries
 
@@ -861,7 +852,6 @@ Response (example, structure shown, not actual length):
   "topics": {
     "acowork/global/providers":        "CgcKBXNrLXYxGgIIUg==",
     "acowork/global/mcps":             "CggKBmFkbWluGgIIUg==",
-    "acowork/global/searches":         "CggK...",
     "acowork/global/embedding_models": "CggK...",
     "acowork/global/user_profile":     "CggK...",
     "acowork/global/bootstrap":        "CggK..."
@@ -890,7 +880,7 @@ if body["instance_id"] != cache.bootstrap_instance_id().unwrap_or("") {
 
 1. **Gateway does not persist business data**: Memory, Skill, Agent runtime config, Session state, etc. are stored in Runtime local files / SQLite memory layer; Gateway pulls snapshots or passthrough via HTTP reverse proxy.
 2. **Proxy endpoints require Runtime online**: if Runtime is not registered / has exited, returns 503; the MQTT channel `acowork/agents/{id}/http_port` is the **sole source** for Gateway to discover the Runtime port — **retained publish** is critical (after Gateway restart, broker replays the last port).
-3. **Most writes trigger hot pushes**: for example, after modifying Provider / MCP / Search config, Gateway synchronises the latest available list to all connected Runtimes via MQTT **retained publish**; see [mqtt.md §Global resource availability broadcast](./mqtt.md).
+3. **Most writes trigger hot pushes**: for example, after modifying Provider / MCP config, Gateway synchronises the latest available list to all connected Runtimes via MQTT **retained publish**; see [mqtt.md §Global resource availability broadcast](./mqtt.md).
 4. **CORS**: always enabled as `CorsLayer::permissive()` (any origin, any method, any header; **without** `allow_credentials(true)` — `*` wildcard conflicts with `Access-Control-Allow-Credentials: true`, tower-http panics at build; also frontend `fetch` defaults to `credentials: 'same-origin'`, so this header is unnecessary). Dev mode Vite (`:5173`) and production Tauri custom protocol (`tauri://localhost` / `http(s)://tauri.localhost`) both cross‑origin access Gateway (`:19876`); any hardcoded allowlist would be broken when browsers resolve `localhost` to different IP literals. Local bind defaults to `127.0.0.1` — an attacker would already need access to the loopback to exploit permissive CORS, so it's zero‑risk on loopback. For remote deployments, CSRF protection relies on `Authorization: Bearer <token>` (`[http].auth_enabled = true`); Gateway does not send Set‑Cookie, and browsers by default do not send cookies with `credentials: 'same-origin'`.
 5. **Static file service**: `/workspace-files` and `/ws-files` paths are served directly by the Axum router as file streams, for frontend `<img>` / video direct references (historical names remain unchanged).
 6. **Session write operations have all moved to MQTT** (see §7): do not attempt HTTP `POST /message` / `/activate` / `/continue` etc. — these paths **do not exist** at the Gateway HTTP layer; calls will return 404.

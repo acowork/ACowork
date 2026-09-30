@@ -1750,7 +1750,6 @@ grep -rn 'command: "chat_message"' apps/acowork-desktop/src        # ≥ 1 命�
 grep -rn 'command: "compress_action"' apps/acowork-desktop/src     # ≥ 1 命中
 grep -rn '/api/agents/.*/continue\|/api/agents/.*/approval\|/api/agents/.*/question' apps/acowork-desktop/src  # 0 命中
 grep -rn '/sessions/.*/state' apps/acowork-desktop/src  # 0 命中 (除注释)
-grep -rn 'mcp-servers\|search-config' apps/acowork-desktop/src  # 0 命中 (合并为 /tools)
 ```
 
 ### 14.6 架构规约自检增量 (§12.4 补充)

@@ -6,10 +6,9 @@ import { getGatewayUrl } from "../../lib/config";
 import { with503Retry } from "../../lib/httpRetry";
 import { log } from "../../lib/logger";
 import { useTranslation } from "../../i18n/useTranslation";
-import { Tooltip } from "../common/Tooltip";
 import { Switch } from "../common/Switch";
 import { ListBox, ListRow, ExpandableRow, Badge, EmptyState } from "../common/list";
-import type { SearchProviderListItem, AgentSearchProvider, McpServerView, AgentMcpToolItem } from "../../lib/types";
+import type { McpServerView, AgentMcpToolItem } from "../../lib/types";
 
 const EMPTY_ARRAY: string[] = [];
 // Stable empty-object reference for Zustand selectors (see line ~178 below).
@@ -189,11 +188,6 @@ export function ToolsTab() {
   // Per-agent MCP server definitions (catalog ∪ local) from merged /tools.
   const [mcpServerDefs, setMcpServerDefs] = useState<McpServerView[]>([]);
 
-  // Search provider configuration
-  const [searchProviders, setSearchProviders] = useState<SearchProviderListItem[]>([]);
-  const [activeSearch, setActiveSearch] = useState<AgentSearchProvider[]>([]);
-  const [searchSaving, setSearchSaving] = useState(false);
-
   // ADR-029: Builtin tools configuration
   const [builtinToolsAll, setBuiltinToolsAll] = useState<BuiltinToolEntry[]>([]);
   const [builtinSaving, setBuiltinSaving] = useState(false);
@@ -207,20 +201,19 @@ export function ToolsTab() {
   const [mcpToolsConfig, setMcpToolsConfig] = useState<Record<string, AgentMcpToolItem[]>>({});
   const [mcpToolsSaving, setMcpToolsSaving] = useState(false);
 
-  // Group-level collapse state for the three tool cards (Builtin Tools /
-  // Web Search / MCP). Each card mirrors the Debug-panel "Context
-  // Snapshots" level-1 collapsible style; default open so the previous
-  // always-visible behavior is preserved on first mount.
+  // Group-level collapse state for the two tool cards (Builtin Tools /
+  // MCP). Each card mirrors the Debug-panel "Context Snapshots" level-1
+  // collapsible style; default open so the previous always-visible
+  // behavior is preserved on first mount.
   const [builtinOpen, setBuiltinOpen] = useState(true);
-  const [searchOpen, setSearchOpen] = useState(true);
   const [mcpOpen, setMcpOpen] = useState(true);
 
   useEffect(() => {
     if (!selectedAgentId) return;
     let cancelled = false;
 
-    // Tools, MCP servers, search providers — fetch once from merged /tools endpoint.
-    // ADR-034 Phase 5: Replaces 3 separate calls (config, mcp-servers, search-providers).
+    // Tools, MCP servers — fetch once from merged /tools endpoint.
+    // ADR-034 Phase 5: Replaces 2 separate calls (config, mcp-servers).
     // Bug B v3 fix: the merged `/tools` endpoint proxies through the
     // Runtime and 503s during the boot window. `with503Retry` rides out
     // the transient 503 so the RightPanel/Tools tab does not have to
@@ -249,18 +242,6 @@ export function ToolsTab() {
           // agent-installed MCPs show up too.
           if (data.mcp_servers_defs && Array.isArray(data.mcp_servers_defs)) {
             setMcpServerDefs(data.mcp_servers_defs as McpServerView[]);
-          }
-          // search — search providers (both available list and active config).
-          // ADR-034 §7.6.5: the merged /tools endpoint returns a single
-          // `providers` array — ordered active providers for this agent.
-          // Treating `providers` as "available candidates" and
-          // `active_providers` as "currently active" used to leave
-          // `activeSearch` empty on first render (the server only ships
-          // one key, not two), so the fresh-mount case showed no checked
-          // checkboxes even though search was already configured.
-          if (Array.isArray(data.search?.providers)) {
-            setSearchProviders(data.search.providers as SearchProviderListItem[]);
-            setActiveSearch(data.search.providers as AgentSearchProvider[]);
           }
         }
 
@@ -311,16 +292,6 @@ export function ToolsTab() {
         if (data.mcp_servers_defs && Array.isArray(data.mcp_servers_defs)) {
           setMcpServerDefs(data.mcp_servers_defs as McpServerView[]);
         }
-        if (data.search) {
-          // ADR-034 §7.6.5: server returns a single `providers` array which
-          // is the merged "active selection" view. Mirror the initial-load
-          // shape so the catalog list AND the active checkboxes stay in
-          // sync when an MCP/Search toggle elsewhere triggers a refresh.
-          if (Array.isArray(data.search.providers)) {
-            setSearchProviders(data.search.providers as SearchProviderListItem[]);
-            setActiveSearch(data.search.providers as AgentSearchProvider[]);
-          }
-        }
         // ADR-069: refresh the per-tool opt-in list from its dedicated
         // endpoint (the merged /tools view has no `mcp_tools` field).
         try {
@@ -367,63 +338,6 @@ export function ToolsTab() {
     window.addEventListener('acowork:refresh-agent-config', handler);
     return () => window.removeEventListener('acowork:refresh-agent-config', handler);
   }, [selectedAgentId]);
-
-  // ── Search config helpers ──────────────────────────────────────────
-
-  /** Save search provider config via PUT /api/agents/{id}/search-config */
-  const saveSearchConfig = async (providers: AgentSearchProvider[]) => {
-    if (!selectedAgentId) return;
-    setSearchSaving(true);
-    try {
-      await fetch(
-        `${getGatewayUrl()}/api/agents/${selectedAgentId}/search-config`,
-        {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ providers }),
-        },
-      );
-    } catch {
-      // silently ignore network errors
-    } finally {
-      setSearchSaving(false);
-    }
-  };
-
-  /** Toggle a search provider ON/OFF for this agent */
-  const toggleSearchProvider = (providerId: string) => {
-    const current = activeSearch.find((p) => p.provider === providerId);
-    let next: AgentSearchProvider[];
-    if (current) {
-      // Remove from active
-      next = activeSearch.filter((p) => p.provider !== providerId);
-      // Re-number priorities
-      next = next.map((p, i) => ({ ...p, priority: i + 1 }));
-    } else {
-      // Add with next priority
-      const maxPrio = activeSearch.reduce((max, p) => Math.max(max, p.priority), 0);
-      next = [...activeSearch, { provider: providerId, priority: maxPrio + 1 }];
-    }
-    setActiveSearch(next);
-    saveSearchConfig(next);
-  };
-
-  /** Move a provider up in priority (lower number = higher priority) */
-  const moveSearchProviderUp = (providerId: string) => {
-    const idx = activeSearch.findIndex((p) => p.provider === providerId);
-    if (idx <= 0) return;
-    const next = [...activeSearch];
-    // Swap priorities
-    const prevPriority = next[idx - 1].priority;
-    next[idx - 1] = { ...next[idx - 1], priority: next[idx].priority };
-    next[idx] = { ...next[idx], priority: prevPriority };
-    // Sort by priority
-    next.sort((a, b) => a.priority - b.priority);
-    // Re-normalize
-    const normalized = next.map((p, i) => ({ ...p, priority: i + 1 }));
-    setActiveSearch(normalized);
-    saveSearchConfig(normalized);
-  };
 
   // ── ADR-029: Builtin tools helpers ─────────────────────────────────
 
@@ -564,88 +478,7 @@ export function ToolsTab() {
       </div>
 
       {/* Divider — full panel-width hairline separating the functional
-          blocks (Builtin Tools / Web Search / MCP). Matches the
-          workspace/memory panel divider style. */}
-      <div className="-mx-3 my-2 border-t border-border-divider" />
-
-      {/* Web Search Providers card — same Debug-panel collapsible
-          style as the Builtin Tools card above. */}
-      <div>
-        <ListBox dividers={false}>
-          <ExpandableRow
-            open={searchOpen}
-            onToggle={() => setSearchOpen((v) => !v)}
-            title={t("agentSetup.webSearchProviders", { count: searchProviders.length })}
-            ariaLabel={t("agentSetup.webSearchProviders", { count: searchProviders.length })}
-            bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset"
-          >
-            {searchProviders.length === 0 ? (
-              <EmptyState message={t("agentSetup.noSearchKeys")} />
-            ) : (
-              <ListBox variant="plain" maxHeight={192}>
-                {searchProviders.map((sp) => {
-                  const active = activeSearch.find((p) => p.provider === sp.id);
-                  const isChecked = !!active;
-                  const priority = active?.priority;
-                  const hasKey = !!sp.id; // Providers listed here already have vault keys
-                  const activeIdx = activeSearch.findIndex((p) => p.provider === sp.id);
-                  return (
-                    <Tooltip key={sp.id} content={hasKey ? "" : t("agentSetup.noApiKey")} variant="plain">
-                      <ListRow
-                        disabled={!hasKey}
-                        surface="inset"
-                        trailing={
-                          <div className="flex items-center gap-1">
-                            {isChecked && activeIdx > 0 && (
-                              <Tooltip content={t("agentSetup.moveUp")} variant="plain">
-                                <button
-                                  onClick={() => moveSearchProviderUp(sp.id)}
-                                  disabled={searchSaving}
-                                  className="shrink-0 rounded p-0.5 text-text-tertiary hover:bg-zinc-100 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300"
-                                >
-                                  <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                    <path d="m18 15-6-6-6 6" />
-                                  </svg>
-                                </button>
-                              </Tooltip>
-                            )}
-                            <Switch
-                              checked={isChecked}
-                              onChange={() => toggleSearchProvider(sp.id)}
-                              disabled={searchSaving || !hasKey}
-                              size="sm"
-                              aria-label={sp.name || sp.id}
-                            />
-                          </div>
-                        }
-                      >
-                        <div className="flex items-center gap-1.5">
-                          <span className="truncate text-[11px] font-medium text-text-secondary ">
-                            {sp.name || sp.id}
-                          </span>
-                          {isChecked && priority !== undefined && (
-                            <Badge>{t("agentSetup.priority", { value: priority })}</Badge>
-                          )}
-                          {!hasKey && <Badge tone="warning">{t("agentSetup.noKey")}</Badge>}
-                        </div>
-                        <span className="block truncate text-[9px] leading-tight text-text-tertiary ">
-                          {sp.description || sp.base_url || ""}
-                        </span>
-                      </ListRow>
-                    </Tooltip>
-                  );
-                })}
-              </ListBox>
-            )}
-          </ExpandableRow>
-        </ListBox>
-        <p className="mt-1 text-[9px] text-text-tertiary ">
-          {t("agentSetup.searchProvidersDesc")}
-        </p>
-      </div>
-
-      {/* Divider — full panel-width hairline separating the functional
-          blocks (Builtin Tools / Web Search / MCP). Matches the
+          blocks (Builtin Tools / MCP). Matches the
           workspace/memory panel divider style. */}
       <div className="-mx-3 my-2 border-t border-border-divider" />
 

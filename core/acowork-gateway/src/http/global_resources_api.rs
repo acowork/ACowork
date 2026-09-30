@@ -1,6 +1,6 @@
 //! `GET /api/global-resources` — Runtime active pull endpoint.
 //!
-//! Returns the current snapshot of all 6 global resource topics. Each
+//! Returns the current snapshot of all 5 global resource topics. Each
 //! value is **base64-encoded `DataEnvelope` protobuf bytes**, structurally
 //! identical to the payload that the Gateway would publish on the
 //! matching MQTT retained topic:
@@ -9,7 +9,6 @@
 //! |-----------------------------------|----------------------------------|-------------------------------|
 //! | `acowork/global/providers`        | `acowork/global/providers`       | `AvailableProviders`          |
 //! | `acowork/global/mcps`             | `acowork/global/mcps`            | `AvailableMcps`               |
-//! | `acowork/global/searches`         | `acowork/global/searches`        | `AvailableSearches`           |
 //! | `acowork/global/embedding_models` | `acowork/global/embedding_models`| `AvailableEmbeddingModels`    |
 //! | `acowork/global/user_profile`     | `acowork/global/user_profile`    | `AvailableUsers` (ADR-042)    |
 //! | `acowork/global/bootstrap`        | `acowork/global/bootstrap`       | `BootstrapState` (ADR-059)    |
@@ -66,7 +65,7 @@
 //!    surface in both channels for free, and the Runtime's handling is
 //!    zero-special-case.
 //!
-//! Total snapshot size is small (typically < 5 KB across all 6 topics);
+//! Total snapshot size is small (typically < 5 KB across all 5 topics);
 //! the base64 expansion is negligible.
 
 use std::collections::BTreeMap;
@@ -87,7 +86,7 @@ use crate::bootstrap::orchestrator::BootstrapPhase;
 use crate::http::routes::AppState;
 use crate::mqtt::global_resources_builders::{
     build_available_embedding_models, build_available_mcps, build_available_providers,
-    build_available_searches, build_available_users,
+    build_available_users,
 };
 
 /// MQTT topic constants — must stay in lockstep with
@@ -96,7 +95,6 @@ use crate::mqtt::global_resources_builders::{
 mod topics {
     pub const PROVIDERS: &str = "acowork/global/providers";
     pub const MCPS: &str = "acowork/global/mcps";
-    pub const SEARCHES: &str = "acowork/global/searches";
     pub const EMBEDDING_MODELS: &str = "acowork/global/embedding_models";
     pub const USER_PROFILE: &str = "acowork/global/user_profile";
     pub const BOOTSTRAP: &str = "acowork/global/bootstrap";
@@ -302,14 +300,13 @@ pub async fn get_global_resources(State(state): State<AppState>) -> Response {
         }
     }
 
-    // ── Build all 6 payloads from the GatewayState snapshot ────────────
+    // ── Build all 5 payloads from the GatewayState snapshot ────────────
     // The builders live in `mqtt::global_resources_builders` so HTTP and
     // MQTT paths stay in lockstep — any new field added to a protobuf
     // message appears in both channels without separate mapping code.
     let gw = state.gateway_state.read().await;
     let providers = build_available_providers(&gw);
     let mcps = build_available_mcps(&gw);
-    let searches = build_available_searches(&gw);
     let embedding_models = build_available_embedding_models(&gw);
     let user_profile = build_available_users(&gw);
 
@@ -330,10 +327,6 @@ pub async fn get_global_resources(State(state): State<AppState>) -> Response {
     topics.insert(
         topics::MCPS,
         encode_envelope_b64(&mcps, Payload::AvailableMcps),
-    );
-    topics.insert(
-        topics::SEARCHES,
-        encode_envelope_b64(&searches, Payload::AvailableSearches),
     );
     topics.insert(
         topics::EMBEDDING_MODELS,
@@ -548,7 +541,7 @@ mod tests {
         );
         let body = response_body_json(resp, 16384).await;
         assert_eq!(body["instance_id"], GATEWAY_GENERATION);
-        assert_eq!(body["topics"].as_object().unwrap().len(), 6);
+        assert_eq!(body["topics"].as_object().unwrap().len(), 5);
         for (_topic, b64) in body["topics"].as_object().unwrap() {
             let b64 = b64.as_str().expect("topic value is base64 string");
             let bytes = BASE64.decode(b64).expect("valid base64");
@@ -572,13 +565,13 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = response_body_json(resp, 16384).await;
         assert_eq!(body["instance_id"], GATEWAY_GENERATION);
-        assert_eq!(body["topics"].as_object().unwrap().len(), 6);
+        assert_eq!(body["topics"].as_object().unwrap().len(), 5);
     }
 
     /// Empty GatewayState (no BootstrapOrchestrator attached): every
     /// snapshot serialises to a valid `DataEnvelope`, `instance_id` is
     /// the empty string (the orchestrator-not-attached fallback), and
-    /// all 6 topics appear in the map.
+    /// all 5 topics appear in the map.
     #[tokio::test]
     async fn get_global_resources_empty_gateway() {
         let state = test_state().await;
@@ -594,7 +587,6 @@ mod tests {
         let gw = GatewayState::new("/tmp/empty");
         let providers = build_available_providers(&gw);
         let mcps = build_available_mcps(&gw);
-        let searches = build_available_searches(&gw);
         let embedding_models = build_available_embedding_models(&gw);
         let user_profile = build_available_users(&gw);
 
@@ -606,10 +598,6 @@ mod tests {
             (
                 topics::MCPS,
                 encode_envelope_b64(&mcps, Payload::AvailableMcps),
-            ),
-            (
-                topics::SEARCHES,
-                encode_envelope_b64(&searches, Payload::AvailableSearches),
             ),
             (
                 topics::EMBEDDING_MODELS,
@@ -629,7 +617,6 @@ mod tests {
                 envelope.payload,
                 Some(Payload::AvailableProviders(_))
                 | Some(Payload::AvailableMcps(_))
-                | Some(Payload::AvailableSearches(_))
                 | Some(Payload::AvailableEmbeddingModels(_))
                 | Some(Payload::AvailableUsers(_))
             ));

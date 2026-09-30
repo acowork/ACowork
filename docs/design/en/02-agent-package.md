@@ -491,7 +491,6 @@ fn matches_permission(declared: &str, requested: &str) -> bool {
 | memory | `memory:read`, `memory:write` | memory_query, memory_store |
 | intent | `intent:send:com.example.calendar` | intent_send |
 | shell | (shell tool requires no permission declaration; controlled by Approval Gate) | shell |
-| search | (search tool requires no permission declaration; reads public data only) | web_search |
 | identity | (identity_store available to system Agents only; authorized via `platform.system` declaration) | identity_store |
 
 ## 4. Design Decision Records

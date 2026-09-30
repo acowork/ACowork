@@ -74,7 +74,6 @@ function formatDuration(ms: number): string {
  *  - doc_reader         : path [P{a}-{b}]   (pages/sheets/slides)
  *  - http_request       : METHOD url
  *  - web_fetch          : url
- *  - web_search         : query [N results]  (from result)
  *  - content_search     : pattern [in path]  [(N matches|no matches)]
  *  - glob_search        : pattern [in path]  [(N files|no matches)]
  *  - memory_recall      : query (N hits)
@@ -146,11 +145,6 @@ function summarizeToolCall(
     }
     case "web_fetch":
       return asString(params.url);
-    case "web_search": {
-      const q = asString(params.query);
-      const total = extractTotal(/Found\s+(\d+)\s+results?/i, "0 results");
-      return total ? `${q} (${total})` : q;
-    }
     case "content_search": {
       let s = asString(params.pattern);
       const path = asString(params.path);

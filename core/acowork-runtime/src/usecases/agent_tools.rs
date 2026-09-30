@@ -18,8 +18,6 @@
 //! |---|---|---|
 //! | `GET  /agents/{id}/mcp-servers`   | [`AgentToolsService::get_mcp_servers`]   | `agent_mcp.json` |
 //! | `PUT  /agents/{id}/mcp-servers`   | [`AgentToolsService::put_mcp_servers`]   | `agent_mcp.json` |
-//! | `GET  /agents/{id}/search-config` | [`AgentToolsService::get_search_config`] | `agent_search.json` |
-//! | `PUT  /agents/{id}/search-config` | [`AgentToolsService::put_search_config`] | `agent_search.json` |
 //! | `GET  /agents/{id}/builtin-tools` | [`AgentToolsService::get_builtin_tools`] | `agent_tools.json` |
 //! | `PUT  /agents/{id}/builtin-tools` | [`AgentToolsService::put_builtin_tools`] | `agent_tools.json` |
 //!
@@ -31,8 +29,8 @@
 //!   [`crate::usecases::AgentConfigService`] because that file has a
 //!   separate read-modify-write contract, MQTT re-PUBLISH semantics,
 //!   and live-broadcast side effects (none of which apply to the
-//!   `agent_tools.json` / `agent_mcp.json` / `agent_search.json` files).
-//! - `GET /agents/{id}/tools` — read-only merge of the three files,
+//!   `agent_tools.json` / `agent_mcp.json` files).
+//! - `GET /agents/{id}/tools` — read-only merge of the two files,
 //!   frontend convenience. Trivially inlinable; not worth a trait method.
 //!
 //! ## Errors
@@ -58,7 +56,7 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-/// All error variants that MCP / search config operations can produce.
+/// All error variants that MCP config operations can produce.
 ///
 /// The HTTP layer maps each variant to a deterministic status code so
 /// the desktop can distinguish "unknown name" (400) from a generic
@@ -73,8 +71,8 @@ pub enum AgentToolsError {
     #[error("unknown MCP server names (not in catalog+local): {0:?}")]
     UnknownServers(Vec<String>),
 
-    /// Failed to load, parse, or persist an `agent_mcp.json` /
-    /// `agent_search.json` file. Maps to HTTP 500.
+    /// Failed to load, parse, or persist an `agent_mcp.json`
+    /// file. Maps to HTTP 500.
     #[error("failed to persist agent tools config: {0}")]
     Persistence(String),
 }
@@ -107,19 +105,6 @@ pub struct PutBuiltinToolsBody {
     pub builtin_tools: Vec<String>,
 }
 
-/// Request body for `PUT /agents/{id}/search-config`.
-///
-/// Wire shape matches `acowork_core::protocol::AgentSearchProvider` 1:1
-/// so the Gateway proxy pass-through is transparent. Each entry carries
-/// the provider id and its priority (1 = highest priority, lower
-/// number = tried first in the fallback chain).
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct PutSearchConfigBody {
-    /// Ordered list of active search providers for this agent.
-    #[serde(default)]
-    pub providers: Vec<acowork_core::protocol::AgentSearchProvider>,
-}
-
 /// Response for `GET /agents/{id}/mcp-servers`.
 #[derive(Debug, Clone, Serialize)]
 pub struct McpServersResponse {
@@ -129,17 +114,6 @@ pub struct McpServersResponse {
     /// `AgentMcpConfig`; falls back to the merged catalog list when the
     /// user has never explicitly chosen).
     pub active_servers: Vec<String>,
-}
-
-/// Response for `GET /agents/{id}/search-config`.
-#[derive(Debug, Clone, Serialize)]
-pub struct SearchConfigResponse {
-    /// Echo of the requested `agent_id` for client-side routing.
-    pub agent_id: String,
-    /// Ordered list of active search providers with priority.
-    /// Empty list means "no providers selected" — distinct from
-    /// "config file missing" which is a 500.
-    pub providers: Vec<acowork_core::protocol::AgentSearchProvider>,
 }
 
 /// Response for `GET /agents/{id}/builtin-tools` (and the `PUT`
@@ -170,9 +144,9 @@ pub struct McpServerView {
 
 /// Response for `GET /agents/{id}/tools` - the merged Tools-panel view.
 ///
-/// Combines all three Tools-panel sources (builtin tools, MCP servers,
-/// search providers) in a single round-trip so the desktop can render
-/// the entire panel without chaining three separate calls.
+/// Combines both Tools-panel sources (builtin tools, MCP servers)
+/// in a single round-trip so the desktop can render
+/// the entire panel without chaining separate calls.
 ///
 /// `mcp_servers` keeps the active server **names** (backward-compatible
 /// with the per-agent activation store); `mcp_servers_defs` carries the
@@ -185,14 +159,13 @@ pub struct MergedToolsResponse {
     pub tools: Vec<crate::agent_config::AgentToolEntry>,
     pub mcp_servers: Vec<String>,
     pub mcp_servers_defs: Vec<McpServerView>,
-    pub search: serde_json::Value,
 }
 
 // ── Trait ──────────────────────────────────────────────────────────────
 
 /// UseCase trait for the Tools-panel persistence endpoints that mutate
-/// the three per-agent `agent_*` JSON files the Tools panel owns
-/// (`agent_mcp.json`, `agent_search.json`, `agent_tools.json`).
+/// the two per-agent `agent_*` JSON files the Tools panel owns
+/// (`agent_mcp.json`, `agent_tools.json`).
 ///
 /// See the module-level docs for the rationale, the explicit list of
 /// covered endpoints, and the pre-existing handlers that are
@@ -213,20 +186,6 @@ pub trait AgentToolsService: Send + Sync {
         agent_id: &str,
         body: PutMcpServersBody,
     ) -> Result<McpServersResponse, AgentToolsError>;
-
-    /// `GET /agents/{id}/search-config` — list active search provider IDs.
-    async fn get_search_config(&self, agent_id: &str) -> SearchConfigResponse;
-
-    /// `PUT /agents/{id}/search-config` — persist the active search
-    /// provider selection. The body replaces the full `providers` list
-    /// (no per-field merge — matches the desktop's "this is the
-    /// complete enabled set" semantic, parallel to
-    /// `put_builtin_tools`'s read-modify-write cycle).
-    async fn put_search_config(
-        &self,
-        agent_id: &str,
-        body: PutSearchConfigBody,
-    ) -> Result<SearchConfigResponse, AgentToolsError>;
 
     /// `GET /agents/{id}/builtin-tools` — list all builtin tools with
     /// their enabled flag. Returns an empty `tools` vec when no
@@ -253,7 +212,7 @@ pub trait AgentToolsService: Send + Sync {
     ) -> Result<BuiltinToolsResponse, AgentToolsError>;
 
     /// `GET /agents/{id}/tools` - merged Tools-panel view (builtin +
-    /// MCP + search). Read-only aggregation of the three Tools-panel
+    /// MCP). Read-only aggregation of the two Tools-panel
     /// config files; the handler does not merge anything itself.
     async fn get_merged_tools(&self, agent_id: &str) -> MergedToolsResponse;
 

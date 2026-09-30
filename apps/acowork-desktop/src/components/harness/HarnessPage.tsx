@@ -12,7 +12,6 @@ import { getGatewayUrl } from "../../lib/config";
 import { Monitor, MousePointer, Package, Search, Globe, BookOpen, FileText, PenTool, Star, Plus, CheckCircle2, Download, XCircle, Loader2, Minus, Pencil } from "lucide-react";
 import { useMcpStore, type McpInstallRunResponse } from "../../stores/mcpStore";
 import { MCP_PRESETS, presetToServerConfig } from "../../lib/mcp-presets";
-import { SearchTab } from "./SearchTab";
 import { EmbeddingModelTab } from "./EmbeddingModelTab";
 import { LspTab } from "./LspTab";
 import { ModelMultiSelect, defaultMakeCaps } from "./ModelMultiSelect";
@@ -25,7 +24,7 @@ import { ErrorBox } from "../common/ErrorBox";
 import { ExpandableRow, ListBox, ListRow } from "../common/list";
 import { TabButton } from "../common/tab";
 
-type HarnessTab = "providers" | "search" | "mcp" | "embedding" | "lsp";
+type HarnessTab = "providers" | "mcp" | "embedding" | "lsp";
 
 export function HarnessPage() {
   const { t } = useTranslation();
@@ -33,7 +32,6 @@ export function HarnessPage() {
 
   const tabs: { id: HarnessTab; label: string }[] = [
     { id: "providers", label: t("harness.tabProviders") },
-    { id: "search", label: t("harness.tabSearch") },
     { id: "mcp", label: t("harness.tabMcp") },
     { id: "embedding", label: t("harness.tabEmbedding") },
     { id: "lsp", label: t("harnessLsp.tabLsp") },
@@ -57,7 +55,6 @@ export function HarnessPage() {
       {/* Tab content — CSS visibility preserves component state across tab switches */}
       <div className="flex-1 overflow-y-auto p-6">
         <div style={{ display: activeTab === "providers" ? "block" : "none" }}><ProvidersTab /></div>
-        <div style={{ display: activeTab === "search" ? "block" : "none" }}><SearchTab /></div>
         <div style={{ display: activeTab === "mcp" ? "block" : "none" }}><McpTab /></div>
         <div style={{ display: activeTab === "embedding" ? "block" : "none" }}><EmbeddingModelTab /></div>
         <div style={{ display: activeTab === "lsp" ? "block" : "none" }}><LspTab /></div>

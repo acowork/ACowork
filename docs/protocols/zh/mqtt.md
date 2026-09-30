@@ -55,7 +55,7 @@ graph LR
 4. **全局资源三层分离**（详见 §3.1）：
    - **全量原始列表**：HTTP only（`GET/POST/PUT/DELETE /api/global/{kind}`），Desktop Settings 用。
    - **已就绪可用状态**：MQTT pub/sub（`acowork/global/{kind}` 单主题,Retained），所有 Runtime 共享。Gateway 是唯一权威。
-   - **Runtime per-agent 运行时数据**（agent_config.json / agent_mcp.json / agent_search.json）：Runtime 本地文件，通过 `agents/{id}/config` MQTT retained 同步给 Desktop（无需 HTTP GET）。
+   - **Runtime per-agent 运行时数据**（agent_config.json / agent_mcp.json）：Runtime 本地文件，通过 `agents/{id}/config` MQTT retained 同步给 Desktop（无需 HTTP GET）。
 5. **Gateway 不在 Runtime 与 Desktop 之间转发事件**。Runtime 发布的 session 事件由 Desktop **直接订阅** `agents/{id}/sessions/{sid}/messages/...`；而 **Desktop 触发的一切用户操作都走 HTTP**（Gateway 鉴权 + 反代注入 `x-user-id`，ADR-076 §决策 4）——MQTT 上不再有任何 Desktop → Runtime 的用户操作命令，见 §5.3 与 http.md。`sessions/control/#` 现仅剩 `intent`（Runtime → Runtime）与 `active_heartbeat`（Desktop 存在性心跳）两条非用户动作。
 
 ---
@@ -64,7 +64,7 @@ graph LR
 
 ### 3.1 全局资源全量列表(只读静态数据,HTTP only)
 
-**全局资源全量列表(provider list、mcp list、lsp list、search list、embedding model list)走 HTTP,不走 MQTT。**
+**全局资源全量列表(provider list、mcp list、lsp list、embedding model list)走 HTTP,不走 MQTT。**
 
 这些列表是用户在 Desktop Settings 里管理的原始数据(已配置但未必"就绪")——比如用户添加了一个 provider 但还没填 API key,或者一个 mcp 包还在下载。Desktop 一次性 HTTP 拉取整张表渲染表单,提交修改时 HTTP POST 回去,**不需要任何订阅/通知机制**。
 
@@ -75,7 +75,6 @@ HTTP 端点:
   GET    /api/global/providers           # 全量 provider 列表
   GET    /api/global/mcps               # 全量 MCP 列表
   GET    /api/global/lsps               # 全量 LSP 列表
-  GET    /api/global/searches           # 全量 search provider 列表
   GET    /api/global/embedding_models   # 全量 embedding model 列表
   POST   /api/global/{kind}             # 新增一条(Desktop Settings 提交)
   PUT    /api/global/{kind}/{id}        # 更新一条
@@ -114,9 +113,6 @@ acowork/global/
 │                              # 注：McpRef 内嵌 `auth_token` 字段
 │                              # （提取自 catalog 中 env/headers 的 token 类键值）
 ├── lsps                       # [Retained] 当前已就绪的 LSP 列表
-├── searches                   # [Retained] 当前已就绪的 search provider 列表
-│                              # 注：SearchRef 内嵌 `api_key` 字段
-│                              # （Gateway 从 Vault 解密后填入）
 ├── embedding_models           # [Retained] 当前已就绪的 embedding model 列表
 └── user_profile               # [Retained, ADR-042] 当前 active user 的 profile 快照
                                # payload = AvailableUsers {
@@ -139,12 +135,12 @@ acowork/global/
 
 1. **Gateway 是 broker 的同进程宿主**（见 §11），broker 只绑定 localhost（`127.0.0.1`），不出主机。PUBLISH 的 payload（含解密的密钥）不会进入网络。
 2. **Runtime 与 Gateway 同用户**——Runtime 是 Gateway 拉起的子进程，不存在"跨租户"密钥泄露场景。
-3. **运行期变更推送**——用户从 Desktop 改了某个 provider 的 API key、添加了新 MCP token、改了 search key 后，Gateway health-check 触发 publisher 重算并重发 `acowork/global/{kind}`（retain=true）。所有已订阅的 Runtime **立即**收到带新密钥的 push，无需重新启动或额外的 request/response 往返。
+3. **运行期变更推送**——用户从 Desktop 改了某个 provider 的 API key、添加了新 MCP token 或修改了已有密钥后，Gateway health-check 触发 publisher 重算并重发 `acowork/global/{kind}`（retain=true）。所有已订阅的 Runtime **立即**收到带新密钥的 push，无需重新启动或额外的 request/response 往返。
 
 密钥是 **acowork/global/* retained push 通道** 的合法载荷，**不是**违反 §28 “MQTT 不承载 req/res 模式”（这里没 req/res 语义，就是单向 PUBLISH 推快照 + 后续变更）。
 
 
-- **Owner**:**Gateway**(数据源权威)。Gateway 后台 health-check loop 检测到 provider/mcp/lsp/search/embedding 状态变化(就绪/失效/卸载)时,重算该主题 payload 并 PUBLISH(retain=true)。
+- **Owner**:**Gateway**(数据源权威)。Gateway 后台 health-check loop 检测到 provider/mcp/lsp/embedding 状态变化(就绪/失效/卸载)时,重算该主题 payload 并 PUBLISH(retain=true)。
 - **订阅者**:
   - **所有 Runtime**(`SUB acowork/global/#`)——Runtime 启动后立即收到 retained 当前快照,在内存中缓存(不需要持久化)。后续变化直接收到 push。
   - **Desktop**(可选,SUB `acowork/global/#`)——用于 Settings 页实时显示"某 provider 暂时不可用"等状态。
@@ -166,7 +162,7 @@ acowork/global/
 >
 > 此外,所有 Runtime 看到的是同一份数据——这是它**不放在 `agents/{id}/` 下的根本原因**:没有 per-agent 差异。
 >
-> 这一层同时**携带每个 provider/MCP/search 的解密后密钥**——Runtime 启动后 Phase A 解析 retained payload，从 `ProviderRef.api_key` 取得 OpenAI/Anthropic 等 LLM provider 的 API key、从 `McpRef.auth_token` 取得 MCP bearer token、从 `SearchRef.api_key` 取得 search provider key，填入 provider factory 与 MCP 客户端。这就是 §5.1 启动流程中 Runtime 一行 SUB `acowork/global/#` 就拿到全部启动期所需状态的根因。
+> 这一层同时**携带每个 provider/MCP 的解密后密钥**——Runtime 启动后 Phase A 解析 retained payload，从 `ProviderRef.api_key` 取得 OpenAI/Anthropic 等 LLM provider 的 API key、从 `McpRef.auth_token` 取得 MCP bearer token、填入 provider factory 与 MCP 客户端。这就是 §5.1 启动流程中 Runtime 一行 SUB `acowork/global/#` 就拿到全部启动期所需状态的根因。
 >
 > **为什么不用 `current` / `update` 两个子主题?**
 >
@@ -178,8 +174,8 @@ acowork/global/
 
 Runtime 拿到 §3.1.1 的可用资源后，**用户从这些可用资源里选了哪几个、怎么激活的**，是 Runtime 自己持久化的 per-agent 状态——**不进 MQTT 事件总线**，但通过 `agents/{id}/config` retained 主题同步给 Desktop：
 
-1. 它是 Runtime 工作区的本地文件（`agent_config.json`、`agent_mcp.json`、`agent_search.json` 等），不是"广播数据"
-2. Runtime 启动时加载并合并 manifest 默认值后，**PUBLISH `agents/{id}/config` retained**（包含 agent_config 全部字段 + MCP 选择 + Search 选择），Desktop 订阅该主题即可获得最新完整配置
+1. 它是 Runtime 工作区的本地文件（`agent_config.json`、`agent_mcp.json` 等），不是"广播数据"
+2. Runtime 启动时加载并合并 manifest 默认值后，**PUBLISH `agents/{id}/config` retained**（包含 agent_config 全部字段 + MCP 选择），Desktop 订阅该主题即可获得最新完整配置
 3. Desktop 不需要 HTTP GET 拉取这些数据——MQTT retained 保证了订阅后立即收到最新快照
 4. Gateway 不需要知道 Runtime 内部如何筛选资源——它只关心"哪些资源已就绪"
 
@@ -187,7 +183,6 @@ Runtime 拿到 §3.1.1 的可用资源后，**用户从这些可用资源里选�
 |------|------|------|-----------------|
 | `agent_config.json` | `<workspace>/agents/{id}/config/` | per-agent 运行时参数（temperature、context_window、max_output_tokens、system_prompt_override、avatar 等），初始化自 manifest.toml 默认值 | SUB `agents/{id}/config` retained（Runtime 启动时 PUBLISH，变更时重新 PUBLISH） |
 | `agent_mcp.json` | `<workspace>/agents/{id}/` | 用户从 available mcps 中激活的子集（per-agent） | 已包含在 `agents/{id}/config` retained 内（`active_mcp_servers` 字段） |
-| `agent_search.json` | `<workspace>/agents/{id}/` | 用户从 available searches 中激活的子集（per-agent） | 已包含在 `agents/{id}/config` retained 内（`search_config` 字段） |
 | `session_meta` | `<workspace>/agents/{id}/sessions/{sid}/` | 当前 session 选择的 provider/model/embedding model（per-session，不是 per-agent 持久状态） | SUB `agents/{id}/sessions/{sid}/meta` retained（动态订阅） |
 
 **资源使用分层总结**:
@@ -196,7 +191,7 @@ Runtime 拿到 §3.1.1 的可用资源后，**用户从这些可用资源里选�
 ┌─────────────────────────────────────────────────────────────────┐
 │  第 1 层:全量原始列表(用户管理,HTTP only,不走 MQTT)            │
 │  Gateway / Vault → Desktop Settings(CRUD)                       │
-│  provider list、mcp list、lsp list、search list、embedding list │
+│  provider list、mcp list、lsp list、embedding list │
 └─────────────────────────────────────────────────────────────────┘
                               │ Gateway 后台 health-check
                               ▼
@@ -210,10 +205,10 @@ Runtime 拿到 §3.1.1 的可用资源后，**用户从这些可用资源里选�
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │  第 3 层：Runtime 端 per-agent 运行时数据（本地文件，MQTT retained 同步）│
-│  agent_config.json（运行时参数）+ agent_mcp.json + agent_search.json │
+│  agent_config.json（运行时参数）+ agent_mcp.json               │
 │  session_meta 中的 provider/model（per-session）                  │
 │  Desktop 通过 MQTT retained 获取：                                │
-│  SUB  agents/{id}/config（含全部 config + MCP + Search）          │
+│  SUB  agents/{id}/config（含全部 config + MCP）                │
 │  SUB  agents/{id}/sessions/{sid}/meta（进入 session 时动态订阅）   │
 │  写入通过：PUT /api/agents/{id}/config → Gateway MQTT control →   │
 │           Runtime 应用 + 保存 + 重新 PUBLISH retained              │
@@ -377,7 +372,7 @@ acowork/users/{user_id}/
 9. **全局资源三层分离**:
    - **第 1 层 - 全量原始列表**(用户在 Desktop Settings 里管理的原始配置):HTTP only,不走 MQTT。Desktop Settings 拉取后表单渲染,提交修改走 HTTP POST。
    - **第 2 层 - 已就绪可用状态**(Gateway health-check 后的可用资源):MQTT pub/sub,主题为 `acowork/global/{kind}`(单主题,Retained)。**不区分 agent**,所有 Runtime 共享同一份,因为"资源是否就绪"是全局事实。
-   - **第 3 层 - Runtime per-agent 持久化选择**(`agent_mcp.json` / `agent_search.json`):本地文件,Desktop 通过 HTTP 拉 agent config 查看,不走 MQTT。
+   - **第 3 层 - Runtime per-agent 持久化选择**(`agent_mcp.json`):本地文件,Desktop 通过 HTTP 拉 agent config 查看,不走 MQTT。
    - **为什么不能把第 2 层放到 `agents/{id}/` 下**:所有 agent 看到的可用资源完全相同,放在 per-agent 主题下会造成冗余数据;所有 Runtime 都 SUB `acowork/global/#` 即可。
 10. **全局资源原始列表 vs 可用状态 vs agent 选择不可混淆**:
     - 全量原始列表 = 用户管理,HTTP only
@@ -490,7 +485,7 @@ sequenceDiagram
     GW->>GW: 构建 rumqttd Config（端口 19875、ACL 加载）
     GW->>BROKER: Broker::new(config).start()（嵌入进程内）
     GW->>BROKER: CONNECT (client_id: "gateway:publisher")
-    Note over GW,BROKER: Gateway 本步仅连接 broker；后续 Global Resources Publisher 后台 loop 检测 provider/mcp/lsp/search/embedding 状态变化后 PUBLISH acowork/global/{kind} (Retained)
+    Note over GW,BROKER: Gateway 本步仅连接 broker；后续 Global Resources Publisher 后台 loop 检测 provider/mcp/lsp/embedding 状态变化后 PUBLISH acowork/global/{kind} (Retained)
 
     Note over GW,RT: 2. Gateway spawn Runtime 进程
     GW->>RT: spawn (命令行/env: --agent-id, --package-path=.agent 包, --work-dir, --config-dir, --mqtt-port, --http-port=0)
@@ -513,7 +508,7 @@ sequenceDiagram
     RT->>BROKER: PUBLISH acowork/agents/{id}/status = "online" (Retained)
     RT->>BROKER: PUBLISH acowork/agents/{id}/meta (Retained, 完整 meta)
     RT->>BROKER: PUBLISH acowork/agents/{id}/config (Retained, Runtime 当前生效的完整 agent_config.json)
-    RT->>BROKER: SUBSCRIBE acowork/global/# (立即收到全局资源 retained 快照——含各 provider/MCP/search 的解密后 key)
+    RT->>BROKER: SUBSCRIBE acowork/global/# (立即收到全局资源 retained 快照——含各 provider/MCP 的解密后 key)
     RT->>BROKER: SUBSCRIBE acowork/agents/{id}/sessions/control/#
     Note over RT: 收到 acowork/global/providers retained → Phase A 从 ProviderRef.api_key 取出 key 创建 LLM provider
 
@@ -527,7 +522,7 @@ sequenceDiagram
     Note over DA: 进入具体 agent 详情页时，动态 SUBSCRIBE 该 agent 的 sessions/+/...<br/>用户进入具体 session 时，动态 SUBSCRIBE 该 session 的 meta/config/messages/control
 ```
 
-**说明**：全局资源全量列表（provider/mcp/lsp/search/embedding）**不在此启动序列中**——它们是静态全量数据，Desktop 在 Settings 页加载时通过 `GET /api/global/{kind}` HTTP 一次性拉取，不需要 MQTT 启动同步。全局资源**可用状态**则在 Runtime 启动后由 Retained 快照推送，无需额外 HTTP 初始化。
+**说明**：全局资源全量列表（provider/mcp/lsp/embedding）**不在此启动序列中**——它们是静态全量数据，Desktop 在 Settings 页加载时通过 `GET /api/global/{kind}` HTTP 一次性拉取，不需要 MQTT 启动同步。全局资源**可用状态**则在 Runtime 启动后由 Retained 快照推送，无需额外 HTTP 初始化。
 
 #### 5.1.1 Bootstrap 五步合约（ADR-039）
 
@@ -687,7 +682,7 @@ sequenceDiagram
 
 ### 5.4 全局资源可用状态变更（Gateway 后台 health-check）
 
-**场景**：Gateway 后台 loop 检测到某个 provider/mcp/lsp/search/embedding 状态变化（刚装完 / 临时不可用 / 卸载）。
+**场景**：Gateway 后台 loop 检测到某个 provider/mcp/lsp/embedding 状态变化（刚装完 / 临时不可用 / 卸载）。
 
 ```mermaid
 sequenceDiagram
@@ -774,9 +769,9 @@ Runtime 异常断开时（包括 `kill -9`、崩溃、网络断开），Broker �
 
 | 数据资源类型 | 走 MQTT | 走 HTTP |
 |------------|--------|---------|
-| **全局资源全量列表**（providers/mcps/lsps/searches/embedding_models） | ❌ 不走（静态全量，仅 Desktop Settings 用） | ✅ `GET/POST/PUT/DELETE /api/global/{kind}`（Settings 页面交互） |
+| **全局资源全量列表**（providers/mcps/lsps/embedding_models） | ❌ 不走（静态全量，仅 Desktop Settings 用） | ✅ `GET/POST/PUT/DELETE /api/global/{kind}`（Settings 页面交互） |
 | **全局资源可用状态**（Gateway health-check 后的就绪列表） | `acowork/global/{kind}` (Retained,QoS 1) | — |
-| **Runtime per-agent 资源激活选择**（agent_mcp.json / agent_search.json） | ❌ 不走（本地文件，不是广播数据） | `GET /api/agents/{id}` → config 字段 |
+| **Runtime per-agent 资源激活选择**（agent_mcp.json） | ❌ 不走（本地文件，不是广播数据） | `GET /api/agents/{id}` → config 字段 |
 | **Session 内 provider/model/embedding 选择**（per-session） | 已包含在 `sessions/{sid}/meta` 中 | `GET /api/agents/{id}/sessions/{sid}/state` |
 | **Agent 状态**（status + meta） | `status` Retained+LWT（在线/离线） + `meta` Retained（单主题） | `GET /api/agents/{id}` 详情 |
 | **Agent config**（Runtime 当前生效的 agent_config.json，合并 manifest 默认值） | `config` Retained（单主题，Runtime 自己 PUBLISH） | —（Runtime 启动时本地加载，Desktop 改走 `PUT /api/agents/{id}/config`） |
@@ -830,20 +825,17 @@ Runtime 异常断开时（包括 `kill -9`、崩溃、网络断开），Broker �
 | Provider list（全量） | Gateway | KB | ❌（静态全量，不走 MQTT） | `GET /api/global/providers` |
 | MCP list（全量） | Gateway | KB | ❌ | `GET /api/global/mcps` |
 | LSP relay 端点（node-local，ADR-055 §6.7） | Node | B | `acowork/nodes/{node_id}/lsps` (R, QoS 1) | `GET /api/agents/{id}/lsp-endpoint`（Gateway 按 agent → node 解析） |
-| Search list（全量） | Gateway | KB | ❌ | `GET /api/global/searches` |
 | Embedding model list（全量） | Gateway | B-KB | ❌ | `GET /api/global/embedding_models` |
 | Provider available（Gateway health-check 后） | Gateway | KB | `acowork/global/providers` (R, QoS 1) | — |
 | MCP available | Gateway | KB | `acowork/global/mcps` (R, QoS 1) | — |
-| Search available | Gateway | KB | `acowork/global/searches` (R, QoS 1) | — |
 | Embedding model available | Gateway | B-KB | `acowork/global/embedding_models` (R, QoS 1) | — |
 | Active user profile（ADR-042） | Gateway | B | `acowork/global/user_profile` (R, QoS 1) | —（Runtime 启动等 retained 快照，5s timeout fallback 到 None） |
 | Agent MCP 选择（`agent_mcp.json`） | Runtime（本地） | B-KB | 含在 `agents/{id}/config` retained 内（`active_mcp_servers`） | —（Desktop SUB retained 获取） |
-| Agent Search 选择（`agent_search.json`） | Runtime（本地） | B-KB | 含在 `agents/{id}/config` retained 内（`search_config`） | —（同上） |
 | Session provider/model 选择（`session_meta`） | Runtime（本地） | B | `agents/{id}/sessions/{sid}/meta` (R) | —（Desktop 进入 session 时 SUB retained） |
 | Agent status (在线) | Runtime | B | `agents/{id}/status` (LWT+Retained) | `GET /api/agents/{id}/status` |
 | Agent ready（HTTP server 已 bind、Phase A–C 完成） | Runtime | B | `agents/{id}/ready` (R, QoS 1) | `GET /api/agents/{id}/ready` |
 | Agent meta | Runtime | KB | `agents/{id}/meta` (R, 单主题) | `GET /api/agents/{id}` |
-| Agent config（Runtime 工作区 agent_config.json 合并默认值，含 MCP + Search） | Runtime（本地） | KB | `agents/{id}/config` (R, 单主题，Runtime 自己 PUBLISH) | —（Desktop SUB retained；写入走 `PUT /api/agents/{id}/config` → Gateway MQTT control） |
+| Agent config（Runtime 工作区 agent_config.json 合并默认值，含 MCP） | Runtime（本地） | KB | `agents/{id}/config` (R, 单主题，Runtime 自己 PUBLISH) | —（Desktop SUB retained；写入走 `PUT /api/agents/{id}/config` → Gateway MQTT control） |
 | Session list | Runtime | 任意 | ❌ 仅 `created` / `deleted` 增量通知 | ✅ `GET /api/agents/{id}/sessions`（Gateway 反向代理到 Runtime HTTP） |
 | Session messages 增量 | Runtime | KB | `agents/{id}/sessions/{sid}/messages/*` (QoS 0) | — |
 | Session messages 全量 | Runtime | MB+ | ❌ | ✅ `GET /api/agents/{id}/sessions/{sid}/messages`（Gateway 反向代理） |
@@ -898,7 +890,7 @@ Desktop ──HTTP──▶ Gateway (:19876) ──HTTP 反向代理──▶ Ru
 
 | 场景 | 走 MQTT retained | 走 HTTP 反向代理 |
 |------|-----------------|----------------|
-| Agent config（含 MCP/Search） | ✅ `agents/{id}/config` | ❌（不需要 HTTP GET） |
+│ Agent config（含 MCP） | ✅ `agents/{id}/config` | ❌（不需要 HTTP GET） |
 | Session meta | ✅ `agents/{id}/sessions/{sid}/meta` | ❌ |
 | Session 列表（全量） | ❌（仅 `created`/`deleted` 增量） | ✅ `GET .../sessions` |
 | Message 列表（全量） | ❌（数据量 MB+） | ✅ `GET .../messages` |
@@ -966,7 +958,7 @@ client.publish(
 - `agents/{id}/sessions/{sid}/config`（完整 session config）
 - `sidecar/{kind}/status`（sidecar 端点）
 
-> 全局资源全量列表（provider/mcp/lsp/search/embedding）**不**走 MQTT retained——它们是静态全量数据，仅通过 HTTP `GET /api/global/{kind}` 拉取，不在 MQTT 场景中。
+> 全局资源全量列表（provider/mcp/lsp/embedding）**不**走 MQTT retained——它们是静态全量数据，仅通过 HTTP `GET /api/global/{kind}` 拉取，不在 MQTT 场景中。
 > 全局资源**可用状态**走 MQTT retained（单主题 `acowork/global/{kind}`），同时承担快照与增量语义，是 Gateway 主动发布的唯一业务主题。
 
 ### 8.3 QoS 选择
@@ -1223,7 +1215,7 @@ Gateway 进程由 **4 个核心组件 + 1 个发布器** 构成：
 | **HTTP Server** (`:19876`) | 提供 CRUD、Runtime 注册、全局资源全量 CRUD 接口；**HTTP 反向代理**到 Runtime localhost HTTP server（大数据查询）；**不**转发业务事件，**不**维护 session 状态 |
 | **Runtime Registry** (内存) | 维护 Runtime 注册信息（agent_id → `{http_port, mqtt_client_id, online}`），供 HTTP 反向代理查询目标 Runtime |
 | **rumqttd Broker** (`:19875`) | 嵌入进程内的 MQTT broker，负责连接管理、ACL、retained 存储；接收并路由所有 MQTT 消息 |
-| **Global Resources Publisher** (`client_id: gateway:publisher`) | 后台 health-check loop 检测 provider/mcp/lsp/search/embedding 状态变化，重算 payload 后 PUBLISH `acowork/global/{kind}` Retained。Gateway 是唯一权威，**不**区分 agent |
+| **Global Resources Publisher** (`client_id: gateway:publisher`) | 后台 health-check loop 检测 provider/mcp/lsp/embedding 状态变化，重算 payload 后 PUBLISH `acowork/global/{kind}` Retained。Gateway 是唯一权威，**不**区分 agent |
 | **Global Resources Store** (JSON / Vault) | 持久化全局资源全量原始列表（Desktop Settings CRUD） + 可用状态缓存（Publisher health-check 计算） |
 
 **进程组件关系图**：

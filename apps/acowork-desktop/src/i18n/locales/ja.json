@@ -493,7 +493,6 @@
     "nodesUnassignedDesc": "既知のノードに紐付けられていないAgent"
   },
   "agentSetup": {
-    "noApiKey": "No API key configured. Add in Harness → Search.",
     "resetConfirm": "Agent設定をデフォルト値にリセットしますか？名前、説明、プロンプトロール、アバターアイコン、シェル承認しきい値、ツール設定が含まれます。",
     "noAgentSelected": "Agentが選択されていません",
     "chooseIcon": "アイコンを選択",
@@ -515,12 +514,9 @@
     "editRiskRules": "リスクルールファイルを編集",
     "approvalTimeout": "承認タイムアウト（秒）",
     "approvalTimeoutDesc": "空欄の場合はデフォルト値（300秒 = 5分）を使用。ツール承認はタイムアウト後に自動拒否されます。",
-    "webSearchProviders": "ウェブ検索プロバイダー（{{count}}）",
-    "noSearchKeys": "検索APIキーが設定されていません。Harness > 検索タブでキーを追加してください。",
     "priority": "優先度：{{value}}",
     "noKey": "キーなし",
     "moveUp": "上に移動（優先度を上げる）",
-    "searchProvidersDesc": "このAgentの検索プロバイダーを選択して優先順位を付けます。優先度が高いほど先に試行されます。",
     "mcpServers": "MCPサーバー（{{count}}）",
     "noMcpInCatalog": "カタログにMCPサーバーがありません。Harness > MCPタブでサーバーを追加してください。",
     "mcpToggleDesc": "このAgentのMCPサーバーを切り替えます。Harness > MCPタブでさらにサーバーを追加できます。",
@@ -541,7 +537,6 @@
   },
   "harness": {
     "tabProviders": "プロバイダー",
-    "tabSearch": "検索",
     "tabMcp": "MCP",
     "tabEmbedding": "エンベディング",
     "providerManagement": "プロバイダー管理",
@@ -653,37 +648,6 @@
       "unavailable": "使用できません",
       "saveFailed": "保存に失敗しました：{{error}}"
     }
-  },
-  "harnessSearch": {
-    "searchProviderManagement": "検索プロバイダー管理",
-    "loading": "読み込み中...",
-    "configuredSearchProviders": "設定済み検索プロバイダー（{{count}}）",
-    "active": "有効",
-    "key": "キー",
-    "edit": "編集",
-    "remove": "削除",
-    "removeKeyConfirm": "{{provider}} の検索キーを削除しますか？",
-    "availableSearchProviders": "利用可能な検索プロバイダー（{{count}}）",
-    "allConfigured": "すべての検索プロバイダーが設定済み",
-    "addKey": "キーを追加",
-    "addSearchProvider": "検索プロバイダーを追加：",
-    "provider": "プロバイダー",
-    "apiKey": "APIキー",
-    "baseUrl": "ベースURL",
-    "required": "必須",
-    "optional": "任意",
-    "testing": "テスト中...",
-    "testAndSave": "テストして保存",
-    "cancel": "キャンセル",
-    "pleaseEnterApiKey": "最初にAPIキーを入力してください",
-    "apiKeyValid": "APIキーは有効です！",
-    "failedAddKey": "検索キーの追加に失敗しました：",
-    "failedRemoveKey": "検索キーの削除に失敗しました：",
-    "failedUpdateKey": "検索キーの更新に失敗しました：",
-    "editSearchProvider": "検索プロバイダーを編集：",
-    "leaveEmptyToKeep": "空欄のままにすると現在の値を保持",
-    "current": "現在",
-    "save": "保存"
   },
   "harnessMcp": {
     "mcpServerCatalog": "MCPサーバーカタログ（{{count}}）",
@@ -1125,10 +1089,6 @@
     "web_fetch": {
       "running": "ウェブページ取得中",
       "done": "ウェブページ取得済み"
-    },
-    "web_search": {
-      "running": "ウェブ検索中",
-      "done": "ウェブ検索済み"
     },
     "file_read": {
       "running": "ファイル読み込み中",

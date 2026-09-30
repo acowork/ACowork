@@ -95,7 +95,6 @@ message AgentHelloRequest {
 message AgentHelloResult {
     repeated ProviderConfig providers = 1;
     repeated McpServerConfig mcp_servers = 2;
-    repeated SearchProviderConfig search_providers = 3;
     VaultKeyReleases keys = 4;
     IdentityDelivery identity_delivery = 5;       // v3.1
     CapabilityOverview capability_overview = 6;

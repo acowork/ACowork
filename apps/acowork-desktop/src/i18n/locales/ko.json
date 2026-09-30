@@ -492,7 +492,6 @@
     "nodesUnassignedDesc": "알려진 호스팅 노드가 없는 Agent"
   },
   "agentSetup": {
-    "noApiKey": "No API key configured. Add in Harness → Search.",
     "resetConfirm": "Agent 설정을 기본값으로 초기화하시겠습니까？이름, 설명, 프롬프트 역할, 아바타 아이콘, 셸 승인 임계값, 도구 설정이 포함됩니다。",
     "noAgentSelected": "Agent가 선택되지 않음",
     "chooseIcon": "아이콘 선택",
@@ -514,12 +513,9 @@
     "editRiskRules": "리스크 규칙 파일 편집",
     "approvalTimeout": "승인 타임아웃（초）",
     "approvalTimeoutDesc": "비워두면 기본값（300초 = 5분）사용。도구 승인은 타임아웃 후 자동 거부됩니다。",
-    "webSearchProviders": "웹 검색 제공자（{{count}}）",
-    "noSearchKeys": "검색 API 키가 설정되지 않았습니다。Harness > 검색 탭에서 키를 추가하세요。",
     "priority": "우선순위：{{value}}",
     "noKey": "키 없음",
     "moveUp": "위로 이동（우선순위 높임）",
-    "searchProvidersDesc": "이 Agent의 검색 제공자를 선택하고 우선순위를 지정하세요。우선순위가 높을수록 먼저 시도됩니다。",
     "mcpServers": "MCP 서버（{{count}}）",
     "noMcpInCatalog": "카탈로그에 MCP 서버가 없습니다。Harness > MCP 탭에서 서버를 추가하세요。",
     "mcpToggleDesc": "이 Agent의 MCP 서버를 전환합니다。Harness > MCP 탭에서 서버를 더 추가할 수 있습니다。",
@@ -542,7 +538,6 @@
   },
   "harness": {
     "tabProviders": "제공자",
-    "tabSearch": "검색",
     "tabMcp": "MCP",
     "tabEmbedding": "임베딩",
     "providerManagement": "제공자 관리",
@@ -654,37 +649,6 @@
       "unavailable": "사용 불가",
       "saveFailed": "저장 실패：{{error}}"
     }
-  },
-  "harnessSearch": {
-    "searchProviderManagement": "검색 제공자 관리",
-    "loading": "로딩 중...",
-    "configuredSearchProviders": "설정된 검색 제공자（{{count}}）",
-    "active": "활성",
-    "key": "키",
-    "edit": "편집",
-    "remove": "제거",
-    "removeKeyConfirm": "{{provider}}의 검색 키를 제거하시겠습니까？",
-    "availableSearchProviders": "사용 가능한 검색 제공자（{{count}}）",
-    "allConfigured": "모든 검색 제공자 설정 완료",
-    "addKey": "키 추가",
-    "addSearchProvider": "검색 제공자 추가：",
-    "provider": "제공자",
-    "apiKey": "API 키",
-    "baseUrl": "기본 URL",
-    "required": "필수",
-    "optional": "선택",
-    "testing": "테스트 중...",
-    "testAndSave": "테스트 후 저장",
-    "cancel": "취소",
-    "pleaseEnterApiKey": "먼저 API 키를 입력하세요",
-    "apiKeyValid": "API 키가 유효합니다！",
-    "failedAddKey": "검색 키 추가 실패：",
-    "failedRemoveKey": "검색 키 제거 실패：",
-    "failedUpdateKey": "검색 키 업데이트 실패：",
-    "editSearchProvider": "검색 제공자 편집：",
-    "leaveEmptyToKeep": "비워두면 현재 값 유지",
-    "current": "현재",
-    "save": "저장"
   },
   "harnessMcp": {
     "mcpServerCatalog": "MCP 서버 카탈로그（{{count}}）",
@@ -1126,10 +1090,6 @@
     "web_fetch": {
       "running": "웹 페이지 가져오는 중",
       "done": "웹 페이지 가져옴"
-    },
-    "web_search": {
-      "running": "웹 검색 중",
-      "done": "웹 검색 완료"
     },
     "file_read": {
       "running": "파일 읽는 중",

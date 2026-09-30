@@ -186,7 +186,6 @@ let prompt = core.title_prompt
 - **启动时静态加载**：与 system prompt / compaction prompt 一致，包升级 / 热更新后需重启 Runtime 生效。
 - **grafeo / memory 的常量当前为进程级单例**（非 per-AgentCore），需评估是否升级为 `MemoryProvider` trait 的可注入参数（ADR-051 解耦基础上的延伸）；本次 ADR 仅做"加载器 + 注入点"，实现期评估是否需要 trait 改造。
 - **`compact-template.md` 的特殊语义**：覆盖的是 user prompt 模板（含 `<conversation>` 占位符），包作者必须保留 `{messages_text}` 占位符，否则运行时拼装失败。文档中明确标注。
-- **`search.md` 的作用范围**：当前 `SEARCH_SYSTEM_PROMPT` 仅用于 Perplexity Sonar 后端；其他 7 个 search backend（Tavily / Brave / Serper / Exa / Google CSE / Firecrawl / SearXNG）的"配置项说明"型 description 不在本 ADR 覆盖范围。
 
 ### 3.7 Debug 面板编辑入口（L1 文件读写 + L2 DevMode 重载）
 

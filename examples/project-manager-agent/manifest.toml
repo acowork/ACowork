@@ -34,7 +34,7 @@ type = "MemoryWrite"
 # progress tracking, risk assessment, and team coordination. Tools cover those
 # workflows:
 #   - file_*/doc_reader/glob_search/content_search → project docs, status reports
-#   - http_request/web_fetch/web_search            → research tools/methodologies
+#   - http_request/web_fetch                      → research tools/methodologies
 #   - memory_*                                     → project history & decisions
 #   - intent_send                                  → coordinate team member agents
 #   - ask_user_question, todo_write                → clarify requirements & track tasks

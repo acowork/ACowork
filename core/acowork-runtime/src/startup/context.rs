@@ -39,11 +39,6 @@ pub(crate) struct AgentBootContext {
     /// `SessionManager::update_global_provider_list`.
     pub provider_update_rx:
         Option<tokio::sync::mpsc::UnboundedReceiver<crate::mqtt::client::ProviderUpdate>>,
-    /// Receiver for `acowork/global/searches` updates.
-    /// Consumed by `gateway_loop::mqtt_only_loop` and forwarded to
-    /// `SessionManager::update_search_config`.
-    pub search_update_rx:
-        Option<tokio::sync::mpsc::UnboundedReceiver<crate::mqtt::client::SearchUpdate>>,
     /// Receiver for `acowork/global/embedding_models` updates (ADR-033).
     /// Consumed by `gateway_loop::mqtt_only_loop` and forwarded to
     /// `SessionManager::handle_embedding_config_update` so sessions rebuild
@@ -124,10 +119,6 @@ pub(crate) struct AgentBootContext {
     // `prompts/` — `None` is the normal "no override" state and the LLM
     // call site resolves to the built-in constant via
     // `core.<field>.read().unwrap().as_deref().unwrap_or(const)`.
-    /// Override for `crate::prompt::SEARCH_SYSTEM_PROMPT`
-    /// (package file: `prompts/search.md`).
-    pub search_prompt: Option<String>,
-
     /// Override for `crate::prompt::COMPACT_PROMPT`
     /// (package file: `prompts/compact-template.md`).
     /// Package authors MUST preserve the `{messages_text}` placeholder
@@ -283,8 +274,8 @@ pub(crate) struct AgentBootContext {
     /// pattern as the workspace services — populated in Phase B.
     pub git_query_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::GitQueryService>>>>,
     /// ADR-040 follow-up: Late-bind slot for Tools-panel persistence
-    /// (the four `/agents/{id}/mcp-servers` and
-    /// `/agents/{id}/search-config` HTTP handlers). Populated in
+    /// (the `/agents/{id}/mcp-servers` and
+    /// `/agents/{id}/builtin-tools` HTTP handlers). Populated in
     /// Phase B (sync — no async resource dependency like memory).
     pub agent_tools_slot:
         Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AgentToolsService>>>>,
@@ -332,17 +323,6 @@ pub(crate) struct AgentBootContext {
     /// Phase C reconciles it against the shared `WorkspaceResolver`
     /// so every user-configured workspace gets an event publisher.
     pub workspace_watcher_set: crate::workspace::SharedWorkspaceWatcherSet,
-
-    /// Shared search key vault (provider_id -> decrypted API key).
-    /// Created in Phase A, passed to `WebSearchEngine` (via
-    /// `all_builtin_tools`) and injected into `AgentCore` in Phase B.
-    /// `SessionManager::update_search_config` writes to this same Arc,
-    /// so the search engine sees updates without re-registration.
-    pub search_key_vault: crate::tools::builtin::search_backends::SharedSearchKeyVault,
-
-    /// Shared search provider list. Same lifecycle as
-    /// [`Self::search_key_vault`].
-    pub search_provider_list: crate::tools::builtin::search_backends::SharedSearchProviderList,
 }
 
 /// Context produced by Phase B (per-session initialization).

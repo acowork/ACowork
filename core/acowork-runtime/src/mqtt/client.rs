@@ -128,15 +128,6 @@ pub struct ProviderUpdate {
     pub default_compact_models: Vec<acowork_core::protocol::CompactModelRef>,
 }
 
-/// Search provider update pushed from MQTT poll loop to SessionManager.
-///
-/// Carries both the search provider metadata list and the decrypted API keys.
-#[derive(Debug, Clone)]
-pub struct SearchUpdate {
-    pub search_list: Vec<acowork_core::protocol::SearchProviderListItem>,
-    pub search_key_vault: Vec<acowork_core::protocol::SearchKeyEntry>,
-}
-
 /// Embedding model update pushed from the MQTT poll loop to SessionManager.
 ///
 /// Carried by `acowork/global/embedding_models` (AvailableEmbeddingModels).
@@ -228,8 +219,7 @@ pub(crate) fn decode_node_proxy_base(payload: &[u8]) -> Option<String> {
 //
 // Extracted from the inline poll-loop closures so they are independently
 // unit-testable and the poll loop stays readable. These are the Runtime-side
-// counterparts of the Gateway's `build_available_providers` /
-// `build_available_searches` in `global_resources_publisher.rs`.
+
 
 /// Map MQTT `ProviderRef` list to domain `ProviderListItem` list.
 ///
@@ -316,34 +306,6 @@ fn extract_provider_keys(
         .collect()
 }
 
-/// Map MQTT `SearchRef` list to domain `SearchProviderListItem` list.
-pub fn map_search_refs_to_list_items(
-    refs: &[acowork_core::mqtt_proto::SearchRef],
-) -> Vec<acowork_core::protocol::SearchProviderListItem> {
-    refs.iter()
-        .map(|pr| acowork_core::protocol::SearchProviderListItem {
-            id: pr.id.clone(),
-            name: pr.name.clone(),
-            description: pr.description.clone(),
-            requires_api_key: pr.requires_api_key,
-            base_url: pr.base_url.clone(),
-        })
-        .collect()
-}
-
-/// Extract non-empty API keys from MQTT `SearchRef` list.
-pub fn extract_search_keys(
-    refs: &[acowork_core::mqtt_proto::SearchRef],
-) -> Vec<acowork_core::protocol::SearchKeyEntry> {
-    refs.iter()
-        .filter(|pr| !pr.api_key.is_empty())
-        .map(|pr| acowork_core::protocol::SearchKeyEntry {
-            provider_id: pr.id.clone(),
-            api_key: pr.api_key.clone(),
-        })
-        .collect()
-}
-
 /// Configuration for `RuntimeMqttClient::connect`.
 ///
 /// ADR-034 Phase 8: replaces 11 individual parameters.
@@ -390,16 +352,6 @@ pub struct MqttConnectConfig<'a> {
     /// `available_cache` but does not notify SessionManager.
     #[cfg_attr(not(test), allow(dead_code))]
     pub provider_update_tx: Option<tokio::sync::mpsc::UnboundedSender<ProviderUpdate>>,
-    /// Sink for search update updates. The MQTT event loop sends
-    /// `SearchUpdate` here whenever `acowork/global/searches` retained
-    /// is received. The receiver (held by `agent_init.rs` → `gateway_loop`)
-    /// forwards to `SessionManager::update_search_config` so all sessions
-    /// pick up the new search provider list and API keys.
-    ///
-    /// Optional: when None, the MQTT event loop still updates
-    /// `available_cache` but does not notify SessionManager.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub search_update_tx: Option<tokio::sync::mpsc::UnboundedSender<SearchUpdate>>,
     /// Sink for embedding-model updates. The MQTT event loop sends
     /// [`EmbeddingUpdate`] here whenever `acowork/global/embedding_models`
     /// retained is received (initial snapshot or hot-push after the embed
@@ -616,8 +568,6 @@ struct RuntimeHandler {
     mcp_notifier: crate::mcp_notify::McpNotifyRef,
     /// Sink for provider list updates.
     provider_update_tx: Option<tokio::sync::mpsc::UnboundedSender<ProviderUpdate>>,
-    /// Sink for search updates.
-    search_update_tx: Option<tokio::sync::mpsc::UnboundedSender<SearchUpdate>>,
     /// Sink for embedding-model updates.
     embedding_update_tx: Option<tokio::sync::mpsc::UnboundedSender<EmbeddingUpdate>>,
     /// Sink for node LSP relay state changes (ADR-055 §6.7).
@@ -851,50 +801,6 @@ impl MqttClientHandler for RuntimeHandler {
                         );
                     }
                 }
-            } else if topic == "acowork/global/searches" {
-                // Persist search provider catalog to agent_search.json
-                let (search_list, key_vault) = match cache_write.searches.as_ref() {
-                    Some(s) => {
-                        let list = map_search_refs_to_list_items(&s.providers);
-                        let keys = extract_search_keys(&s.providers);
-                        (list, keys)
-                    }
-                    None => (vec![], vec![]),
-                };
-                drop(cache_write);
-
-                // Persist catalog to agent_search.json
-                if let Err(e) = crate::agent_config::save_agent_search_config_catalog(
-                    &self.work_dir,
-                    &search_list,
-                ) {
-                    tracing::warn!(
-                        agent_id = %self.agent_id,
-                        error = %e,
-                        "Failed to persist acowork/global/searches catalog to agent_search.json"
-                    );
-                } else {
-                    tracing::info!(
-                        agent_id = %self.agent_id,
-                        search_count = search_list.len(),
-                        "Synced search catalog from acowork/global/searches into agent_search.json"
-                    );
-                }
-
-                // Forward to SessionManager via channel
-                if let Some(ref tx) = self.search_update_tx {
-                    let update = SearchUpdate {
-                        search_list,
-                        search_key_vault: key_vault,
-                    };
-                    if let Err(e) = tx.send(update) {
-                        tracing::warn!(
-                            agent_id = %self.agent_id,
-                            error = %e,
-                            "Failed to send search update to SessionManager"
-                        );
-                    }
-                }
             } else if topic == "acowork/global/embedding_models" {
                 // ADR-033 MQTT replacement for the removed gRPC
                 // SidecarEndpointUpdate: forward the active embedding
@@ -1111,7 +1017,6 @@ impl RuntimeMqttClient {
             identity_update_tx: cfg.identity_update_tx.clone(),
             mcp_notifier: cfg.mcp_notifier.clone(),
             provider_update_tx: cfg.provider_update_tx.clone(),
-            search_update_tx: cfg.search_update_tx.clone(),
             embedding_update_tx: cfg.embedding_update_tx.clone(),
             lsps_update_tx: cfg.lsps_update_tx.clone(),
             work_dir: cfg.work_dir.clone(),
@@ -2623,7 +2528,6 @@ mod tests {
             identity_update_tx: None,
             mcp_notifier: None,
             provider_update_tx: None,
-            search_update_tx: None,
             embedding_update_tx: None,
             node_id: None,
             lsps_update_tx: None,
@@ -2724,7 +2628,6 @@ mod tests {
             identity_update_tx: None,
             mcp_notifier: None,
             provider_update_tx: None,
-            search_update_tx: None,
             embedding_update_tx: None,
             node_id: None,
             lsps_update_tx: None,
@@ -2825,7 +2728,6 @@ mod tests {
             identity_update_tx: None,
             mcp_notifier: None,
             provider_update_tx: None,
-            search_update_tx: None,
             embedding_update_tx: None,
             node_id: None,
             lsps_update_tx: None,

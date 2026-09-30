@@ -151,7 +151,7 @@ pub struct Timeouts {
     pub provider_stream_read: Duration,
 
     // Built-in tool layer
-    /// Default HTTP timeout for tools (web_fetch, web_search, etc).
+    /// Default HTTP timeout for tools (web_fetch, etc).
     /// Was: tool_http_timeout_ms (Runtime). Default: 30 s.
     #[serde(default = "default_tool_http")]
     pub tool_http: Duration,

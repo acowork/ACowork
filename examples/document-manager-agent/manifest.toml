@@ -34,7 +34,7 @@ type = "MemoryWrite"
 # reviewing, and converting documentation. Tools cover the full doc lifecycle:
 #   - doc_reader              → PRIMARY tool: read PDF/Word/Excel/PowerPoint
 #   - file_*/glob_search/content_search → organize, write, search knowledge base
-#   - http_request/web_fetch/web_search → gather external references
+#   - http_request/web_fetch             → gather external references
 #   - memory_*                → knowledge-base persistence across sessions
 #   - intent_send             → coordinate with content-owner agents
 #   - ask_user_question, todo_write → clarify scope & track doc tasks
@@ -70,9 +70,6 @@ name = "http_request"
 
 [[tools]]
 name = "web_fetch"
-
-[[tools]]
-name = "web_search"  # conditional: needs search provider
 
 # --- Inter-agent ---
 [[tools]]

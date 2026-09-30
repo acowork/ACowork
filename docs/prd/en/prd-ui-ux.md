@@ -404,7 +404,6 @@ The Harness entry (puzzle icon) in the navigation bar opens `HarnessPage`, with 
 | Tab | Content |
 |-----|---------|
 | Providers | Provider API Key management (`AddProviderFlow` / edit dialog), model capability configuration (`ModelMultiSelect`), global default model (`GlobalCompactModelCard`) |
-| Search | Web search configuration (`SearchTab`) |
 | MCP | MCP server management (`McpTab`, with `MCP_PRESETS`) |
 | Embedding | Embedding model configuration (`EmbeddingModelTab`) |
 | LSP | LSP server management (`LspTab`) |

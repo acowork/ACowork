@@ -43,7 +43,6 @@ crates/acowork-runtime/
     │   │   ├── calculator.rs      # arithmetic and statistics
     │   │   ├── http_request.rs    # HTTP request (GET/POST/PUT/DELETE)
     │   │   ├── web_fetch.rs       # fetch web page and convert to plain text
-    │   │   ├── web_search.rs      # web search (Brave/SearXNG)
     │   │   ├── weather.rs         # weather query (wttr.in)
     │   │   ├── git_operations.rs  # structured Git operations
     │   │   ├── pdf_read.rs        # PDF text extraction

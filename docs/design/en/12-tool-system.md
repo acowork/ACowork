@@ -27,7 +27,7 @@ Tool Dispatcher
 
 The following tools are built-in implementations of Agent Runtime; Agents can declare use in manifest without providing implementation code.
 
-**Platform Infrastructure-Level Tool Definition**: The scope of built-in tools is limited to **platform infrastructure level** — calling open protocols (HTTP/DNS/filesystem/OS APIs) or local computation (WASM/Embedding), not depending on specific third-party service paid APIs. SaaS integration (Jira/Notion/LinkedIn etc.) is provided by independent Agents, not built-in. `web_search` calls search engine APIs, but the API Key is provided by the user and distributed via Vault; the platform only provides the call channel, not bound to specific service providers — so it's classified as platform infrastructure-level tool.
+**Platform Infrastructure-Level Tool Definition**: The scope of built-in tools is limited to **platform infrastructure level** — calling open protocols (HTTP/DNS/filesystem/OS APIs) or local computation (WASM/Embedding), not depending on specific third-party service paid APIs. SaaS integration (Jira/Notion/LinkedIn etc.) is provided by independent Agents, not built-in. 
 
 | Tool Name | Function | Required Permission | Description |
 |-----------|----------|---------------------|-------------|
@@ -35,7 +35,6 @@ The following tools are built-in implementations of Agent Runtime; Agents can de
 | `memory_store` | Write to private SQLite memory layer | `memory:write` | Real-time extraction via Tool Call mechanism: LLM autonomously decides whether to call; supports Fact/Preference/Relation/Procedural/Autobiographical five types, with importance (0-1) and privacy (Public/Personal/Sensitive) parameters. Fact deduplicated semantically by (subject, predicate) |
 | `http_request` | HTTP requests (GET/POST/PUT/DELETE) | `network:<url_pattern>` | Supports method parameter for HTTP method selection; JSON responses auto-parsed; supports JSON body and form |
 | `web_fetch` | Fetch web page content | `network:<url_pattern>` | HTML → Markdown conversion, Agent directly receives readable text |
-| `web_search` | Web search | `search:web` | Calls search engine API, returns structured results; API Key distributed by Vault |
 | `shell` | Execute shell commands | `filesystem:exec` | Subject to sandbox restrictions, interruptible on timeout |
 | `file_read` | Read file | `filesystem:read:<path>` | Restricted to workspace and authorized directories |
 | `file_write` | Write file | `filesystem:write:<path>` | Restricted to workspace and authorized directories |
@@ -55,7 +54,6 @@ The following tools are built-in implementations of Agent Runtime; Agents can de
 | `memory_store` | ✅ | ✅ | ✅ | ✅ | ✅ | All platforms |
 | `http_request` | ✅ | ✅ | ✅ | ✅ | ✅ | All platforms |
 | `web_fetch` | ✅ | ✅ | ✅ | ✅ | ✅ | All platforms |
-| `web_search` | ✅ | ✅ | ✅ | ✅ | ✅ | All platforms |
 | `shell` | ✅ | ✅ | ✅ | ❌ | ❌ | Desktop only |
 | `file_read` | ✅ | ✅ | ✅ | ⚠️ | ⚠️ | All platforms, mobile restricted |
 | `file_write` | ✅ | ✅ | ✅ | ⚠️ | ⚠️ | All platforms, mobile restricted |
@@ -523,7 +521,7 @@ Process each tool_call one by one:
 | API Key invisible to WASM | secrecy::SecretString | WASM tools are untrusted code, must never get LLM API Key |
 | SDK deferred | Phase 2+ | Phase 1 manual export functions sufficient, SDK lowers barrier but doesn't block core |
 | Builtin scope | Platform infrastructure level only | SaaS integration (Jira/Notion/LinkedIn etc.) provided by independent Agents, not built-in; vertical capabilities via WASM Tool or independent Agent |
-| web_fetch/web_search built-in | Yes | Nearly all Agents need it, platform-level infrastructure; web_search's Search API Key distributed by Vault |
+| web_fetch built-in | Yes | Nearly all Agents need it, platform-level infrastructure |
 | file_edit/glob_search/content_search built-in | Yes | File ops trio (read+write+edit+search); missing any one leads Agent to inefficient simulation with file_write |
 | RAG tool type | Independent type="rag", config-driven Opt-In | Enterprise RAG is external service integration, not built-in tool nor WASM tool, needs independent declaration and execution model; only registers when manifest declares, zero intrusion for Agents without RAG |
 | RAG credential security | Vault reference, runtime fetch | Consistent with built-in tool API Key management, not plaintext in manifest or process env vars |

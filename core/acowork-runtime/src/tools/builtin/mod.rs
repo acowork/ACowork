@@ -10,7 +10,6 @@
 //! | memory_store | memory:write |
 //! | http_request | network:<url> |
 //! | web_fetch | network:<url> |
-//! | web_search | search:web |
 //! | shell | filesystem:exec |
 //! | file_read | filesystem:read:<path> |
 //! | file_write | filesystem:write:<path> |
@@ -39,11 +38,9 @@ pub mod mcp_uninstall;
 pub mod memory_recall;
 pub mod memory_store;
 pub mod rag_query;
-pub mod search_backends;
 pub mod shell;
 pub mod todo_write;
 pub mod web_fetch;
-pub mod web_search;
 
 /// Names of builtin tools that may be **conditionally registered** —
 /// present in the codebase and fully valid, but only constructed when a
@@ -51,7 +48,6 @@ pub mod web_search;
 ///
 /// - `codebase` — requires the node LSP relay (arrives asynchronously
 ///   over MQTT after boot; see `SessionManager::handle_lsp_relay_update`)
-/// - `web_search` — requires at least one configured search provider
 /// - `rag_query` — requires a manifest `[[tools]]` entry of `type = "rag"`
 ///
 /// At startup (`agent_init.rs`) these tools can be absent from the code
@@ -62,7 +58,7 @@ pub mod web_search;
 /// then writing the merge result back to disk) would erase the user's
 /// enable/disable preference. This constant is the single source of
 /// truth for that distinction.
-pub const CONDITIONALLY_REGISTERED_TOOL_NAMES: &[&str] = &["codebase", "web_search", "rag_query"];
+pub const CONDITIONALLY_REGISTERED_TOOL_NAMES: &[&str] = &["codebase", "rag_query"];
 
 // ── Shared limits ──────────────────────────────────────────────────────
 
@@ -90,7 +86,6 @@ use std::time::Duration;
 
 use crate::mcp_notify::McpNotifyRef;
 use crate::tools::workspace_resolver::SharedResolver;
-use search_backends::WebSearchEngine;
 
 /// Create the standard built-in tools (without RAG).
 ///
@@ -102,11 +97,6 @@ use search_backends::WebSearchEngine;
 /// * `resolver` - Workspace directory resolver (single source of truth)
 /// * `agent_id` - Agent ID for memory isolation and identity management
 /// * `tool_http_timeout_ms` - Default HTTP timeout in milliseconds for built-in tools
-/// * `search_key_vault` - Shared search API key vault. The `web_search`
-///   tool is registered when the provider list is non-empty at call time.
-///   The engine reads from this vault (and `search_provider_list`) at
-///   call time, so MQTT-driven key updates take effect immediately.
-/// * `search_provider_list` - Shared list of configured search providers.
 /// * `memory_session` - Optional MemorySessionHandle for memory_recall and memory_store late-binding store access.
 /// * `mcp_notifier` - Optional McpConfigNotifier for mcp_install/mcp_uninstall event notification.
 /// * `agent_home` - Agent home directory (from `config().work_dir`). Required by mcp_install/mcp_uninstall
@@ -121,8 +111,6 @@ pub fn all_builtin_tools(
     resolver: &SharedResolver,
     agent_id: &str,
     tool_http_timeout_ms: u64,
-    search_key_vault: search_backends::SharedSearchKeyVault,
-    search_provider_list: search_backends::SharedSearchProviderList,
     memory_session: Option<Arc<crate::memory::MemorySessionHandle>>,
     mcp_notifier: McpNotifyRef,
     agent_home: String,
@@ -182,24 +170,6 @@ pub fn all_builtin_tools(
         )),
     ];
 
-    // Only register web_search when at least one search provider is configured
-    // (checked from the shared provider list). Without providers, the tool
-    // always fails with "Provider not configured", wasting LLM inference
-    // tokens on doomed calls. The engine reads the vault/list dynamically at
-    // search time, so MQTT-driven updates take effect without re-registration.
-    let has_search_providers = !search_provider_list
-        .read()
-        .map(|l| l.is_empty())
-        .unwrap_or(true);
-    if has_search_providers {
-        let search_engine = WebSearchEngine::new(
-            search_key_vault,
-            search_provider_list,
-            Duration::from_millis(tool_http_timeout_ms),
-        );
-        tools.push(Arc::new(web_search::WebSearchTool::new(search_engine)));
-    }
-
     // Only register codebase when the LSP Relay is available.
     // Without the relay, the tool always fails with "LSP Relay not available",
     // wasting LLM inference tokens on doomed calls.
@@ -218,7 +188,6 @@ mod tests {
     use crate::mcp_notify::McpConfigNotifier;
     use crate::memory::MemorySessionHandle;
     use crate::tools::workspace_resolver::WorkspaceResolver;
-    use std::collections::HashMap;
 
     /// Build a minimal set of dependencies for `all_builtin_tools` testing.
     /// Most dependencies are empty/default so the test focuses on the
@@ -232,8 +201,6 @@ mod tests {
         SharedResolver,
         String, // agent_id
         u64,    // tool_http_timeout_ms
-        search_backends::SharedSearchKeyVault,
-        search_backends::SharedSearchProviderList,
         Option<Arc<MemorySessionHandle>>,
         McpNotifyRef,
         String,         // agent_home
@@ -244,10 +211,6 @@ mod tests {
         let resolver = Arc::new(std::sync::RwLock::new(WorkspaceResolver::new(
             dir.path().to_str().unwrap(),
         )));
-        let search_key_vault: search_backends::SharedSearchKeyVault =
-            Arc::new(std::sync::RwLock::new(HashMap::new()));
-        let search_provider_list: search_backends::SharedSearchProviderList =
-            Arc::new(std::sync::RwLock::new(Vec::new()));
         let memory_session = Some(Arc::new(MemorySessionHandle::new(None)));
         let mcp_notifier: McpNotifyRef = Some(Arc::new(McpConfigNotifier::default()));
         let mqtt_slot: crate::http::server::SharedMqttClientSlot =
@@ -257,8 +220,6 @@ mod tests {
             resolver,
             "com.test.agent".to_string(),
             30_000,
-            search_key_vault,
-            search_provider_list,
             memory_session,
             mcp_notifier,
             "/tmp/test-agent".to_string(),
@@ -280,12 +241,10 @@ mod tests {
         // tool surface (ADR-061 §10). `context_retrieve` was deleted
         // outright once it turned out to scan every session file instead of
         // the current one; `context_abandon` survives as dead code.
-        let (resolver, agent_id, timeout, search_kv, search_pl, mem, mcp, agent_home, lsp, mqtt) =
-            make_test_deps();
+        let (resolver, agent_id, timeout, mem, mcp, agent_home, lsp, mqtt) = make_test_deps();
 
-        let tools = all_builtin_tools(
-            &resolver, &agent_id, timeout, search_kv, search_pl, mem, mcp, agent_home, lsp, mqtt,
-        );
+        let tools =
+            all_builtin_tools(&resolver, &agent_id, timeout, mem, mcp, agent_home, lsp, mqtt);
 
         let names = tool_names(&tools);
         assert!(
@@ -299,12 +258,10 @@ mod tests {
     fn test_all_builtin_tools_default_includes_core_tools() {
         // Regression: platform-tool changes only affect the compression
         // tools; all other core tools are always present.
-        let (resolver, agent_id, timeout, search_kv, search_pl, mem, mcp, agent_home, lsp, mqtt) =
-            make_test_deps();
+        let (resolver, agent_id, timeout, mem, mcp, agent_home, lsp, mqtt) = make_test_deps();
 
-        let tools = all_builtin_tools(
-            &resolver, &agent_id, timeout, search_kv, search_pl, mem, mcp, agent_home, lsp, mqtt,
-        );
+        let tools =
+            all_builtin_tools(&resolver, &agent_id, timeout, mem, mcp, agent_home, lsp, mqtt);
 
         let names = tool_names(&tools);
         // Core tools that must always be present (sanity check)

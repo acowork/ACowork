@@ -76,16 +76,11 @@ pub fn agent_routes() -> Router<AppState> {
         // (intentionally NOT calling `put(...)` here — see proxy.rs.)
         //
         // Win11-MCP-ToolsBugFix (2026-07): the same ADR-034 pattern now also
-        // covers `GET/PUT /api/agents/{id}/mcp-servers` and
-        // `GET/PUT /api/agents/{id}/search-config`. Previously these were
+        // covers `GET/PUT /api/agents/{id}/mcp-servers`. Previously these were
         // bespoke stubs in this module that returned 200 but never persisted
         // (`let _ = (..., resolved_servers)`), causing the user's Tools-panel
         // selection to silently disappear on the next tab remount. Routes
         // are now registered in `proxy::proxy_routes` — see comment there.
-        .route(
-            "/api/agents/{id}/search-providers",
-            get(get_agent_search_providers),
-        )
         // ADR-034: All Runtime endpoints live as pure reverse-proxy routes in
         // `proxy::proxy_routes`.  The routes that previously had bespoke
         // handlers here (`PUT /api/agents/{id}/config`,
@@ -2201,52 +2196,6 @@ pub async fn get_agent_model(
         provider,
         model,
         available_models,
-    }))
-}
-
-// ── Agent config handlers ─────────────────────────────────────────────
-
-// ── Search provider per-agent config ─────────────────────────────────
-
-/// Response for per-agent search provider list
-#[derive(Serialize)]
-pub struct AgentSearchProvidersResponse {
-    pub agent_id: String,
-    /// All search providers with API keys configured (from Gateway resource cache)
-    pub providers: Vec<acowork_core::protocol::SearchProviderListItem>,
-}
-
-/// `GET /api/agents/{id}/search-providers` — get search provider list for agent
-///
-/// Returns the search provider catalog from Gateway's resource cache.
-/// This tells the frontend which providers have API keys configured.
-///
-/// Win11-MCP-ToolsBugFix: `GET/PUT /api/agents/{id}/search-config` (the user's
-/// active-provider selection) USED TO live here as a stub that returned 200
-/// but never persisted — selection silently reset on next Tools-tab remount.
-/// Those two endpoints now reverse-proxy to the Runtime; see
-/// `proxy::proxy_routes()` for the route registration.
-pub async fn get_agent_search_providers(
-    State(state): State<AppState>,
-    Path(agent_id): Path<String>,
-) -> Result<Json<AgentSearchProvidersResponse>, ApiError> {
-    // Verify agent exists
-    {
-        let gw = state.gateway_state.read().await;
-        if !gw.installed_agents.contains_key(&agent_id) {
-            return Err(ApiError::not_found(&format!(
-                "Agent not found: {}",
-                agent_id
-            )));
-        }
-    }
-
-    let gw = state.gateway_state.read().await;
-    let providers = gw.resource_cache.search_list.providers.clone();
-
-    Ok(Json(AgentSearchProvidersResponse {
-        agent_id,
-        providers,
     }))
 }
 

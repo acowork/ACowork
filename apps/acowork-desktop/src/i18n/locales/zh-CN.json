@@ -533,7 +533,6 @@
     }
   },
   "agentSetup": {
-    "noApiKey": "未配置 API 密钥。请在 Harness → 搜索中添加。",
     "resetConfirm": "确定要重置 Agent 设置为默认值吗？包括名称、描述、提示词角色、头像图标、Shell 审批阈值和工具配置。",
     "noAgentSelected": "未选择 Agent",
     "chooseIcon": "选择图标",
@@ -555,12 +554,9 @@
     "editRiskRules": "编辑风险规则文件",
     "approvalTimeout": "审批超时时间（秒）",
     "approvalTimeoutDesc": "留空使用默认值（300秒 = 5分钟）。工具审批将在超时后自动拒绝。",
-    "webSearchProviders": "网页搜索服务商（{{count}}）",
-    "noSearchKeys": "未配置搜索 API 密钥。请先在 Harness > 搜索 标签页添加密钥。",
     "priority": "优先级：{{value}}",
     "noKey": "无密钥",
     "moveUp": "上移（提高优先级）",
-    "searchProvidersDesc": "选择并排列此 Agent 的搜索服务商。优先级越高越先尝试。",
     "mcpServers": "MCP 服务器（{{count}}）",
     "noMcpInCatalog": "目录中无 MCP 服务器。请在 Harness > MCP 标签页添加服务器。",
     "mcpToggleDesc": "切换此 Agent 的 MCP 服务器。在 Harness > MCP 标签页添加更多服务器。",
@@ -592,7 +588,6 @@
   },
   "harness": {
     "tabProviders": "模型服务商",
-    "tabSearch": "搜索",
     "tabMcp": "MCP",
     "tabEmbedding": "嵌入模型",
     "providerManagement": "服务商管理",
@@ -704,37 +699,6 @@
       "unavailable": "已不可用",
       "saveFailed": "保存失败：{{error}}"
     }
-  },
-  "harnessSearch": {
-    "searchProviderManagement": "搜索服务商管理",
-    "loading": "加载中...",
-    "configuredSearchProviders": "已配置的搜索服务商（{{count}}）",
-    "active": "已激活",
-    "key": "密钥",
-    "edit": "编辑",
-    "remove": "移除",
-    "removeKeyConfirm": "确定移除 {{provider}} 的搜索密钥吗？",
-    "availableSearchProviders": "可用搜索服务商（{{count}}）",
-    "allConfigured": "所有搜索服务商已配置",
-    "addKey": "添加密钥",
-    "addSearchProvider": "添加搜索服务商：",
-    "provider": "服务商",
-    "apiKey": "API 密钥",
-    "baseUrl": "基础 URL",
-    "required": "必填",
-    "optional": "可选",
-    "testing": "测试中...",
-    "testAndSave": "测试并保存",
-    "cancel": "取消",
-    "pleaseEnterApiKey": "请先输入 API 密钥",
-    "apiKeyValid": "API 密钥有效！",
-    "failedAddKey": "添加搜索密钥失败：",
-    "failedRemoveKey": "移除搜索密钥失败：",
-    "failedUpdateKey": "更新搜索密钥失败：",
-    "editSearchProvider": "编辑搜索服务商：",
-    "leaveEmptyToKeep": "留空保持当前值",
-    "current": "当前",
-    "save": "保存"
   },
   "harnessMcp": {
     "mcpServerCatalog": "MCP 服务器目录（{{count}}）",
@@ -1181,10 +1145,6 @@
     "web_fetch": {
       "running": "获取网页",
       "done": "已获取网页"
-    },
-    "web_search": {
-      "running": "搜索网页",
-      "done": "已搜索网页"
     },
     "file_read": {
       "running": "读取文件",

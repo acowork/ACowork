@@ -747,7 +747,6 @@
     }
   },
   "agentSetup": {
-    "noApiKey": "No API key configured. Add in Harness → Search.",
     "resetConfirm": "Reset agent settings to defaults? Includes name, description, prompt role, avatar, shell approval threshold, and tool config.",
     "noAgentSelected": "No agent selected",
     "chooseIcon": "Choose icon",
@@ -769,12 +768,9 @@
     "editRiskRules": "Edit risk rules file",
     "approvalTimeout": "Approval Timeout (seconds)",
     "approvalTimeoutDesc": "Leave empty to use default (300s = 5 min). Tool approval will auto-deny after timeout.",
-    "webSearchProviders": "Web Search Providers ({{count}})",
-    "noSearchKeys": "No search API keys configured. Add keys in Harness > Search tab first.",
     "priority": "Prio: {{value}}",
     "noKey": "No key",
     "moveUp": "Move up (higher priority)",
-    "searchProvidersDesc": "Select and prioritize search providers for this agent. Higher priority = tried first.",
     "mcpServers": "MCP Servers ({{count}})",
     "noMcpInCatalog": "No MCP servers in catalog. Add servers in Harness > MCP tab.",
     "mcpToggleDesc": "Toggle MCP servers for this agent. Add more in Harness > MCP tab.",
@@ -821,7 +817,6 @@
   },
   "harness": {
     "tabProviders": "Providers",
-    "tabSearch": "Search",
     "tabMcp": "MCP",
     "tabEmbedding": "Embedding",
     "providerManagement": "Provider Management",
@@ -933,37 +928,6 @@
       "unavailable": "unavailable",
       "saveFailed": "Save failed: {{error}}"
     }
-  },
-  "harnessSearch": {
-    "searchProviderManagement": "Search Provider Management",
-    "loading": "Loading...",
-    "configuredSearchProviders": "Configured Search Providers ({{count}})",
-    "active": "Active",
-    "key": "Key",
-    "edit": "Edit",
-    "remove": "Remove",
-    "removeKeyConfirm": "Remove search key for {{provider}}?",
-    "availableSearchProviders": "Available Search Providers ({{count}})",
-    "allConfigured": "All search providers configured",
-    "addKey": "Add Key",
-    "addSearchProvider": "Add Search Provider: ",
-    "provider": "Provider",
-    "apiKey": "API Key",
-    "baseUrl": "Base URL",
-    "required": "required",
-    "optional": "optional",
-    "testing": "Testing...",
-    "testAndSave": "Test & Save",
-    "cancel": "Cancel",
-    "pleaseEnterApiKey": "Please enter an API Key first",
-    "apiKeyValid": "API Key is valid!",
-    "failedAddKey": "Failed to add search key: ",
-    "failedRemoveKey": "Failed to remove search key: ",
-    "failedUpdateKey": "Failed to update search key: ",
-    "editSearchProvider": "Edit Search Provider: ",
-    "leaveEmptyToKeep": "leave empty to keep current",
-    "current": "Current",
-    "save": "Save"
   },
   "harnessMcp": {
     "mcpServerCatalog": "MCP Server Catalog ({{count}})",
@@ -1335,10 +1299,6 @@
     "web_fetch": {
       "running": "Web Fetching",
       "done": "Web Fetched"
-    },
-    "web_search": {
-      "running": "Web Searching",
-      "done": "Web Searched"
     },
     "file_read": {
       "running": "Reading file",

@@ -6,7 +6,6 @@
 //!
 //! Also stores per-agent MCP server config in `{work_dir}/config/agent_mcp.json`
 //! (dual-list format: `catalog` from Gateway + `local` from agent-installed tools)
-//! and per-agent search provider config in `{work_dir}/config/agent_search.json`.
 //!
 //! Model selection is per-session (ADR-012), persisted in JSONL SessionMetadata.
 
@@ -15,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 use indexmap::IndexMap;
 
-use acowork_core::protocol::{AgentSearchConfig, McpServerConfigDef};
+use acowork_core::protocol::McpServerConfigDef;
 
 /// Per-agent MCP config with dual-list format.
 ///
@@ -594,7 +593,7 @@ pub fn remove_tool_from_config(work_dir: &Path, tool_name: &str) {
 /// - Tools only in persisted file -> dropped **unless** the name is a
 ///   conditionally-registered builtin tool (see
 ///   [`crate::tools::builtin::CONDITIONALLY_REGISTERED_TOOL_NAMES`]:
-///   `codebase`, `web_search`, `rag_query`). Those are valid tools that
+///   `codebase`, `rag_query`). Those are valid tools that
 ///   may simply not be registered *this boot* (their dependency arrives
 ///   asynchronously after startup), so their persisted `enabled` flag is
 ///   preserved — dropping it would erase the user's preference. Only
@@ -615,10 +614,10 @@ pub fn merge_tools_config(
     let code_set: std::collections::HashSet<&str> =
         code_tool_names.iter().map(|s| s.as_str()).collect();
 
-    // Conditionally-registered builtin tools (`codebase`, `web_search`,
-    // `rag_query`) are valid tools that may simply not be in the code
-    // registry *this boot* (their dependency — LSP relay, search
-    // provider, RAG manifest entry — can arrive asynchronously after
+    // Conditionally-registered builtin tools (`codebase`, `rag_query`)
+    // are valid tools that may simply not be in the code
+    // registry *this boot* (their dependency — LSP relay or
+    // RAG manifest entry — can arrive asynchronously after
     // startup). Their persisted entries must survive the merge, or the
     // startup write-back below would erase the user's preference.
     // See [`crate::tools::builtin::CONDITIONALLY_REGISTERED_TOOL_NAMES`].
@@ -1201,105 +1200,6 @@ pub fn save_agent_mcp_tools_config(
         "Saved agent MCP tools config to workspace"
     );
     Ok(())
-}
-
-// ── Per-agent search config ────────────────────────────────────────────
-
-/// Filename for per-agent search config in the workspace config directory.
-const AGENT_SEARCH_CONFIG_FILE: &str = "agent_search.json";
-
-/// Build the path to the agent search config file.
-fn search_config_path(work_dir: &Path) -> PathBuf {
-    work_dir.join("config").join(AGENT_SEARCH_CONFIG_FILE)
-}
-
-/// Load per-agent search config from workspace/config/agent_search.json.
-///
-/// Returns `None` if the file does not exist (no search providers configured).
-/// Returns an error if the file exists but cannot be read or parsed.
-pub fn load_agent_search_config(work_dir: &Path) -> Result<Option<AgentSearchConfig>, String> {
-    let path = search_config_path(work_dir);
-    if !path.exists() {
-        return Ok(None);
-    }
-
-    let raw = std::fs::read_to_string(&path)
-        .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
-
-    let cfg: AgentSearchConfig = serde_json::from_str(&raw)
-        .map_err(|e| format!("Failed to parse {}: {}", path.display(), e))?;
-
-    tracing::info!(
-        work_dir = %work_dir.display(),
-        provider_count = cfg.providers.len(),
-        "Loaded agent search config from workspace"
-    );
-
-    Ok(Some(cfg))
-}
-
-/// Save per-agent search config to workspace/config/agent_search.json.
-///
-/// Uses atomic write-tmp-rename to prevent corruption on crash.
-pub fn save_agent_search_config(work_dir: &Path, cfg: &AgentSearchConfig) -> Result<(), String> {
-    let config_dir = work_dir.join("config");
-    std::fs::create_dir_all(&config_dir).map_err(|e| {
-        format!(
-            "Failed to create config dir {}: {}",
-            config_dir.display(),
-            e
-        )
-    })?;
-
-    let path = search_config_path(work_dir);
-    let tmp_path = path.with_extension("tmp");
-
-    let json = serde_json::to_string_pretty(cfg)
-        .map_err(|e| format!("Failed to serialize agent search config: {}", e))?;
-
-    std::fs::write(&tmp_path, &json)
-        .map_err(|e| format!("Failed to write {}: {}", tmp_path.display(), e))?;
-
-    std::fs::rename(&tmp_path, &path).map_err(|e| {
-        format!(
-            "Failed to rename {} -> {}: {}",
-            tmp_path.display(),
-            path.display(),
-            e
-        )
-    })?;
-
-    tracing::info!(
-        work_dir = %work_dir.display(),
-        provider_count = cfg.providers.len(),
-        "Saved agent search config to workspace"
-    );
-
-    Ok(())
-}
-
-/// Save only the catalog portion of agent search config.
-///
-/// This is the search equivalent of `save_agent_mcp_config_catalog`:
-/// called by the MQTT poll loop when it receives `acowork/global/searches`.
-/// Replaces only the `catalog` field, preserving `providers`.
-pub fn save_agent_search_config_catalog(
-    work_dir: &Path,
-    catalog_providers: &[acowork_core::protocol::SearchProviderListItem],
-) -> Result<(), String> {
-    let current = load_agent_search_config(work_dir)
-        .unwrap_or_else(|e| {
-            tracing::warn!(error = %e, "Failed to load agent_search.json, using default");
-            None
-        })
-        .unwrap_or_default();
-
-    let updated = acowork_core::protocol::AgentSearchConfig {
-        providers: current.providers,
-        catalog: catalog_providers.to_vec(),
-    };
-
-    save_agent_search_config(work_dir, &updated)
 }
 
 // ── Per-agent provider config ────────────────────────────────────────────

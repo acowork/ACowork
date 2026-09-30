@@ -13,7 +13,7 @@
 //! functions or `std::fs` calls directly. Without this trait, the new
 //! `POST /sessions/{sid}/files` and `GET /files/{doc_id}` handlers would
 //! re-introduce the "direct-call" antipattern flagged by the
-//! MCP/Search-config fix (see [`crate::usecases::AgentToolsService`] for
+//! MCP-config fix (see [`crate::usecases::AgentToolsService`] for
 //! the established pattern).
 //!
 //! ## What lives here

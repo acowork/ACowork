@@ -16,9 +16,8 @@
 //!   *which providers exist* (Vault only carries the key).
 
 use acowork_core::mqtt_proto::{
-    AvailableEmbeddingModels, AvailableMcps, AvailableProviders, AvailableSearches, AvailableUsers,
-    CompactModelRef, EmbeddingModelRef, McpRef, ProviderModelRef, ProviderRef, SearchRef,
-    UserProfileRef,
+    AvailableEmbeddingModels, AvailableMcps, AvailableProviders, AvailableUsers, CompactModelRef,
+    EmbeddingModelRef, McpRef, ProviderModelRef, ProviderRef, UserProfileRef,
 };
 use acowork_core::protocol::{McpTransportDef, ProtocolType};
 
@@ -315,39 +314,6 @@ pub(crate) fn build_available_mcps(gw: &GatewayState) -> AvailableMcps {
     AvailableMcps {
         version: cache.version,
         servers,
-    }
-}
-
-/// Build `AvailableSearches` from the GatewayState resource cache.
-///
-/// `api_key` is decrypted from the Gateway's Vault at snapshot time,
-/// mirroring the logic in `build_search_key_vault` for gRPC AgentHello.
-/// Empty when the search provider has no key configured.
-pub(crate) fn build_available_searches(gw: &GatewayState) -> AvailableSearches {
-    let cache = &gw.resource_cache.search_list;
-    let providers: Vec<SearchRef> = cache
-        .providers
-        .iter()
-        .map(|s| {
-            let api_key = gw
-                .vault
-                .get_search_key(&s.id)
-                .map(|entry| entry.api_key)
-                .unwrap_or_default();
-            SearchRef {
-                id: s.id.clone(),
-                name: s.name.clone(),
-                description: s.description.clone(),
-                requires_api_key: s.requires_api_key,
-                base_url: s.base_url.clone(),
-                api_key,
-            }
-        })
-        .collect();
-
-    AvailableSearches {
-        version: cache.version,
-        providers,
     }
 }
 

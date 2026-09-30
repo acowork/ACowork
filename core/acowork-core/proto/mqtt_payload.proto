@@ -27,11 +27,15 @@ package acowork.mqtt.v1;
 /// evolve via field addition per protobuf conventions.
 message DataEnvelope {
   uint32 version = 1;
+  // Field 4 of the `payload` oneof was `AvailableSearches
+  // available_searches` — removed together with the built-in web-search
+  // module (web search is now served exclusively through standard MCP
+  // servers). Never reused; the gap is intentional.
+  reserved 4;
   oneof payload {
     // ── Global resources (Gateway → all Runtimes, Retained) ──
     AvailableProviders       available_providers       = 2;
     AvailableMcps            available_mcps            = 3;
-    AvailableSearches        available_searches        = 4;
     AvailableEmbeddingModels available_embedding_models = 5;
     AvailableLsps            available_lsps            = 6;
     // ADR-042: Active user identity. Single-snapshot topic; Runtime uses
@@ -168,13 +172,6 @@ message CompactModelRef {
 message AvailableMcps {
   uint64 version = 1;
   repeated McpRef servers = 2;
-}
-
-/// Available search providers — Gateway health-check verified.
-/// Topic: acowork/global/searches (Retained, QoS 1)
-message AvailableSearches {
-  uint64 version = 1;
-  repeated SearchRef providers = 2;
 }
 
 /// Available embedding models — loaded into ONNX runtime.
@@ -368,22 +365,6 @@ enum McpTransport {
   MCP_TRANSPORT_STDIO = 1;
   MCP_TRANSPORT_HTTP = 2;
   MCP_TRANSPORT_SSE = 3;
-}
-
-// ── Search reference (mirrors SearchProviderListItem; key inline) ──────
-
-/// Search provider reference published on `acowork/global/searches`.
-///
-/// `api_key` is the decrypted search provider key (Brave / Serper /
-/// etc.). Runtime uses it directly when calling the search endpoint.
-message SearchRef {
-  string id = 1;
-  string name = 2;
-  string description = 3;
-  bool requires_api_key = 4;
-  string base_url = 5;
-  /// Decrypted search API key (empty = no key required).
-  string api_key = 6;
 }
 
 // ── Embedding model reference (mirrors EmbeddingModelEntry) ────────────

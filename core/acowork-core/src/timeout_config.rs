@@ -46,7 +46,7 @@ pub struct Timeouts {
 
     // ── Built-in tool layer ──
     /// Default HTTP timeout for built-in tools in milliseconds
-    /// (web_fetch, web_search, embedding clients, etc.).
+    /// (web_fetch, embedding clients, etc.).
     #[serde(default = "default_tool_http_timeout_ms")]
     pub tool_http_timeout_ms: u64,
 

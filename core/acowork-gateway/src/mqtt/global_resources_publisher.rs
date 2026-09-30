@@ -21,22 +21,20 @@ use std::sync::Arc;
 use tokio::sync::{watch, Notify};
 
 use acowork_core::mqtt_proto::{
-    self, AvailableEmbeddingModels, AvailableMcps, AvailableProviders, AvailableSearches,
-    AvailableUsers, DataEnvelope,
+    self, AvailableEmbeddingModels, AvailableMcps, AvailableProviders, AvailableUsers, DataEnvelope,
 };
 
 use crate::http::routes::SharedHttpState;
 use crate::mqtt::client::{GatewayMqttClient, MqttQoS};
 use crate::mqtt::global_resources_builders::{
     build_available_embedding_models, build_available_mcps, build_available_providers,
-    build_available_searches, build_available_users,
+    build_available_users,
 };
 
 /// MQTT topic constants for global resources (§3.1.1).
 mod topics {
     pub const PROVIDERS: &str = "acowork/global/providers";
     pub const MCPS: &str = "acowork/global/mcps";
-    pub const SEARCHES: &str = "acowork/global/searches";
     pub const EMBEDDING_MODELS: &str = "acowork/global/embedding_models";
     /// ADR-042: active user profile snapshot. Runtime uses this to populate
     /// the identity_context for the compact model's language hint.
@@ -207,7 +205,7 @@ impl MqttGlobalResourcesPublisher {
 
             // ── Trigger-driven republish loop — no periodic polling ─────
             // Every resource-mutating HTTP handler (add/remove/update provider,
-            // MCP catalog entry, embedding model, search key, global config)
+            // MCP catalog entry, embedding model, global config)
             // calls `trigger()` which wakes this loop via `Notify`.
             loop {
                 notify_for_loop.notified().await;
@@ -242,7 +240,6 @@ impl LoopHelper {
     /// Reads the current GatewayState snapshot and publishes:
     /// - `acowork/global/providers` — AvailableProviders
     /// - `acowork/global/mcps` — AvailableMcps
-    /// - `acowork/global/searches` — AvailableSearches
     /// - `acowork/global/embedding_models` — AvailableEmbeddingModels
     /// - `acowork/global/user_profile` — AvailableUsers (ADR-042)
     async fn publish_all(&self) {
@@ -251,7 +248,6 @@ impl LoopHelper {
         // Build all payloads from the snapshot.
         let providers_payload = build_available_providers(&gw);
         let mcps_payload = build_available_mcps(&gw);
-        let searches_payload = build_available_searches(&gw);
         let embedding_payload = build_available_embedding_models(&gw);
         let user_profile_payload = build_available_users(&gw);
 
@@ -271,7 +267,6 @@ impl LoopHelper {
         // Publish each topic. Errors are logged but don't abort the batch.
         self.publish_providers(providers_payload).await;
         self.publish_mcps(mcps_payload).await;
-        self.publish_searches(searches_payload).await;
         self.publish_embedding_models(embedding_payload).await;
         self.publish_user_profiles(user_profile_payload).await;
     }
@@ -290,14 +285,6 @@ impl LoopHelper {
             payload: Some(mqtt_proto::data_envelope::Payload::AvailableMcps(payload)),
         };
         self.publish_envelope_raw(topics::MCPS, &envelope).await;
-    }
-
-    async fn publish_searches(&self, payload: AvailableSearches) {
-        let envelope = DataEnvelope {
-            version: 1,
-            payload: Some(mqtt_proto::data_envelope::Payload::AvailableSearches(payload)),
-        };
-        self.publish_envelope_raw(topics::SEARCHES, &envelope).await;
     }
 
     async fn publish_embedding_models(&self, payload: AvailableEmbeddingModels) {

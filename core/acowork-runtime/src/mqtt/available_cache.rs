@@ -3,7 +3,7 @@
 //! In-memory cache of the latest `acowork/global/{kind}` Retained messages.
 //! Updated by the Runtime MQTT client's event loop as it receives
 //! `Available*` payloads. The Runtime queries this cache to know which
-//! providers, MCPs, searches, embedding models, LSP relays, and the
+//! providers, MCPs, embedding models, LSP relays, and the
 //! active user profile are currently available (health-check verified
 //! by Gateway; user profile is authoritative per ADR-042).
 //!
@@ -14,7 +14,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use acowork_core::mqtt_proto::{
-    AvailableEmbeddingModels, AvailableLsps, AvailableMcps, AvailableProviders, AvailableSearches,
+    AvailableEmbeddingModels, AvailableLsps, AvailableMcps, AvailableProviders,
     AvailableUsers, BootstrapState, DataEnvelope,
 };
 
@@ -41,7 +41,6 @@ macro_rules! impl_versioned {
 impl_versioned!(
     AvailableProviders,
     AvailableMcps,
-    AvailableSearches,
     AvailableEmbeddingModels,
     AvailableLsps,
     AvailableUsers,
@@ -54,7 +53,6 @@ impl_versioned!(
 pub struct AvailableResourceCache {
     pub providers: Option<AvailableProviders>,
     pub mcps: Option<AvailableMcps>,
-    pub searches: Option<AvailableSearches>,
     pub embedding_models: Option<AvailableEmbeddingModels>,
     pub lsps: Option<AvailableLsps>,
     /// ADR-042: Active user profile (Gateway-authoritative). None until
@@ -150,24 +148,6 @@ impl AvailableResourceCache {
                     "Cached AvailableMcps"
                 );
                 self.mcps = Some(p);
-            }
-            acowork_core::mqtt_proto::data_envelope::Payload::AvailableSearches(p) => {
-                // ADR-059 §5.3: reject stale retained re-delivery (see
-                // `is_newer_or_first`).
-                if !self.is_newer_or_first(&self.searches, &p) {
-                    tracing::warn!(
-                        stale_version = p.version,
-                        current_version = self.searches.as_ref().map(|c| c.version).unwrap_or(0),
-                        "Rejected stale AvailableSearches retained re-delivery"
-                    );
-                    return;
-                }
-                tracing::debug!(
-                    version = p.version,
-                    count = p.providers.len(),
-                    "Cached AvailableSearches"
-                );
-                self.searches = Some(p);
             }
             acowork_core::mqtt_proto::data_envelope::Payload::AvailableEmbeddingModels(p) => {
                 // ADR-059 §5.3: reject stale retained re-delivery (see
@@ -275,7 +255,6 @@ impl AvailableResourceCache {
                         );
                         self.providers = None;
                         self.mcps = None;
-                        self.searches = None;
                         self.embedding_models = None;
                         self.lsps = None;
                         self.user_profile = None;

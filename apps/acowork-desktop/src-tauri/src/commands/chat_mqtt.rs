@@ -126,17 +126,18 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
         // protobuf (Sept 2026 — auto-sleep retired, the only on/off transition
         // is now stop / start; see `acowork-runtime::mqtt::client::publish_status`).
         // We decode the envelope and emit a flat `agent_status` event.
-        if msg.topic.starts_with("acowork/agents/") && msg.topic.ends_with("/status") {
-            if let Some(parsed) = parse_agent_status_envelope(&msg.topic, &msg.payload) {
-                let event = serde_json::json!({
-                    "type": "agent_status",
-                    "instance_id": parsed.instance_id,
-                    "online": parsed.online,
-                    "node_id": parsed.node_id,
-                });
-                let _ = app_handle.emit("agent-event", event);
-                return;
-            }
+        if msg.topic.starts_with("acowork/agents/")
+            && msg.topic.ends_with("/status")
+            && let Some(parsed) = parse_agent_status_envelope(&msg.topic, &msg.payload)
+        {
+            let event = serde_json::json!({
+                "type": "agent_status",
+                "instance_id": parsed.instance_id,
+                "online": parsed.online,
+                "node_id": parsed.node_id,
+            });
+            let _ = app_handle.emit("agent-event", event);
+            return;
         }
 
         // ── ADR-059: Gateway bootstrap snapshot ──
@@ -336,7 +337,7 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
                 tracing::info!(
                     target: "llm_avail_diag",
                     session_id = %config.session_id,
-                    llm_availability_raw = config.llm_availability as i32,
+                    llm_availability_raw = config.llm_availability,
                     "DIAG: DESKTOP received session_config with llm_availability"
                 );
                 let event = serde_json::json!({
@@ -350,10 +351,12 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
                     "reasoning_effort": config.reasoning_effort,
                     "temperature": config.temperature,
                     "workspace_id": config.workspace_id,
-                    // Three-state LLM availability (ADR-XXX). prost enums
-                    // don't derive serde, so serialize the wire tag
-                    // explicitly; the frontend maps i32 → its projection.
-                    "llm_availability": config.llm_availability as i32,
+                    // Three-state LLM availability (ADR-XXX). prost
+                    // generates the `LlmAvailability` enum as a bare
+                    // `i32` wire tag, so it serializes to the numeric
+                    // tag directly; the frontend maps it to its
+                    // own three-state projection.
+                    "llm_availability": config.llm_availability,
                 });
                 tracing::info!(
                     instance_id = %topic_instance_id,

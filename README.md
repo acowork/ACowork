@@ -216,7 +216,7 @@ provider = "deepseek"
 model = "deepseek-v4-flash"
 
 [permissions]
-tools = ["web_search", "read_file", "write_file"]
+tools = ["rag_query", "read_file", "write_file"]
 ```
 
 ```markdown

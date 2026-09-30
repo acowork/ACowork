@@ -38,7 +38,7 @@ type = "MemoryWrite"
 # shell + LSP needs for architecture review and infrastructure investigation:
 #   - file_*/doc_reader/glob_search/content_search → navigate and author designs
 #   - bash/powershell/shell                       → investigate infra, run analysis tools
-#   - http_request/web_fetch/web_search           → research patterns & best practices
+#   - http_request/web_fetch                     → research patterns & best practices
 #   - codebase                                    → LSP-based code intelligence for review
 #   - memory_*                                    → architecture decisions and trade-offs
 #   - intent_send                                 → coordinate with dev and review agents
@@ -66,9 +66,6 @@ name = "http_request"
 
 [[tools]]
 name = "web_fetch"
-
-[[tools]]
-name = "web_search"  # conditional: needs search provider
 
 # --- Shell (platform-detected; declare all three for cross-platform opt-in) ---
 [[tools]]

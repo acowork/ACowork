@@ -58,7 +58,6 @@ User identity information (name, city, language etc.) **is NOT passed via comman
    - user_identity: { name, city, language, ... }
    - provider_list: LLM config list
    - mcp_list: MCP server list
-   - search_list: search provider list
    - Corresponding Key Vault entries (encrypted transfer)
 4. Runtime stores in AgentCore, for Context Builder use
 ```
@@ -102,7 +101,6 @@ Agent Runtime binary
 ├── Skill Loader        # Load Skills (SKILL.md + SQLite memory layer experience layer)
 ├── Debug/DevMode       # Debug protocol (HTTP RPC + MQTT events, ADR-048; optional)
 ├── MCP Manager         # MCP server connection management (activate on demand)
-├── Search Config       # Web search provider config (synced from Gateway)
 └── Budget Manager      # Local budget pre-check + usage reporting
 ```
 

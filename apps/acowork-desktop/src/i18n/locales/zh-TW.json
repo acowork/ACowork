@@ -492,7 +492,6 @@
     "nodesUnassignedDesc": "無法對應到已知節點的 Agent"
   },
   "agentSetup": {
-    "noApiKey": "No API key configured. Add in Harness → Search.",
     "resetConfirm": "確定要重設 Agent 設定為預設值嗎？包括名稱、說明、提示詞角色、頭像圖示、Shell 審批閾值和工具設定。",
     "noAgentSelected": "未選取 Agent",
     "chooseIcon": "選擇圖示",
@@ -514,12 +513,9 @@
     "editRiskRules": "編輯風險規則檔案",
     "approvalTimeout": "審批逾時時間（秒）",
     "approvalTimeoutDesc": "留空使用預設值（300 秒 = 5 分鐘）。工具審批將在逾時後自動拒絕。",
-    "webSearchProviders": "網頁搜尋服務提供者（{{count}}）",
-    "noSearchKeys": "未設定搜尋 API 金鑰。請先在 Harness > 搜尋 標籤頁新增金鑰。",
     "priority": "優先順序：{{value}}",
     "noKey": "無金鑰",
     "moveUp": "上移（提高優先順序）",
-    "searchProvidersDesc": "選擇並排列此 Agent 的搜尋服務提供者。優先順序越高越先嘗試。",
     "mcpServers": "MCP 伺服器（{{count}}）",
     "noMcpInCatalog": "目錄中無 MCP 伺服器。請在 Harness > MCP 標籤頁新增伺服器。",
     "mcpToggleDesc": "切換此 Agent 的 MCP 伺服器。在 Harness > MCP 標籤頁新增更多伺服器。",
@@ -540,7 +536,6 @@
   },
   "harness": {
     "tabProviders": "模型服務提供者",
-    "tabSearch": "搜尋",
     "tabMcp": "MCP",
     "tabEmbedding": "嵌入模型",
     "providerManagement": "服務提供者管理",
@@ -652,37 +647,6 @@
       "unavailable": "已不可用",
       "saveFailed": "儲存失敗：{{error}}"
     }
-  },
-  "harnessSearch": {
-    "searchProviderManagement": "搜尋服務提供者管理",
-    "loading": "載入中...",
-    "configuredSearchProviders": "已設定的搜尋服務提供者（{{count}}）",
-    "active": "已啟用",
-    "key": "金鑰",
-    "edit": "編輯",
-    "remove": "移除",
-    "removeKeyConfirm": "確定移除 {{provider}} 的搜尋金鑰嗎？",
-    "availableSearchProviders": "可用搜尋服務提供者（{{count}}）",
-    "allConfigured": "所有搜尋服務提供者已設定",
-    "addKey": "新增金鑰",
-    "addSearchProvider": "新增搜尋服務提供者：",
-    "provider": "服務提供者",
-    "apiKey": "API 金鑰",
-    "baseUrl": "基礎 URL",
-    "required": "必填",
-    "optional": "選填",
-    "testing": "測試中...",
-    "testAndSave": "測試並儲存",
-    "cancel": "取消",
-    "pleaseEnterApiKey": "請先輸入 API 金鑰",
-    "apiKeyValid": "API 金鑰有效！",
-    "failedAddKey": "新增搜尋金鑰失敗：",
-    "failedRemoveKey": "移除搜尋金鑰失敗：",
-    "failedUpdateKey": "更新搜尋金鑰失敗：",
-    "editSearchProvider": "編輯搜尋服務提供者：",
-    "leaveEmptyToKeep": "留空保持目前值",
-    "current": "目前",
-    "save": "儲存"
   },
   "harnessMcp": {
     "mcpServerCatalog": "MCP 伺服器目錄（{{count}}）",
@@ -1124,10 +1088,6 @@
     "web_fetch": {
       "running": "取得網頁",
       "done": "已取得網頁"
-    },
-    "web_search": {
-      "running": "搜尋網頁",
-      "done": "已搜尋網頁"
     },
     "file_read": {
       "running": "讀取檔案",

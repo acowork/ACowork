@@ -59,9 +59,6 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     let mut provider_update_rx: Option<
         tokio::sync::mpsc::UnboundedReceiver<crate::mqtt::client::ProviderUpdate>,
     > = None;
-    let mut search_update_rx: Option<
-        tokio::sync::mpsc::UnboundedReceiver<crate::mqtt::client::SearchUpdate>,
-    > = None;
     // ADR-033: receiver for `acowork/global/embedding_models` retained
     // updates, wired through `gateway_loop` to SessionManager so sessions
     // rebuild their embedding provider when the embed sidecar becomes
@@ -159,8 +156,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         Arc::new(tokio::sync::Mutex::new(None));
 
     // ADR-040 follow-up: Late-bind slot for the Tools-panel persistence
-    // service (the four `/agents/{id}/mcp-servers` and
-    // `/agents/{id}/search-config` HTTP handlers). The service holds
+    // service (the `/agents/{id}/mcp-servers` HTTP handlers). The service holds
     // only the work_dir (sync, no async dependency), so we wire it
     // immediately after the workspace services in session_init.rs.
     let agent_tools_slot: Arc<
@@ -349,8 +345,6 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
             tokio::sync::mpsc::unbounded_channel::<acowork_core::protocol::UserProfile>();
         let (provider_update_tx, provider_update_chan_rx) =
             tokio::sync::mpsc::unbounded_channel::<crate::mqtt::client::ProviderUpdate>();
-        let (search_update_tx, search_update_chan_rx) =
-            tokio::sync::mpsc::unbounded_channel::<crate::mqtt::client::SearchUpdate>();
         // ADR-033: sink for `acowork/global/embedding_models` retained
         // updates (embed sidecar ready / model switch). gateway_loop
         // forwards to SessionManager::handle_embedding_config_update.
@@ -394,7 +388,6 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
             identity_update_tx: Some(identity_update_tx),
             mcp_notifier: Some(mcp_notifier.clone()),
             provider_update_tx: Some(provider_update_tx),
-            search_update_tx: Some(search_update_tx),
             embedding_update_tx: Some(embedding_update_tx),
             node_id: config.node_id.as_deref(),
             lsps_update_tx: Some(lsps_update_tx),
@@ -524,7 +517,6 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
                 control_rx = Some(ctrl_rx);
                 identity_update_rx = Some(identity_update_chan_rx);
                 provider_update_rx = Some(provider_update_chan_rx);
-                search_update_rx = Some(search_update_chan_rx);
                 embedding_update_rx = Some(embedding_update_chan_rx);
                 lsps_update_rx = Some(lsps_update_chan_rx);
 
@@ -637,7 +629,6 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         }
         loaded
     };
-    let search_prompt = load_or_trace("search.md", "SEARCH_SYSTEM_PROMPT");
     let compact_template = load_or_trace("compact-template.md", "COMPACT_PROMPT");
     let title_prompt = load_or_trace("title.md", "TITLE_PROMPT");
     let abstention_prompt = load_or_trace("abstention.md", "DEFAULT_ABSTENTION_PROMPT (memory)");
@@ -905,30 +896,6 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
 
     // ── Step 4: Build tool registry + activate by manifest ──────────
 
-    // Shared search key vault and provider list - same Arcs are injected
-    // into AgentCore (Phase B) so that SessionManager::update_search_config
-    // writes are visible to the WebSearchEngine without re-registration.
-    let search_key_vault: crate::tools::builtin::search_backends::SharedSearchKeyVault =
-        Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
-    let search_provider_list: crate::tools::builtin::search_backends::SharedSearchProviderList =
-        Arc::new(std::sync::RwLock::new(Vec::new()));
-
-    // Pre-populate from agent_search.json catalog (persisted by MQTT handler
-    // on previous run). This determines whether web_search tool is registered.
-    let work_path = std::path::Path::new(&config.work_dir);
-    let has_catalog = crate::agent_config::load_agent_search_config(work_path)
-        .ok()
-        .flatten()
-        .filter(|c| !c.catalog.is_empty());
-    if let Some(search_cfg) = has_catalog {
-        let mut list = search_provider_list.write().unwrap();
-        *list = search_cfg.catalog.clone();
-        tracing::info!(
-            provider_count = list.len(),
-            "Pre-populated search_provider_list from agent_search.json catalog"
-        );
-    }
-
     // ADR-040: LSP relay endpoint - always unavailable in MQTT-only mode.
     let lsp_relay_endpoint: Option<String> = None;
 
@@ -941,8 +908,6 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         &workspace_resolver,
         &config.agent_id,
         config.timeouts.tool_http_timeout_ms,
-        search_key_vault.clone(),
-        search_provider_list.clone(),
         Some(memory_session.clone()),
         Some(mcp_notifier.clone()),
         config.work_dir.clone(),
@@ -1282,7 +1247,6 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         control_rx,
         identity_update_rx,
         provider_update_rx,
-        search_update_rx,
         embedding_update_rx,
         lsps_update_rx,
         runtime_http_port,
@@ -1308,7 +1272,6 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         // ADR-068: 3 grafeo-specific overrides (extraction /
         // conflict-classification / generalization) removed — see the
         // matching comment in `agent_core.rs` for rationale.
-        search_prompt,
         compact_template,
         title_prompt,
         abstention_prompt,
@@ -1359,8 +1322,6 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         // ADR-058: same Arc as the one cloned into the HTTP server —
         // Phase C reads it via `ctx.workspace_watcher_set`.
         workspace_watcher_set,
-        search_key_vault,
-        search_provider_list,
         session_configs,
     })
 }

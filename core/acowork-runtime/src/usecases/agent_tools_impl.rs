@@ -1,8 +1,8 @@
 //! RuntimeAgentToolsService — implements [`AgentToolsService`].
 //!
 //! ADR-040 follow-up: the Tools-panel persistence endpoints
-//! (`/agents/{id}/mcp-servers`, `/agents/{id}/search-config`,
-//! `/agents/{id}/builtin-tools`) used to call `agent_config::*` directly
+//! (`/agents/{id}/mcp-servers`, `/agents/{id}/builtin-tools`) used to call
+//! `agent_config::*` directly
 //! from the HTTP handlers, bypassing the UseCase trait layer. This
 //! module consolidates those operations behind a single struct so the
 //! HTTP handlers become thin protocol converters — consistent with
@@ -20,11 +20,10 @@
 //! ## File layout
 //!
 //! All disk I/O goes through [`crate::agent_config`] module functions
-//! (`load_agent_mcp_config` / `save_agent_mcp_config`,
-//! `load_agent_search_config` / `save_agent_search_config`, and
+//! (`load_agent_mcp_config` / `save_agent_mcp_config` and
 //! `load_agent_tools_config` / `save_agent_tools_config` for
 //! builtin tools). This service is the **single audit point** for the
-//! six endpoints — path construction, atomic write-tmp-rename, the
+//! four endpoints — path construction, atomic write-tmp-rename, the
 //! `active_names` validation rule for MCP, and the
 //! read-modify-write cycle for builtin tools all live here, not in
 //! the handlers.
@@ -46,19 +45,16 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use acowork_core::protocol::AgentSearchConfig;
 use async_trait::async_trait;
 
 use crate::agent_config;
 use crate::usecases::agent_tools::{
     AgentToolsError, AgentToolsService, BuiltinToolsResponse, McpServersResponse, McpToolsResponse,
     MergedToolsResponse, PutBuiltinToolsBody, PutMcpServersBody, PutMcpToolsBody,
-    PutSearchConfigBody, SearchConfigResponse,
 };
 
 /// Concrete [`AgentToolsService`] backed by the
-/// `workspace/config/agent_mcp.json`, `agent_search.json`, and
-/// `agent_tools.json` files.
+/// `workspace/config/agent_mcp.json` and `agent_tools.json` files.
 pub struct RuntimeAgentToolsService {
     work_dir: PathBuf,
 }
@@ -126,48 +122,6 @@ impl AgentToolsService for RuntimeAgentToolsService {
         Ok(McpServersResponse {
             agent_id: agent_id.to_string(),
             active_servers: body.servers,
-        })
-    }
-
-    async fn get_search_config(&self, agent_id: &str) -> SearchConfigResponse {
-        let providers = agent_config::load_agent_search_config(&self.work_dir)
-            .ok()
-            .flatten()
-            .map(|c| c.providers)
-            .unwrap_or_default();
-        SearchConfigResponse {
-            agent_id: agent_id.to_string(),
-            providers,
-        }
-    }
-
-    async fn put_search_config(
-        &self,
-        agent_id: &str,
-        body: PutSearchConfigBody,
-    ) -> Result<SearchConfigResponse, AgentToolsError> {
-        let current = agent_config::load_agent_search_config(&self.work_dir)
-            .unwrap_or_else(|e| {
-                tracing::warn!(error = %e, "Failed to load agent_search.json, using default");
-                None
-            })
-            .unwrap_or_default();
-        let cfg = AgentSearchConfig {
-            providers: body.providers.clone(),
-            catalog: current.catalog,
-        };
-        agent_config::save_agent_search_config(&self.work_dir, &cfg)
-            .map_err(AgentToolsError::Persistence)?;
-
-        tracing::info!(
-            agent_id,
-            provider_count = body.providers.len(),
-            "RuntimeAgentToolsService::put_search_config: providers persisted"
-        );
-
-        Ok(SearchConfigResponse {
-            agent_id: agent_id.to_string(),
-            providers: body.providers,
         })
     }
 
@@ -276,18 +230,11 @@ impl AgentToolsService for RuntimeAgentToolsService {
             })
             .unwrap_or_default();
 
-        let search = agent_config::load_agent_search_config(&self.work_dir)
-            .ok()
-            .flatten()
-            .map(|cfg| serde_json::json!({ "providers": cfg.providers }))
-            .unwrap_or_else(|| serde_json::json!({ "providers": [] }));
-
         MergedToolsResponse {
             agent_id: agent_id.to_string(),
             tools,
             mcp_servers,
             mcp_servers_defs,
-            search,
         }
     }
 

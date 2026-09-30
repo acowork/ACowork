@@ -33,7 +33,7 @@ type = "MemoryWrite"
 # Product Manager focuses on strategy, PRD writing, roadmap prioritization,
 # Figma/feature review, and launch planning. Tools cover those workflows:
 #   - file_*/doc_reader/glob_search/content_search → PRDs, specs, references
-#   - http_request/web_fetch/web_search            → market & competitor research
+#   - http_request/web_fetch                      → market & competitor research
 #   - memory_*                                     → long-term project context
 #   - intent_send                                  → coordinate with engineering agents
 #   - ask_user_question, todo_write                → gather requirements & track plans
@@ -69,9 +69,6 @@ name = "http_request"
 
 [[tools]]
 name = "web_fetch"
-
-[[tools]]
-name = "web_search"  # conditional: needs search provider
 
 # --- Inter-agent ---
 [[tools]]

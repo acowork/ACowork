@@ -89,7 +89,6 @@ async fn connect_runtime(port: u16, agent_id: &str) -> (RuntimeMqttClient, Strin
         identity_update_tx: None,
         mcp_notifier: None,
         provider_update_tx: None,
-        search_update_tx: None,
         embedding_update_tx: None,
         node_id: None,
         lsps_update_tx: None,

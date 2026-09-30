@@ -13,7 +13,7 @@
 use serde::{Deserialize, Serialize};
 
 use acowork_core::ShellApprovalThreshold;
-use acowork_core::protocol::{AgentSearchConfig, McpServerConfigDef};
+use acowork_core::protocol::McpServerConfigDef;
 
 /// Effective (merged) config returned to API consumers.
 #[derive(Debug, Clone, Serialize)]
@@ -66,9 +66,6 @@ pub struct AgentConfigResponse {
     /// Active MCP server names for this agent (from workspace config)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub active_mcp_servers: Vec<String>,
-    /// Per-agent search provider config (from workspace agent_search.json)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub search_config: Option<AgentSearchConfig>,
     /// ADR-024: max sessions limit per-agent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_sessions: Option<usize>,

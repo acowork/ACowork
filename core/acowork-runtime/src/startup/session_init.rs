@@ -357,7 +357,6 @@ pub(crate) async fn phase_b_init_session(
         // pattern (RwLock write — Phase B is the only writer before
         // sessions are spawned, so no contention with the LLM call
         // sites' read guards). `None` is the normal "no override" state.
-        *c.search_prompt.write().unwrap() = ctx.search_prompt.clone();
         *c.compact_template.write().unwrap() = ctx.compact_template.clone();
         *c.title_prompt.write().unwrap() = ctx.title_prompt.clone();
         *c.abstention_prompt.write().unwrap() = ctx.abstention_prompt.clone();
@@ -439,44 +438,6 @@ pub(crate) async fn phase_b_init_session(
                     provider_count = available.providers.len(),
                     key_count = vault.len(),
                     "Populated AgentCore provider_key_vault from MQTT available cache"
-                );
-            }
-        }
-
-        // Replace AgentCore's internally-created search vault/list with the
-        // shared Arcs from Phase A (same instances held by WebSearchEngine).
-        // This ensures SessionManager::update_search_config writes are visible
-        // to the search engine without re-registration.
-        c.search_key_vault = ctx.search_key_vault.clone();
-        c.search_provider_list = ctx.search_provider_list.clone();
-
-        // Populate search key vault and provider list from MQTT available
-        // cache (mirrors the provider_key_vault pattern above). The
-        // AvailableSearches payload carries SearchRef entries with inline
-        // decrypted API keys.
-        if let Some(ref cache) = ctx.available_cache {
-            let cache_read = cache.read().await;
-            if let Some(searches) = cache_read.searches.as_ref() {
-                let search_refs = &searches.providers;
-                let list_items = crate::mqtt::client::map_search_refs_to_list_items(search_refs);
-                let key_entries = crate::mqtt::client::extract_search_keys(search_refs);
-
-                {
-                    let mut vault = c.search_key_vault.write().unwrap();
-                    vault.clear();
-                    for entry in &key_entries {
-                        vault.insert(entry.provider_id.clone(), entry.api_key.clone());
-                    }
-                }
-                {
-                    let mut list = c.search_provider_list.write().unwrap();
-                    *list = list_items.clone();
-                }
-                tracing::info!(
-                    version = searches.version,
-                    provider_count = list_items.len(),
-                    key_count = key_entries.len(),
-                    "Populated AgentCore search_key_vault + search_provider_list from MQTT available cache"
                 );
             }
         }
@@ -635,10 +596,10 @@ pub(crate) async fn phase_b_init_session(
         }
 
         // ADR-040 follow-up: Publish Tools-panel persistence service.
-        // The four `/agents/{id}/mcp-servers` and `/agents/{id}/search-config`
-        // HTTP handlers route through this trait. The service holds only
-        // the agent's `work_dir` (sync, no async dependency), so it can
-        // be wired immediately alongside the workspace services.
+        // The `/agents/{id}/mcp-servers` HTTP handlers route through this
+        // trait. The service holds only the agent's `work_dir` (sync, no
+        // async dependency), so it can be wired immediately alongside the
+        // workspace services.
         {
             let tools_svc: Arc<dyn crate::usecases::AgentToolsService> = Arc::new(
                 crate::usecases::RuntimeAgentToolsService::new(work_dir_path.to_path_buf()),

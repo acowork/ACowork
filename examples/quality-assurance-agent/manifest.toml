@@ -35,7 +35,7 @@ type = "MemoryWrite"
 # planning/management role, not a test-execution role — tools cover authoring
 # and review, not running test commands:
 #   - file_*/doc_reader/glob_search/content_search → test plans, cases, defect reports
-#   - http_request/web_fetch/web_search            → research test tools & practices
+#   - http_request/web_fetch                      → research test tools & practices
 #   - memory_*                                     → quality history & known issues
 #   - intent_send                                  → coordinate with dev/PM agents
 #   - ask_user_question, todo_write                → clarify acceptance & track plans

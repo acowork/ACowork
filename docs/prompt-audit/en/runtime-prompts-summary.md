@@ -34,7 +34,6 @@ The only entry point explicitly tagged as "every production prompt should live h
 | --- | --- | --- |
 | `PROMPT_BUILDER_FALLBACK` | Fallback system prompt when the package has no `prompts/*.md` | `package/prompt_builder.rs` |
 | `COMPACTION_SYSTEM_PROMPT` | System prompt for context compaction / episode distillation. Forces `<summary>` + `<user_intent>` two-block output (ADR-061 §8.1) | `episode_distill.rs` |
-| `SEARCH_SYSTEM_PROMPT` | System prompt for the Perplexity Sonar search backend | `tools/builtin/search_backends/perplexity.rs` |
 | `COMPACT_PROMPT` | User prompt template that wraps the conversation text inside `<conversation>...</conversation>` (`{messages_text}` placeholder) | `episode_distill.rs` |
 | `TITLE_PROMPT` | Prompt that produces a ≤60-character session title (`{language}` / `{user_message}` placeholders) | `episode_distill.rs::compact_session_title_with_llm` |
 | `build_compaction_system_prompt()` | Helper that appends the identity context (and a "Language field" directive) to a base compaction system prompt | `episode_distill.rs` |
@@ -74,7 +73,6 @@ Every LLM call carries tool schemas, whose `description` field is read by the mo
 | `content_search` | `content_search.rs` | "use `include` glob + focused regex", capped at 1000 hits |
 | `glob_search` | `glob_search.rs` | Single-line glob pattern notes |
 | `http_request` | `http_request.rs` | GET / POST / PUT / DELETE + auto JSON parsing + network permission required |
-| `web_search` | `web_search.rs` | Tavily / Brave / Firecrawl / SearXNG with auto fallback |
 | `web_fetch` | `web_fetch.rs` | URL fetch + HTML stripping |
 | `doc_reader` | `doc_reader/mod.rs` | PDF / DOCX / PPTX / XLSX + plain text |
 | `rag_query` | `rag_query.rs` | Enterprise knowledge-base RAG deep query |
@@ -85,8 +83,6 @@ Every LLM call carries tool schemas, whose `description` field is read by the mo
 | `intent_send` | `intent_send.rs` | Cross-Agent Intent routing + permission requirement |
 | `ask_user_question` | `ask_user_question.rs` | "Do NOT use for simple yes/no" |
 | `codebase` | `codebase.rs` | LSP 5-action overview |
-
-> The 8 search backends in `tools/builtin/search_backends/mod.rs` (Tavily / Brave / Serper / Perplexity / Exa / Google CSE / Firecrawl / SearXNG) each also carry a one-line `description`. They read more like configuration metadata than instructions, so they are not enumerated individually.
 
 ## 5. Runtime-assembled system-prompt blocks
 
