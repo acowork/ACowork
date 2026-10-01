@@ -12,6 +12,8 @@ import { Download, FileText, Loader2 } from "lucide-react";
 import { useTranslation } from "../i18n/useTranslation";
 import {
   attachmentObjectUrl,
+  attachmentThumbObjectUrl,
+  attachmentThumbText,
   canPreviewAttachment,
   downloadChatAttachment,
   fetchAttachmentText,
@@ -66,7 +68,9 @@ export function MessageRow({
   // even by one token (the layout collapse bug ("two English words per
   // line") came from reordering wrappers around max-w).
   //
-  // One intentional exception: a user↔user attachment chip gains its own
+  // Two intentional exceptions: a user↔user attachment row sits ABOVE the
+  // bubble rather than inside it (the agent side already does this — see
+  // the `message-attachments` block below), and a chip gains its own
   // preview hit area (see `FileAttachment`), which the agent-side chip has
   // no use for — agent attachments are workspace files that open in the
   // file tab through the attached-context list already. The chip's own
@@ -118,44 +122,67 @@ export function MessageRow({
         {senderName && (
           <span className="mt-[2px] text-xs text-text-tertiary">{senderName}</span>
         )}
+        {/* Attachments — their own row ABOVE the bubble, exactly like the
+            agent side renders chips
+            ([UserWithAttachmentsBubble.tsx:142](../../components/chat/UserWithAttachmentsBubble.tsx#L142)).
+            They used to live *inside* the rounded bubble next to the body,
+            which is what every IM since WeChat stopped doing: the bubble
+            ended up sized by its attachments, an image inherited the
+            bubble's text padding, and a file with no caption rendered an
+            empty rounded shell around one chip. `messages.jsonl` always
+            carried them as a sibling of `body` — this is purely where the
+            DOM puts them. */}
+        {attachments.length > 0 && (
+          <div
+            data-testid="message-attachments"
+            className={cn(
+              "mt-2 flex max-w-[var(--content-max-width)] flex-col gap-1.5",
+              own ? "items-end" : "items-start",
+            )}
+          >
+            {attachments.map((attachment) =>
+              attachment.mime.startsWith("image/") ? (
+                <ImageAttachment
+                  key={attachment.id}
+                  userId={userId}
+                  chatId={chatId}
+                  attachment={attachment}
+                  downloadLabel={t("messages.download")}
+                />
+              ) : (
+                <FileAttachment
+                  key={attachment.id}
+                  userId={userId}
+                  chatId={chatId}
+                  attachment={attachment}
+                />
+              ),
+            )}
+          </div>
+        )}
+
         {/* Bubble wrapper — mirrors `group mt-[6px] max-w-[85%] flex flex-col
             items-start` from agent user branch. Keep `flex flex-col items-start`
             verbatim — the timestamp sibling needs that column to align its
             left edge to the bubble's left edge. */}
         <div className="group mt-[6px] max-w-[var(--content-max-width)] flex flex-col items-start">
-          <div
-            className={cn(
-              "w-full rounded-md max-h-48 overflow-y-auto",
-              bubbleClass,
-            )}
-            style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}
-          >
-            <div className="px-4 py-2.5 whitespace-pre-wrap break-words">
-              {attachments.length > 0 && (
-                <div className={cn("flex flex-col gap-1", hasBody && "mb-1")}>
-                  {attachments.map((attachment) =>
-                    attachment.mime.startsWith("image/") ? (
-                      <ImageAttachment
-                        key={attachment.id}
-                        userId={userId}
-                        chatId={chatId}
-                        attachment={attachment}
-                        downloadLabel={t("messages.download")}
-                      />
-                    ) : (
-                      <FileAttachment
-                        key={attachment.id}
-                        userId={userId}
-                        chatId={chatId}
-                        attachment={attachment}
-                      />
-                    ),
-                  )}
-                </div>
+          {/* A message with attachments and no body has no bubble at all —
+              the row is the attachment. The old unconditional wrapper
+              rendered an empty `max-h-48` shell in that case. */}
+          {hasBody && (
+            <div
+              data-testid="message-bubble"
+              className={cn(
+                "w-full rounded-md max-h-48 overflow-y-auto",
+                bubbleClass,
               )}
-              {hasBody && <div>{message.body}</div>}
+              style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}
+            >
+              <div className="px-4 py-2.5 whitespace-pre-wrap break-words">
+                {message.body}
+              </div>
             </div>
-          </div>
+          )}
           <span className="mt-1 text-[10px] text-text-tertiary opacity-0 transition-opacity group-hover:opacity-100">
             {ts}
           </span>
@@ -167,12 +194,16 @@ export function MessageRow({
 }
 
 /**
- * An image attachment, shown inline.
+ * An image attachment, shown as a thumbnail tile.
  *
- * The bytes come from an authenticated route, so `<img src="/api/...">` cannot
- * work — the global fetch interceptor only sees `fetch`. The object URL is
- * handed to the element instead, which also keeps the bearer out of any URL a
- * log could keep.
+ * The tile is the **generated** sidecar (`?thumb=1`, a 320 px JPEG made at
+ * upload), not the original: rendering the row used to pull the whole blob,
+ * so a 25 MB screenshot cost 25 MB to fill a 160 px square. The original is
+ * still what the click downloads.
+ *
+ * Falls back to the original blob when no sidecar exists (an upload from
+ * before thumbnails, or a format the decoder rejected) — the row must never
+ * be a hole just because a nicety is missing.
  */
 function ImageAttachment({
   userId,
@@ -185,24 +216,56 @@ function ImageAttachment({
   attachment: ChatAttachment;
   downloadLabel: string;
 }) {
-  const [url, setUrl] = useState<string | null>(null);
-  const [failed, setFailed] = useState(false);
+  const [thumbUrl, setThumbUrl] = useState<string | null>(null);
+  const [originalUrl, setOriginalUrl] = useState<string | null>(null);
+  // Only set once the sidecar route has answered *and* declined, so the
+  // original is fetched only for attachments that genuinely lack one.
+  const [needOriginal, setNeedOriginal] = useState(false);
+  // The sidecar route has answered — either with bytes or with a refusal.
+  // Without this the "no url" fallback below cannot tell *not yet* from
+  // *never*, and fires on the very first render, so every image falls
+  // through to `FileAttachment` for the whole life of the message and the
+  // thumbnail is fetched, resolved, and then thrown away.
+  const [sidecarDone, setSidecarDone] = useState(false);
 
   useEffect(() => {
     let live = true;
-    attachmentObjectUrl(userId, chatId, attachment.id).then(
-      (u) => live && setUrl(u),
-      () => live && setFailed(true),
-    );
+    attachmentThumbObjectUrl(userId, chatId, attachment).then((u) => {
+      if (!live) return;
+      if (u) setThumbUrl(u);
+      else setNeedOriginal(true);
+      setSidecarDone(true);
+    });
     return () => {
       live = false;
     };
-  }, [userId, chatId, attachment.id]);
+  }, [userId, chatId, attachment]);
 
-  // A broken image still has a name and a size worth showing, and the
-  // download route may well work — degrade to the file chip rather than
-  // leaving a hole in the thread.
-  if (failed) {
+  useEffect(() => {
+    if (!needOriginal) return;
+    let live = true;
+    attachmentObjectUrl(userId, chatId, attachment.id)
+      .then((u) => {
+        if (live) setOriginalUrl(u);
+      }, () => {
+        // A dead original is cosmetic — the chip below still names the
+        // file and the download route may well work.
+        if (live) setSidecarDone(true);
+      });
+    return () => {
+      live = false;
+    };
+  }, [userId, chatId, attachment.id, needOriginal]);
+
+  const url = thumbUrl ?? originalUrl;
+
+  // Neither the sidecar nor the original resolved — a broken image still has
+  // a name and a size worth showing, and the download route may well work,
+  // so degrade to the file chip rather than leaving a hole in the thread.
+  // Gated on `sidecarDone` so it fires on *refusal*, not on the first
+  // render, which is what made the image tile unreachable (the thumbnail
+  // resolved into a component that had already committed to the chip).
+  if (sidecarDone && !url) {
     return (
       <FileAttachment
         userId={userId}
@@ -211,6 +274,11 @@ function ImageAttachment({
       />
     );
   }
+  // A fixed tile rather than the image at natural size: a 4K screenshot
+  // used to stretch the row to its full width and push every message
+  // below it off screen. `object-cover` fills the square so the row
+  // keeps a predictable rhythm; the alt text and the title still name
+  // the file, and the whole tile is the download hit area.
   return (
     <button
       type="button"
@@ -223,16 +291,16 @@ function ImageAttachment({
       }}
       aria-label={`${downloadLabel}: ${attachment.filename}`}
       title={`${downloadLabel}: ${attachment.filename}`}
-      className="block cursor-pointer"
+      className="block size-40 cursor-pointer overflow-hidden rounded-md bg-black/10"
     >
       {url ? (
         <img
           src={url}
           alt={attachment.filename}
-          className="max-h-40 max-w-full rounded object-contain"
+          className="size-full object-cover"
         />
       ) : (
-        <span className="block h-20 w-32 animate-pulse rounded bg-black/10" />
+        <span className="block size-full animate-pulse bg-black/10" />
       )}
     </button>
   );
@@ -247,6 +315,10 @@ function ImageAttachment({
  * another `<button>`, and nesting them is invalid HTML that breaks click
  * routing. Non-previewable files (binaries, oversized text) keep a single
  * download hit area over the whole chip, as before.
+ *
+ * A text file small enough for the thumbnail budget also gets its opening
+ * lines rendered above the chip, so the row says what the file is before
+ * anyone clicks it.
  */
 function FileAttachment({
   userId,
@@ -268,6 +340,9 @@ function FileAttachment({
   // it never touches the download's byte counter.
   const [previewing, setPreviewing] = useState(false);
   const previewable = canPreviewAttachment(attachment);
+  // The `txt` sidecar the service captured at upload — a few hundred bytes,
+  // where the old on-mount read cost the entire file.
+  const [thumbText, setThumbText] = useState<string | null>(null);
   const total = attachment.size;
   // `null` when the size is unknown — then there is nothing to divide by
   // and the chip falls back to a spinner.
@@ -275,6 +350,23 @@ function FileAttachment({
     received !== null && total > 0
       ? Math.min(100, Math.floor((received / total) * 100))
       : null;
+
+  // A missing or unreadable sidecar is a cosmetic gap, not an error: the
+  // filename and size already say what this row is, and the click-to-preview
+  // path below still fetches the real file and reports its own failures.
+  useEffect(() => {
+    let live = true;
+    attachmentThumbText(userId, chatId, attachment)
+      .then((t) => {
+        if (live) setThumbText(t);
+      })
+      .catch(() => {
+        if (live) setThumbText(null);
+      });
+    return () => {
+      live = false;
+    };
+  }, [userId, chatId, attachment]);
 
   const handleDownload = () => {
     setReceived(0);
@@ -285,6 +377,8 @@ function FileAttachment({
 
   const handlePreview = () => {
     setPreviewing(true);
+    // The full body, always — the sidecar is only the first few lines and
+    // handing those to Monaco would silently truncate the file in the tab.
     fetchAttachmentText(userId, chatId, attachment)
       .then((content) =>
         openAttachmentPreview({
@@ -311,10 +405,26 @@ function FileAttachment({
   const busy = received !== null || previewing;
 
   return (
-    <div className="relative max-w-64">
-      <button
-        type="button"
-        onClick={previewable ? handlePreview : handleDownload}
+    <div className="max-w-64">
+      {thumbText !== null && (
+        <div
+          data-testid="attachment-thumbnail"
+          className="mb-1 overflow-hidden rounded bg-black/10 px-1.5 py-1"
+        >
+          {/* A shape hint, not something to read in full — the chip click
+              opens the real thing in Monaco. `text-[10px]` in a monospace
+              stack; the service already capped it at 8 non-blank lines. */}
+          <pre className="line-clamp-8 max-h-24 overflow-hidden whitespace-pre-wrap break-words font-mono text-[10px] leading-[1.35] opacity-80">
+            {thumbText}
+          </pre>
+        </div>
+      )}
+      {/* The bolt is absolutely positioned against THIS box so it stays
+          anchored to the chip, not to the thumbnail above it. */}
+      <div className="relative">
+        <button
+          type="button"
+          onClick={previewable ? handlePreview : handleDownload}
         aria-label={
           previewable
             ? `${t("messages.preview")}: ${attachment.filename}`
@@ -326,56 +436,57 @@ function FileAttachment({
           "flex w-full flex-col gap-0.5 rounded bg-black/10 px-1.5 py-1 text-left hover:bg-black/20 disabled:cursor-progress disabled:opacity-70",
           previewable && "pr-6",
         )}
-      >
-        <span className="flex items-center gap-1.5">
-          <FileText className="h-3.5 w-3.5 shrink-0" />
-          <span className="min-w-0 flex-1 truncate text-[11px]">{attachment.filename}</span>
-          {/* Non-previewable chips have no bolt, so the trailing glyph
-              stays the download affordance it always was. */}
-          {!previewable &&
-            (received !== null
-              ? <Loader2 className="h-3 w-3 shrink-0 animate-spin opacity-70" />
-              : <Download className="h-3 w-3 shrink-0 opacity-70" />)}
-        </span>
-        <span className="block text-[9px] opacity-70">
-          {received === null
-            ? formatAttachmentSize(total)
-            : percent === null
-              ? t("messages.saving")
-              : `${formatAttachmentSize(received)} / ${formatAttachmentSize(total)} (${percent}%)`}
-        </span>
-        {percent !== null && (
-          <span
-            className="mt-0.5 block h-1 overflow-hidden rounded-full bg-black/15"
-            role="progressbar"
-            aria-valuemin={0}
-            aria-valuemax={100}
-            aria-valuenow={percent}
-          >
-            <span
-              className="block h-full bg-current opacity-70 transition-[width] duration-200"
-              style={{ width: `${percent}%` }}
-            />
-          </span>
-        )}
-      </button>
-      {previewable && (
-        <button
-          type="button"
-          onClick={handleDownload}
-          aria-label={`${t("messages.download")}: ${attachment.filename}`}
-          title={t("messages.download")}
-          disabled={received !== null}
-          className="absolute right-1 top-1 rounded p-0.5 text-text-tertiary transition-colors hover:bg-black/10 hover:text-text-secondary disabled:cursor-progress disabled:opacity-50"
         >
-          {/* Also the spinner slot for the preview read: the body only opens
-              the tab once it has the content, so without this the chip looks
-              inert for the duration. */}
-          {busy
-            ? <Loader2 className="h-3 w-3 animate-spin" />
-            : <Download className="h-3 w-3" />}
+          <span className="flex items-center gap-1.5">
+            <FileText className="h-3.5 w-3.5 shrink-0" />
+            <span className="min-w-0 flex-1 truncate text-[11px]">{attachment.filename}</span>
+            {/* Non-previewable chips have no bolt, so the trailing glyph
+                stays the download affordance it always was. */}
+            {!previewable &&
+              (received !== null
+                ? <Loader2 className="h-3 w-3 shrink-0 animate-spin opacity-70" />
+                : <Download className="h-3 w-3 shrink-0 opacity-70" />)}
+          </span>
+          <span className="block text-[9px] opacity-70">
+            {received === null
+              ? formatAttachmentSize(total)
+              : percent === null
+                ? t("messages.saving")
+                : `${formatAttachmentSize(received)} / ${formatAttachmentSize(total)} (${percent}%)`}
+          </span>
+          {percent !== null && (
+            <span
+              className="mt-0.5 block h-1 overflow-hidden rounded-full bg-black/15"
+              role="progressbar"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={percent}
+            >
+              <span
+                className="block h-full bg-current opacity-70 transition-[width] duration-200"
+                style={{ width: `${percent}%` }}
+              />
+            </span>
+          )}
         </button>
-      )}
+        {previewable && (
+          <button
+            type="button"
+            onClick={handleDownload}
+            aria-label={`${t("messages.download")}: ${attachment.filename}`}
+            title={t("messages.download")}
+            disabled={received !== null}
+            className="absolute right-1 top-1 rounded p-0.5 text-text-tertiary transition-colors hover:bg-black/10 hover:text-text-secondary disabled:cursor-progress disabled:opacity-50"
+          >
+            {/* Also the spinner slot for the preview read: the body only opens
+                the tab once it has the content, so without this the chip looks
+                inert for the duration. */}
+            {busy
+              ? <Loader2 className="h-3 w-3 animate-spin" />
+              : <Download className="h-3 w-3" />}
+          </button>
+        )}
+      </div>
     </div>
   );
 }

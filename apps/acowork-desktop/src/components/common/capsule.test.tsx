@@ -19,8 +19,9 @@
  *      the min-h-0 that lets inner scroll roots work).
  *   2. The four pre-existing chat-side panels derive their shell from the
  *      constant instead of re-spelling the classes.
- *   3. EmptyChatPane / EmptyRightPane render the shell, so the empty states
- *      are outlined panels rather than bare text on glass.
+ *   3. EmptyChatPane renders the shell, so the chat column's empty state is
+ *      an outlined panel rather than bare text on glass — while the *right*
+ *      column renders nothing at all without an agent (see below).
  *   4. The pm / docs / extensions view wrappers no longer paint a solid
  *      `bg-page-bg` plane — the vibrancy must show through, which is what
  *      makes the capsule language read as one system.
@@ -37,7 +38,7 @@ import { dirname, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { CAPSULE_PANE_CN } from "./capsule";
-import { EmptyChatPane, EmptyRightPane } from "../chat/EmptyChatPane";
+import { EmptyChatPane } from "../chat/EmptyChatPane";
 import { ExtensionsView } from "../../views/ExtensionsView";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -92,15 +93,19 @@ describe("empty placeholders are outlined capsules", () => {
     expect(shell.className).toContain("bg-chat-body");
   });
 
-  it("EmptyRightPane reserves the right panel's width and surface", () => {
-    const { container } = render(<EmptyRightPane width={340} />);
-    const outer = container.firstElementChild as HTMLElement;
-    expect(outer.style.width).toBe("340px");
-    const shell = outer.firstElementChild as HTMLElement;
-    expect(shell.className).toContain("rounded-xl");
-    expect(shell.className).toContain("bg-right-panel");
-    // Purely a frame — nothing to announce to a screen reader.
-    expect(outer.getAttribute("aria-hidden")).toBe("true");
+  it("no right-column placeholder without an agent session", () => {
+    // Every right-panel tab (workspace / status / memory) is agent-scoped, so
+    // an empty outline there carried no information — it only added a blank
+    // bordered slab, and being a separate element from RightPanel it missed
+    // that panel's `ml-1` gutter, so the chat pane and the frame touched.
+    // AppLayout must therefore render NO right pane at all in that state.
+    const src = read("components/layout/AppLayout.tsx");
+    expect(src).not.toContain("EmptyRightPane");
+    expect(read("components/chat/EmptyChatPane.tsx")).not.toContain("EmptyRightPane");
+    // …and the placeholder export must be gone, not just unreferenced.
+    expect(read("components/chat/EmptyChatPane.tsx")).not.toMatch(
+      /export function EmptyRightPane/,
+    );
   });
 });
 

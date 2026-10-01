@@ -5,7 +5,7 @@ import { NavBar } from "./NavBar";
 import { TitleBar } from "./TitleBar";
 import { AgentList } from "../agent-list/AgentList";
 import { ChatPanel } from "../chat/ChatPanel";
-import { EmptyChatPane, EmptyRightPane } from "../chat/EmptyChatPane";
+import { EmptyChatPane } from "../chat/EmptyChatPane";
 import { InboxPanel } from "../../views/InboxPanel";
 import { RightPanel } from "../right-panel/RightPanel";
 import { RightNavBar } from "./RightNavBar";
@@ -1079,18 +1079,19 @@ export function AppLayout() {
               </>
             )}
 
-            {/* Right panel — unified tabs, collapsible, resizable. Hidden in
-                inbox mode since user↔user chat has no agent session config.
-                With no agent selected the panel's own data is agent-scoped, so
-                an outlined placeholder of the same width stands in — the
-                four-capsule layout stays intact instead of leaving raw
-                vibrancy where the panel would be (see EmptyRightPane). */}
-            {selectedAgentId ? (
-              !rightPanelCollapsed && (
-                <RightPanel width={rightWidth} onCollapse={toggleRightPanel} isDebugMode={isDebugMode} onResizeStart={handleMouseDownRight} activeTab={activeTab} onTabChange={setActiveTab} />
-              )
-            ) : (
-              !rightPanelCollapsed && <EmptyRightPane width={rightWidth} />
+            {/* Right panel — unified tabs, collapsible, resizable. Only
+                meaningful for an agent session: every tab (workspace /
+                status / memory) reads the selected agent's Runtime, so with
+                no agent there is nothing truthful to show. It used to fall
+                back to an outlined placeholder capsule of the same width to
+                keep the four-capsule layout intact, but an empty frame only
+                widened the gap to the 40px right rail without adding
+                information — worse, the placeholder was a separate element
+                from RightPanel and so missed that panel's `ml-1` gutter,
+                making the chat pane and the frame touch. No panel, no
+                gutter to get wrong. */}
+            {!rightPanelCollapsed && selectedAgentId && (
+              <RightPanel width={rightWidth} onCollapse={toggleRightPanel} isDebugMode={isDebugMode} onResizeStart={handleMouseDownRight} activeTab={activeTab} onTabChange={setActiveTab} />
             )}
           </div>
         )}

@@ -129,9 +129,20 @@ async fn user_proxy_handler(
         Ok(response) => {
             let status = StatusCode::from_u16(response.status().as_u16())
                 .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-            let resp_headers = response.headers().clone();
+            // Strip hop-by-hop headers (RFC 7230 §6.1) exactly as the
+            // request path above does. The response side was previously a
+            // blind copy of every upstream header, which forwarded
+            // `transfer-encoding: chunked` onto a body that `bytes()` has
+            // already de-chunked. A streamed attachment download (every
+            // `/files/...` response uses `Body::from_stream`, so it has no
+            // content-length) then reached the browser with a chunked
+            // encoding header that no longer described the body, and fetch
+            // rejected it outright as `TypeError: Failed to fetch` — a 200
+            // in the Gateway log and an empty tile in the UI.
+            // `content-length` is dropped for the same reason: reqwest
+            // recomputes it from the buffered body.
+            let resp_headers = forwardable_response_headers(response.headers());
             let body = response.bytes().await.unwrap_or_default();
-
             let mut response_builder = Response::builder().status(status);
             *response_builder.headers_mut().unwrap() = resp_headers;
             response_builder
@@ -199,6 +210,30 @@ fn build_trusted_headers(headers: &HeaderMap, auth: Option<&AuthContext>) -> Hea
     out
 }
 
+/// Copy upstream response headers, dropping the ones that describe *this*
+/// hop rather than the message.
+///
+/// A reverse proxy must strip hop-by-hop headers in **both** directions
+/// (RFC 7230 §6.1). The request direction has always done so; the response
+/// direction used to copy everything, which forwarded
+/// `transfer-encoding: chunked` from a streamed upstream onto a body that
+/// `bytes()` had already de-chunked. Browsers reject that response outright
+/// (`TypeError: Failed to fetch`) even though it logged as a 200 — the
+/// failure that showed up as a missing attachment thumbnail.
+///
+/// `content-length` is dropped for the same reason
+/// [`is_hop_by_hop_header`] excludes it: reqwest recomputes it from the
+/// buffered body.
+fn forwardable_response_headers(upstream: &HeaderMap) -> HeaderMap {
+    let mut out = HeaderMap::new();
+    for (name, value) in upstream.iter() {
+        if !is_hop_by_hop_header(name) {
+            out.insert(name.clone(), value.clone());
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -216,7 +251,7 @@ mod tests {
 
     use crate::gateway::state::GatewayState;
     use crate::http::auth::HttpAuth;
-    use super::{build_trusted_headers, AuthContext};
+    use super::{build_trusted_headers, forwardable_response_headers, AuthContext};
     use crate::http::auth_middleware::{AUTH_AS_USER_HEADER, AUTH_ROLE_HEADER, AUTH_USER_HEADER};
     use crate::http::routes::{AppState, build_router};
     use crate::lifecycle::user_supervisor::UserProcessState;
@@ -407,5 +442,30 @@ mod tests {
         let out = build_trusted_headers(&headers, None);
         assert!(!out.contains_key(AUTH_USER_HEADER));
         assert!(!out.contains_key(AUTH_ROLE_HEADER));
+    }
+
+    #[test]
+    fn a_chunked_upstream_response_does_not_forward_transfer_encoding() {
+        // The bug this locks: a streamed attachment download (`Body::from_stream`
+        // in the user service, so no content-length) came back as
+        // `transfer-encoding: chunked` on an already-dechunked body. The
+        // browser threw `TypeError: Failed to fetch` while the Gateway log
+        // showed a 200, so the chat row silently lost its thumbnail.
+        let mut upstream = HeaderMap::new();
+        upstream.insert("transfer-encoding", HeaderValue::from_static("chunked"));
+        upstream.insert("content-length", HeaderValue::from_static("17"));
+        upstream.insert("content-type", HeaderValue::from_static("image/jpeg"));
+        upstream.insert(
+            "content-disposition",
+            HeaderValue::from_static("attachment; filename=\"a.jpg\""),
+        );
+
+        let out = forwardable_response_headers(&upstream);
+        assert!(!out.contains_key("transfer-encoding"));
+        // Recomputed by hyper from the buffered body.
+        assert!(!out.contains_key("content-length"));
+        // The headers that describe the message itself must survive.
+        assert_eq!(out.get("content-type").unwrap(), "image/jpeg");
+        assert!(out.contains_key("content-disposition"));
     }
 }

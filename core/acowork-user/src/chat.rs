@@ -65,6 +65,114 @@ pub fn limit_for(mime: &str) -> u64 {
     }
 }
 
+/// Longest edge of a stored image thumbnail, in pixels. 320 px renders
+/// sharp in the 160 px chat tile at 2× and keeps a 25 MB screenshot under
+/// ~15 KB of JPEG — small enough to inline in `messages.jsonl`.
+const THUMB_MAX_EDGE: u32 = 320;
+
+/// Text lines kept in a stored text preview, and the byte ceiling on how much
+/// of the file is read to find them. Reading at most 4 KiB means a 100 MB log
+/// costs the same as a 2 KiB one; [`THUMB_TEXT_BYTES`] is comfortably more
+/// than [`THUMB_TEXT_LINES`] lines of realistic source (80 cols → 320 B/line).
+const THUMB_TEXT_LINES: usize = 8;
+const THUMB_TEXT_BYTES: usize = 4 * 1024;
+
+/// Extensions whose bytes we are willing to read as UTF-8 text for a preview.
+///
+/// Mirrors the Desktop's own `isTextReadablePath` whitelist
+/// ([monacoLanguage.ts](../../../apps/acowork-desktop/src/lib/monacoLanguage.ts))
+/// — a binary with a text-ish extension would be previewed as mojibake here
+/// and again as gibberish in the Monaco tab there, so the two lists have to
+/// move together. Deliberately an allow-list: anything unlisted (pdf, zip,
+/// sqlite, docx) is opaque and gets no preview.
+fn is_text_previewable(filename: &str) -> bool {
+    let ext = filename
+        .rsplit_once('.')
+        .map(|(_, e)| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    const TEXT_EXTS: &[&str] = &[
+        "txt", "text", "log", "csv", "tsv", "env", "conf", "cfg", "properties", "patch", "diff",
+        "md", "markdown", "json", "jsonc", "yaml", "yml", "toml", "ini", "xml", "html", "htm",
+        "css", "js", "jsx", "ts", "tsx", "py", "rs", "go", "java", "kt", "c", "h", "cpp", "hpp",
+        "cs", "rb", "php", "sh", "bash", "zsh", "ps1", "sql", "vue", "svelte",
+    ];
+    TEXT_EXTS.contains(&ext.as_str())
+}
+
+/// Build the thumbnail for an uploaded blob and write it beside the blob,
+/// returning the token that locates it (`"jpg"` / `"txt"`), or `None` when
+/// there is nothing useful to show.
+///
+/// Both arms are total functions: any failure (an image format the decoder
+/// rejects, a file that is not valid UTF-8) yields `None` and the client
+/// falls back to the plain file chip. Nothing here may fail the **upload** —
+/// a preview is a nicety, the blob is the message.
+///
+/// `dir` is the conversation directory; the caller owns the write order and
+/// the cleanup (see [`store_attachment`]).
+fn generate_thumb(
+    dir: &Path,
+    id: &str,
+    bytes: &[u8],
+    mime: &str,
+    filename: &str,
+) -> Option<String> {
+    if mime.starts_with("image/") {
+        let out = thumb_image(bytes)?;
+        fs::write(attachment_thumb_path(dir, id, "jpg"), out).ok()?;
+        return Some("jpg".to_string());
+    }
+    if is_text_previewable(filename) {
+        let out = thumb_text(bytes)?;
+        fs::write(attachment_thumb_path(dir, id, "txt"), out).ok()?;
+        return Some("txt".to_string());
+    }
+    None
+}
+
+/// Downscale to JPEG bytes.
+///
+/// Same `thumbnail` → JPEG shape as [acowork-pm](../../acowork-pm)'s
+/// `generate_thumb`, so both services' thumbnails look the same.
+fn thumb_image(bytes: &[u8]) -> Option<Vec<u8>> {
+    use image::GenericImageView;
+    use std::io::Cursor;
+
+    let img = image::load_from_memory(bytes).ok()?;
+    let (w, h) = img.dimensions();
+    let thumb = if w.max(h) > THUMB_MAX_EDGE {
+        img.thumbnail(THUMB_MAX_EDGE, THUMB_MAX_EDGE)
+    } else {
+        img
+    };
+    let mut out = Vec::new();
+    thumb
+        .write_to(&mut Cursor::new(&mut out), image::ImageFormat::Jpeg)
+        .ok()?;
+    Some(out)
+}
+
+/// The first few non-blank lines, as bytes ready to write.
+///
+/// Only the first [`THUMB_TEXT_BYTES`] of the blob are read, and only the
+/// first [`THUMB_TEXT_LINES`] non-blank lines kept, so a file with a licence
+/// header still shows real content. `from_utf8_lossy` on a *truncated*
+/// buffer can split a multi-byte char, so the tail bytes that fail to decode
+/// become U+FFFD rather than rejecting the whole file.
+fn thumb_text(bytes: &[u8]) -> Option<Vec<u8>> {
+    let head = &bytes[..bytes.len().min(THUMB_TEXT_BYTES)];
+    let text = String::from_utf8_lossy(head);
+    let lines: Vec<&str> = text
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .take(THUMB_TEXT_LINES)
+        .collect();
+    if lines.is_empty() {
+        return None;
+    }
+    Some(lines.join("\n").into_bytes())
+}
+
 /// One attachment, as stored in `files/{id}.json` and inside a message.
 ///
 /// Every field is written by [`store_attachment`] and read back verbatim by
@@ -76,6 +184,27 @@ pub struct Attachment {
     pub filename: String,
     pub mime: String,
     pub size: u64,
+    /// Which thumbnail sidecar sits next to the blob: `"jpg"` or `"txt"`.
+    ///
+    /// An image gets a downscaled JPEG; a text file gets its opening lines
+    /// as plain text. Both are produced **once, at upload** and served from
+    /// `files/{id}.thumb.{ext}` via the download route's `?thumb=1`, so a
+    /// client rendering a thread never fetches a whole blob just to decide
+    /// what a row looks like — a 25 MB screenshot and a 5 MB log both cost
+    /// the same few KB.
+    ///
+    /// A short token rather than a path on purpose: the handler rebuilds the
+    /// location from the validated id, so nothing a client can influence
+    /// reaches a path (see [`thumb_sidecar`]).
+    ///
+    /// `None` when generation was skipped or failed: an image whose format
+    /// the decoder rejects, or a binary with no text to show. Clients must
+    /// treat it as "no preview" and fall back to the file chip — never as an
+    /// error. `skip_serializing_if` keeps it off the wire (and out of
+    /// `messages.jsonl`) in the common case of no preview, so a thread of
+    /// binaries is no heavier than before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thumb: Option<String>,
 }
 
 impl Attachment {
@@ -299,6 +428,42 @@ fn attachment_meta_path(dir: &Path, id: &str) -> PathBuf {
     files_dir(dir).join(format!("{id}.json"))
 }
 
+/// Thumbnail sidecar: `files/{id}.thumb.{ext}`.
+///
+/// A sibling of the blob and of the `.json`, not a separate tree: the
+/// thumbnail shares the attachment's lifetime exactly, so no sweep can leave
+/// one behind after the other is gone, and the download handler reaches it
+/// with the same id validation as the blob.
+fn attachment_thumb_path(dir: &Path, id: &str, ext: &str) -> PathBuf {
+    files_dir(dir).join(format!("{id}.thumb.{ext}"))
+}
+
+/// Resolve the `thumb` recorded on an attachment to its sidecar, rejecting
+/// anything this module would not have written.
+///
+/// Takes `data_dir` + `chat_id` like every other public reader here
+/// ([`load_attachment_meta`], [`load`]) rather than a conversation directory,
+/// so the caller cannot hand it the wrong level of the tree and end up
+/// probing `data_dir/files/` — a directory that exists in nobody's
+/// deployment.
+///
+/// The extension is a closed set rather than a free string, so a hand-edited
+/// sidecar cannot steer the path out of `files/` the way a stored filename
+/// could. The id is already UUID-validated by the caller.
+pub fn thumb_sidecar(
+    data_dir: &Path,
+    chat_id: &str,
+    id: &str,
+    thumb: Option<&str>,
+) -> Option<PathBuf> {
+    let ext = match thumb? {
+        "jpg" => "jpg",
+        "txt" => "txt",
+        _ => return None,
+    };
+    Some(attachment_thumb_path(&dir_for(data_dir, chat_id)?, id, ext))
+}
+
 // ── Reads ──────────────────────────────────────────────────────────────
 
 /// Load one conversation by `chat_id`.
@@ -422,8 +587,9 @@ pub fn store_attachment(
     let attachment = Attachment {
         id: uuid::Uuid::new_v4().to_string(),
         filename: safe_filename(filename),
-        mime,
+        mime: mime.clone(),
         size: bytes.len() as u64,
+        thumb: None,
     };
 
     let dir = pair_dir(data_dir, &lo, &hi);
@@ -434,12 +600,29 @@ pub fn store_attachment(
     let blob = attachment_path(&dir, &attachment.id);
     fs::write(&blob, bytes).map_err(|e| format!("{}: {e}", blob.display()))?;
 
+    // Thumbnail third, from the bytes already in hand so nothing is read
+    // back off disk. A failure here is not fatal — the sidecar is simply
+    // absent and `thumb` stays `None`, which the client already handles.
+    let thumb = generate_thumb(
+        &dir,
+        &attachment.id,
+        bytes,
+        &attachment.mime,
+        &attachment.filename,
+    );
+    let attachment = Attachment { thumb, ..attachment };
+
     let meta = attachment_meta_path(&dir, &attachment.id);
     let json = serde_json::to_string(&attachment).map_err(|e| format!("serialize: {e}"))?;
-    fs::write(&meta, json).map_err(|e| {
-        let _ = fs::remove_file(&blob); // do not leave a blob we cannot describe
-        format!("{}: {e}", meta.display())
-    })?;
+    if let Err(e) = fs::write(&meta, &json) {
+        // Do not leave a blob we cannot describe — nor a thumbnail the
+        // missing sidecar no longer points at.
+        let _ = fs::remove_file(&blob);
+        if let Some(ext) = attachment.thumb.as_deref() {
+            let _ = fs::remove_file(attachment_thumb_path(&dir, &attachment.id, ext));
+        }
+        return Err(format!("{}: {e}", meta.display()));
+    }
     Ok(attachment)
 }
 
@@ -678,6 +861,80 @@ mod tests {
         // A non-canonical pair is not a conversation at all.
         assert!(store_attachment(&dir, &format!("{B}{SEP}{A}"), A, "x", "image/png", b"hi").is_err());
         assert!(store_attachment(&dir, &id, A, "x.png", "image/png", b"").is_err());
+    }
+
+    #[test]
+    fn an_image_gets_a_jpeg_sidecar_and_a_text_file_gets_its_opening_lines() {
+        let dir = temp_dir();
+        let id = chat_id(A, B);
+        let conv = pair_dir(&dir, A, B);
+
+        // A real 2×2 PNG — the generator decodes for real, so a fake header
+        // would just prove that `image` refuses junk.
+        let png = image::ImageBuffer::from_fn(2, 2, |_, _| image::Rgba([255, 0, 0, 255]));
+        let mut png_bytes = Vec::new();
+        image::DynamicImage::ImageRgba8(png)
+            .write_to(&mut std::io::Cursor::new(&mut png_bytes), image::ImageFormat::Png)
+            .unwrap();
+
+        let img = store_attachment(&dir, &id, A, "shot.png", "image/png", &png_bytes).unwrap();
+        assert_eq!(img.thumb.as_deref(), Some("jpg"));
+        let sidecar = thumb_sidecar(&dir, &id, &img.id, img.thumb.as_deref()).unwrap();
+        assert!(sidecar.exists(), "image sidecar must exist on disk");
+        // JPEG magic — proves the bytes are a real thumbnail, not the PNG
+        // copied next to itself.
+        let jpeg = fs::read(&sidecar).unwrap();
+        assert_eq!(&jpeg[..3], &[0xFF, 0xD8, 0xFF]);
+
+        let text = store_attachment(
+            &dir,
+            &id,
+            A,
+            "notes.md",
+            "text/markdown",
+            b"\n\n# Title\n\nfirst real line\nsecond line\n",
+        )
+        .unwrap();
+        assert_eq!(text.thumb.as_deref(), Some("txt"));
+        let sidecar = thumb_sidecar(&dir, &id, &text.id, text.thumb.as_deref()).unwrap();
+        // Leading blank lines are dropped so the preview shows content.
+        assert_eq!(
+            fs::read_to_string(&sidecar).unwrap(),
+            "# Title\nfirst real line\nsecond line"
+        );
+
+        // A binary gets no sidecar at all — never an empty one, and never a
+        // hand-edited `thumb` pointing outside `files/`.
+        let bin = store_attachment(&dir, &id, A, "app.exe", "application/octet-stream", b"MZ\x90\x00")
+            .unwrap();
+        assert_eq!(bin.thumb, None);
+        assert!(thumb_sidecar(&dir, &id, &bin.id, Some("jpg")).is_some());
+        assert!(!attachment_thumb_path(&conv, &bin.id, "jpg").exists());
+    }
+
+    #[test]
+    fn a_forged_thumb_token_cannot_escape_the_files_directory() {
+        let dir = temp_dir();
+        let id = chat_id(A, B);
+        let conv = pair_dir(&dir, A, B);
+        // A hand-edited sidecar carrying a traversal or an unknown extension
+        // must resolve to `None`, not to a path built from the string.
+        for forged in ["../../secrets", "jpg/../../..", "png", "", "JPG"] {
+            assert!(
+                thumb_sidecar(&dir, &id, A, Some(forged)).is_none(),
+                "{forged:?} must not resolve to a sidecar"
+            );
+        }
+        // Only the two tokens the generator writes are accepted, and each
+        // stays inside that conversation's own `files/`.
+        for good in ["jpg", "txt"] {
+            let p = thumb_sidecar(&dir, &id, A, Some(good)).unwrap();
+            assert!(p.starts_with(files_dir(&conv)));
+            assert_eq!(p.file_name().unwrap(), format!("{A}.thumb.{good}").as_str());
+        }
+        // A `chat_id` that does not parse resolves to `None` rather than a
+        // path at the data root.
+        assert!(thumb_sidecar(&dir, "not-a-chat-id", A, Some("jpg")).is_none());
     }
 
     #[test]

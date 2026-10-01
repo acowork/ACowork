@@ -136,6 +136,67 @@ export function attachmentObjectUrl(
   return url;
 }
 
+/**
+ * Object URL for an attachment's **thumbnail** sidecar, or `null` when it has
+ * none.
+ *
+ * The same `?thumb=1` route the agent-side preview uses, so a chat row costs
+ * a few KB instead of the whole blob. This is the path `ChatAttachment.thumb`
+ * exists for: a `null` here means "no preview was generated at upload" and
+ * the caller falls back to the original — it is not an error worth surfacing.
+ *
+ * Failures resolve to `null` rather than rejecting, for the same reason the
+ * inline fetch above is separate: a missing thumbnail is a cosmetic gap, and
+ * a rejected promise in a render effect is an unhandled rejection.
+ */
+export async function attachmentThumbObjectUrl(
+  userId: string,
+  chatId: string,
+  attachment: ChatAttachment,
+): Promise<string | null> {
+  if (!attachment.thumb) return null;
+  try {
+    const resp = await fetch(
+      `${base(userId, chatId)}/files/${encodeURIComponent(attachment.id)}?thumb=1`,
+    );
+    if (!resp.ok) return null;
+    const blob = await resp.blob();
+    // A 200 with no body is a broken thumbnail, not a thumbnail: handing an
+    // empty blob to `<img src>` draws a broken-image glyph that reads as a
+    // decode failure rather than as "no preview here".
+    if (blob.size === 0) return null;
+    return URL.createObjectURL(blob);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The opening lines a `txt` thumbnail sidecar holds, captured at upload.
+ *
+ * Separate from [`attachmentThumbObjectUrl`] because a text sidecar is
+ * rendered as text, not handed to `<img>`: an object URL would send the bytes
+ * through a second fetch just to read them back. `null` when there is no
+ * sidecar or it cannot be read.
+ */
+export async function attachmentThumbText(
+  userId: string,
+  chatId: string,
+  attachment: ChatAttachment,
+): Promise<string | null> {
+  if (attachment.thumb !== "txt") return null;
+  try {
+    const resp = await fetch(
+      `${base(userId, chatId)}/files/${encodeURIComponent(attachment.id)}?thumb=1`,
+    );
+    if (!resp.ok) return null;
+    const text = await resp.text();
+    return text.trim() ? text : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Download an attachment to disk: OS save dialog, then the transfer.
  *
  *  The transfer happens in Rust (`download_attachment`), not here — the
