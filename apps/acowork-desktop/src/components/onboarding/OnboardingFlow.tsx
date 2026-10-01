@@ -722,14 +722,13 @@ async function runBounded<T>(
   await Promise.all(runners);
 }
 
-/** Map a bundled agent resource name to its canonical agent id (ADR-059 §6).
+/** Map a bundled agent resource name to its package id (ADR-059 §6).
  *
  * The id is the `agent_id` inside each package's manifest.toml — NOT the
- * `.agent` filename. The Gateway inventory and the node's retained
- * installed entry both key on the manifest id (e.g.
- * `com.acowork.software-architect`), so `wait_agent_installed` must poll
- * exactly that id: polling the filename (`… .agent`) 404s forever and the
- * onboarding step shows "waiting" even after a successful install. */
+ * `.agent` filename. Used for display / dedup only since ADR-073: the
+ * Gateway inventory is keyed by the gateway-generated instance id (the
+ * install ack's `instance_id`), which is what `wait_agent_installed`
+ * must poll. */
 function bundledAgentId(resourceName: string): string {
   switch (resourceName) {
     case "software-architect-agent": return "com.acowork.software-architect";
@@ -851,7 +850,9 @@ function InstallAgentStep({ onComplete, onPrev }: { onComplete: () => void; onPr
             operationId: ack.operation_id,
           });
           await invoke("wait_agent_installed", {
-            agentId: op.agentId,
+            // ADR-073: the inventory is keyed by the gateway-generated
+            // instance id carried in the ack; the package id 404s forever.
+            agentId: ack.instance_id ?? op.agentId,
             timeoutSecs: 120,
           });
           updateOp(op.resourceName, { state: "completed" });
