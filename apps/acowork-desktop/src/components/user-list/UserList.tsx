@@ -21,12 +21,15 @@
  */
 
 import { useCallback, useEffect, useState, type MouseEvent, forwardRef, useImperativeHandle } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { ChevronRight, Eye, KeyRound, MessageSquare, ShieldCheck, ShieldOff, UserX, X } from "lucide-react";
 import { useAuthStore } from "../../stores/authStore";
 import { useUserChatStore } from "../../stores/userChatStore";
 import { useAgentStore } from "../../stores/agentStore";
+import { useChatStore } from "../../stores/chatStore";
 import { useTranslation } from "../../i18n/useTranslation";
 import { getGatewayUrl } from "../../lib/config";
+import { log } from "../../lib/logger";
 import {
   AuthApiError,
   disableAccount,
@@ -102,16 +105,17 @@ export const UserList = forwardRef<UserListHandle>(function UserList(_props, ref
     if (!isAdmin) {
       // Non-admin: the full `/api/users` list is admin-only, but the
       // `/api/users/directory` endpoint exposes just enough (id / username /
-      // display_name) for the contact picker so they can start a 1:1 chat
-      // (ADR-076 §决策 8). Without this a non-admin's sidebar shows only
-      // themselves and the inbox is unreachable.
+      // display_name / avatar pair) for the contact picker so they can
+      // start a 1:1 chat (ADR-076 §决策 8). Without this a non-admin's
+      // sidebar shows only themselves and the inbox is unreachable.
       //
       // ponytail: directory entries are projected into the `UserAccount`
       // shape with `role: 'user'` and empty profile fields so the row +
       // `partitionAccounts` rendering path is shared with admin. The lie is
       // harmless — non-admin viewers never show the admin badge (gated by
       // `isAdmin` in the row), and admin viewers keep using `fetchAccounts`
-      // for the real role.
+      // for the real role. The avatar fields ARE carried through, so a
+      // non-admin's sidebar draws the same faces the inbox does.
       const token = useAuthStore.getState().accessToken ?? "";
       try {
         const dir = await fetchDirectory(getGatewayUrl(), token);
@@ -135,6 +139,49 @@ export const UserList = forwardRef<UserListHandle>(function UserList(_props, ref
     if (!loggedIn) return;
     void refetch();
   }, [loggedIn, self, accessToken, refetch]);
+
+  // ── Realtime account refresh (ADR-084 §决策 4b) ──
+  //
+  // The user service publishes `acowork/user/profiles/changed` after
+  // *every* account/profile mutation, avatar writes included; the Tauri
+  // side re-emits it as `user-profiles-changed` (see
+  // `src-tauri/src/commands/chat_mqtt.rs`). Without this, a user who
+  // changed their avatar kept seeing the old one in the sidebar until a
+  // remount — the row data is a one-shot fetch with no other trigger.
+  //
+  // The signal is non-retained, so anything that changed while the
+  // Desktop was disconnected never reaches us; the MQTT connect edge
+  // bumps `inventoryVersion` for exactly this catch-up on the agent
+  // sidebar, and we read the same counter here. The initial `0` is
+  // skipped because the mount fetch above already ran.
+  const inventoryVersion = useChatStore((s) => s.inventoryVersion);
+  useEffect(() => {
+    if (!loggedIn || inventoryVersion === 0) return;
+    void refetch();
+  }, [loggedIn, inventoryVersion, refetch]);
+
+  useEffect(() => {
+    if (!loggedIn) return;
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    void listen("user-profiles-changed", () => {
+      if (disposed) return;
+      void refetch();
+    })
+      .then((fn) => {
+        // The component can unmount before `listen` resolves; releasing
+        // the subscription then is the whole reason for this dance.
+        if (disposed) fn();
+        else unlisten = fn;
+      })
+      .catch((err) => {
+        log.warn("[UserList] failed to listen for user-profiles-changed:", err);
+      });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [loggedIn, refetch]);
 
   if (!loggedIn) return null;
 
@@ -375,6 +422,14 @@ function directoryRow(d: DirectoryUser): UserAccount {
     role: "user",
     language: "",
     timezone: "",
+    // The whole point of the avatar fix: these used to be dropped here,
+    // so a non-admin's list fell through `UserAvatar` to a derived
+    // placeholder icon for every peer while the inbox (reading
+    // `ChatSummary.peer_avatar`) showed the real one. A cleared field
+    // arrives as `null` and becomes `undefined` here to match
+    // `UserAccount`; the row normalises back with `?? null`.
+    avatar: d.avatar ?? undefined,
+    builtin_avatar: d.builtin_avatar ?? undefined,
     created_at: "",
     updated_at: "",
   };

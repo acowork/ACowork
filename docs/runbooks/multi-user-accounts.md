@@ -226,13 +226,15 @@ admin 右键"以该用户视角查看 session"→ 会话列表变成那个用户
 
 超限 → 413。下载时 `Content-Type` 取自 Gateway 存储时记录的 mime（不信客户端声明），`Content-Disposition` 用 UTF-8 编码，中文文件名不会乱码。
 
-### 4.6 隐私边界（名录端点为什么只回三个字段）
+### 4.6 隐私边界（名录端点为什么只回这么少字段）
 
 `GET /api/users/directory` 是任何认证用户都能读的——否则普通用户无从知道"能发给谁"，只能求 admin 要 ID。为了让这条口子足够小：
 
-- 只回 `user_id` / `username` / `display_name`，**不含**邮箱、时区、角色细节、自定义字段
+- 只回 `user_id` / `username` / `display_name` / `avatar` / `builtin_avatar`，**不含**邮箱、时区、角色细节、自定义字段
 - 排除已禁用账号
 - 排除调用者自己
+
+两个头像字段是展示状态，不是隐私：它们本来就出现在 `user_profiles.json`（从 `accounts.json` 重建、被 Runtime 当 `last_user_profile` 读），而 `GET /api/users/{id}/chats` 的 `peer_avatar` / `peer_builtin_avatar` 早就把它们发给了**任何**认证账号。名录端点回它们只是把既有暴露面拉平——不带的话侧栏只能画一个占位图标，而聊天面板（读 `peer_avatar`）显示真头像，同一个人两张脸。
 
 **已知残余 ceiling**：`username` 全集仍然可被枚举（知道有几个人、都叫什么）。换来的是普通用户能自己发起会话。真要消除，需要"仅返回与我有过会话的人 + 精确 username 搜索"，那是另一轮设计（ADR-076 §5.5 有记）。
 
