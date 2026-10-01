@@ -656,16 +656,166 @@ echo ""
 
 # Step 5: Start Gateway (only when not --no-start)
 if [ "$START_GATEWAY" = "true" ]; then
-    log_level="${ACOWORK_GATEWAY_LOG_LEVEL:-info}"
-    echo -e "${YELLOW}[5/8] Starting Gateway in daemon mode (log level: $log_level)...${NC}"
-    export ACOWORK_GATEWAY_DAEMON="true"
-
+    # Resolve the gateway binary path up-front: both the first-boot setup
+    # block further down (Step 4.7) and the actual `start` step (Step 5)
+    # need it.
     GATEWAY_EXE=""
     if [ "$OS" = "windows" ]; then
         GATEWAY_EXE="$TARGET_DIR/acowork-gateway.exe"
     else
         GATEWAY_EXE="$TARGET_DIR/acowork-gateway"
     fi
+
+
+    # Step 4.7: First-boot admin password setup (ADR-076 decision 12 v3).
+    #
+    # Mirrors dev/build_core.ps1:678-783. The Gateway starts in first-boot
+    # restricted mode whenever its seeded `admin` account still has the
+    # `$disabled$` placeholder hash -- every /api/* returns 403
+    # setup_required until the operator sets a real password via the
+    # in-process rpassword prompt or the `admin-setup` subcommand. The
+    # in-process prompt is unreachable from this script: the daemon is
+    # forked with `> /dev/null 2>&1 &` further down (Step 5), which strips
+    # the daemon's TTY, so can_prompt_interactively() returns false and the
+    # Gateway silently logs the setup_required warning before daemonising
+    # (see core/acowork-gateway/src/cli.rs::can_prompt_interactively + the
+    # v3 comment block above warn_first_boot_restricted). Detect that
+    # state up-front, prompt the operator once *here* (where the parent
+    # shell still has a TTY), and write the password via
+    # `admin-setup --password-file` so the daemon boots clean instead of
+    # dead-ending the Desktop at the SetupRequiredView gate.
+    #
+    # ADR-084: the account store moved to the user service's data dir
+    # (`~/.acowork/acowork-user/accounts.json`); the old gateway path no
+    # longer exists on fresh installs, so reading it would report "setup
+    # required" forever.
+    _ACCT_JSON="$HOME/.acowork/acowork-user/accounts.json"
+    _NEEDS_SETUP=true
+    if [ -f "$_ACCT_JSON" ]; then
+        if command -v jq >/dev/null 2>&1; then
+            # jq path: robust regardless of field ordering or future
+            # schema additions; this is the happy path when jq is
+            # installed.
+            _admin_hash="$(jq -r '.accounts[] | select(.username == "admin") | .password_hash // empty' "$_ACCT_JSON" 2>/dev/null)"
+            if [ -n "$_admin_hash" ] && [ "$_admin_hash" != '$disabled$' ]; then
+                _NEEDS_SETUP=false
+            fi
+        else
+            # Fallback grep path: assumes the current accounts.json field
+            # ordering (username followed within 6 lines by
+            # password_hash). Brittle if the user service ever reshuffles
+            # fields, but works without a jq dependency.
+            if ! grep -A 6 '"username": "admin"' "$_ACCT_JSON" 2>/dev/null \
+                | grep -q '"password_hash": "\$disabled\$"'; then
+                _NEEDS_SETUP=false
+            fi
+        fi
+    fi
+
+    if [ "$_NEEDS_SETUP" = "true" ]; then
+        # Defensive: a missing exe here usually means cargo build above
+        # failed and exited 1, but guard anyway in case the build step
+        # was skipped.
+        if [ ! -f "$GATEWAY_EXE" ]; then
+            echo -e "${RED}ERROR: cannot run admin-setup -- gateway executable not found at: $GATEWAY_EXE${NC}"
+            exit 1
+        fi
+
+        # Refuse non-interactive contexts: if the script's own stdio is
+        # not a TTY (CI / pipe / redirect), `stty -echo; read` would
+        # either fail or block forever, and we'd silently launch a
+        # half-broken daemon. Degrade to a clear error instead.
+        if [ ! -t 0 ] || [ ! -t 1 ]; then
+            echo ""
+            echo -e "${YELLOW}[setup] First-boot detected (admin password not set), but no interactive TTY is attached.${NC}"
+            echo -e "${YELLOW}        Run admin-setup manually before starting the gateway:${NC}"
+            echo -e "${YELLOW}          $GATEWAY_EXE --auth-mode multi_user admin-setup --password-file <pwfile>${NC}"
+            echo ""
+            exit 1
+        fi
+
+        echo ""
+        echo -e "${YELLOW}[4.7/8] First-boot detected -- admin password has not been set yet.${NC}"
+        echo -e "${YELLOW}        Without it, the Gateway would boot in restricted mode (every /api/* returns 403).${NC}"
+        echo -e "${YELLOW}        This prompt only appears on a fresh install.${NC}"
+        echo ""
+
+        # Save terminal state and install a trap that always restores it
+        # so a Ctrl-C mid-prompt can't leave the operator's shell in
+        # raw/no-echo mode. We use `stty -echo` (not `read -s`) because
+        # `read -s` does not mask the password on some terminals; the
+        # Gateway's `can_prompt_interactively` comment in cli.rs covers
+        # the same ground.
+        _stty_orig="$(stty -g 2>/dev/null || true)"
+        trap '[ -n "$_stty_orig" ] && stty "$_stty_orig" 2>/dev/null || true' EXIT INT TERM
+
+        _PW1=""
+        _PW2=""
+        printf "New admin password: "
+        stty -echo 2>/dev/null
+        IFS= read -r _PW1 || _PW1=""
+        stty echo 2>/dev/null
+        printf "\n"
+
+        printf "Confirm admin password: "
+        stty -echo 2>/dev/null
+        IFS= read -r _PW2 || _PW2=""
+        stty echo 2>/dev/null
+        printf "\n"
+
+        # Restore terminal now that both reads are done; drop the trap
+        # so an exit further down doesn't re-run the restore.
+        if [ -n "$_stty_orig" ]; then
+            stty "$_stty_orig" 2>/dev/null || true
+        fi
+        trap - EXIT INT TERM
+
+        if [ -z "$_PW1" ]; then
+            echo -e "${RED}ERROR: empty password rejected (also blocked by the Gateway's password policy).${NC}"
+            unset _PW1 _PW2
+            exit 1
+        fi
+        if [ "$_PW1" != "$_PW2" ]; then
+            echo -e "${RED}ERROR: passwords do not match.${NC}"
+            unset _PW1 _PW2
+            exit 1
+        fi
+
+        # Hand the password to admin-setup via a one-shot temp file. The
+        # subcommand has no --password CLI flag on purpose (would leak
+        # the secret to shell history). mktemp creates a 0600 file in
+        # $TMPDIR; we still immediately shred/remove it in the cleanup
+        # trap, even on admin-setup failure.
+        _tmp_pw="$(mktemp -t acowork-admin-pw.XXXXXX 2>/dev/null || mktemp)"
+        cleanup_pw() {
+            if [ -n "${_tmp_pw:-}" ] && [ -f "$_tmp_pw" ]; then
+                if command -v shred >/dev/null 2>&1; then
+                    shred -u "$_tmp_pw" 2>/dev/null || rm -f "$_tmp_pw"
+                else
+                    rm -f "$_tmp_pw"
+                fi
+            fi
+            unset _PW1 _PW2 2>/dev/null || true
+        }
+        trap cleanup_pw EXIT INT TERM
+
+        printf '%s' "$_PW1" > "$_tmp_pw"
+        echo -e "${GRAY}  Setting admin password...${NC}"
+        if ! "$GATEWAY_EXE" --auth-mode multi_user admin-setup --password-file "$_tmp_pw"; then
+            echo -e "${RED}ERROR: admin-setup failed. Likely a password-policy violation -- check [multi_user].password_policy in gateway.toml.${NC}"
+            cleanup_pw
+            trap - EXIT INT TERM
+            exit 1
+        fi
+        echo -e "${GREEN}  Admin password set.${NC}"
+        cleanup_pw
+        trap - EXIT INT TERM
+        echo ""
+    fi
+
+    log_level="${ACOWORK_GATEWAY_LOG_LEVEL:-info}"
+    echo -e "${YELLOW}[5/8] Starting Gateway in daemon mode (log level: $log_level)...${NC}"
+    export ACOWORK_GATEWAY_DAEMON="true"
 
     if [ -f "$GATEWAY_EXE" ]; then
         if [ "${#GATEWAY_ARGS[@]}" -gt 0 ]; then
