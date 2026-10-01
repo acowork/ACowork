@@ -481,7 +481,12 @@ fn parse_task_id(s: &str) -> Result<TaskId> {
 /// 状态流转合法校验（对齐设计文档 §4 状态机图）。
 fn validate_transition(from: TaskStatus, to: TaskStatus, task_id: &TaskId) -> Result<()> {
     let allowed = match from {
-        TaskStatus::Pending => matches!(to, TaskStatus::InProgress | TaskStatus::Cancelled),
+        // `pending → rejected`：人类驳回一个 Agent 刚建、从未开工的任务
+        // （创建审批的 reject 分支，区别于结果审核的 `submitted → rejected`）。
+        TaskStatus::Pending => matches!(
+            to,
+            TaskStatus::InProgress | TaskStatus::Rejected | TaskStatus::Cancelled
+        ),
         TaskStatus::InProgress => matches!(
             to,
             TaskStatus::Pending | TaskStatus::Submitted | TaskStatus::Cancelled
@@ -498,6 +503,29 @@ fn validate_transition(from: TaskStatus, to: TaskStatus, task_id: &TaskId) -> Re
             task_id: task_id.to_string(),
             from: from.board_column().to_string(),
             to: to.board_column().to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// **创建审批闸门**：Agent 创建的任务（`review_status=pending`）未经人类
+/// 批准前，不得进入 `in_progress`。
+///
+/// 挂在**所有**进入 `in_progress` 的写路径上——`claim_task` 与
+/// `update_task(status=in_progress)`——因为只堵一条等于没堵：Agent 换个
+/// 工具就绕过去了（设计 §4 "需人类 `review` 通过才进入正式流转"）。
+///
+/// 只卡 `Pending` 一种：`Rejected` 仍放行，那是设计 D-1 明确的
+/// "驳回后 Agent 可重新自领重做"路径。
+///
+/// ponytail: 人类操作面同样受此闸门约束（REST `PATCH status`）。这是有意的
+/// ——审批是一个显式的、可审计的写入动作（`review_status=approved` + 记
+/// `updated_at`），比在闸门里开一个人类特权后门更简单也更可查。代价：人类
+/// 想强推一个 Agent 建的垃圾任务，得先点一次"批准"再改状态。
+fn ensure_creation_approved(task: &Task) -> Result<()> {
+    if task.review_status == ReviewStatus::Pending && task.status == TaskStatus::Pending {
+        return Err(PmError::ReviewNotApproved {
+            task_id: task.id.to_string(),
         });
     }
     Ok(())
@@ -926,6 +954,11 @@ impl PmStore for TreePmStore {
         }
         if let Some(s) = input.status {
             validate_transition(task.status, s, id)?;
+            // 审批闸门：绕过 claim_task 直接 PATCH status=in_progress 的路径
+            // 同样受管（见 ensure_creation_approved）
+            if s == TaskStatus::InProgress {
+                ensure_creation_approved(&task)?;
+            }
             task.status = s;
         }
         if let Some(p) = input.priority {
@@ -1128,6 +1161,8 @@ impl PmStore for TreePmStore {
         let mut task: Task = read_json(&path).await?;
 
         validate_transition(task.status, TaskStatus::InProgress, id)?;
+        // 审批闸门：Agent 创建但人类尚未批准 → 不可自领（见 ensure_creation_approved）
+        ensure_creation_approved(&task)?;
 
         // 依赖未满足 → 409
         let blocked = self.compute_blocked_by(id).await?;
@@ -1187,6 +1222,21 @@ impl PmStore for TreePmStore {
         Ok(task)
     }
 
+    /// 人类审核。**两种审核语义**，由任务的 `status` 区分：
+    ///
+    /// | 任务形态 | `status` | approve | reject |
+    /// |---------|---------|---------|--------|
+    /// | Agent 刚创建、未开工（`review_status=pending`） | `pending` | 只翻 `review_status=approved`，**`status` 不动** | `status=rejected` + `review_status=rejected` |
+    /// | Agent 已提交结果等验收 | `submitted` | `status=done` + `review_status=approved` | `status=rejected` + `review_status=rejected` |
+    ///
+    /// 两种审核都写 `review_status`，因为 MCP `pm_check_task` 用它回答
+    /// "我建的任务批了吗"（manifest 工具语义），而人类操作面的 `status`
+    /// 决定卡片落到哪一列。
+    ///
+    /// 保持 `status=pending` 而非 `done` 很重要：审批只是**授权** Agent
+    /// 开工，不代表工作完成——把它跳到 `done` 会让看板出现一个"从未
+    /// claim、从未 submit 就已完成"的任务，也堵死了 Agent 自己的
+    /// `pm_claim_task` 路径。
     async fn review_task(&self, id: &TaskId, approved: bool, _reviewer: &str) -> Result<Task> {
         let entry = self
             .index
@@ -1198,14 +1248,20 @@ impl PmStore for TreePmStore {
         let path = entry.dir_path.join("task.json");
         let mut task: Task = read_json(&path).await?;
 
+        // 创建审批（status=pending）只动 review_status；结果审核才动 status。
         let to = if approved {
-            TaskStatus::Done
+            if task.status == TaskStatus::Pending {
+                None
+            } else {
+                Some(TaskStatus::Done)
+            }
         } else {
-            TaskStatus::Rejected
+            Some(TaskStatus::Rejected)
         };
-        validate_transition(task.status, to, id)?;
-
-        task.status = to;
+        if let Some(to) = to {
+            validate_transition(task.status, to, id)?;
+            task.status = to;
+        }
         task.review_status = if approved {
             ReviewStatus::Approved
         } else {
@@ -1475,6 +1531,12 @@ mod tests {
         store.add_project_member(pid, instance).await.unwrap();
     }
 
+    /// 人类批准一个 Agent 创建的任务（`review_status: pending → approved`）。
+    /// 测试里凡是"Agent 建了任务然后要 claim"的都必须先过这一关，否则撞审批闸门。
+    async fn approve_creation(store: &TreePmStore, tid: &TaskId) {
+        store.review_task(tid, true, "human").await.unwrap();
+    }
+
     #[tokio::test]
     async fn project_crud_roundtrip() {
         let store = TreePmStore::new(test_config()).await.unwrap();
@@ -1628,6 +1690,37 @@ mod tests {
             .unwrap();
         assert_eq!(t.review_status, ReviewStatus::Pending);
 
+        // 审批闸门：未批准 → claim 409
+        let err = store.claim_task(&t.id, instance).await.unwrap_err();
+        assert!(
+            matches!(err, PmError::ReviewNotApproved { .. }),
+            "unapproved agent task must not be claimable, got {err:?}"
+        );
+        // 同样挡住绕过 claim 的 PATCH status 路径
+        let err = store
+            .update_task(
+                &t.id,
+                UpdateTask {
+                    status: Some(TaskStatus::InProgress),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, PmError::ReviewNotApproved { .. }),
+            "update_task must not bypass the approval gate, got {err:?}"
+        );
+
+        // 人类批准创建 → review_status=approved，**status 仍为 pending**（只是授权开工）
+        let approved = store.review_task(&t.id, true, "human").await.unwrap();
+        assert_eq!(approved.review_status, ReviewStatus::Approved);
+        assert_eq!(
+            approved.status,
+            TaskStatus::Pending,
+            "creation approval must not jump the task to done/in_progress"
+        );
+
         let claimed = store.claim_task(&t.id, instance).await.unwrap();
         assert_eq!(claimed.status, TaskStatus::InProgress);
 
@@ -1637,9 +1730,42 @@ mod tests {
             .unwrap();
         assert_eq!(submitted.status, TaskStatus::Submitted);
 
+        // 结果审核：这次才动 status
         let reviewed = store.review_task(&t.id, true, "human").await.unwrap();
         assert_eq!(reviewed.status, TaskStatus::Done);
         assert_eq!(reviewed.review_status, ReviewStatus::Approved);
+    }
+
+    /// 人类**驳回**一个 Agent 新建的（从未开工的）任务 → `status=rejected`
+    /// 且 `review_status=rejected`；Agent 之后仍可按设计 D-1 重新自领重做。
+    #[tokio::test]
+    async fn reject_creation_blocks_then_allows_reclaim() {
+        let store = TreePmStore::new(test_config()).await.unwrap();
+        let p = store
+            .create_project(
+                CreateProject {
+                    title: "P".into(),
+                    description: "".into(),
+                    metadata: Default::default(),
+                },
+                "human",
+            )
+            .await
+            .unwrap();
+        let instance = "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d";
+        add_member(&store, &p.id, instance).await;
+        let t = store
+            .create_task(&p.id, create_task_input("junk"), instance)
+            .await
+            .unwrap();
+
+        let rejected = store.review_task(&t.id, false, "human").await.unwrap();
+        assert_eq!(rejected.status, TaskStatus::Rejected);
+        assert_eq!(rejected.review_status, ReviewStatus::Rejected);
+
+        // 设计 D-1：驳回后仍可自领重做（闸门只卡 review_status=pending）
+        let reclaimed = store.claim_task(&t.id, instance).await.unwrap();
+        assert_eq!(reclaimed.status, TaskStatus::InProgress);
     }
 
     #[tokio::test]
@@ -1982,6 +2108,7 @@ mod tests {
             .await
             .unwrap();
         // claim_task 在 P1 不写 assignee,显式 update_task 设之(覆盖三态契约)
+        approve_creation(&store, &t_p1_inprog_x.id).await;
         store.claim_task(&t_p1_inprog_x.id, "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d").await.unwrap();
         store
             .update_task(
@@ -2013,6 +2140,7 @@ mod tests {
             .create_task(&p2.id, create_task_input("p2-inprog-x"), "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d")
             .await
             .unwrap();
+        approve_creation(&store, &t_p2_inprog_x.id).await;
         store.claim_task(&t_p2_inprog_x.id, "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d").await.unwrap();
         store
             .update_task(

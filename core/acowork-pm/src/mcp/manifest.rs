@@ -98,7 +98,7 @@ pub const PM_TOOL_MANIFEST: &str = r#"{
     },
     {
       "name": "pm_create_task",
-      "description": "Create a task. Set parent_task_id to create a child task. Use depends_on to declare dependencies (other tasks must exist).",
+      "description": "Create a task. Set parent_task_id to create a child task. Use depends_on to declare dependencies (other tasks must exist). Tasks created by an agent enter review_status=pending and CANNOT be claimed until a human approves them (pm_claim_task returns 409 review_not_approved); check pm_check_task to see whether approval landed.",
       "inputSchema": {
         "type": "object",
         "required": ["project_id", "title"],
@@ -115,7 +115,7 @@ pub const PM_TOOL_MANIFEST: &str = r#"{
           "parent_task_id": { "type": "string", "pattern": "^t-[a-zA-Z0-9-]{1,62}$" },
           "assignee": {
             "type": "string",
-            "description": "agent_instance_id (UUID v4, ADR-073 §1.2) to assign. Must exist in the Gateway agent directory (design §9.1, `GET /api/agents/{instance_id}`). Agent-created tasks enter review_status=pending regardless."
+            "description": "agent_instance_id (UUID v4, ADR-073 §1.2) to assign. Must exist in the Gateway agent directory (design §9.1, `GET /api/agents/{instance_id}`). Agent-created tasks enter review_status=pending regardless: a human must approve them before pm_claim_task will move them to in_progress. Poll pm_check_task to learn when approval landed."
           },
           "due_at": {
             "type": "string",
@@ -168,7 +168,7 @@ pub const PM_TOOL_MANIFEST: &str = r#"{
     },
     {
       "name": "pm_claim_task",
-      "description": "Claim a task as the current agent. Transitions pending → in_progress. Returns 409 if blocked by dependencies. Actor is taken from MCP client identity.",
+      "description": "Claim a task as the current agent. Transitions pending → in_progress. Returns 409 if the task was created by an agent and is still awaiting human approval (review_status=pending), or if blocked by dependencies. Actor is taken from MCP client identity.",
       "inputSchema": {
         "type": "object",
         "required": ["task_id"],

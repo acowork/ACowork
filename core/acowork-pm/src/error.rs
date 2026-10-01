@@ -86,6 +86,15 @@ pub enum PmError {
         to: String,
     },
 
+    /// Agent 创建的任务尚未经人类审批（`review_status=pending`），
+    /// 试图 `claim` / 改状态进入 `in_progress`。
+    ///
+    /// 与 [`Self::InvalidStateTransition`] 的区别：状态机本身允许该流转
+    /// （`pending → in_progress` 合法），拦住它的是**审批闸门**——语义上
+    /// 是"要重试"（先请人类点批准），故映射 409 而非 400。
+    #[error("task {task_id} is awaiting human approval (review_status=pending); a human must approve it before it can be claimed or moved to in_progress")]
+    ReviewNotApproved { task_id: String },
+
     // ── MCP 鉴权（设计 §9.2 / §9.3）──────────────────────────────────
     /// 调用者不是任务 assignee，或匿名调用被禁止的工具。
     #[error("forbidden: {0}")]
@@ -144,6 +153,7 @@ impl PmError {
             | PmError::MemberHasOpenTasks { .. } => 409,
 
             PmError::DependencyNotSatisfied { .. } => 409,
+            PmError::ReviewNotApproved { .. } => 409,
 
             PmError::Unauthenticated(_) => 401,
 
@@ -178,6 +188,7 @@ impl PmError {
             PmError::AttachmentMimeRejected(_) => "attachment_mime_rejected",
             PmError::TooManyAttachments(_) => "too_many_attachments",
             PmError::InvalidStateTransition { .. } => "invalid_state_transition",
+            PmError::ReviewNotApproved { .. } => "review_not_approved",
             PmError::Unauthenticated(_) => "unauthenticated",
             PmError::Forbidden(_) => "forbidden",
             PmError::Io(_) => "io_error",
@@ -255,6 +266,7 @@ mod tests {
                 "invalid_state_transition"
             ),
             // ── 409 conflicts ─────────────────────────────────────────
+            (PmError::ReviewNotApproved { task_id: "t-z".into() }, 409, "review_not_approved"),
             (
                 PmError::CycleDetected {
                     task_id: "a".into(),
@@ -316,9 +328,9 @@ mod tests {
                 expected_code
             );
         }
-        // 27 个错误码（member_* 4 个：member_not_found / assignee_not_project_member
+        // 28 个错误码（member_* 4 个：member_not_found / assignee_not_project_member
         // / member_already_exists / member_has_open_tasks）
-        assert_eq!(seen_codes.len(), 27);
+        assert_eq!(seen_codes.len(), 28);
     }
 
     /// `IntoResponse` 生成的 JSON body 包含 code 与 message。
@@ -382,6 +394,7 @@ mod tests {
                 from: "a".into(),
                 to: "b".into(),
             },
+            PmError::ReviewNotApproved { task_id: "t".into() },
             PmError::Io(io::Error::other("x")),
             PmError::Multipart("x".into()),
             PmError::Image("x".into()),
