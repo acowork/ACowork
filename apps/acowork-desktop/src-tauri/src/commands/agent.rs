@@ -215,17 +215,10 @@ pub async fn install_agent(
         return Err("Package file is empty".to_string());
     }
 
-    // ADR-059 §6: install is asynchronous. The Gateway answers 202 with
-    // an OperationAck, then the Node downloads / extracts / publishes
-    // the retained install in the background. We resolve the
-    // `agent_id` from manifest.toml and then poll the Gateway inventory
-    // until the agent appears — that 200 is the authoritative
-    // "installed" signal. Without this wait the caller (AgentList,
-    // OnboardingFlow) would race the Node install and toast success on
-    // the 202 ACK alone, leaving the agent missing from the inventory
-    // (the bug surfaced as the "toast says success but agent is not
-    // installed" issue).
-    let agent_id = read_agent_id_from_package(&package_bytes)?;
+    // ADR-059 §6: install is asynchronous (202 + OperationAck). Resolve +
+    // validate the manifest up front: a broken package fails here with a
+    // clear local error instead of a Gateway round-trip.
+    read_agent_id_from_package(&package_bytes)?;
 
     // Clone the captured Tauri `State` outside the closure so the retry
     // wrapper can borrow `state` while the `move` closure owns its copy.
@@ -245,12 +238,22 @@ pub async fn install_agent(
     .await?;
 
     // Wait until the install actually lands in the Gateway inventory.
-    // Any error here surfaces as a Tauri error → invoke() throws on the
-    // frontend → AgentList's catch block shows the toast.
+    // ADR-073: the inventory is keyed by the gateway-generated INSTANCE
+    // identity (the install ack carries it) — polling the package id 404s
+    // forever and hung this call for the full timeout, leaving the
+    // caller's `installing` flag stuck. Any error here surfaces as a Tauri
+    // error → invoke() throws on the frontend → AgentList's catch shows
+    // the toast.
+    let wait_key = ack.instance_id.as_deref().ok_or_else(|| {
+        format!(
+            "Install accepted (operation {}) but the Gateway reported no instance id",
+            ack.operation_id
+        )
+    })?;
     let client = state.gateway.read().await;
     client
         .wait_for_agent_installed(
-            &agent_id,
+            wait_key,
             std::time::Duration::from_secs(INSTALL_WAIT_SECS),
         )
         .await
@@ -325,13 +328,18 @@ pub async fn install_bundled_agent(
     .await?;
 
     // See INSTALL_AGENT: wait for the install to land in the Gateway
-    // inventory. The bundled packages ship with a canonical agent id
-    // that we resolve from the package's manifest.toml (filename
-    // independence, same rationale as `read_agent_id_from_package`).
+    // inventory, keyed by the ack's instance id (ADR-073) — the package
+    // id resolved from the manifest is only for logging / early validation.
+    let wait_key = ack.instance_id.as_deref().ok_or_else(|| {
+        format!(
+            "Install of {} accepted (operation {}) but the Gateway reported no instance id",
+            resource_name, ack.operation_id
+        )
+    })?;
     let client = state.gateway.read().await;
     client
         .wait_for_agent_installed(
-            &agent_id,
+            wait_key,
             std::time::Duration::from_secs(INSTALL_WAIT_SECS),
         )
         .await

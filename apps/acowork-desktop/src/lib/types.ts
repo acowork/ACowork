@@ -2445,5 +2445,9 @@ export interface OperationAck {
     code: string;
     [key: string]: unknown;
   };
+  /** ADR-073: instance identity created by this operation (install /
+   *  clone only). The Gateway inventory is keyed by this id — NOT the
+   *  package id. */
+  instance_id?: string;
 }
 

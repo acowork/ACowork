@@ -297,13 +297,7 @@ impl Cli {
                 unsafe { std::env::set_var("ACOWORK_HOME", home); }
             }
 
-        // One-time migration from the legacy split layout. Must run BEFORE
-        // init_tracing creates the log dir, otherwise `new_root.exists()`
-        // would be true (the freshly-created log dir counts) and migration
-        // would skip. Uses eprintln! because tracing isn't set up yet.
-        GatewayConfig::migrate_legacy_layout();
-
-        // Load config (paths now reflect the migrated layout).
+        // Load config.
         let config = GatewayConfig::from_cli(&self)?;
         // Initialize tracing with reload support
         let log_reload_handle = init_tracing(&config.log_level, config.log_file_size_mb, config.log_file_count);

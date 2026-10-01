@@ -684,82 +684,6 @@ impl GatewayConfig {
         project_root().join("data")
     }
 
-    /// One-time migration from the previous split layout.
-    ///
-    /// On first startup with the new code, if the old XDG paths exist
-    /// and the new root does not, move the old contents into the new
-    /// layout (Linux/macOS only — Windows legacy paths are different
-    /// enough that users should move them manually):
-    ///
-    ///   - `$XDG_CONFIG_HOME/acowork-gateway/` (default `~/.config/`)
-    ///     → `<root>/config/`
-    ///   - `$XDG_DATA_HOME/acowork-gateway/`   (default `~/.local/share/`)
-    ///     → `<root>/data/`
-    ///
-    /// Idempotent: if the new root already exists, this is a no-op so
-    /// we never overwrite an established installation.
-    ///
-    /// MUST be called before `init_tracing` (which creates the new log
-    /// dir and would make `new_root.exists()` true). Uses `eprintln!`
-    /// for status messages because the tracing subscriber isn't set up
-    /// yet at this point.
-    pub(crate) fn migrate_legacy_layout() {
-        let new_root = project_root();
-        let _ = new_root.exists();
-
-        #[cfg(not(windows))]
-        {
-            // The new root itself must exist before rename can target
-            // <root>/config or <root>/data as destinations.
-            if let Err(e) = std::fs::create_dir_all(&new_root) {
-                eprintln!(
-                    "[acowork-gateway] WARN: failed to create {}: {}. Skipping legacy migration.",
-                    new_root.display(),
-                    e
-                );
-                return;
-            }
-
-            if let Some(old) = legacy_config_dir()
-                && old.exists()
-            {
-                let dest = new_root.join("config");
-                match std::fs::rename(&old, &dest) {
-                    Ok(()) => eprintln!(
-                        "[acowork-gateway] Migrated legacy config dir: {} -> {}",
-                        old.display(),
-                        dest.display()
-                    ),
-                    Err(e) => eprintln!(
-                        "[acowork-gateway] WARN: failed to migrate legacy config dir ({} -> {}): {}. Please move manually.",
-                        old.display(),
-                        dest.display(),
-                        e
-                    ),
-                }
-            }
-
-            if let Some(old) = legacy_data_dir()
-                && old.exists()
-            {
-                let dest = new_root.join("data");
-                match std::fs::rename(&old, &dest) {
-                    Ok(()) => eprintln!(
-                        "[acowork-gateway] Migrated legacy data dir: {} -> {}",
-                        old.display(),
-                        dest.display()
-                    ),
-                    Err(e) => eprintln!(
-                        "[acowork-gateway] WARN: failed to migrate legacy data dir ({} -> {}): {}. Please move manually.",
-                        old.display(),
-                        dest.display(),
-                        e
-                    ),
-                }
-            }
-        }
-    }
-
     /// Create config from CLI arguments
     pub fn from_cli(cli: &Cli) -> Result<Self, GatewayError> {
         // Try loading from config file first
@@ -1104,39 +1028,6 @@ impl Default for GatewayConfig {
             relay: RelayClientConfig::default(),
         }
     }
-}
-
-/// Legacy XDG layout — `~/.config/acowork-gateway/`.
-#[cfg(not(windows))]
-fn legacy_config_dir() -> Option<PathBuf> {
-    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME")
-        && !xdg.is_empty()
-    {
-        return Some(PathBuf::from(xdg).join("acowork-gateway"));
-    }
-    std::env::var("HOME")
-        .ok()
-        .filter(|h| !h.is_empty())
-        .map(|h| PathBuf::from(h).join(".config").join("acowork-gateway"))
-}
-
-/// Legacy XDG layout — `~/.local/share/acowork-gateway/`.
-#[cfg(not(windows))]
-fn legacy_data_dir() -> Option<PathBuf> {
-    if let Ok(xdg) = std::env::var("XDG_DATA_HOME")
-        && !xdg.is_empty()
-    {
-        return Some(PathBuf::from(xdg).join("acowork-gateway"));
-    }
-    std::env::var("HOME")
-        .ok()
-        .filter(|h| !h.is_empty())
-        .map(|h| {
-            PathBuf::from(h)
-                .join(".local")
-                .join("share")
-                .join("acowork-gateway")
-        })
 }
 
 /// Resolve the advertise host for this Gateway (ADR-055 D3 §6.3).
