@@ -6,6 +6,7 @@ import { cn } from "../../lib/utils";
 import { isProcessing } from "../../lib/types";
 import { useTranslation } from "../../i18n/useTranslation";
 import { Tooltip } from "../common/Tooltip";
+import { useReadOnlySessionIds } from "../../lib/session-write-access";
 
 interface SessionPanelProps {
   agentId: string;
@@ -37,6 +38,8 @@ export function SessionPanel({ agentId }: SessionPanelProps) {
   const fetchSessions = useAgentStore((s) => s.fetchSessions);
   const createSession = useAgentStore((s) => s.createSession);
   const deleteSession = useAgentStore((s) => s.deleteSession);
+  // ADR-076: a session shared with us is owner-only for delete.
+  const readOnlyIds = useReadOnlySessionIds(agentId);
 
   const currentSessionId = useChatStore((s) => s.agentStates[agentId]?.activeSessionId ?? null);
   const [open, setOpen] = useState(false);
@@ -87,6 +90,7 @@ export function SessionPanel({ agentId }: SessionPanelProps) {
 
   const handleDeleteSession = async (sessionId: string) => {
     if (deletingId) return;
+    if (readOnlyIds.has(sessionId)) return;
     setDeletingId(sessionId);
     try {
       await deleteSession(agentId, sessionId);
@@ -190,14 +194,17 @@ export function SessionPanel({ agentId }: SessionPanelProps) {
                       </button>
                     </div>
                   ) : (
-                    <Tooltip content={t("sessionPanel.deleteSession")} variant="plain">
+                    <Tooltip
+                      content={readOnlyIds.has(session.session_id) ? t("chatPanel.readOnlySession") : t("sessionPanel.deleteSession")}
+                      variant="plain"
+                    >
                       <button
                         onClick={(e) => {
                           e.stopPropagation();
                           setConfirmDelete(session.session_id);
                         }}
-                        disabled={deletingId !== null}
-                        className="rounded p-1 text-text-tertiary opacity-0 transition-all group-hover:opacity-100 hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-900/20 dark:hover:text-red-400 disabled:opacity-50 disabled:cursor-not-allowed"
+                        disabled={deletingId !== null || readOnlyIds.has(session.session_id)}
+                        className="rounded p-1 text-text-tertiary opacity-0 transition-all group-hover:opacity-100 hover:bg-red-50 hover:text-red-600 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent dark:hover:bg-red-900/20 dark:hover:text-red-400"
                       >
                         <Trash2 className="h-3 w-3" />
                       </button>

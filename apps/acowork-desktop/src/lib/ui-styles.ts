@@ -25,9 +25,18 @@ export const inputMono =
 
 // ── Button styles ───────────────────────────────────────────────────
 
-/** Toolbar button (borderless, compact) — used for Model/Workspace selectors */
+/**
+ * Toolbar button (borderless, compact) — used for Model/Workspace selectors.
+ *
+ * The `disabled:` variants are load-bearing, not decoration: ADR-076 read-only
+ * sessions gate the whole session-write toolbar on the `disabled` attribute, and
+ * a bare `disabled` with no visual difference is indistinguishable from an
+ * enabled button — users click and nothing happens. `hover:bg-transparent` is
+ * the key part: without it a disabled button still lights up on hover while
+ * refusing the click, which reads as a broken control.
+ */
 export const toolbarButton =
-  "inline-flex items-center gap-1 rounded px-2 py-1.5 text-xs transition-colors text-text-tertiary hover:bg-zinc-200 dark:hover:bg-zinc-700 hover:text-zinc-700 dark:hover:text-zinc-200";
+  "inline-flex items-center gap-1 rounded px-2 py-1.5 text-xs transition-colors text-text-tertiary hover:bg-zinc-200 dark:hover:bg-zinc-700 hover:text-zinc-700 dark:hover:text-zinc-200 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent dark:disabled:hover:bg-transparent";
 
 /** Toolbar button active state */
 export const toolbarButtonActive =
