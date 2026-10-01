@@ -3975,6 +3975,27 @@ async fn get_consolidation_status(
             "procedures_promoted": r.procedures_promoted,
             "autobio_promoted": r.autobio_promoted,
             "episodes_marked_consolidated": r.episodes_marked_consolidated,
+            // Why the run produced what it produced. `error` is the difference
+            // between "the distiller had nothing to do" and "the distiller
+            // died every hour for a week" — both used to look like an empty
+            // memory panel.
+            "error": r.error,
+            "funnel": {
+                "scanned": r.funnel.scanned,
+                "backlog_remaining": r.funnel.backlog_remaining,
+                "llm_calls": r.funnel.llm_calls,
+                "llm_calls_failed": r.funnel.llm_calls_failed,
+                "llm_calls_truncated": r.funnel.llm_calls_truncated,
+                "below_importance": r.funnel.below_importance,
+                "candidates_recalled": r.funnel.candidates_recalled,
+                "projected": r.funnel.projected,
+                "verdict_no_merge": r.funnel.verdict_no_merge,
+                "verdict_merged": r.funnel.verdict_merged,
+                "verdict_superseded": r.funnel.verdict_superseded,
+                "episodes_consolidated": r.funnel.episodes_consolidated,
+                "episodes_deferred": r.funnel.episodes_deferred,
+                "errors": r.funnel.errors,
+            },
         })
     });
 
@@ -4035,6 +4056,10 @@ async fn post_memory_distill(
             "procedures_promoted": result.procedures_promoted,
             "autobio_promoted": result.autobio_promoted,
             "episodes_marked_consolidated": result.episodes_marked_consolidated,
+            // The counters above say what came out; the funnel says where the
+            // rest went. A manual trigger is exactly when someone is watching,
+            // so it answers without a second round-trip to /status.
+            "funnel": result.funnel,
         }))),
         Ok(None) => Err(err_json(
             StatusCode::SERVICE_UNAVAILABLE,

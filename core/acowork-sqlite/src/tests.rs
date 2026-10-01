@@ -38,6 +38,7 @@ fn episode(content: &str) -> Episode {
         metadata: HashMap::new(),
         importance: 0.5,
         knowledge_subtype: None,
+        normalized: None,
     }
 }
 
@@ -269,6 +270,7 @@ fn props_keys_are_complete_per_type() {
             "importance",
             "knowledge_subtype",
             "metadata",
+            "normalized",
             "role",
             "session_id",
             "timestamp",
@@ -401,8 +403,15 @@ fn episodes_by_session_and_recent_first() {
 #[test]
 fn mark_and_cleanup_consolidated() {
     let store = store();
-    let old = store.store_episode(&episode("old")).unwrap();
-    let recent = store.store_episode(&episode("recent")).unwrap();
+    // `count_unconsolidated_episodes` is the distiller's backlog gauge, so it
+    // only counts subtype-classified episodes; unclassified fragments stay in
+    // the episodic layer forever and must not inflate it.
+    let mut old_ep = episode("old");
+    old_ep.knowledge_subtype = Some(KnowledgeSubType::Fact);
+    let mut recent_ep = episode("recent");
+    recent_ep.knowledge_subtype = Some(KnowledgeSubType::Fact);
+    let old = store.store_episode(&old_ep).unwrap();
+    let recent = store.store_episode(&recent_ep).unwrap();
     store.mark_episode_consolidated(old).unwrap();
     assert_eq!(store.count_unconsolidated_episodes().unwrap(), 1);
 
@@ -991,32 +1000,8 @@ fn provider_status_reads_column_not_props() {
     );
 }
 
-/// A skipped episode is a sticky judge verdict: it must leave the distiller
-/// backlog (both count and enumeration) while staying retrievable.
-#[test]
-fn provider_skip_tombstone_removes_from_distiller_backlog() {
-    let store = store();
-    let keep = store.store_episode(&episode("keep me")).unwrap();
-    let skip = store.store_episode(&episode("skip me")).unwrap();
-    assert_eq!(store.count_unconsolidated_episodes().unwrap(), 2);
-
-    store
-        .mark_episodes_skipped(&[skip], "cluster-1", "declined")
-        .unwrap();
-
-    assert_eq!(store.count_unconsolidated_episodes().unwrap(), 1);
-    let backlog = store.get_episodes_by_subtype(None, 10).unwrap();
-    assert_eq!(backlog.len(), 1);
-    assert_eq!(backlog[0].0, keep);
-    // Still retrievable — the content stays in the episodic layer.
-    assert_eq!(
-        store.get_node_content(skip).unwrap().as_deref(),
-        Some("skip me")
-    );
-}
-
-/// `get_episodes_by_subtype` honours the subtype filter and orders oldest
-/// first so evidence accumulates deterministically across distiller runs.
+/// `get_episodes_by_subtype` honours the subtype filter and orders newest
+/// first, and the backlog count uses the same predicate as the scan.
 #[test]
 fn provider_episodes_by_subtype_filters_and_orders() {
     let store = store();
@@ -1039,8 +1024,11 @@ fn provider_episodes_by_subtype_filters_and_orders() {
     let all = store.get_episodes_by_subtype(None, 10).unwrap();
     assert_eq!(
         all.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
-        vec![older_id, newer_id]
+        vec![newer_id, older_id],
+        "newest first: an episode that keeps failing must not hold the queue"
     );
+    // Both carry a subtype, so the backlog count sees both (same predicate).
+    assert_eq!(store.count_unconsolidated_episodes().unwrap(), 2);
 }
 
 /// Forgetting: Active → Dormant once retention drops below the threshold, but

@@ -471,6 +471,7 @@ mod tests {
             metadata: Default::default(),
             importance: 0.5,
             knowledge_subtype: Some(acowork_memory::KnowledgeSubType::Fact),
+            normalized: None,
         };
         provider.store_episode(&episode).unwrap();
 

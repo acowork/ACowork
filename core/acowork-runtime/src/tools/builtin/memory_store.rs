@@ -79,7 +79,11 @@ impl MemoryStoreTool {
                 recognised offline by the distiller's server-side LLM). \
                 Describe what to remember in \
                 'content' (natural language). Estimate your confidence \
-                (0.0-1.0). Optionally provide keywords."
+                (0.0-1.0). Optionally provide keywords. Also provide \
+                'normalized': a one-sentence, de-contextualised restatement of \
+                the durable claim — this is what offline consolidation merges \
+                on, so a memory without it can only ever be carried forward \
+                verbatim."
                 .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
@@ -110,6 +114,10 @@ impl MemoryStoreTool {
                         "type": "array",
                         "items": { "type": "string" },
                         "description": "Optional keywords to help retrieval. Provide short lowercase tokens (≤30 chars), avoid duplicates and common stopwords (e.g. ['beijing', 'location', 'home'])"
+                    },
+                    "normalized": {
+                        "type": "string",
+                        "description": "One sentence restating the durable claim in this memory, written so it still reads correctly years from now and outside the conversation that produced it. Third person, no deictic references (this/that/it/today/here), no task framing, no justification. Where 'content' may record what happened around the observation, 'normalized' states only what is now true. Example — content: 'User asked me to summarize and said 3 sentences was enough, so I kept it short' -> normalized: 'User wants summaries capped at three sentences.' Omit only when there is no durable claim to restate."
                     }
                 },
                 "required": ["content", "category"]
@@ -236,6 +244,16 @@ impl Tool for MemoryStoreTool {
             .get("importance")
             .and_then(|v| v.as_f64())
             .map(|c| c.clamp(0.0, 1.0) as f32);
+        // Optional de-contextualised restatement. Trimmed and blanked to None
+        // so an empty string from a hesitant model does not become a
+        // meaningless normalized value that the distiller would prefer over
+        // the real content.
+        let normalized = params
+            .get("normalized")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string);
 
         // --- Resolve MemoryProvider via late-binding handle ---
         // The provider may be None if AgentCore::init_memory_provider hasn't
@@ -340,6 +358,7 @@ impl Tool for MemoryStoreTool {
                     metadata,
                     importance: importance.unwrap_or(0.5),
                     knowledge_subtype: Some(knowledge_subtype.clone()),
+                    normalized: normalized.clone(),
                 };
 
                 match provider.store_episode(&episode) {

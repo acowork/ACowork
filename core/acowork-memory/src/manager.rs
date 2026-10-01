@@ -782,6 +782,7 @@ impl MemoryManager {
             metadata,
             importance: 0.7,
             knowledge_subtype: None,
+            normalized: None,
         };
         provider.store_episode(&ep)?;
 

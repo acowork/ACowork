@@ -207,21 +207,13 @@ const PROMPT_ENTRIES: &[PromptEntry] = &[
         required: false,
     },
     PromptEntry {
-        name: "distiller-extraction",
-        file: "distiller-extraction.md",
-        purpose: "Offline memory distiller Step 2a — extract structured facts/preferences/relations from episodes (ADR-071).",
-        // The real fallback is `acowork_memory::consolidation::distiller::EXTRACTION_SYSTEM_PROMPT`
-        // (~3 KiB, private const), so the canonical text cannot be referenced
-        // here without duplicating it; keep the reference note instead of a
-        // drifting copy (see module docs: long built-ins are not mirrored).
-        fallback_constant: "(built-in EXTRACTION_SYSTEM_PROMPT, ~3 KiB — see acowork-memory/src/consolidation/distiller.rs)",
-        required: false,
-    },
-    PromptEntry {
-        name: "distiller-judge",
-        file: "distiller-judge.md",
-        purpose: "Offline memory distiller Step 4 — judge whether a clustered candidate promotes/skips/defers (ADR-071).",
-        fallback_constant: "(built-in JUDGE_SYSTEM_PROMPT — see acowork-memory/src/consolidation/distiller.rs)",
+        name: "distiller-merge",
+        file: "distiller-merge.md",
+        purpose: "Offline memory distiller — decide whether one new statement merges into, supersedes, or stands apart from its nearest existing nodes (ADR-071).",
+        // The real fallback is `acowork_memory::consolidation::distiller::MERGE_SYSTEM_PROMPT`
+        // (private const); keep a reference note rather than a copy that can
+        // drift (see module docs: long built-ins are not mirrored).
+        fallback_constant: "(built-in MERGE_SYSTEM_PROMPT — see acowork-memory/src/consolidation/distiller.rs)",
         required: false,
     },
 ];

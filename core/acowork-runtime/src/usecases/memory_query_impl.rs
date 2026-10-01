@@ -271,6 +271,7 @@ mod tests {
                 metadata: Default::default(),
                 importance: 0.7,
                 knowledge_subtype: None,
+                normalized: None,
             })
             .unwrap();
         store

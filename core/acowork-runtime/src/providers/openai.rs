@@ -252,6 +252,9 @@ struct NativeChatResponse {
 #[derive(Debug, Deserialize)]
 struct NativeChoice {
     message: NativeResponseMessage,
+    /// OpenAI protocol: "stop" | "length" | "tool_calls" | null.
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -499,7 +502,11 @@ fn convert_tools(tools: Option<&[serde_json::Value]>) -> Option<Vec<NativeToolSp
     })
 }
 
-fn parse_response(msg: NativeResponseMessage, usage: Option<NativeUsage>) -> ChatResponse {
+fn parse_response(
+    msg: NativeResponseMessage,
+    usage: Option<NativeUsage>,
+    finish_reason: Option<String>,
+) -> ChatResponse {
     let content = msg.content.unwrap_or_default();
     let tool_calls = msg
         .tool_calls
@@ -549,7 +556,10 @@ fn parse_response(msg: NativeResponseMessage, usage: Option<NativeUsage>) -> Cha
         usage: usage_info,
         reasoning_started_at: None,
         reasoning_finished_at: None,
-        finish_reason: None,
+        // Non-streaming path used to hardcode `None`, which made an
+        // output-budget truncation (`finish_reason = "length"`) invisible to
+        // every non-streaming caller — the memory distiller among them.
+        finish_reason,
     }
 }
 
@@ -926,7 +936,11 @@ impl Provider for OpenAIProvider {
             ))
         })?;
 
-        Ok(parse_response(choice.message, native_resp.usage))
+        Ok(parse_response(
+            choice.message,
+            native_resp.usage,
+            choice.finish_reason,
+        ))
     }
 
     async fn chat_stream(
@@ -1475,7 +1489,7 @@ mod tests {
             reasoning_content: None,
             tool_calls: None,
         };
-        let resp = parse_response(msg, None);
+        let resp = parse_response(msg, None, None);
         assert_eq!(resp.content, "Hello!");
         assert!(resp.tool_calls.is_none());
 
@@ -1499,6 +1513,7 @@ mod tests {
                 prompt_tokens_details: None,
                 completion_tokens_details: None,
             }),
+            None,
         );
         assert!(resp.tool_calls.is_some());
         assert_eq!(resp.usage.as_ref().unwrap().total_tokens, 15);

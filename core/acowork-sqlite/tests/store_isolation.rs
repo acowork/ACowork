@@ -48,6 +48,7 @@ fn episode(content: &str) -> Episode {
         metadata: HashMap::new(),
         importance: 0.5,
         knowledge_subtype: None,
+        normalized: None,
     }
 }
 

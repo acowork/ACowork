@@ -74,27 +74,17 @@ impl EmbeddingProvider for DeterministicEmbedding {
 }
 
 // ============================================================================
-// Scripted LLM responses (Step 2a extract JSON, then Step 4 judge JSON)
+// Scripted LLM responses (one merge verdict per call)
 // ============================================================================
 
-fn extract_entry(episode_id: u64, subject: &str, predicate: &str, object: &str) -> String {
-    format!(
-        "{{\"episode_id\": {id}, \"structure\": {{\"kind\": \"triple\", \"subject\": \"{s}\", \"predicate\": \"{p}\", \"object\": \"{o}\"}}, \"autobio_candidate\": null}}",
-        id = episode_id,
-        s = subject,
-        p = predicate,
-        o = object,
-    )
-}
-
-fn extract_response(entries: &[String]) -> String {
-    format!("[{}]", entries.join(","))
-}
-
-fn judge_response(decision: &str, confidence: f32, content: &str) -> String {
-    format!(
-        "{{\"decision\": \"{decision}\", \"confidence\": {confidence}, \"reasoning\": \"r\", \"merged_content\": \"{content}\"}}"
-    )
+fn merge_response(action: &str, target_id: Option<u64>, statement: Option<&str>) -> String {
+    serde_json::json!({
+        "action": action,
+        "target_id": target_id,
+        "statement": statement,
+        "reasoning": "scripted e2e verdict",
+    })
+    .to_string()
 }
 
 // ============================================================================
@@ -183,6 +173,7 @@ impl Adr071E2e {
             metadata: Default::default(),
             importance: 0.5,
             knowledge_subtype: Some(subtype),
+            normalized: None,
         };
         let provider: Arc<dyn MemoryProvider> = self.store.clone();
         provider.store_episode(&ep).expect("store_episode ok")
@@ -280,151 +271,105 @@ async fn spawn_server(e2e: &Adr071E2e) -> u16 {
 // E1 — HTTP manual distill: episodes -> promoted nodes (real store)
 // ============================================================================
 
-/// Seed two classified episodes, run `POST /memory/distill` through the real
-/// HTTP stack, and assert the full chain: DistillResponse counts, promoted
-/// `KnowledgeNode`s with `promotion_metadata.promoted_by = "episodic_distiller"`,
-/// episode cleanup (`consolidated = true`), and the status endpoint's
-/// `last_run` summary.
+/// Run `POST /memory/distill` three times against a real store and assert both
+/// consolidation paths end to end:
+///
+/// 1. an empty semantic layer projects each episode with **zero LLM calls**;
+/// 2. a restated episode recalls the node written by pass 1 and merges into it,
+///    appending its episode id to the provenance list;
+/// 3. several restatements fold into the same node in one run.
+///
+/// Pass 2 needs the node id that pass 1 created, which is why these are
+/// separate runs rather than one scripted queue.
 #[tokio::test(flavor = "multi_thread")]
 async fn e1_http_manual_distill_promotes_episodes() {
     let now = Utc::now();
     let store = Arc::new(SqliteStore::open_in_memory(EMBED_DIM).expect("in-memory store"));
-    let mut e2e = build_core(true, store.clone(), Vec::new());
+    let client = reqwest::Client::new();
+    let distill = |port: u16| {
+        let client = client.clone();
+        async move {
+            let resp = client
+                .post(format!("http://127.0.0.1:{port}/memory/distill"))
+                .send()
+                .await
+                .expect("POST /memory/distill");
+            assert_eq!(resp.status(), 200, "manual distill must succeed");
+            resp.json::<serde_json::Value>().await.unwrap()
+        }
+    };
 
-    // Seed evidence episodes per subtype so the distiller's evidence gate
-    // passes: Fact needs >= 2, Preference >= 3 (ADR-068 Step 3). All members
-    // of a subtype share the same predicate so they cluster together. ts is
-    // spread so `get_unconsolidated_episodes_by_subtype` (timestamp-ascending)
-    // returns them in a deterministic order.
-    let fact_ids: Vec<u64> = (0..2)
-        .map(|i| {
-            e2e.seed_episode(
-                "User lives in Shanghai",
-                KnowledgeSubType::Fact,
-                now - ChronoDuration::days(2) + ChronoDuration::hours(i),
-            )
-        })
-        .collect();
-    let pref_ids: Vec<u64> = (0..3)
-        .map(|i| {
-            e2e.seed_episode(
-                "User prefers dark mode",
-                KnowledgeSubType::Preference,
-                now - ChronoDuration::days(1) + ChronoDuration::hours(i),
-            )
-        })
-        .collect();
-    let ids = e2e.unconsolidated_ids();
-    assert_eq!(ids.len(), 5, "five seeded episodes");
-    assert_eq!(&ids[0..2], &fact_ids[..], "facts come first (older ts)");
-    assert_eq!(&ids[2..5], &pref_ids[..], "preferences follow");
-
-    // Now that the REAL node ids are known, build the scripted LLM queue:
-    // one Step 2a extract call (one entry per episode), then one Step 4
-    // judge per cluster (Fact first, then Preference) + safety margin.
-    let mut extract_entries: Vec<String> = fact_ids
-        .iter()
-        .map(|id| extract_entry(*id, "user", "lives_in", "Shanghai"))
-        .collect();
-    extract_entries.extend(
-        pref_ids
-            .iter()
-            .map(|id| extract_entry(*id, "user", "prefers", "dark_mode")),
+    // ── Pass 1: projection. Nothing similar exists yet, so the backlog
+    // consolidates without consulting the model at all. The empty response
+    // queue makes any LLM call visible as a failed merge in the funnel.
+    let e2e = build_core(true, store.clone(), Vec::new());
+    let fact_ep = e2e.seed_episode(
+        "User lives in Shanghai",
+        KnowledgeSubType::Fact,
+        now - ChronoDuration::days(2),
     );
-    Arc::get_mut(&mut e2e.core)
-        .expect("unique core ref")
-        .provider = Arc::new(MockProvider::new(vec![
-        MockResponse::Text {
-            content: extract_response(&extract_entries),
-        },
-        MockResponse::Text {
-            content: judge_response("promote", 0.92, "user lives in Shanghai"),
-        },
-        MockResponse::Text {
-            content: judge_response("promote", 0.90, "user prefers dark mode"),
-        },
-        // Safety margin if the cluster order differs from the seed order.
-        MockResponse::Text {
-            content: judge_response("promote", 0.80, "fallback"),
-        },
-    ]));
+    let pref_ep = e2e.seed_episode(
+        "User prefers dark mode",
+        KnowledgeSubType::Preference,
+        now - ChronoDuration::days(1),
+    );
+    assert_eq!(
+        e2e.unconsolidated_ids(),
+        vec![pref_ep, fact_ep],
+        "newest first (the backlog can no longer starve)"
+    );
 
     let port = spawn_server(&e2e).await;
-    let base = format!("http://127.0.0.1:{port}");
-    let client = reqwest::Client::new();
-
-    // ── POST /memory/distill ────────────────────────────────────────────
-    let resp = client
-        .post(format!("{base}/memory/distill"))
-        .send()
-        .await
-        .expect("POST /memory/distill");
-    assert_eq!(resp.status(), 200, "manual distill must succeed");
-    let body: serde_json::Value = resp.json().await.unwrap();
+    let body = distill(port).await;
     assert_eq!(body["started"], true);
-    assert_eq!(body["episodes_scanned"], 5, "five seeded episodes scanned");
-    assert!(
-        body["facts_promoted"].as_u64().unwrap() >= 1,
-        "fact promoted: {body}"
-    );
-    assert!(
-        body["preferences_promoted"].as_u64().unwrap() >= 1,
-        "preference promoted: {body}"
-    );
+    assert_eq!(body["episodes_scanned"], 2);
+    assert_eq!(body["facts_promoted"], 1, "fact episode consolidated: {body}");
     assert_eq!(
-        body["episodes_marked_consolidated"].as_u64().unwrap(),
-        5,
-        "all five evidence episodes consolidated"
+        body["preferences_promoted"], 1,
+        "preference episode consolidated: {body}"
     );
+    assert_eq!(body["episodes_marked_consolidated"], 2);
+    let funnel = &body["funnel"];
+    assert_eq!(
+        funnel["llm_calls"], 0,
+        "projection costs no LLM calls: {funnel}"
+    );
+    assert_eq!(funnel["projected"], 2, "both took the projection path");
+    assert_eq!(funnel["episodes_deferred"], 0);
 
-    // ── Sediment layer: promoted nodes carry full provenance ────────────
-    let (_, fact) = e2e
+    // Projected nodes carry the same provenance the old judge used to write.
+    let (fact_id, fact) = e2e
         .store
-        .find_knowledge_by_subject("user", "lives_in")
+        .find_knowledge_by_subject("user", "user_lives_in_shanghai")
         .expect("lookup ok")
         .expect("Fact KnowledgeNode exists");
-    let meta = fact
-        .promotion_metadata
-        .as_ref()
-        .expect("promotion metadata");
+    let meta = fact.promotion_metadata.as_ref().expect("promotion metadata");
     assert_eq!(meta.promoted_by, "episodic_distiller");
-    assert_eq!(
-        meta.evidence_episode_ids.len(),
-        2,
-        "both fact evidence episodes cited"
-    );
-    assert!(meta.llm_judge_confidence > 0.0);
+    assert_eq!(meta.evidence_episode_ids, vec![fact_ep]);
+    assert_eq!(fact.sub_type, KnowledgeSubType::Fact);
+    assert_eq!(fact.object, "User lives in Shanghai");
 
     let (_, pref) = e2e
         .store
-        .find_knowledge_by_subject("user", "prefers")
+        .find_knowledge_by_subject("user", "user_prefers_dark_mode")
         .expect("lookup ok")
         .expect("Preference KnowledgeNode exists");
-    let meta = pref
-        .promotion_metadata
-        .as_ref()
-        .expect("promotion metadata");
-    assert_eq!(meta.promoted_by, "episodic_distiller");
-    assert_eq!(
-        meta.evidence_episode_ids.len(),
-        3,
-        "all three preference evidence episodes cited"
-    );
+    assert_eq!(pref.sub_type, KnowledgeSubType::Preference);
+    assert_eq!(pref.promotion_metadata.as_ref().unwrap().evidence_episode_ids, vec![pref_ep]);
 
-    // ── Episodes consumed: a second run must find nothing ───────────────
-    let remaining = e2e
-        .store
-        .get_episodes_by_subtype(None, 10)
-        .expect("scan ok");
+    // Episodes consumed: a re-run finds an empty backlog.
     assert!(
-        remaining.is_empty(),
-        "all evidence episodes consolidated, got {}",
-        remaining.len()
+        e2e
+            .store
+            .get_episodes_by_subtype(None, 10)
+            .expect("scan ok")
+            .is_empty(),
+        "all evidence episodes consolidated"
     );
 
-    // ── Status endpoint surfaces the run summary ────────────────────────
-    let status = client
-        .get(format!("{base}/memory/consolidation/status"))
+    // ── Status endpoint surfaces the run summary ─────────────────────────
+    let status = reqwest::Client::new()
+        .get(format!("http://127.0.0.1:{port}/memory/consolidation/status"))
         .send()
         .await
         .expect("GET status");
@@ -435,21 +380,84 @@ async fn e1_http_manual_distill_promotes_episodes() {
     let last_run = d["last_run"].as_object().expect("last_run present");
     assert_eq!(
         last_run["episodes_scanned"].as_u64().unwrap(),
-        5,
+        2,
         "last_run: {last_run:?}"
     );
     assert!(
         last_run["total_promoted"].as_u64().unwrap() >= 2,
         "last_run total_promoted: {last_run:?}"
     );
-    assert_eq!(
-        last_run["episodes_marked_consolidated"].as_u64().unwrap(),
-        5
-    );
+    assert_eq!(last_run["funnel"]["llm_calls"], 0, "last_run: {last_run:?}");
     assert!(
         last_run["at"].as_str().is_some(),
         "last_run carries a timestamp"
     );
+
+    // ── Pass 2: merge. DeterministicEmbedding maps the restated text to the
+    // same vector, so pass 1's Fact node comes back above the recall threshold.
+    // The scripted verdict names that node — an id only knowable because pass 1
+    // already ran.
+    let e2e2 = build_core(
+        true,
+        store.clone(),
+        vec![MockResponse::Text {
+            content: merge_response("merge", Some(fact_id), Some("User lives in Shanghai")),
+        }],
+    );
+    let restated = e2e2.seed_episode("User lives in Shanghai", KnowledgeSubType::Fact, now);
+    let body2 = distill(spawn_server(&e2e2).await).await;
+    assert_eq!(body2["episodes_scanned"], 1, "only the restatement is left");
+    assert_eq!(body2["funnel"]["llm_calls"], 1, "the merge path asks once");
+    assert_eq!(body2["funnel"]["verdict_merged"], 1);
+    assert_eq!(body2["funnel"]["projected"], 0, "nothing was a lone voice");
+
+    let (fact_id2, fact2) = e2e2
+        .store
+        .find_knowledge_by_subject("user", "user_lives_in_shanghai")
+        .expect("lookup ok")
+        .expect("Fact node still exists");
+    assert_eq!(fact_id2, fact_id, "merged into the existing row, not a new one");
+    assert_eq!(
+        fact2.promotion_metadata.as_ref().unwrap().evidence_episode_ids,
+        vec![fact_ep, restated],
+        "the restatement's episode id is appended to the provenance list"
+    );
+
+    // ── Pass 3: several restatements fold into the same node in one run.
+    // Both episodes are the same text, so both scripted verdicts are identical
+    // and the order the two calls land in stops mattering.
+    let e2e3 = build_core(
+        true,
+        store.clone(),
+        vec![
+            MockResponse::Text {
+                content: merge_response("merge", Some(fact_id), Some("User lives in Shanghai")),
+            },
+            MockResponse::Text {
+                content: merge_response("merge", Some(fact_id), Some("User lives in Shanghai")),
+            },
+        ],
+    );
+    let more = [
+        e2e3.seed_episode("User lives in Shanghai", KnowledgeSubType::Fact, now + ChronoDuration::hours(1)),
+        e2e3.seed_episode("User lives in Shanghai", KnowledgeSubType::Fact, now + ChronoDuration::hours(2)),
+    ];
+    let body3 = distill(spawn_server(&e2e3).await).await;
+    assert_eq!(body3["episodes_scanned"], 2);
+    assert_eq!(body3["funnel"]["verdict_merged"], 2, "both folded in: {body3}");
+    let mut evidence = e2e3
+        .store
+        .get_knowledge(fact_id)
+        .expect("get ok")
+        .expect("node exists")
+        .promotion_metadata
+        .unwrap()
+        .evidence_episode_ids;
+    evidence.sort();
+    let mut want = vec![fact_ep, restated];
+    want.extend_from_slice(&more);
+    want.sort();
+    assert_eq!(evidence, want, "every episode behind the statement is cited");
 }
 
 // ============================================================================

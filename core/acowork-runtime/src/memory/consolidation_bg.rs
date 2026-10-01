@@ -21,7 +21,7 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use acowork_memory::EpisodicDecayConfig;
-use acowork_memory::consolidation::{SchedulerConfig, TripleExtractorLlm};
+use acowork_memory::consolidation::{SchedulerConfig, ConsolidationLlm};
 use chrono::Utc;
 use tokio::sync::Mutex;
 
@@ -77,6 +77,11 @@ pub struct DistillRunRecord {
     pub procedures_promoted: usize,
     pub autobio_promoted: usize,
     pub episodes_marked_consolidated: usize,
+    /// Stage-by-stage counters for the run (where the episodes went).
+    pub funnel: acowork_memory::consolidation::ConsolidationFunnel,
+    /// Set when the run returned `Err`, so "ran and produced nothing" and
+    /// "crashed" are distinguishable from the UI without reading logs.
+    pub error: Option<String>,
 }
 
 impl DistillRunRecord {
@@ -94,6 +99,23 @@ impl DistillRunRecord {
             procedures_promoted: result.procedures_promoted,
             autobio_promoted: result.autobio_promoted,
             episodes_marked_consolidated: result.episodes_marked_consolidated,
+            funnel: result.funnel.clone(),
+            error: None,
+        }
+    }
+
+    /// Record a run that failed before producing a result. The funnel is kept
+    /// (partial, up to the point of failure) because that is the useful half.
+    pub fn from_error(
+        at: chrono::DateTime<Utc>,
+        error: &str,
+        funnel: acowork_memory::consolidation::ConsolidationFunnel,
+    ) -> Self {
+        Self {
+            at,
+            funnel,
+            error: Some(error.to_string()),
+            ..Default::default()
         }
     }
 
@@ -290,7 +312,7 @@ impl ConsolidationBgTask {
     pub fn spawn(
         scheduler: Arc<ConsolidationTimer>,
         provider: Arc<dyn acowork_memory::MemoryProvider>,
-        llm: Arc<dyn TripleExtractorLlm>,
+        llm: Arc<dyn ConsolidationLlm>,
         embedding_provider: Arc<dyn EmbeddingProvider>,
         poll_interval: Duration,
         work_dir: Option<std::path::PathBuf>,
@@ -329,7 +351,7 @@ impl Drop for ConsolidationBgTask {
 async fn run_consolidation_loop(
     scheduler: Arc<ConsolidationTimer>,
     provider: Arc<dyn acowork_memory::MemoryProvider>,
-    llm: Arc<dyn TripleExtractorLlm>,
+    llm: Arc<dyn ConsolidationLlm>,
     embedding_provider: Arc<dyn EmbeddingProvider>,
     poll_interval: Duration,
     work_dir: Option<std::path::PathBuf>,
@@ -405,11 +427,24 @@ async fn run_consolidation_loop(
             .await;
             // ADR-071 D2: persist the run summary (time + promotion counts)
             // for the status endpoint, and reset the interval gate.
-            if let Some(result) = result {
-                let record = DistillRunRecord::from_result(Utc::now(), &result);
-                scheduler.record_distill_result(&record).await;
-            } else {
-                scheduler.mark_distill_run().await;
+            match result {
+                Some(result) => {
+                    let record = DistillRunRecord::from_result(Utc::now(), &result);
+                    scheduler.record_distill_result(&record).await;
+                }
+                None => {
+                    // The run aborted before returning a result. Recording an
+                    // explicit failure is the point: before this, a run that
+                    // died every hour looked identical to a run that had
+                    // nothing to do.
+                    scheduler
+                        .record_distill_result(&DistillRunRecord::from_error(
+                            Utc::now(),
+                            "distiller run failed (see logs for the Step 2a / promotion warning)",
+                            Default::default(),
+                        ))
+                        .await;
+                }
             }
         }
 
@@ -505,7 +540,7 @@ fn build_embedding_bridge(
 /// ([`acowork_memory::consolidation::EpisodicDistiller`]).
 async fn run_episodic_distiller_step(
     provider: &dyn acowork_memory::MemoryProvider,
-    llm: &dyn TripleExtractorLlm,
+    llm: &dyn ConsolidationLlm,
     embedding_fn: Option<&DistillerEmbeddingFn>,
     config: &SchedulerConfig,
 ) -> Option<acowork_memory::consolidation::DistillerResult> {
@@ -528,6 +563,7 @@ async fn run_episodic_distiller_step(
                     autobio_promoted = result.autobio_promoted,
                     episodes_marked_consolidated = result.episodes_marked_consolidated,
                     evaluations = result.promotion_evaluations.len(),
+                    funnel = %result.funnel.summary(),
                     "EpisodicDistiller run complete (ADR-068)"
                 );
                 // Full audit trail at debug level (one line per evaluation).
@@ -536,7 +572,7 @@ async fn run_episodic_distiller_step(
                         kind = ?eval.promoted_kind,
                         decision = ?eval.decision,
                         confidence = eval.llm_confidence,
-                        evidence_score = eval.evidence_score,
+                        reasoning = %eval.llm_reasoning,
                         episodes = ?eval.source_episode_ids,
                         "distiller evaluation"
                     );
@@ -559,7 +595,7 @@ async fn run_episodic_distiller_step(
                 tracing::info!(
                     kind = ?eval.promoted_kind,
                     node_id = eval.promoted_node_id,
-                    span_days = ?eval.evidence_score,
+                    rule = %eval.llm_reasoning,
                     "Relationship node promoted (ADR-068 M8)"
                 );
             }
@@ -625,7 +661,7 @@ pub fn start_consolidation_pipeline(
 /// feature is off, so the caller can report "not available").
 pub(crate) async fn run_episodic_distiller_step_once(
     provider: Arc<dyn acowork_memory::MemoryProvider>,
-    llm: Arc<dyn TripleExtractorLlm>,
+    llm: Arc<dyn ConsolidationLlm>,
     embedding_provider: Arc<dyn EmbeddingProvider>,
     config: SchedulerConfig,
 ) -> Option<acowork_memory::consolidation::DistillerResult> {
@@ -873,7 +909,7 @@ mod tests {
 
         struct NoopLlm;
         #[async_trait::async_trait]
-        impl TripleExtractorLlm for NoopLlm {
+        impl ConsolidationLlm for NoopLlm {
             async fn chat(
                 &self,
                 _messages: Vec<acowork_memory::consolidation::LlmMessage>,
@@ -882,11 +918,12 @@ mod tests {
                 Ok(acowork_memory::consolidation::LlmResponse {
                     content: "[]".to_string(),
                     usage_tokens: None,
+                    ..Default::default()
                 })
             }
         }
 
-        let llm: Arc<dyn TripleExtractorLlm> = Arc::new(NoopLlm);
+        let llm: Arc<dyn ConsolidationLlm> = Arc::new(NoopLlm);
         let embedding_provider: Arc<dyn EmbeddingProvider> = {
             struct DummyEmbeddingProvider;
             #[async_trait::async_trait]
@@ -988,7 +1025,7 @@ mod tests {
     #[tokio::test]
     async fn test_scheduler_config_distiller_config_roundtrip() {
         let cfg = DistillerConfig {
-            fact_min_evidence: 4,
+            min_importance: 0.4,
             ..DistillerConfig::default()
         };
         let config = SchedulerConfig {
@@ -998,8 +1035,8 @@ mod tests {
         };
         assert!(config.distiller_enabled);
         assert_eq!(
-            config.distiller_config.as_ref().unwrap().fact_min_evidence,
-            4
+            config.distiller_config.as_ref().unwrap().min_importance,
+            0.4
         );
         // Using ..Default::default() keeps existing fields untouched.
         assert_eq!(config.accumulation_threshold, 50);
@@ -1018,8 +1055,20 @@ mod tests {
             ..SchedulerConfig::default()
         };
         let result = run_episodic_distiller_step_inner(provider.as_ref(), &*llm, config).await;
-        assert!(result.episodes_scanned >= 2);
-        assert_eq!(result.facts_promoted, 1);
+        assert_eq!(result.episodes_scanned, 2);
+        assert_eq!(
+            result.episodes_marked_consolidated, 2,
+            "both episodes must consolidate — there is no evidence gate any more"
+        );
+        assert_eq!(
+            result.funnel.llm_calls, 0,
+            "with no embedding function nothing can be recalled, so the whole
+             run must consolidate without spending a single LLM call"
+        );
+        assert_eq!(
+            result.funnel.projected, 2,
+            "both take the zero-LLM projection path"
+        );
     }
 
     #[tokio::test]
@@ -1058,20 +1107,24 @@ mod distiller_fixture {
     }
 
     #[async_trait::async_trait]
-    impl TripleExtractorLlm for MockDistillerLlm {
+    impl ConsolidationLlm for MockDistillerLlm {
         async fn chat(
             &self,
             _messages: Vec<LlmMessage>,
         ) -> std::result::Result<LlmResponse, String> {
-            let resp = self.responses.lock().unwrap().pop_front().unwrap();
+            let Some(resp) = self.responses.lock().unwrap().pop_front() else {
+                panic!("distiller LLM was called but the fixture expects zero calls");
+            };
             Ok(LlmResponse {
                 content: resp,
                 usage_tokens: None,
+                ..Default::default()
             })
         }
     }
 
-    pub fn build_distiller_test_fixture() -> (Arc<acowork_sqlite::SqliteStore>, Arc<MockDistillerLlm>) {
+    pub fn build_distiller_test_fixture()
+    -> (Arc<acowork_sqlite::SqliteStore>, Arc<MockDistillerLlm>) {
         let store = Arc::new(
             acowork_sqlite::SqliteStore::open_in_memory(
                 acowork_memory::types::DEFAULT_EMBEDDING_DIM,
@@ -1094,29 +1147,14 @@ mod distiller_fixture {
                 metadata: Default::default(),
                 importance: 0.5,
                 knowledge_subtype: Some(KnowledgeSubType::Fact),
+                normalized: None,
             };
             provider.store_episode(&ep).unwrap();
         }
-        // Read back the actual storage ids assigned by the provider so the
-        // mock LLM's extraction response references the correct episode_id.
-        let raw = provider
-            .get_episodes_by_subtype(Some(KnowledgeSubType::Fact), 10)
-            .unwrap();
-        let ids: Vec<u64> = raw.iter().map(|(id, _)| *id).collect();
-        let extraction_items: Vec<String> = ids
-            .iter()
-            .map(|id| {
-                format!(
-                    r#"{{"episode_id": {id}, "structure": {{"kind":"triple","subject":"user","predicate":"lives_in","object":"Shanghai"}}, "autobio_candidate": null}}"#
-                )
-            })
-            .collect();
-        let extraction_resp = format!("[{}]", extraction_items.join(","));
-        let llm = Arc::new(MockDistillerLlm::new(vec![
-            extraction_resp,
-            r#"{"decision":"promote","confidence":0.95,"reasoning":"consistent","merged_content":"user lives_in Shanghai"}"#
-                .to_string(),
-        ]));
+        // No embedding function is wired in, so nothing can be recalled and
+        // the merge LLM is never consulted. A mock that panics on use turns
+        // "zero LLM calls" into an assertion rather than an accident.
+        let llm = Arc::new(MockDistillerLlm::new(vec![]));
         (store, llm)
     }
 
@@ -1124,7 +1162,7 @@ mod distiller_fixture {
     /// assert on promotion behaviour without running the full loop.
     pub async fn run_episodic_distiller_step_inner(
         provider: &dyn acowork_memory::MemoryProvider,
-        llm: &dyn TripleExtractorLlm,
+        llm: &dyn ConsolidationLlm,
         config: SchedulerConfig,
     ) -> DistillerResult {
         use acowork_memory::consolidation::{DefaultEpisodicDistiller, EpisodicDistiller};

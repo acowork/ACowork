@@ -23,12 +23,6 @@ pub use acowork_core::memory::traits::{MemoryNode, PrivacyLevel};
 /// to decouple Runtime from the grafeo crate.
 pub const DEFAULT_EMBEDDING_DIM: usize = 384;
 
-/// Episode metadata key holding the sticky distiller "skip" tombstone
-/// (ADR-068 Step 4). Present on episodes whose cluster the LLM judge
-/// declined to promote; the value is a JSON object
-/// `{cluster_key, reason, at}`. The EpisodicDistiller excludes episodes
-/// carrying this key from every future run.
-pub const DISTILLER_SKIP_METADATA_KEY: &str = "distiller_skip";
 
 // ============================================================================
 // Query Types
@@ -409,6 +403,17 @@ pub struct Episode {
     /// promoted to the semantic layer by EpisodicDistiller".
     #[serde(default)]
     pub knowledge_subtype: Option<KnowledgeSubType>,
+    /// De-contextualised restatement of this episode in one sentence — the
+    /// form that stays true once the conversation around it is gone.
+    ///
+    /// The write-time LLM produces this alongside `content`; it is the
+    /// distiller's primary input, because normalisation (what is the durable
+    /// claim here?) is a judgement the writing model is already positioned to
+    /// make and an offline re-reader is not. `None` on episodes stored before
+    /// the field existed, and when the model declined to offer one — the
+    /// distiller falls back to `content` in that case.
+    #[serde(default)]
+    pub normalized: Option<String>,
 }
 
 fn default_importance() -> f32 {

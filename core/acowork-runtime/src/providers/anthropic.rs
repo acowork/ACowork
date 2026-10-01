@@ -729,7 +729,22 @@ fn parse_response(resp: AnthropicResponse) -> ChatResponse {
             Some(tool_calls)
         },
         usage: usage_info,
+        // Anthropic names the same condition differently; normalise to the
+        // OpenAI-style vocabulary that `ChatResponse::finish_reason` carries.
+        // Without this, a caller checking for `"length"` would never see an
+        // Anthropic truncation, which the API reports as `"max_tokens"`.
+        finish_reason: resp.stop_reason.as_deref().map(normalize_stop_reason),
         ..Default::default()
+    }
+}
+
+/// Map an Anthropic `stop_reason` onto the OpenAI-style vocabulary used
+/// internally (`"stop"` / `"length"` / `"tool_calls"`).
+fn normalize_stop_reason(reason: &str) -> String {
+    match reason {
+        "max_tokens" => "length".to_string(),
+        "tool_use" => "tool_calls".to_string(),
+        other => other.to_string(),
     }
 }
 

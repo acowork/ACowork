@@ -28,7 +28,7 @@ use std::time::Duration;
 use chrono::Utc;
 
 use acowork_memory::admin::AdminListNodesParams;
-use acowork_memory::types::{EpisodicDecayConfig, MemoryQuery};
+use acowork_memory::types::{EpisodicDecayConfig, KnowledgeSubType, MemoryQuery};
 use acowork_memory::{Episode, MemoryAdminService, MemoryProvider, NodeStatus};
 use acowork_sqlite::SqliteStore;
 
@@ -59,6 +59,7 @@ fn episode(content: &str, session: &str, age_days: i64) -> Episode {
         metadata: HashMap::new(),
         importance: 0.5,
         knowledge_subtype: None,
+        normalized: None,
     }
 }
 
@@ -71,13 +72,18 @@ fn four_memory_chains_round_trip_across_a_restart() {
     let (memory, admin) = provider(&path);
 
     // ── 1. memory_store ──────────────────────────────────────────────────
-    let fresh_id = memory
-        .store_episode(&episode("帮我把网关的日志级别改成 debug", "s1", 0))
-        .unwrap();
-    let old_id = memory
-        .store_episode(&episode("deploy the gateway to staging", "s1", 400))
-        .unwrap();
+    let mut fresh = episode("帮我把网关的日志级别改成 debug", "s1", 0);
+    fresh.knowledge_subtype = Some(KnowledgeSubType::Fact);
+    let fresh_id = memory.store_episode(&fresh).unwrap();
+    let mut old = episode("deploy the gateway to staging", "s1", 400);
+    old.knowledge_subtype = Some(KnowledgeSubType::Procedure);
+    let old_id = memory.store_episode(&old).unwrap();
     assert_ne!(fresh_id, old_id, "ids must not collide");
+    // A subtype-less dialogue fragment: retrievable forever, never a
+    // consolidation candidate.
+    let fragment_id = memory
+        .store_episode(&episode("ok thanks", "s1", 0))
+        .unwrap();
 
     // ── 2. memory_recall ─────────────────────────────────────────────────
     // 4-char CJK substring: the trigram tokenizer's whole reason for existing.
@@ -111,7 +117,14 @@ fn four_memory_chains_round_trip_across_a_restart() {
     );
 
     // ── 3. memory_distill ────────────────────────────────────────────────
+    // Backlog counts exactly what the scan can return — the fragment is in
+    // neither, so the two predicates cannot drift apart.
     assert_eq!(memory.count_unconsolidated_episodes().unwrap(), 2);
+    assert!(memory
+        .get_episodes_by_subtype(None, 10)
+        .unwrap()
+        .iter()
+        .all(|(id, _)| *id != fragment_id));
     memory.mark_consolidated(&[fresh_id]).unwrap();
     assert_eq!(
         memory.count_unconsolidated_episodes().unwrap(),
@@ -119,15 +132,14 @@ fn four_memory_chains_round_trip_across_a_restart() {
         "consolidated episode must leave the distiller's queue"
     );
 
-    // A judged-and-skipped episode must ALSO leave the queue, or every sweep
-    // re-extracts the cluster and pays for the same LLM judgement again.
-    memory
-        .mark_episodes_skipped(&[old_id], "cluster-1", "not worth remembering")
-        .unwrap();
+    // An episode the distiller did NOT consolidate must stay in the queue.
+    // There is no skip tombstone any more: a verdict that went wrong (or an
+    // LLM that was unavailable) costs a retry, never the memory.
+    let backlog = memory.get_episodes_by_subtype(None, 10).unwrap();
     assert_eq!(
-        memory.count_unconsolidated_episodes().unwrap(),
-        0,
-        "a tombstoned episode must not be re-offered to the distiller"
+        backlog.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+        vec![old_id],
+        "an unconsolidated episode must be re-offered on the next run"
     );
 
     // ── 4. forgetting ────────────────────────────────────────────────────
@@ -153,8 +165,8 @@ fn four_memory_chains_round_trip_across_a_restart() {
     let (memory, _admin) = provider(&path);
     assert_eq!(
         memory.stats().unwrap().episode_count,
-        2,
-        "episodes must survive a restart"
+        3,
+        "all three episodes (two classified, one fragment) survive a restart"
     );
     let hits = memory.search_episodes(&MemoryQuery::new("网关的日志")).unwrap();
     assert_eq!(hits.len(), 1, "recall must survive a restart: {hits:?}");

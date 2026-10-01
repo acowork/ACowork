@@ -75,6 +75,7 @@ fn memory_session_meta_and_conversation_index_share_one_file() -> AcoworkResult<
         metadata: std::collections::HashMap::new(),
         importance: 1.0,
         knowledge_subtype: None,
+        normalized: None,
     };
     // ── memory node write ──────────────────────────────────────────────
     let node_id = store.store_episode(&episode)?;

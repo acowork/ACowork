@@ -143,17 +143,11 @@ pub(crate) struct AgentBootContext {
     /// `EpisodicDistiller` owns its own internal prompts.
     pub abstention_prompt: Option<String>,
 
-    /// ADR-071 D7/D9: override for the offline distiller Step 2a
-    /// extraction system prompt (package file: `prompts/distiller-extraction.md`).
-    /// `None` → the built-in `EXTRACTION_SYSTEM_PROMPT` in
+    /// ADR-071 D7/D9: override for the offline distiller's merge-decision
+    /// system prompt (package file: `prompts/distiller-merge.md`).
+    /// `None` → the built-in `MERGE_SYSTEM_PROMPT` in
     /// `acowork_memory::consolidation::distiller` is used.
-    pub distiller_extraction_prompt: Option<String>,
-
-    /// ADR-071 D7/D9: override for the offline distiller Step 4 judge
-    /// system prompt (package file: `prompts/distiller-judge.md`).
-    /// `None` → the built-in `JUDGE_SYSTEM_PROMPT` in
-    /// `acowork_memory::consolidation::distiller` is used.
-    pub distiller_judge_prompt: Option<String>,
+    pub distiller_merge_prompt: Option<String>,
 
     // Shared handles
     pub memory_session: Arc<crate::memory::MemorySessionHandle>,

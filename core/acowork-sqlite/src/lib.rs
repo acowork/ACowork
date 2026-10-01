@@ -45,7 +45,8 @@ use rusqlite::{Connection, OptionalExtension, ToSql, params};
 use acowork_memory::labels;
 use acowork_memory::quality::MemoryQualityConfig;
 use acowork_memory::{
-    AutobioCategory, AutobiographicalNode, Episode, KnowledgeNode, NodeStatus, ProceduralNode,
+    AutobioCategory, AutobiographicalNode, Episode, KnowledgeNode, NodeStatus, PromotionMetadata,
+    ProceduralNode,
 };
 
 pub use schema::{SCHEMA_SQL, SCHEMA_VERSION};
@@ -367,7 +368,9 @@ impl SqliteStore {
     pub fn count_unconsolidated_episodes(&self) -> Result<usize> {
         let conn = self.lock();
         let n: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM nodes WHERE label = ?1 AND json_extract(props, '$.consolidated') = 0 AND json_extract(props, '$.metadata.distiller_skip') IS NULL",
+            "SELECT COUNT(*) FROM nodes WHERE label = ?1 \
+             AND json_extract(props, '$.consolidated') = 0 \
+             AND json_extract(props, '$.knowledge_subtype') IS NOT NULL",
             params![labels::EPISODIC],
             |r| r.get(0),
         )?;
@@ -454,12 +457,27 @@ impl SqliteStore {
                 _ => true,
             };
             if merge {
+                // Provenance is a union, not an overwrite. The caller is about
+                // to mark `node`'s episodes consolidated; dropping their ids
+                // here would leave those episodes citing no node and the node
+                // unciteable, which is exactly the audit trail a rollback needs.
+                let mut source_episode_ids = existing.source_episode_ids.clone();
+                for id in &node.source_episode_ids {
+                    if !source_episode_ids.contains(id) {
+                        source_episode_ids.push(*id);
+                    }
+                }
+                let promotion_metadata =
+                    union_promotion_metadata(existing.promotion_metadata.as_ref(), node.promotion_metadata.as_ref(), &source_episode_ids);
                 let merged = KnowledgeNode {
                     object: node.object.clone(),
-                    confidence: node.confidence,
+                    confidence: node.confidence.max(existing.confidence),
+                    importance: existing.importance.max(node.importance),
                     updated_at: Utc::now(),
                     embedding: node.embedding.clone().or(existing.embedding.clone()),
                     source_episode_id: node.source_episode_id.or(existing.source_episode_id),
+                    source_episode_ids,
+                    promotion_metadata,
                     ..existing
                 };
                 self.update_knowledge(id, &merged)?;
@@ -991,6 +1009,31 @@ fn non_empty(embedding: &[f32]) -> Option<&[f32]> {
     } else {
         Some(embedding)
     }
+}
+
+/// Fold two promotion records together after a dedup merge.
+///
+/// The surviving record is the newer one — it describes the statement that is
+/// actually in the row now — but the evidence list is the union the caller
+/// computed, since both episodes really did back this statement.
+fn union_promotion_metadata(
+    existing: Option<&PromotionMetadata>,
+    incoming: Option<&PromotionMetadata>,
+    source_episode_ids: &[u64],
+) -> Option<PromotionMetadata> {
+    let sides: Vec<&PromotionMetadata> = existing.into_iter().chain(incoming).collect();
+    let newest = sides.iter().max_by_key(|m| m.promoted_at)?;
+    Some(PromotionMetadata {
+        evidence_episode_ids: source_episode_ids.to_vec(),
+        promoted_at: newest.promoted_at,
+        promoted_by: newest.promoted_by.clone(),
+        evidence_span_days: sides.iter().map(|m| m.evidence_span_days).max().unwrap_or(0),
+        llm_judge_confidence: sides
+            .iter()
+            .map(|m| m.llm_judge_confidence)
+            .fold(0.0, f32::max),
+        llm_judge_reasoning: newest.llm_judge_reasoning.clone(),
+    })
 }
 
 /// FTS content for a knowledge node — matches `KnowledgeNode::to_properties`.
