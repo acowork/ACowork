@@ -159,7 +159,7 @@ export interface OpenFile {
     /** The URL to load (only for kind === "url") */
     url?: string;
     /** ADR-078: git diff classification for kind === "diff" virtual
-     *  tabs ("modified" | "untracked" | "deleted" | "binary" | "no_change"). */
+     *  tabs ("modified" | "untracked" | "deleted" | "binary" | "nochange"). */
     gitDiffKind?: string;
     /** ADR-078 extension: base revision for the diff (default "HEAD").
      *  Set when the user picks a different base via the diff banner. */

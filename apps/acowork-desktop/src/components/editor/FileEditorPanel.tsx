@@ -220,7 +220,15 @@ export function FileEditorPanel({ width }: { width: number }) {
                 useFileEditorStore.setState((s) => ({
                     openFiles: s.openFiles.map((f) =>
                         f.id === activeFile.id
-                            ? { ...f, originalContent: diff.original }
+                            ? {
+                                  ...f,
+                                  originalContent: diff.original,
+                                  // Re-render the placeholder when the new
+                                  // pair degrades (binary) or has no
+                                  // changes at all — the kind belongs to
+                                  // this ref pair, not to the tab.
+                                  gitDiffKind: diff.kind,
+                              }
                             : f,
                     ),
                 }));

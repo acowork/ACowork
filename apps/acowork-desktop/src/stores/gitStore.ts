@@ -54,7 +54,9 @@ export interface GitStatusResponse {
 }
 
 export interface GitDiffResponse {
-  kind: "modified" | "untracked" | "deleted" | "binary" | "no_change";
+  // Lowercase-verbatim from the server (`GitDiffKind` is
+  // `#[serde(rename_all = "lowercase")]`, so `NoChange` → `"nochange"`).
+  kind: "modified" | "untracked" | "deleted" | "binary" | "nochange";
   original: string;
   modified: string;
   /**

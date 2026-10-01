@@ -669,6 +669,130 @@ async fn diff_two_refs_base_falls_back_to_first_parent_for_file_introducing_comm
 }
 
 #[tokio::test]
+async fn diff_two_refs_same_commit_reports_no_change() {
+    // Bug: both diff-side banners set to the same commit still showed a
+    // diff. `diff_two_refs` overrode every caller-supplied `base_ref` with
+    // the file-history predecessor of `head_ref`, so "X vs X" silently
+    // became "prev(X) vs X".
+    let (port, dir) = spawn_server("diff-same-commit").await;
+    init_repo(&dir);
+    std::fs::write(dir.join("a.txt"), "v2\n").unwrap();
+    git_in(&dir, &["add", "a.txt"]);
+    git_in(&dir, &["commit", "-m", "second"]);
+    let second = git_in(&dir, &["rev-parse", "HEAD"]).trim().to_string();
+
+    let (status, body) = get_git(
+        port,
+        "diff",
+        &[
+            ("path", "a.txt"),
+            ("base_ref", &second),
+            ("head_ref", &second),
+        ],
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(body["kind"], "nochange", "X vs X must have no changes");
+    assert_eq!(body["original"], "v2\n");
+    assert_eq!(body["modified"], "v2\n");
+    assert_eq!(body["baseRev"], body["headRev"]);
+}
+
+#[tokio::test]
+async fn diff_two_refs_honours_explicit_base_that_is_not_first_parent() {
+    // Generalisation of the bug above: an explicit base that is NOT
+    // `<head>^` must be compared verbatim, not swapped for the
+    // file-history predecessor. Here `v1` vs `v3` must show v1's blob even
+    // though `v2` is the predecessor of `v3` on this path.
+    let (port, dir) = spawn_server("diff-explicit-base").await;
+    init_repo(&dir);
+    // c1 (after `init_repo`'s "init" commit) — a.txt = v1.
+    std::fs::write(dir.join("a.txt"), "v1\n").unwrap();
+    git_in(&dir, &["add", "a.txt"]);
+    git_in(&dir, &["commit", "-m", "v1"]);
+    let v1 = git_in(&dir, &["rev-parse", "HEAD"]).trim().to_string();
+    std::fs::write(dir.join("a.txt"), "v2\n").unwrap();
+    git_in(&dir, &["add", "a.txt"]);
+    git_in(&dir, &["commit", "-m", "v2"]);
+    std::fs::write(dir.join("a.txt"), "v3\n").unwrap();
+    git_in(&dir, &["add", "a.txt"]);
+    git_in(&dir, &["commit", "-m", "v3"]);
+    let v3 = git_in(&dir, &["rev-parse", "HEAD"]).trim().to_string();
+
+    let (status, body) = get_git(
+        port,
+        "diff",
+        &[("path", "a.txt"), ("base_ref", &v1), ("head_ref", &v3)],
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(body["kind"], "modified");
+    assert_eq!(
+        body["original"], "v1\n",
+        "explicit base_ref must not be replaced by the file-history predecessor (v2)"
+    );
+    assert_eq!(body["modified"], "v3\n");
+    assert_eq!(body["baseRev"], v1);
+}
+
+#[tokio::test]
+async fn diff_worktree_honours_explicit_base_for_clean_file() {
+    // Bug: banners = "<older commit>" vs "Working Tree" showed an empty
+    // diff. A file with no uncommitted changes has no `git status` entry,
+    // and the `diff_clean` fallback re-derived the base from HEAD instead
+    // of the caller's ref — so the worktree was compared against its own
+    // committed state.
+    let (port, dir) = spawn_server("diff-worktree-clean-base").await;
+    init_repo(&dir); // a.txt = "hello\n" (c1)
+    let c1 = git_in(&dir, &["rev-parse", "HEAD"]).trim().to_string();
+    std::fs::write(dir.join("a.txt"), "v2\n").unwrap();
+    git_in(&dir, &["add", "a.txt"]);
+    git_in(&dir, &["commit", "-m", "second"]);
+    // HEAD moves on without touching a.txt → a.txt is clean.
+    std::fs::write(dir.join("b.txt"), "b\n").unwrap();
+    git_in(&dir, &["add", "b.txt"]);
+    git_in(&dir, &["commit", "-m", "b only"]);
+
+    let (status, body) = get_git(
+        port,
+        "diff",
+        &[("path", "a.txt"), ("base_ref", &c1), ("head_ref", "")],
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        body["kind"], "modified",
+        "c1 vs working tree must show the change committed after c1"
+    );
+    assert_eq!(body["original"], "hello\n");
+    assert_eq!(body["modified"], "v2\n");
+    assert_eq!(body["baseRev"], c1);
+    assert_eq!(
+        body["headRev"],
+        serde_json::Value::Null,
+        "working tree has no canonical SHA"
+    );
+
+    // Default (base_ref=HEAD) keeps the file-history-head label promotion:
+    // the banner must show a commit the file-scoped picker actually lists.
+    let (status, body) = get_git(
+        port,
+        "diff",
+        &[("path", "a.txt"), ("base_ref", "HEAD"), ("head_ref", "")],
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(body["kind"], "nochange");
+    assert_eq!(
+        body["baseRev"],
+        git_in(&dir, &["log", "-n", "1", "--pretty=%H", "HEAD", "--", "a.txt"])
+            .trim()
+            .to_string(),
+        "HEAD base still promotes to the newest commit touching a.txt"
+    );
+}
+
+#[tokio::test]
 async fn diff_worktree_response_omits_head_rev() {
     // Worktree variant: `head_ref` is the empty string → working tree.
     // `head_rev` must be absent so the client falls back to its
