@@ -1767,13 +1767,19 @@ export interface AccountListResponse {
 
 /** One row of `GET /api/users/directory` (any authenticated caller,
  *  ADR-076 §决策 8). A deliberate projection, not `UserAccount`: a non-admin
- *  gets the three fields needed to name a recipient and nothing else — no
- *  role, no timestamps, no profile. Matches
- *  `acowork_gateway::http::account_api::DirectoryEntry`. */
+ *  gets the fields needed to name and *draw* a recipient and nothing else —
+ *  no role, no timestamps, no profile. The avatar pair is display state that
+ *  the chat list already returns to every authenticated caller (see
+ *  `UserChatSummary.peer_avatar`). Matches
+ *  `acowork_user::http::account_api::DirectoryEntry`. */
 export interface DirectoryUser {
   user_id: string;
   username: string;
   display_name: string;
+  /** Custom avatar path, or `null` when the user set none / cleared it. */
+  avatar?: string | null;
+  /** Builtin avatar icon id, or `null`. */
+  builtin_avatar?: string | null;
 }
 
 /** Response from `GET /api/users/directory`. */

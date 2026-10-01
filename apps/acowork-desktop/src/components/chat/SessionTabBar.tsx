@@ -15,6 +15,7 @@ import { StyledInput } from "../common/StyledInput";
 import { ScrollableTabBar, type ScrollableTabBarHandle } from "../common/ScrollableTabBar";
 import { TabItem } from "../common/tab";
 import { Tooltip } from "../common/Tooltip";
+import { useReadOnlySessionIds } from "../../lib/session-write-access";
 
 const EMPTY_ARRAY: string[] = [];
 
@@ -57,6 +58,9 @@ function SessionListDropdown({ agentId, activeSessionId, onClose }: SessionListD
   const fetchSessions = useAgentStore((s) => s.fetchSessions);
   const deleteSession = useAgentStore((s) => s.deleteSession);
   const openSessionIds = useChatStore((s) => s.agentStates[agentId]?.openSessionIds ?? EMPTY_ARRAY);
+  // ADR-076: sessions shared *with* us are read-only — delete is owner-only
+  // and would 404. The row still opens for reading.
+  const readOnlyIds = useReadOnlySessionIds(agentId);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState("");
@@ -86,6 +90,7 @@ function SessionListDropdown({ agentId, activeSessionId, onClose }: SessionListD
 
   const handleDelete = async (sessionId: string) => {
     if (deletingId) return;
+    if (readOnlyIds.has(sessionId)) return;
     setDeletingId(sessionId);
     try {
       await deleteSession(agentId, sessionId);
@@ -151,6 +156,7 @@ function SessionListDropdown({ agentId, activeSessionId, onClose }: SessionListD
         {filteredSessions.map((session) => {
           const isOpen = openSessionIds.includes(session.session_id);
           const isDeleting = confirmDelete === session.session_id;
+          const rowReadOnly = readOnlyIds.has(session.session_id);
           const sessionState = useChatStore.getState().getSessionState(agentId, session.session_id);
           const isProc = isProcessing(sessionState?.sessionStatus);
           // Mirror the SessionTabBar's "selected = accent colour" rule so the
@@ -223,11 +229,14 @@ function SessionListDropdown({ agentId, activeSessionId, onClose }: SessionListD
                   </button>
                 </div>
               ) : (
-                <Tooltip content={t("sessionTabBar.deleteSession")} variant="plain">
+                <Tooltip
+                  content={rowReadOnly ? t("chatPanel.readOnlySession") : t("sessionTabBar.deleteSession")}
+                  variant="plain"
+                >
                   <button
                     onClick={(e) => { e.stopPropagation(); setConfirmDelete(session.session_id); }}
-                    disabled={deletingId !== null}
-                    className="rounded p-1 text-text-tertiary opacity-0 transition-all group-hover:opacity-100 hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-900/20 dark:hover:text-red-400 disabled:opacity-50"
+                    disabled={deletingId !== null || rowReadOnly}
+                    className="rounded p-1 text-text-tertiary opacity-0 transition-all group-hover:opacity-100 hover:bg-red-50 hover:text-red-600 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent dark:hover:bg-red-900/20 dark:hover:text-red-400"
                   >
                     <Trash2 className="h-3 w-3" />
                   </button>
@@ -277,6 +286,9 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
   const activeSessionId = agent?.activeSessionId;
   const sessions = useAgentStore((s) => s.agents[agentId]?.sessions ?? EMPTY_ARRAY);
   const { createSession, closeSession, renameSession } = useAgentStore();
+  // ADR-076: renaming a session shared with us is owner-only; the tab
+  // itself still opens for reading.
+  const readOnlyIds = useReadOnlySessionIds(agentId);
   const setActiveTab = useChatStore((s) => s.setActiveTab);
   const openSession = useChatStore((s) => s.openSession);
 
@@ -406,6 +418,7 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
 
   // ── Inline rename ──────────────────────────────────────────────────────
   const beginRename = (sessionId: string) => {
+    if (readOnlyIds.has(sessionId)) return;
     renamingSessionIdRef.current = sessionId;
     setRenamingSessionId(sessionId);
   };
@@ -483,11 +496,14 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
     const sid = tabMenu.payload?.sessionId;
     if (!sid) return [];
     const canClose = openSessionIds.length > 1;
+    const sidReadOnly = readOnlyIds.has(sid);
     const items: ContextMenuItem<{ sessionId: string }>[] = [
       {
         key: "rename",
         icon: <Pencil size={14} />,
         label: t("sessionTabBar.rename"),
+        // ADR-076: renaming a session shared with us is owner-only.
+        disabled: sidReadOnly,
         onClick: ({ payload }) => payload && beginRename(payload.sessionId),
       },
       {
@@ -518,7 +534,7 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
     ];
     return items;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tabMenu.payload?.sessionId, openSessionIds.length, t]);
+  }, [tabMenu.payload?.sessionId, openSessionIds.length, readOnlyIds, t]);
 
   if (!agent) return null;
 
@@ -533,6 +549,7 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
           const isActive = sessionId === activeSessionId;
           const status = getStatus(sessionId);
           const isProc = isProcessing(status);
+          const rowReadOnly = readOnlyIds.has(sessionId);
 
           return (
             <TabItem
@@ -603,8 +620,14 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
                     e.stopPropagation();
                     beginRename(sessionId);
                   }}
+                  // A read-only row stays a read-only *label*: no text cursor
+                  // and an explanatory title, because `beginRename` silently
+                  // ignores the double-click (a click that does nothing is
+                  // worse than one that looks unclickable).
+                  title={rowReadOnly ? t("chatPanel.readOnlySession") : undefined}
                   className={cn(
                     "min-w-0 flex-1 truncate text-[length:var(--tab-font-size)] leading-[var(--tab-line-height)]",
+                    !rowReadOnly && "cursor-text",
                     isProc && isActive && "text-text-secondary ",
                   )}
                 >

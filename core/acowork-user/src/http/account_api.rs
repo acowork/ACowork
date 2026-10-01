@@ -99,14 +99,27 @@ pub struct ResetPasswordResponse {
 
 /// One row of the contact picker (ADR-076 §决策 8).
 ///
-/// A deliberate projection, not `AccountView`: a non-admin gets the three
-/// fields needed to name a recipient and nothing else — no role, no
-/// timestamps, no profile.
+/// A deliberate projection, not `AccountView`: a non-admin gets what the
+/// sidebar needs to *draw* a contact and nothing else — no role, no
+/// timestamps, no profile fields.
+///
+/// The avatar pair is display state, not a secret, and is already part of
+/// the deployment's public view: `user_profiles.json` (rebuilt from
+/// `accounts.json`, consumed by Runtime as `last_user_profile`) carries it,
+/// and `chat_api::ChatSummary` already returns `peer_avatar` /
+/// `peer_builtin_avatar` to *any* authenticated caller (ADR-076 §决策 8).
+/// Leaving them off here only forced the Desktop to draw a derived
+/// placeholder in the sidebar while the inbox thread showed the real
+/// avatar — same user, two different faces. Emptiness is a **filtered**
+/// `Option`: an empty string is the wire contract for "user cleared this
+/// field" (see `list_chats`), so it must not reach the client as `Some("")`.
 #[derive(Debug, Serialize)]
 pub struct DirectoryEntry {
     pub user_id: String,
     pub username: String,
     pub display_name: String,
+    pub avatar: Option<String>,
+    pub builtin_avatar: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -202,7 +215,8 @@ async fn list_accounts(
 /// The exposure is bounded instead: enabled accounts only (a disabled account
 /// cannot log in, so there is nobody to contact — its *history* still lists
 /// it, which is `chat_api`'s job), never the caller themselves, and only
-/// `user_id` / `username` / `display_name`.
+/// `user_id` / `username` / `display_name` plus the two avatar fields (see
+/// [`DirectoryEntry`] for why those two are not a new exposure).
 async fn list_directory(
     State(state): State<AppState>,
     Extension(ctx): Extension<AuthContext>,
@@ -217,6 +231,12 @@ async fn list_directory(
             user_id: a.user_id.clone(),
             username: a.username.clone(),
             display_name: a.display_name.clone(),
+            avatar: a.avatar.as_deref().filter(|s| !s.is_empty()).map(str::to_string),
+            builtin_avatar: a
+                .builtin_avatar
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
         })
         .collect();
     Ok(Json(UserDirectoryResponse { users }))
@@ -1019,7 +1039,7 @@ mod tests {
     }
 
     /// `GET /api/users/directory` — the one account listing a non-admin may
-    /// read (ADR-076 §决策 8). Pin the four things that keep it a *bounded*
+    /// read (ADR-076 §决策 8). Pin the things that keep it a *bounded*
     /// exception: it is authenticated, it reaches a non-admin, it is a
     /// minimal projection, and it does not lose the route to
     /// `/api/users/{user_id}`.
@@ -1080,11 +1100,90 @@ mod tests {
         assert!(usernames.contains(&"carol"));
         assert!(!usernames.contains(&"alice"), "caller is not their own contact");
 
-        // Minimal projection — nothing beyond the three named fields.
+        // Minimal projection — nothing beyond the five named fields. The
+        // avatar pair rides along because the sidebar has to be able to
+        // draw a contact (see `DirectoryEntry`); the rest of the profile
+        // stays server-side.
         let entry = entries[0].as_object().unwrap();
         let mut fields: Vec<&str> = entry.keys().map(String::as_str).collect();
         fields.sort_unstable();
-        assert_eq!(fields, ["display_name", "user_id", "username"]);
+        assert_eq!(
+            fields,
+            [
+                "avatar",
+                "builtin_avatar",
+                "display_name",
+                "user_id",
+                "username"
+            ]
+        );
+
+        // The avatar pair is the reason the sidebar can draw the same face
+        // the inbox thread shows. Regression: it used to be dropped here,
+        // so a non-admin's contact picker fell back to a derived
+        // placeholder icon for every peer while the chat panel — reading
+        // `chat_api`'s `peer_avatar` — showed the real one. Set both
+        // flavours on carol and read them back as alice.
+        let carol = login(&router, "carol", PWD).await;
+        for (field, value) in [
+            ("avatar", "assets/avatars/carol/avatar-01.png"),
+            ("builtin_avatar", "icon-18"),
+        ] {
+            let resp = router
+                .clone()
+                .oneshot(req(
+                    "PUT",
+                    "/api/user/avatar-config",
+                    Some(&format!(r#"{{"{field}":"{value}"}}"#)),
+                    Some(&carol),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+        let resp = router
+            .clone()
+            .oneshot(req("GET", "/api/users/directory", None, Some(&alice)))
+            .await
+            .unwrap();
+        let entries = json(resp).await;
+        let carol_entry = entries["users"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|u| u["username"] == "carol")
+            .expect("carol is a contact");
+        assert_eq!(carol_entry["avatar"], "assets/avatars/carol/avatar-01.png");
+        assert_eq!(carol_entry["builtin_avatar"], "icon-18");
+
+        // …and a cleared field is `null`, not `""` — an empty string is
+        // the wire contract for "cleared" on the write side, and handing it
+        // through would make the client try to fetch an avatar at "".
+        let resp = router
+            .clone()
+            .oneshot(req(
+                "PUT",
+                "/api/user/avatar-config",
+                Some(r#"{"avatar":""}"#),
+                Some(&carol),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let resp = router
+            .clone()
+            .oneshot(req("GET", "/api/users/directory", None, Some(&alice)))
+            .await
+            .unwrap();
+        let entries = json(resp).await;
+        let carol_entry = entries["users"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|u| u["username"] == "carol")
+            .expect("carol is a contact");
+        assert!(carol_entry["avatar"].is_null(), "got {}", carol_entry["avatar"]);
+        assert_eq!(carol_entry["builtin_avatar"], "icon-18");
 
         // Disabling removes an account: nobody can log in as them, so there
         // is nobody to contact.

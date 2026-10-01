@@ -16,6 +16,7 @@ import { startAgentAndSyncUI } from "../../lib/agent-start";
 import { toolbarButton } from "../../lib/ui-styles";
 import { AddProviderFlow } from "../harness/AddProviderFlow";
 import * as sessionControl from "../../lib/session-control";
+import { useActiveSessionReadOnly } from "../../lib/session-write-access";
 import { Bot, Play, Send, ChevronDown, ChevronRight, ChevronLeft, ChevronsDown, ChevronsUp, Wrench, AlertTriangle, X, Square, Plus, Layers, Loader, Pencil, Paperclip, Image, Brain, Circle, CircleDot, Clipboard, Upload, Check, Search, Clock } from "lucide-react";
 import type { ChatMessage, VaultKeyEntry, ModelEntry, ProviderAccount } from "../../lib/types";
 import { ContextUsageIcon } from "./ContextUsageIcon";
@@ -630,25 +631,15 @@ export function ChatPanel() {
   const currentSessionId = useChatStore((s) => selectedAgentId ? s.agentStates[selectedAgentId]?.activeSessionId ?? null : null);
   /**
    * ADR-076 §决策 4: is the active session writable by the signed-in
-   * account? The backend answers this (`can_write` on the session summary,
-   * resolved from `SessionMeta::is_writable_by`) — the frontend never
-   * re-derives it from `visibility`, because admins and `local` mode may
-   * write sessions they do not own.
+   * account? Resolved by the shared hook so every session-scoped write
+   * control in the app asks the same question the same way (see
+   * `lib/session-write-access.ts` for why this is a hook, not a prop).
    *
-   * Session write controls (model / reasoning effort / workspace) are
-   * disabled rather than hidden: a shared read-only session still needs to
-   * *show* which model and workspace it is using.
-   *
-   * Defaults to `true` — a session that is not in the list yet (just created
-   * optimistically) and an older Runtime that omits the field both degrade
-   * to "enabled, backend rejects the write" instead of locking every control.
+   * Session write controls are disabled rather than hidden: a shared
+   * read-only session still needs to *show* which model and workspace it
+   * is using.
    */
-  const readOnlySession = useAgentStore((s) => {
-    if (!selectedAgentId || !currentSessionId) return false;
-    const list = s.agents[selectedAgentId]?.sessions;
-    const info = list?.find((x) => x.session_id === currentSessionId);
-    return info?.can_write === false;
-  });
+  const readOnlySession = useActiveSessionReadOnly();
   const messages = useChatStore((s) => {
     if (!selectedAgentId) return EMPTY_MESSAGES;
     const agent = s.agentStates[selectedAgentId];
@@ -1858,7 +1849,8 @@ export function ChatPanel() {
         key: "paste",
         label: t("common.paste") ?? "Paste",
         icon: <Clipboard className="h-3.5 w-3.5" />,
-        disabled: inputDisabled,
+        // ADR-076: pasting into a session we only view is session-write input.
+        disabled: inputDisabled || readOnlySession,
         onClick: async () => {
           const ta = textareaRef.current;
           if (!ta) return;
@@ -1901,11 +1893,11 @@ export function ChatPanel() {
         key: "upload",
         label: t("common.uploadFile") ?? "Upload File",
         icon: <Upload className="h-3.5 w-3.5" />,
-        disabled: inputDisabled,
+        disabled: inputDisabled || readOnlySession,
         onClick: () => handleFileUpload(),
       },
     ],
-    [t, inputDisabled, handlePaste, handleFileUpload],
+    [t, inputDisabled, readOnlySession, handlePaste, handleFileUpload],
   );
 
   // ADR-045: cancel an in-flight tool execution by tool_call_id.
@@ -2852,7 +2844,7 @@ export function ChatPanel() {
               </div>
               {/* Skills dropdown */}
               <div ref={skBtnRef} className="min-w-0">
-                <SkillsPanel textHidden={textHidden.sk} />
+                <SkillsPanel textHidden={textHidden.sk} readOnly={readOnlySession} />
               </div>
               {/* ADR-076 §决策 4: per-session read visibility (owner only).
                   Sits with the other session-scoped write controls and is
@@ -2870,12 +2862,13 @@ export function ChatPanel() {
 
               {/* File upload button — single entry point for documents and images.
                   Placed adjacent to send so attachments sit with the action that
-                  consumes them. */}
-              <Tooltip content={t("chatPanel.uploadHint")}>
+                  consumes them. ADR-076: an attachment is session-write input,
+                  so it is disabled on a read-only session. */}
+              <Tooltip content={readOnlySession ? t("chatPanel.readOnlySession") : t("chatPanel.uploadHint")}>
                 <button
                   className={toolbarButton}
                   onClick={handleFileUpload}
-                  disabled={!currentSessionId || !selectedAgentId}
+                  disabled={!currentSessionId || !selectedAgentId || readOnlySession}
                   aria-label={t("chatPanel.uploadFile")}
                 >
                   <Paperclip size={14} />
@@ -2891,10 +2884,14 @@ export function ChatPanel() {
                     : t("chatPanel.stop"))
                 : t("chatPanel.sendMessage")}>
                 <button
+                  // The `sending` branch needs its own `disabled:` styles too:
+                  // a viewer watching the owner's stream lands here with the
+                  // button disabled, and an unstyled disabled button reads as
+                  // a live stop control.
                   className={`rounded-md p-1.5 transition-colors ${sending
                     ? "text-[var(--color-accent)] hover:bg-[var(--color-accent)]/10"
-                    : "text-text-tertiary hover:bg-zinc-200 dark:hover:bg-zinc-700 hover:text-zinc-700 dark:hover:text-zinc-200 disabled:opacity-50"
-                    }`}
+                    : "text-text-tertiary hover:bg-zinc-200 dark:hover:bg-zinc-700 hover:text-zinc-700 dark:hover:text-zinc-200"
+                    } disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent`}
                   onClick={sending ? handleStop : handleSend}
                   disabled={
                     // ADR-076 §决策 4: a session shared with us is read-only
@@ -3097,7 +3094,7 @@ function ModelMenu({
     const CHAR_WIDTH = 7.5; // px per char for text-xs (model rows)
     const HEADER_CHAR_WIDTH = 7.5; // px per char for text-[10px] uppercase + tracking-wide
     const PADDING = 24; // px-3 on each side
-    const ROW_CHROME = 50; // feature icons + chevron + gaps on model rows
+    const ROW_CHROME = 66; // feature icons + check slot + chevron + gaps on model rows
     const HEADER_CHROME = 18; // 12 logo + 6 gap, before the provider name
     let maxWidth = 0;
 
@@ -3378,7 +3375,19 @@ function ModelMenu({
                             {m.input_modalities?.includes('image') && <Image size={10} className="text-blue-400" />}
                           </span>
                         </span>
-                        {drillsDown && <ChevronRight size={12} className="shrink-0 ml-2 text-text-tertiary" />}
+                        {/* Trailing cluster. The check box is a fixed w-3 slot
+                            whenever a chevron is possible, so every drill-down
+                            row's chevron lands on the same `pr-3` baseline
+                            whether or not the check inside it is filled —
+                            otherwise the active row's chevron shifts left. */}
+                        <span className="ml-2 flex shrink-0 items-center gap-1">
+                          {(isActive || drillsDown) && (
+                            <span className="flex w-3 shrink-0 justify-end">
+                              {isActive && <Check size={12} className="text-[var(--color-accent)]" />}
+                            </span>
+                          )}
+                          {drillsDown && <ChevronRight size={12} className="text-text-tertiary" />}
+                        </span>
                       </button>
                     );
                   })}
@@ -3589,6 +3598,7 @@ function ReasoningEffortMenu({
                   >
                     {opt.label}
                   </span>
+                  {isActive && <Check size={12} className="ml-auto text-[var(--color-accent)]" />}
                 </button>
               );
             })}

@@ -22,6 +22,23 @@ vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(async () => ({})),
 }));
 
+// `UserList` subscribes to the user-service profile-change signal
+// (`acowork/user/profiles/changed` → Tauri `user-profiles-changed`).
+// Capture the handler so a test can fire it; the noop default keeps the
+// other cases in this file from needing to know the listener exists.
+const mqttHandlers = new Map<string, (event: { payload: unknown }) => void>();
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: vi.fn(
+    (name: string, cb: (event: { payload: unknown }) => void) =>
+      new Promise<() => void>((resolve) => {
+        mqttHandlers.set(name, cb);
+        resolve(() => {
+          mqttHandlers.delete(name);
+        });
+      }),
+  ),
+}));
+
 function account(role: Role, user_id?: string, display_name?: string): UserAccount {
   return {
     user_id: user_id ?? `u-${role}`,
@@ -60,6 +77,7 @@ describe("UserList invite affordance (ADR-076 §决策 6)", () => {
       })),
     );
     useAuthStore.setState({ mode: "unknown", status: "unknown", account: null });
+    mqttHandlers.clear();
   });
 
   it("clicking another user's row opens an inbox thread (self row is inert)", async () => {
@@ -259,5 +277,54 @@ describe("UserList invite affordance (ADR-076 §决策 6)", () => {
     const peerRow = screen.getByTestId(`user-row-${peer.user_id}`);
     expect(peerRow.textContent).toContain("Hello from peer");
     expect(peerRow.textContent).not.toContain("admin");
+  });
+
+  it("refetches accounts when the user-profile change signal fires", async () => {
+    // Regression: the sidebar fetched the account list exactly once, on
+    // mount. Changing your own avatar writes through the user service
+    // (which publishes `acowork/user/profiles/changed`), but nothing
+    // refetched, so a row kept rendering the avatar captured at login —
+    // while the inbox thread, reading `ChatSummary.peer_avatar`, already
+    // showed the new one. Same user, two faces.
+    //
+    // This is the behavioural half of the fix (the other half is that the
+    // directory endpoint carries the avatar fields at all — pinned on the
+    // Rust side by `user_directory_is_readable_by_any_account_but_bounded`).
+    const peer = account("user", "u-peer", "Charlie");
+    signIn("admin", false);
+    // First answer: no avatar. After the signal: the user set one.
+    let call = 0;
+    const fetchMock = vi.fn(async () => {
+      call += 1;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          accounts: [
+            useAuthStore.getState().account!,
+            call === 1
+              ? peer
+              : { ...peer, builtin_avatar: "icon-18" },
+          ],
+        }),
+        text: async () => "{}",
+      };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    useUserChatStore.setState({ activePeerId: null, activePeerLabel: null, chats: [], messages: [] });
+
+    await act(async () => {
+      render(<UserList />);
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // The signal handler is registered asynchronously by `listen`.
+    const onSignal = mqttHandlers.get("user-profiles-changed");
+    expect(onSignal).toBeDefined();
+
+    await act(async () => {
+      onSignal!({ payload: { version: "7" } });
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });

@@ -7,7 +7,18 @@ import { useAgentStore } from "../../stores/agentStore";
 import { useTranslation } from "../../i18n/useTranslation";
 import { ErrorBox } from "../common/ErrorBox";
 
-export function SkillsPanel({ textHidden }: { textHidden?: boolean } = {}) {
+/**
+ * `readOnly` (ADR-076): the active session is shared with us, so selecting a
+ * skill cannot take effect — the active skill is passed on the next message,
+ * and we cannot send one. The trigger is disabled (not hidden) so the active
+ * skill of the owner's session stays visible, matching model / workspace.
+ *
+ * Note the dropdown is also the entry point for *importing* a skill, which is
+ * an agent-level (not session-level) write the backend does not gate. That
+ * path is unreachable while viewing someone else's session and still works
+ * from any session we own — no capability is actually lost.
+ */
+export function SkillsPanel({ textHidden, readOnly }: { textHidden?: boolean; readOnly?: boolean } = {}) {
   const { t } = useTranslation();
   const { selectedAgentId } = useAgentStore();
   const {
@@ -121,12 +132,13 @@ export function SkillsPanel({ textHidden }: { textHidden?: boolean } = {}) {
         label={skillsLabel}
         collapseClass="tb-sk-text"
         tipClass="tb-sk-tip"
-        tooltip={t("skillsPanel.selectSkill")}
+        tooltip={readOnly ? t("chatPanel.readOnlySession") : t("skillsPanel.selectSkill")}
         open={open}
-        onToggle={() => setOpen(!open)}
+        onToggle={() => !readOnly && setOpen(!open)}
         wrapperRef={ref}
         textHidden={textHidden}
         btnId="sk"
+        disabled={readOnly}
       >
         {/* Dropdown menu */}
         {open && (

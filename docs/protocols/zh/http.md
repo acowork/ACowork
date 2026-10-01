@@ -517,7 +517,7 @@ Runtime 消费规则：`503` **不更新本地 cache**，按 `Retry-After` 退�
 | POST | `/api/auth/change-password` | 改自己的密码（需旧密码）；成功后**撤销该账号全部 refresh family** | 本人 |
 | GET | `/api/users` | 账号列表 | admin |
 | POST | `/api/users` | 建号；不带 `password` 则返回一次性 `invite_token` | admin（`registration_open = true` 时非 admin 可建 `role = user`，**永不**是 admin） |
-| GET | `/api/users/directory` | 联系人名录：`user_id` / `username` / `display_name`，排除已禁用与自己 | **任何**已认证账号 |
+| GET | `/api/users/directory` | 联系人名录：`user_id` / `username` / `display_name` / `avatar` / `builtin_avatar`，排除已禁用与自己 | **任何**已认证账号 |
 | GET | `/api/users/{user_id}` | 单账号详情 | admin，或本人 |
 | PUT | `/api/users/{user_id}` | 改展示字段（`None` 不动 / 空串清除）；改 role 时拒绝摘掉末位 admin | admin，或本人（不含 role） |
 | DELETE | `/api/users/{user_id}` | 删除账号 | admin，或本人 |

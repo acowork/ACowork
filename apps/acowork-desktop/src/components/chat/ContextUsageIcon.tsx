@@ -13,6 +13,7 @@ import { cn } from "../../lib/utils";
 import { getProcessingPhase } from "../../lib/types";
 import { computeCacheHitStats, formatCacheHitRate, hasCacheData } from "../../lib/cacheHitRate";
 import { COMPRESS_SUMMARY } from "../../lib/session-control";
+import { useSessionReadOnly } from "../../lib/session-write-access";
 
 // ADR-074: the editor mirrors the backend `is_valid_context_window`
 // bounds (CONTEXT_WINDOW_FLOOR..=CEILING) so out-of-range input is
@@ -176,10 +177,16 @@ export function ContextUsageIcon({ agentId, sessionId }: { agentId: string; sess
   // only while a compaction is in flight (the session is otherwise busy).
   const canStart = isIdle && !isCompacting && contextUsage != null;
   const canCancel = isCompacting;
-  const canAct = canStart || canCancel;
+  // ADR-076: the popover itself is a *read* surface (usage breakdown) and
+  // stays openable on a read-only session, but both dual-state actions are
+  // session writes — compressing rewrites history, and cancelling aborts the
+  // owner's in-flight compaction. `canAct` is the single gate; the handlers
+  // below re-check `canStart` / `canCancel` defensively.
+  const readOnly = useSessionReadOnly(agentId, sessionId);
+  const canAct = (canStart || canCancel) && !readOnly;
 
 const handleCompressSummary = () => {
-    if (!canStart) return;
+    if (!canStart || readOnly) return;
     // ADR-076 §决策 4: over HTTP now; COMPRESS_SUMMARY is the
     // `CompressType::SUMMARY` wire value.
     sendCompressAction(agentId, sessionId, COMPRESS_SUMMARY);
@@ -187,7 +194,7 @@ const handleCompressSummary = () => {
   };
 
   const handleCancelCompact = () => {
-    if (!canCancel) return;
+    if (!canCancel || readOnly) return;
     // 3 = CompressType::CANCEL (ADR-083). The Runtime aborts the
     // distillation call and leaves history untouched.
     cancelCompressAction(agentId, sessionId);
@@ -349,9 +356,10 @@ const handleCompressSummary = () => {
               <button
                 type="button"
                 onClick={openWindowEditor}
+                disabled={readOnly}
                 aria-label={t("contextUsage.editWindow")}
-                title={t("contextUsage.editWindow")}
-                className="ml-1 rounded p-0.5 text-text-tertiary transition-colors hover:bg-zinc-100 hover:text-zinc-700  dark:hover:bg-zinc-700/50 dark:hover:text-zinc-100"
+                title={readOnly ? t("chatPanel.readOnlySession") : t("contextUsage.editWindow")}
+                className="ml-1 rounded p-0.5 text-text-tertiary transition-colors hover:bg-zinc-100 hover:text-zinc-700 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent  dark:hover:bg-zinc-700/50 dark:hover:text-zinc-100"
               >
                 <Pencil size={11} strokeWidth={2.25} />
               </button>
@@ -411,7 +419,8 @@ const handleCompressSummary = () => {
                   <button
                     type="button"
                     onClick={saveWindow}
-                    className="rounded bg-[var(--color-accent)] px-2 py-1 text-[11px] font-medium text-white transition-[filter] hover:brightness-90"
+                    disabled={readOnly}
+                    className="rounded bg-[var(--color-accent)] px-2 py-1 text-[11px] font-medium text-white transition-[filter] hover:brightness-90 disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     {t("contextUsage.save")}
                   </button>

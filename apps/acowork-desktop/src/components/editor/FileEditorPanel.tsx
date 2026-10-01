@@ -41,6 +41,7 @@ import { SymbolSearchPanel } from "./SymbolSearchPanel";
 import { useSearchStore } from "../../stores/searchStore";
 import { Tooltip } from "../common/Tooltip";
 import { log } from "../../lib/logger";
+import { useActiveSessionReadOnly } from "../../lib/session-write-access";
 
 /**
  * Encode a UTF-8 text string to base64 in a way that survives non-ASCII
@@ -219,7 +220,15 @@ export function FileEditorPanel({ width }: { width: number }) {
                 useFileEditorStore.setState((s) => ({
                     openFiles: s.openFiles.map((f) =>
                         f.id === activeFile.id
-                            ? { ...f, originalContent: diff.original }
+                            ? {
+                                  ...f,
+                                  originalContent: diff.original,
+                                  // Re-render the placeholder when the new
+                                  // pair degrades (binary) or has no
+                                  // changes at all — the kind belongs to
+                                  // this ref pair, not to the tab.
+                                  gitDiffKind: diff.kind,
+                              }
                             : f,
                     ),
                 }));
@@ -236,6 +245,9 @@ export function FileEditorPanel({ width }: { width: number }) {
     // the workspace tree wouldn't actually contain this file (or it'd be the
     // wrong file), and revealing it would be misleading.
     const activeSessionId = selectedAgentId ? getActiveSessionId(selectedAgentId) : null;
+    // ADR-076: gates the "Add to Chat" entry points (see the
+    // `addToChatDisabledReason` reasons below).
+    const readOnlySession = useActiveSessionReadOnly();
     const currentWorkspaceId = activeSessionId
         ? (sessionWorkspaceMap[activeSessionId] ?? "__agent_home__")
         : null;
@@ -261,12 +273,15 @@ export function FileEditorPanel({ width }: { width: number }) {
     // Note: "loading" is intentionally NOT a reason here. A user can still
     // attach a file mid-load; the attached-context payload only needs the
     // relPath/absPath, not the loaded content.
-    type AddToChatDisabledReason = "no-file" | "url-preview" | "wrong-agent" | "wrong-workspace" | null;
+    type AddToChatDisabledReason = "no-file" | "url-preview" | "wrong-agent" | "wrong-workspace" | "read-only-session" | null;
     const addToChatDisabledReason: AddToChatDisabledReason = (() => {
         if (!activeFile) return "no-file";
         if (activeFile.kind === "url") return "url-preview";
         if (activeFile.agentId !== selectedAgentId) return "wrong-agent";
         if (currentWorkspaceId !== null && activeFile.workspaceId !== currentWorkspaceId) return "wrong-workspace";
+        // ADR-076: an attachment only ships with a message we are not
+        // allowed to send, so attaching to a read-only session is a no-op.
+        if (readOnlySession) return "read-only-session";
         return null;
     })();
 
@@ -1826,10 +1841,20 @@ export function FileEditorPanel({ width }: { width: number }) {
                             }}
                         />
                         {/* Floating "Add to Chat" button near selection end */}
-                        {selectionRange && addToChatPos && addToChatDisabledReason === null && (
+                        {selectionRange && addToChatPos && (
                             <button
                                 onClick={handleAddSelectionToChat}
-                                className="absolute z-30 flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium text-white shadow-md transition-colors"
+                                // Kept visible-but-disabled rather than hidden
+                                // when the session is read-only: the button
+                                // floats next to the user's own selection, so
+                                // silently vanishing looks like a bug. The
+                                // reason is still discoverable from the
+                                // context menu's disabled item.
+                                disabled={addToChatDisabledReason !== null}
+                                title={addToChatDisabledReason === "read-only-session"
+                                    ? t("chatPanel.readOnlySession")
+                                    : undefined}
+                                className="absolute z-30 flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium text-white shadow-md transition-colors disabled:cursor-not-allowed disabled:opacity-50"
                                 style={{
                                     top: addToChatPos.top,
                                     left: addToChatPos.left,

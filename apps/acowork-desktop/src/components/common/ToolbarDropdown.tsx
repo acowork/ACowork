@@ -69,7 +69,6 @@ export function ToolbarDropdownTrigger({
                     className={cn(
                         toolbarButton,
                         "min-w-0",
-                        disabled && "cursor-not-allowed opacity-50",
                         open && "bg-zinc-200 dark:bg-zinc-700 text-text ",
                         buttonClassName,
                     )}

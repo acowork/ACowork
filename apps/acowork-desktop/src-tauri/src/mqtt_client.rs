@@ -173,6 +173,23 @@ pub const ALL_TOPIC_FILTERS: &[(&str, MqttQoS)] = &[
     // already connected, and changes missed while disconnected are caught
     // by the sidebar's refetch on each MQTT connect edge.
     ("acowork/desktop/inventory", MqttQoS::AtLeastOnce),
+    // ── User-profile change signal (ADR-084 §决策 4b) ──
+    // The user service publishes a non-retained version-stamped message
+    // here after **every** account/profile mutation — including every
+    // avatar write (`PUT /api/user/avatar-config`, avatar delete, and the
+    // `sync_profiles` tail on every `PUT /api/users/{id}`). The Gateway
+    // subscribes to it to re-pull `GET /internal/user-profiles`; the
+    // Desktop subscribes for the sidebar, so a user who changes their
+    // avatar gets it repainted without a refetch-on-every-render or a
+    // polling interval.
+    //
+    // Same shape as the inventory signal above, same reasons: outside
+    // `acowork/global/` (every Runtime decodes that prefix as a
+    // `DataEnvelope`, so a bare integer payload there would log a decode
+    // failure per Runtime), and non-retained because it is a change
+    // *event* — the catch-up for anything missed while disconnected is
+    // the subscriber's refetch on each MQTT connect edge.
+    ("acowork/user/profiles/changed", MqttQoS::AtLeastOnce),
     // ADR-043: Retained per-session config + state. Runtime publishes
     // config (title/model/provider/workspace/reasoning_effort/temperature)
     // and state (status/message_count/tokens/ratio/context_usage) on

@@ -1145,52 +1145,6 @@ impl RuntimeGitQueryService {
         Ok(None)
     }
 
-    /// Diff for a tracked-and-clean path (absent from status output).
-    /// Only reachable via `diff_with_worktree` - the working-tree
-    /// branch is the only one that uses XY and therefore the only
-    /// one that can encounter "tracked & clean" (both refs resolve
-    /// to identical bytes).
-    async fn diff_clean(
-        &self,
-        repo_root: &Path,
-        abs_path: &Path,
-        repo_rel: &str,
-    ) -> Result<GitDiffResponse, GitError> {
-        // `diff_clean` is only reached for the worktree branch — base is
-        // always "HEAD", head is the working tree (None on the wire).
-        // Promote the label to the file-history head for the same reason
-        // as `diff_with_worktree` (see `file_history_head`): the banner
-        // must show a commit the file-scoped `CommitPicker` lists.
-        let effective_base_ref =
-            match file_history_head(&self.git_bin, repo_root, "HEAD", repo_rel).await? {
-                Some(head_sha) => head_sha,
-                None => "HEAD".to_string(),
-            };
-        let base_rev = rev_parse_commit(&self.git_bin, repo_root, &effective_base_ref).await?;
-        let original = match read_blob(&self.git_bin, repo_root, &effective_base_ref, repo_rel)
-            .await?
-        {
-            BlobRead::Missing => Vec::new(),
-            BlobRead::TooLarge => return Ok(binary_diff_response(Some(base_rev.clone()), None)),
-            BlobRead::Ok(bytes) => bytes,
-        };
-        let modified = match std::fs::metadata(abs_path) {
-            Ok(md) if md.len() > DIFF_SIZE_CAP => {
-                return Ok(binary_diff_response(Some(base_rev), None));
-            }
-            Ok(_) => std::fs::read(abs_path)?,
-            Err(_) => Vec::new(),
-        };
-        Ok(assemble_diff(
-            original,
-            modified,
-            false,
-            false,
-            Some(base_rev),
-            None,
-        ))
-    }
-
     /// Working-tree variant: `original = base_ref:<path>`, `modified =
     /// <working-tree>`. Mirrors the original ADR-078 implementation
     /// (untracked / deleted / staged) but parameterises the base ref
@@ -1228,10 +1182,17 @@ impl RuntimeGitQueryService {
             base_ref.to_string()
         };
         let base_rev = rev_parse_commit(&self.git_bin, repo_root, &effective_base_ref).await?;
-        let xy = self.path_status(repo_root, repo_rel).await?;
-        let Some((x, y, rename_old)) = xy else {
-            return self.diff_clean(repo_root, abs_path, repo_rel).await;
-        };
+        // A tracked-and-clean file simply has no `git status` entry. Treat
+        // it as `XY = "  "` and fall through, so the shared code below reads
+        // `effective_base_ref:<path>` vs the working tree and therefore
+        // honours an explicit caller-chosen base. (A separate `diff_clean`
+        // branch used to re-derive the base from HEAD here, so comparing an
+        // older commit against "Working Tree" on a clean file silently
+        // rendered as an empty diff.)
+        let (x, y, rename_old) = self
+            .path_status(repo_root, repo_rel)
+            .await?
+            .unwrap_or((' ', ' ', None));
         let head_repo_rel = if x == 'R' || y == 'R' {
             rename_old.as_deref().unwrap_or(repo_rel)
         } else {
@@ -1292,6 +1253,9 @@ impl RuntimeGitQueryService {
     /// banner when the picker's second row points elsewhere is the bug
     /// this function fixes. Fallback to first-parent happens when
     /// `path` has no older commit (file was introduced in `head_ref`).
+    ///
+    /// Any other `base_ref` is honoured verbatim: `X` vs `X` reports no
+    /// changes, and `A` vs `B` compares exactly those two blobs.
     async fn diff_two_refs(
         &self,
         repo_root: &Path,
@@ -1317,33 +1281,42 @@ impl RuntimeGitQueryService {
         } else {
             Some(rev_parse_commit(&self.git_bin, repo_root, head_ref).await?)
         };
-        // Promote the caller-requested base (usually `<head>^`) to the
-        // file-history predecessor of `head_ref` on `path`. This is the
+        // Promote the caller's first-parent shorthand (`<head>^`, what the
+        // Git status panel sends when opening "commit X vs X^") to the
+        // file-history predecessor of `head_ref` on `path`. That is the
         // authoritative "what did this file look like right before
         // head_ref's edit" answer — and matches the row above head in
         // the diff banner's `CommitPicker` (`git log -- <path>`).
+        //
+        // Every other base_ref is an explicit user choice (both diff-side
+        // banners send canonical SHAs) and is honoured verbatim. Overriding
+        // it unconditionally was the bug: picking the same commit on both
+        // sides still rendered X-vs-predecessor as a diff, and any
+        // arbitrary two-commit comparison silently became
+        // predecessor-vs-head.
         // Skipped for `:` — there is no file-history predecessor of an
         // index ref; the caller's `base_ref` stands verbatim.
-        let (effective_base_ref, base_rev) = if head_ref == ":" {
-            (base_ref.to_string(), requested_base_rev)
-        } else {
-            match file_history_prev(&self.git_bin, repo_root, head_ref, repo_rel).await? {
-                // File-history had a predecessor. Use it as the actual base
-                // ref so `read_blob` reads the same blob the banner label
-                // promises, and the diff content is the file-scoped diff
-                // (matches IDE / GitKraken default behaviour).
-                Some(prev_sha) => {
-                    let prev_canonical =
-                        rev_parse_commit(&self.git_bin, repo_root, &prev_sha).await?;
-                    (prev_sha, prev_canonical)
+        let (effective_base_ref, base_rev) =
+            if head_ref != ":" && base_ref == format!("{head_ref}^") {
+                match file_history_prev(&self.git_bin, repo_root, head_ref, repo_rel).await? {
+                    // File-history had a predecessor. Use it as the actual base
+                    // ref so `read_blob` reads the same blob the banner label
+                    // promises, and the diff content is the file-scoped diff
+                    // (matches IDE / GitKraken default behaviour).
+                    Some(prev_sha) => {
+                        let prev_canonical =
+                            rev_parse_commit(&self.git_bin, repo_root, &prev_sha).await?;
+                        (prev_sha, prev_canonical)
+                    }
+                    // No predecessor (path first appears in head_ref, or head_ref
+                    // is the only commit touching path). Honour the caller's
+                    // base_ref verbatim — preserves the existing first-parent
+                    // semantics for file-introducing commits.
+                    None => (base_ref.to_string(), requested_base_rev),
                 }
-                // No predecessor (path first appears in head_ref, or head_ref
-                // is the only commit touching path). Honour the caller's
-                // base_ref verbatim — preserves the existing first-parent
-                // semantics for file-introducing commits.
-                None => (base_ref.to_string(), requested_base_rev),
-            }
-        };
+            } else {
+                (base_ref.to_string(), requested_base_rev)
+            };
         let original = match read_blob(&self.git_bin, repo_root, &effective_base_ref, repo_rel)
             .await?
         {

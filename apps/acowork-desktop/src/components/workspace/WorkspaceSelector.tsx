@@ -6,7 +6,7 @@ import { useChatStore } from "../../stores/chatStore";
 import { useTranslation } from "../../i18n/useTranslation";
 import type { WorkspaceDir } from "../../stores/workspaceStore";
 import { useToast } from "../common/ToastProvider";
-import { FolderOpen, FolderPlus, Trash2, Shield, ShieldOff, Home } from "lucide-react";
+import { FolderOpen, FolderPlus, Trash2, Shield, ShieldOff, Home, Check } from "lucide-react";
 import * as dialog from "@tauri-apps/plugin-dialog";
 import { cn } from "../../lib/utils";
 import { ToolbarDropdownTrigger } from "../common/ToolbarDropdown";
@@ -208,7 +208,7 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden, readOnly }
         {/* Dropdown menu */}
         {open && (
           <div className={cn(
-            "absolute left-0 w-60 rounded-md border border-border-outer bg-modal-surface shadow-lg",
+            "absolute left-0 w-80 max-w-[calc(100vw-2rem)] rounded-md border border-border-outer bg-modal-surface shadow-lg",
             dropDirection === "down" ? "top-full mt-1" : "bottom-full mb-1",
           )} style={{ zIndex: 100 }}>
             {/* Menu title */}
@@ -241,7 +241,7 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden, readOnly }
                   </div>
                 </div>
                 {currentWsId === "__agent_home__" && (
-                  <span className="font-medium text-xs" style={{ color: "var(--color-accent)" }}>✓</span>
+                  <Check size={12} className="shrink-0 text-[var(--color-accent)]" />
                 )}
               </button>
 
@@ -282,6 +282,12 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden, readOnly }
                               </div>
                             </Tooltip>
                           </div>
+                          {/* Sibling of the stacked name/path column, NOT
+                              inside it: this column is a block box, so an
+                              inline svg here lands on its own line under the
+                              path. As a flex item of the button it inherits
+                              items-center and sits beside the text. */}
+                          {isCurrent && <Check size={12} className="shrink-0 text-[var(--color-accent)]" />}
                         </button>
 
                         {/* Action buttons: delete (reversible) + access toggle */}

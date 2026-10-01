@@ -14,6 +14,7 @@ import {
 } from "../../common/ContextMenu";
 import { isGatewayLocal } from "../../../lib/config";
 import type { TreeEntry } from "../../../stores/fileTree";
+import { useSessionReadOnly } from "../../../lib/session-write-access";
 
 // Lazy-load Tauri dialog to avoid import error in browser dev mode
 let _dialogModule: typeof import("@tauri-apps/plugin-dialog") | null = null;
@@ -227,6 +228,9 @@ export const FileTreeNode = memo(function FileTreeNode({
   }, [handleCommitRename]);
 
   const addAttachedContext = useChatStore((s) => s.addAttachedContext);
+  // ADR-076: per-session, and this node renders inside the tree for one
+  // specific session — so gate on that session, not the active one.
+  const readOnlySession = useSessionReadOnly(agentId, sessionId);
 
   const handleClick = useCallback(() => {
     if (isDir) {
@@ -343,6 +347,9 @@ export const FileTreeNode = memo(function FileTreeNode({
       key: "add-to-chat",
       icon: <MessageSquarePlus size={14} />,
       label: t("workspace.contextMenu.addToChat"),
+      // ADR-076: the attachment rides along with the next message, which a
+      // viewer of someone else's session may not send.
+      disabled: readOnlySession,
       onClick: handleAddToChat,
     });
     if (isPreviewable) {
@@ -430,6 +437,7 @@ export const FileTreeNode = memo(function FileTreeNode({
     onRename,
     onReveal,
     t,
+    readOnlySession,
     handleAddToChat,
     handlePreview,
     handleTogglePromptFile,

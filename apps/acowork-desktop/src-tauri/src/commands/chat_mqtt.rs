@@ -262,6 +262,31 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
             return;
         }
 
+        // ── User-profile change signal ──
+        //
+        // The user service publishes this after every account/profile
+        // mutation (ADR-084 §决策 4b) — every avatar write included. The
+        // payload is the new profile-list version, plain ASCII; the
+        // frontend ignores the number and just refetches. Emitting it
+        // repaints the sidebar contact list without polling.
+        //
+        // Handled as its own branch (like `inventory-changed` above)
+        // rather than falling through to the `DataEnvelope` decode: the
+        // payload is a bare integer, and a decode attempt there would log
+        // a spurious failure per message.
+        if msg.topic == acowork_core::mqtt_proto::USER_PROFILES_CHANGED_TOPIC {
+            tracing::debug!(
+                "[MQTT] user profile change signal received ({} bytes)",
+                msg.payload.len()
+            );
+            let version = String::from_utf8_lossy(&msg.payload).trim().to_string();
+            let _ = app_handle.emit(
+                "user-profiles-changed",
+                serde_json::json!({ "version": version }),
+            );
+            return;
+        }
+
         // Try to decode as DataEnvelope protobuf
         let envelope = match DataEnvelope::decode(&msg.payload[..]) {
             Ok(e) => e,
