@@ -235,7 +235,7 @@ function getPersistedGatewayUrlHistory(): string[] {
 function getPersistedGatewayMode(): GatewayMode {
   try {
     const stored = localStorage.getItem(STORAGE_KEY_GATEWAY_MODE);
-    if (stored === "local" || stored === "remote") return stored;
+    if (stored === "local" || stored === "remote" || stored === "relay") return stored;
   } catch { }
   return DEFAULT_GATEWAY_MODE;
 }

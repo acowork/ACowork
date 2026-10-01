@@ -301,6 +301,7 @@ function GatewayStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => voi
             options={[
               { label: <span className="font-medium">{t("onboarding.gateway.modeLocalRecommended")}</span>, value: "local" as GatewayMode },
               { label: t("onboarding.gateway.modeRemote"), value: "remote" as GatewayMode },
+              { label: t("onboarding.gateway.modeRelay"), value: "relay" as GatewayMode },
             ]}
             onChange={handleModeChange}
           />
@@ -312,6 +313,11 @@ function GatewayStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => voi
           {gatewayMode === "remote" && (
             <p className="mt-1 text-xs text-text-tertiary">
               {t("onboarding.gateway.remoteHint")}
+            </p>
+          )}
+          {gatewayMode === "relay" && (
+            <p className="mt-1 text-xs text-text-tertiary">
+              {t("onboarding.gateway.relayHint")}
             </p>
           )}
         </div>
@@ -354,8 +360,8 @@ function GatewayStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => voi
           </div>
         )}
 
-        {/* Remote mode: URL config + test */}
-        {gatewayMode === "remote" && (
+        {/* Off-site modes (remote LAN / relay): URL config + test */}
+        {gatewayMode !== "local" && (
           <div className="rounded-md border border-border-outer p-4">
             <label className="mb-1 block text-xs text-text-tertiary">{t("onboarding.gateway.urlLabel")}</label>
             <div className="flex gap-2">
@@ -363,7 +369,7 @@ function GatewayStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => voi
                 type="text"
                 value={urlDraft}
                 onChange={(e) => setUrlDraft(e.target.value)}
-                placeholder={DEFAULT_GATEWAY_URL}
+                placeholder={gatewayMode === "relay" ? "https://<gw-id>.relay.example.com" : DEFAULT_GATEWAY_URL}
                 className="flex-1 rounded-md border border-input-border bg-input-bg px-3 py-2 text-sm"
               />
               {urlDraft !== gatewayUrl && (

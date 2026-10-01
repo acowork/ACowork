@@ -69,7 +69,7 @@ export function isGatewayLocal(): boolean {
 export function getGatewayMode(): GatewayMode {
   try {
     const mode = useSettingsStore.getState().gatewayMode;
-    if (mode === "local" || mode === "remote") return mode;
+    if (mode === "local" || mode === "remote" || mode === "relay") return mode;
   } catch {
     // settingsStore not yet available
   }
@@ -77,8 +77,13 @@ export function getGatewayMode(): GatewayMode {
 }
 
 /**
- * Check if the current Gateway mode is remote.
+ * Check whether the Gateway is off-site (remote LAN or cloud relay).
+ *
+ * Both off-site modes share the "Desktop never spawns the Gateway"
+ * lifecycle; use `getGatewayMode()` when the distinction matters
+ * (e.g. MQTT transport, fs-browse availability — the remote ACL
+ * blocks `/api/fs/browse` for relay-originated requests).
  */
 export function isGatewayModeRemote(): boolean {
-  return getGatewayMode() === "remote";
+  return getGatewayMode() !== "local";
 }

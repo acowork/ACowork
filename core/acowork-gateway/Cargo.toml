@@ -68,6 +68,16 @@ regex.workspace = true
 # required so `IfWatcher` is re-exported from the platform module.
 if-watch = { version = "3", features = ["tokio"] }
 
+# Cloud relay client (design doc 24): outbound WSS tunnel. The TLS
+# feature covers `wss://` relay endpoints (ring backend to match the
+# rest of the workspace); `ws://` needs no TLS and works in tests.
+tokio-tungstenite = { workspace = true, features = ["rustls-tls-webpki-roots"] }
+# yamux multiplexing over the tunnel WebSocket (via acowork-core's
+# shared driver).
+yamux.workspace = true
+# tokio ↔ futures IO bridging in the tunnel stream-forwarding path.
+tokio-util.workspace = true
+
 # Hidden-echo password prompt for first-boot admin setup (TTY path).
 # Cross-platform (macOS / Linux / Windows + msys2 / Git bash). Single-purpose
 # crate, no transitive surprise. ADR-076 §决策 12 v2.
@@ -82,6 +92,9 @@ dialoguer = { workspace = true, optional = true }
 [dev-dependencies]
 acowork-sign = { workspace = true }
 acowork-memory = { workspace = true }
+# Design doc 24 M2 test: the relay client e2e test runs a real
+# in-process acowork-relay server.
+acowork-relay = { workspace = true }
 # Re-declare with fast-derivation feature so test runs use weak Argon2id
 # params (8 KiB / 1 iter / 1 thread) instead of production-grade (64 MB /
 # 3 iter / 4 threads). Without this feature flag, `cfg(test)` would not

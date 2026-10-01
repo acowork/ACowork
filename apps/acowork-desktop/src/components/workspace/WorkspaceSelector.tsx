@@ -92,7 +92,15 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden, readOnly }
   };
 
   const handleBrowse = async () => {
-    // Remote mode: use RemoteFolderPicker to browse server filesystem
+    // Relay mode: server-side fs browse is blocked by the Gateway's
+    // remote ACL (design doc 24 §7.2 — `/api/fs/browse` answers 404 to
+    // relay-originated requests), and the local dialog is meaningless
+    // for a remote workspace host. The browse button is disabled; the
+    // user picks workspaces from the list or via agent-side paths.
+    if (gatewayMode === "relay") {
+      return;
+    }
+    // Remote (LAN) mode: use RemoteFolderPicker to browse server filesystem
     if (gatewayMode === "remote") {
       setShowRemotePicker(true);
       return;
@@ -354,7 +362,8 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden, readOnly }
             {/* Add workspace button */}
             <button
               onClick={handleBrowse}
-              className="mx-3 mt-2 mb-2.5 flex w-[calc(100%-1.5rem)] items-center justify-center gap-1.5 rounded-md bg-zinc-100 px-3 py-[var(--ui-btn-py)] text-xs font-medium text-text-secondary transition-colors hover:bg-zinc-200 hover:text-zinc-900 dark:bg-white/10  dark:hover:bg-white/15 dark:hover:text-zinc-100"
+              disabled={gatewayMode === "relay"}
+              className="mx-3 mt-2 mb-2.5 flex w-[calc(100%-1.5rem)] items-center justify-center gap-1.5 rounded-md bg-zinc-100 px-3 py-[var(--ui-btn-py)] text-xs font-medium text-text-secondary transition-colors hover:bg-zinc-200 hover:text-zinc-900 disabled:opacity-40 disabled:hover:bg-zinc-100 dark:bg-white/10  dark:hover:bg-white/15 dark:hover:text-zinc-100"
             >
               <FolderPlus className="h-3.5 w-3.5" />
               {t("workspace.addWorkspace")}

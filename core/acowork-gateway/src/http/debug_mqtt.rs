@@ -162,9 +162,13 @@ async fn start_mqtt_broker(State(state): State<AppState>) -> impl IntoResponse {
     // Retry the start a few times. The most common failure here is the
     // OS still holding the port in TIME_WAIT after a previous broker
     // listener closed; a short sleep + retry is enough to absorb it.
+    // NOTE: the debug restart does NOT re-host the strict remote MQTT
+    // listener (design doc 24 §7.2) — this endpoint exists for
+    // connection-recovery tests; a debug-restarted broker loses the
+    // `/mqtt` bridge target until the next Gateway boot.
     let mut last_err: Option<String> = None;
     for attempt in 0..START_RETRIES {
-        match crate::mqtt::start_broker_with_auth(&host, port, broker_auth.clone()) {
+        match crate::mqtt::start_broker_with_auth(&host, port, broker_auth.clone(), None) {
             Ok(handle) => {
                 let gw = state.gateway_state.read().await;
                 {

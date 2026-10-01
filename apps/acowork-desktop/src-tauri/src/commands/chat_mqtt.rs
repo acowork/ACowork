@@ -28,8 +28,8 @@ use acowork_core::mqtt_proto::{
     AgentLifecycleState, BootstrapState, DataEnvelope,
     data_envelope, session_message,
 };
-use crate::mqtt_client::{DesktopMqttClient, MqttMessage, MqttStatus};
-use crate::state::{AppState, BootstrapStateView};
+use crate::mqtt_client::{DesktopMqttClient, MqttCredentials, MqttEndpoint, MqttMessage, MqttStatus};
+use crate::state::{AppState, BootstrapStateView, GatewayMode};
 use acowork_core::defaults;
 
 /// Connect to the MQTT broker and start receiving events.
@@ -37,6 +37,15 @@ use acowork_core::defaults;
 /// Called by the frontend after the Gateway is confirmed healthy.
 /// Subscribes to agent lifecycle topics and starts forwarding events
 /// to the frontend via `app.emit("mqtt-event", payload)`.
+///
+/// The broker endpoint is mode-driven (design doc 24 §8.0):
+/// - **Local/Remote** — plain TCP to the host derived from the Gateway
+///   base URL + port from `/api/status` (existing behavior, ADR-058
+///   W4 / ADR-055 D3).
+/// - **Relay** — WSS to `<base_url>/mqtt` through the cloud relay's
+///   TLS byte pipe; CONNECT credentials are the logged-in account's
+///   access token (the strict remote listener's contract, M3), with a
+///   refresher so post-expiry reconnects re-authenticate.
 ///
 /// ADR-036: also wires the broker eventloop's CONNACK / DISCONNECT
 /// transitions to a dedicated `mqtt-status` Tauri event so the React
@@ -46,56 +55,104 @@ use acowork_core::defaults;
 pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Result<(), String> {
     let mut guard = state.mqtt_client.lock().await;
 
-    let user_id = "default"; // Single-user phase; multi-user will use actual user_id
-
-    // ADR-058 W4 + ADR-055 D3: derive both the MQTT broker host AND port
-    // from the Gateway so Remote mode (Gateway behind an SSH tunnel / WSL
-    // IP) reaches the broker through the same forwarded host as :19876
-    // HTTP. The host is derived from the base URL; the port is fetched
-    // dynamically from /api/status (L3-6 residual gap — ADR-058 W4 fixed
-    // the host half, ADR-055 Phase 1.3 closes the port half). Local mode
-    // derives "127.0.0.1" — identical to the previous hardcode.
-    let (mqtt_host, mqtt_port, mqtt_credentials) = {
-        let gw = state.gateway.read().await;
-        let gateway_base_url = gw.base_url().to_string();
-        let mqtt_host = derive_mqtt_broker_host(&gateway_base_url)
-            .unwrap_or_else(|| defaults::GATEWAY_MQTT_HOST.to_string());
-        // Fetch broker discovery info dynamically; fall back to defaults
-        // on any error so the connection still attempts the canonical
-        // port. ADR-055 Phase 5a: `mqtt_username` / `mqtt_password` are
-        // present only when `mqtt.auth_enabled` is on — None keeps the
-        // anonymous connection to an auth-disabled broker.
-        let status = gw.system_status().await.ok();
-        let mqtt_port = status
-            .as_ref()
-            .map(|s| s.mqtt_port)
-            .unwrap_or(defaults::GATEWAY_MQTT_PORT);
-        let credentials = status
-            .as_ref()
-            .and_then(|s| s.mqtt_username.clone().zip(s.mqtt_password.clone()));
-        (mqtt_host, mqtt_port, credentials)
+    let mode = *state.gateway_mode.read().await;
+    let (endpoint, user_id, credentials) = match mode {
+        GatewayMode::Relay => {
+            let base_url = state.gateway.read().await.base_url().to_string();
+            let url = relay_mqtt_wss_url(&base_url).ok_or_else(|| {
+                format!("relay mode: cannot derive a WSS broker URL from base URL '{base_url}'")
+            })?;
+            let token = state.gateway_auth.current_access_token().ok_or_else(|| {
+                "relay mode requires a logged-in account — no access token is mirrored".to_string()
+            })?;
+            let name = access_token_sub(&token).ok_or_else(|| {
+                "relay mode: cannot read the account name out of the access token".to_string()
+            })?;
+            // Soft-restarts re-read the mirrored token: access tokens
+            // expire after 15 min, every reconnect re-sends the
+            // password, and the strict remote listener drops a bad
+            // credential without CONNACK (see MqttCredentials).
+            let auth = state.gateway_auth.clone();
+            let refresher = Arc::new(move || {
+                let token = auth.current_access_token()?;
+                let name = access_token_sub(&token)?;
+                Some((name, token))
+            });
+            let credentials = MqttCredentials {
+                username: name.clone(),
+                password: token,
+                refresher: Some(refresher),
+            };
+            (MqttEndpoint::Wss { url }, name, Some(credentials))
+        }
+        local_or_lan @ (GatewayMode::Local | GatewayMode::Remote) => {
+            // ADR-058 W4 + ADR-055 D3: derive both the MQTT broker host
+            // AND port from the Gateway so Remote mode (Gateway behind an
+            // SSH tunnel / WSL IP) reaches the broker through the same
+            // forwarded host as :19876 HTTP. The host is derived from the
+            // base URL; the port is fetched dynamically from /api/status
+            // (L3-6 residual gap — ADR-058 W4 fixed the host half,
+            // ADR-055 Phase 1.3 closes the port half). Local mode derives
+            // "127.0.0.1" — identical to the previous hardcode.
+            let _ = local_or_lan;
+            let (mqtt_host, mqtt_port, mqtt_credentials) = {
+                let gw = state.gateway.read().await;
+                let gateway_base_url = gw.base_url().to_string();
+                let mqtt_host = derive_mqtt_broker_host(&gateway_base_url)
+                    .unwrap_or_else(|| defaults::GATEWAY_MQTT_HOST.to_string());
+                // Fetch broker discovery info dynamically; fall back to
+                // defaults on any error so the connection still attempts
+                // the canonical port. ADR-055 Phase 5a: `mqtt_username` /
+                // `mqtt_password` are present only when `mqtt.auth_enabled`
+                // is on — None keeps the anonymous connection to an
+                // auth-disabled broker.
+                let status = gw.system_status().await.ok();
+                let mqtt_port = status
+                    .as_ref()
+                    .map(|s| s.mqtt_port)
+                    .unwrap_or(defaults::GATEWAY_MQTT_PORT);
+                let credentials = status
+                    .as_ref()
+                    .and_then(|s| s.mqtt_username.clone().zip(s.mqtt_password.clone()));
+                (mqtt_host, mqtt_port, credentials)
+            };
+            let credentials = mqtt_credentials.map(|(username, password)| MqttCredentials {
+                username,
+                password,
+                // Local/LAN broker credentials (when present) are
+                // long-lived node tokens from /api/status — no refresher.
+                refresher: None,
+            });
+            (
+                MqttEndpoint::Tcp {
+                    host: mqtt_host,
+                    port: mqtt_port,
+                },
+                // Single-user phase; multi-user will use actual user_id.
+                "default".to_string(),
+                credentials,
+            )
+        }
     };
-    let mqtt_credentials = mqtt_credentials
-        .as_ref()
-        .map(|(u, p)| (u.as_str(), p.as_str()));
 
     // Idempotence guard: reuse the existing client only when it targets
-    // the same broker endpoint as the current configuration. A stale
-    // client — created before the user edited the remote Gateway address
-    // on the SplashScreen timeout view or in Settings — would otherwise
-    // keep publishing every control command (chat messages, session
-    // management) to the OLD Gateway's broker with no visible error,
-    // while all agents live on the new one. Tear it down so the rebuild
-    // below targets the configured broker.
+    // the same broker endpoint (address AND transport) as the current
+    // configuration. A stale client — created before the user edited
+    // the remote Gateway address on the SplashScreen timeout view, in
+    // Settings, or switched local↔relay mode — would otherwise keep
+    // publishing every control command (chat messages, session
+    // management) to the OLD broker with no visible error, while all
+    // agents live on the new one. Tear it down so the rebuild below
+    // targets the configured broker.
     if guard.is_some() {
         let current_endpoint = state.mqtt_endpoint.lock().await.clone();
-        if endpoint_matches(current_endpoint.as_ref(), &mqtt_host, mqtt_port) {
+        if endpoint_matches(current_endpoint.as_ref(), &endpoint) {
             return Ok(()); // Already connected to the configured broker
         }
         tracing::info!(
             previous = ?current_endpoint,
-            configured = %format!("{mqtt_host}:{mqtt_port}"),
-            "Gateway address changed - recreating MQTT client"
+            configured = %endpoint.display(),
+            "Gateway address or transport changed - recreating MQTT client"
         );
         // Dropping the client tears down its poll task via the internal
         // EventLoopGuard; the `guard` slot is re-filled below.
@@ -649,10 +706,9 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
     };
 
     let client = DesktopMqttClient::connect(
-        &mqtt_host,
-        mqtt_port,
-        user_id,
-        mqtt_credentials,
+        endpoint.clone(),
+        &user_id,
+        credentials,
         on_message,
         // ADR-036 / ADR-039: bridge `rumqttc` eventloop status → Tauri event.
         //
@@ -694,9 +750,10 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
 
     let shared = Arc::new(tokio::sync::Mutex::new(client));
     *guard = Some(shared);
-    // Record the endpoint this client was created for so a later
-    // `connect_mqtt` call can detect a Gateway-address change.
-    *state.mqtt_endpoint.lock().await = Some((mqtt_host, mqtt_port));
+    // Record the endpoint (transport + address) this client was created
+    // for so a later `connect_mqtt` call can detect a Gateway-address
+    // or mode/transport change.
+    *state.mqtt_endpoint.lock().await = Some(endpoint);
 
     tracing::info!("Desktop MQTT client connected and subscribed to all agent topics");
     Ok(())
@@ -801,34 +858,143 @@ fn derive_mqtt_broker_host(gateway_base_url: &str) -> Option<String> {
 /// in `AppState::mqtt_endpoint`) already targets the configured broker.
 ///
 /// `connect_mqtt` uses this to pick between the fast path (existing
-/// client reused) and the rebuild path (Gateway address changed while a
-/// stale client was still connected — see the idempotence-guard comment
-/// in `connect_mqtt`).
-fn endpoint_matches(recorded: Option<&(String, u16)>, host: &str, port: u16) -> bool {
-    match recorded {
-        Some((h, p)) => h == host && *p == port,
-        None => false,
+/// client reused) and the rebuild path (Gateway address or transport
+/// changed while a stale client was still connected — see the
+/// idempotence-guard comment in `connect_mqtt`).
+fn endpoint_matches(recorded: Option<&MqttEndpoint>, desired: &MqttEndpoint) -> bool {
+    recorded == Some(desired)
+}
+
+/// Derive the WSS broker URL from the relay-mode Gateway base URL
+/// (design doc 24 §8.0): `https://gw-abc.relay.example.com` →
+/// `wss://gw-abc.relay.example.com/mqtt`.
+///
+/// The `/mqtt` path matches the WS bridge the Gateway mounts on its
+/// remote HTTP listener (`relay/remote_listener.rs`, M3) — reached
+/// through the relay's TLS byte pipe for the device domain. A non-null
+/// port is preserved (dev relays on custom ports); the default port
+/// (443) is omitted so rumqttc derives it from the `wss` scheme.
+fn relay_mqtt_wss_url(gateway_base_url: &str) -> Option<String> {
+    let url = reqwest::Url::parse(gateway_base_url).ok()?;
+    let host = url.host_str()?;
+    match url.port() {
+        Some(p) => Some(format!("wss://{host}:{p}/mqtt")),
+        None => Some(format!("wss://{host}/mqtt")),
     }
+}
+
+/// Extract the `sub` (account name) out of an access token.
+///
+/// The token is JWT-shaped (`header.payload.signature`,
+/// base64url-encoded segments — `acowork-core/src/auth/issuer.rs`), but
+/// this parser deliberately does NOT verify the signature: the BROKER
+/// verifies it (strict remote listener) and cross-checks
+/// `claims.sub == client_id name`, so a locally mis-read `sub` can only
+/// fail that cross-check — it can never authenticate anyone. The
+/// signature segment is ignored entirely.
+fn access_token_sub(token: &str) -> Option<String> {
+    use base64::Engine as _;
+    let mut parts = token.split('.');
+    let _header = parts.next()?;
+    let body = parts.next()?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(body)
+        .ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    value.get("sub")?.as_str().map(str::to_string)
 }
 
 #[cfg(test)]
 mod mqtt_endpoint_tests {
     use super::*;
 
+    fn tcp(host: &str, port: u16) -> MqttEndpoint {
+        MqttEndpoint::Tcp {
+            host: host.to_string(),
+            port,
+        }
+    }
+
     /// The idempotence guard must rebuild whenever the recorded broker
     /// endpoint differs from the configured one (SplashScreen retry /
-    /// Settings address change) and short-circuit only on an exact
-    /// (host, port) match.
+    /// Settings address change / local↔relay mode switch) and
+    /// short-circuit only on an exact (transport, address) match.
     #[test]
-    fn endpoint_matches_requires_identical_host_and_port() {
-        let recorded = Some(("192.168.3.61".to_string(), 19875));
-        assert!(endpoint_matches(recorded.as_ref(), "192.168.3.61", 19875));
+    fn endpoint_matches_requires_identical_transport_and_address() {
+        let recorded = tcp("192.168.3.61", 19875);
+        assert!(endpoint_matches(Some(&recorded), &tcp("192.168.3.61", 19875)));
         // Different host — the 67 → 61 address-change incident.
-        assert!(!endpoint_matches(recorded.as_ref(), "192.168.3.67", 19875));
+        assert!(!endpoint_matches(Some(&recorded), &tcp("192.168.3.67", 19875)));
         // Different port — e.g. a custom mqtt_port discovered via /api/status.
-        assert!(!endpoint_matches(recorded.as_ref(), "192.168.3.61", 19876));
+        assert!(!endpoint_matches(Some(&recorded), &tcp("192.168.3.61", 19876)));
         // No client recorded yet (fresh start / after disconnect).
-        assert!(!endpoint_matches(None, "192.168.3.61", 19875));
+        assert!(!endpoint_matches(None, &tcp("192.168.3.61", 19875)));
+        // Transport is part of the identity: a WSS URL to the same
+        // authority is a DIFFERENT endpoint than TCP host:port — the
+        // mode-switch case (local → relay) must rebuild the client.
+        let wss = MqttEndpoint::Wss {
+            url: "wss://gw-abc.relay.example.com/mqtt".to_string(),
+        };
+        assert!(!endpoint_matches(Some(&recorded), &wss));
+        assert!(endpoint_matches(
+            Some(&MqttEndpoint::Wss {
+                url: "wss://gw-abc.relay.example.com/mqtt".to_string()
+            }),
+            &wss
+        ));
+        // Different relay URL → rebuild.
+        assert!(!endpoint_matches(
+            Some(&MqttEndpoint::Wss {
+                url: "wss://gw-other.relay.example.com/mqtt".to_string()
+            }),
+            &wss
+        ));
+    }
+
+    /// Relay-mode WSS URL derivation from the base URL. The `/mqtt`
+    /// path is the Gateway-side WS bridge route (M3 remote listener).
+    #[test]
+    fn relay_mqtt_wss_url_covers_default_and_custom_ports() {
+        assert_eq!(
+            relay_mqtt_wss_url("https://gw-abc.relay.example.com"),
+            Some("wss://gw-abc.relay.example.com/mqtt".to_string())
+        );
+        // Custom port (dev relay) is preserved.
+        assert_eq!(
+            relay_mqtt_wss_url("https://relay.example.com:8443"),
+            Some("wss://relay.example.com:8443/mqtt".to_string())
+        );
+        // Path in the base URL is replaced, not appended.
+        assert_eq!(
+            relay_mqtt_wss_url("https://gw-abc.relay.example.com/"),
+            Some("wss://gw-abc.relay.example.com/mqtt".to_string())
+        );
+        // Unparseable input → None (caller surfaces a clear error).
+        assert_eq!(relay_mqtt_wss_url("not a url"), None);
+        assert_eq!(relay_mqtt_wss_url(""), None);
+    }
+
+    /// Local `sub` extraction from a JWT-shaped access token — without
+    /// signature verification (the broker verifies; see the doc on
+    /// `access_token_sub`). Hand-crafts a token with the same shape
+    /// `acowork-core`'s issuer produces.
+    #[test]
+    fn access_token_sub_extracts_account_name() {
+        use base64::Engine as _;
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let header = b64.encode(r#"{"alg":"EdDSA","typ":"JWT"}"#);
+        let body = b64.encode(r#"{"sub":"u-1","role":"user","kind":"access","iat":1000,"exp":1900}"#);
+        let sig = b64.encode([0u8; 64]);
+        let token = format!("{header}.{body}.{sig}");
+
+        assert_eq!(access_token_sub(&token), Some("u-1".to_string()));
+        // Structural garbage → None (caller errors out with a clear
+        // message instead of connecting with a bogus client_id).
+        assert_eq!(access_token_sub("not-a-token"), None);
+        assert_eq!(access_token_sub("a.b"), None);
+        // Payload without a `sub` → None.
+        let no_sub = b64.encode(r#"{"kind":"access","iat":0,"exp":1}"#);
+        assert_eq!(access_token_sub(&format!("{header}.{no_sub}.{sig}")), None);
     }
 }
 

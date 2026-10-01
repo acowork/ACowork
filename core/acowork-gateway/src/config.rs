@@ -192,6 +192,63 @@ pub struct GatewayConfig {
     /// `None`). CLI `--auth-mode` beats this field.
     #[serde(default)]
     pub auth_mode: Option<AuthMode>,
+
+    /// Cloud relay client (design doc 24 §8): outbound WSS tunnel to an
+    /// acowork-relay server so Desktop clients on the public internet can
+    /// reach this Gateway through device-domain byte pipes. Disabled by
+    /// default; managed at runtime via `POST /api/relay/enable|disable`
+    /// (which persists the change here) and auto-started at boot when
+    /// `enabled = true`.
+    #[serde(default)]
+    pub relay: RelayClientConfig,
+}
+
+/// Cloud relay client configuration (design doc 24 §8.2, Gateway side).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelayClientConfig {
+    /// Whether to maintain the tunnel (auto-connect at boot + reconnect
+    /// with backoff at runtime).
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Relay service endpoint, e.g. `wss://relay.example.com/tunnel`.
+    /// Required when `enabled`. `ws://` is accepted for local testing.
+    #[serde(default)]
+    pub url: Option<String>,
+
+    /// The loopback listener remote clients are piped into (design doc
+    /// 24 §7.2 "origin-by-listener"): the second HTTP server with the
+    /// remote-origin guard and the `/mqtt` WebSocket bridge. The tunnel
+    /// client forwards `STREAM_TAG_HTTP` streams here.
+    #[serde(default = "default_relay_remote_http_port")]
+    pub remote_http_port: u16,
+
+    /// The strict MQTT listener (§7.2): a second rumqttd v4 server,
+    /// loopback-only, admitting ONLY `user:*:desktop:*` /
+    /// `user:*:mobile:*` clients with a valid user access token. The
+    /// `/mqtt` WebSocket bridge on the remote HTTP listener connects
+    /// here; the relay client never talks to it directly.
+    #[serde(default = "default_relay_remote_mqtt_port")]
+    pub remote_mqtt_port: u16,
+}
+
+fn default_relay_remote_http_port() -> u16 {
+    19877
+}
+
+fn default_relay_remote_mqtt_port() -> u16 {
+    19874
+}
+
+impl Default for RelayClientConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            url: None,
+            remote_http_port: default_relay_remote_http_port(),
+            remote_mqtt_port: default_relay_remote_mqtt_port(),
+        }
+    }
 }
 
 /// Local Node Agent configuration (ADR-055 §6.11 / §6.13).
@@ -898,6 +955,10 @@ impl GatewayConfig {
                 sec.apply_env_overrides();
                 sec
             },
+            relay: file_config
+                .as_ref()
+                .map(|c| c.relay.clone())
+                .unwrap_or_default(),
             auth_mode: {
                 // ADR-076 §决策 12: CLI `--auth-mode` > TOML `auth_mode`.
                 // The bind-address inference is applied lazily in
@@ -1040,6 +1101,7 @@ impl Default for GatewayConfig {
             user: UserConfig::default(),
             security: SecurityConfig::default(),
             auth_mode: None,
+            relay: RelayClientConfig::default(),
         }
     }
 }

@@ -189,6 +189,19 @@ impl GatewayAuth {
         (s.access_token.clone(), s.epoch, s.armed)
     }
 
+    /// The mirrored access token, if a session is active.
+    ///
+    /// Read by `connect_mqtt` in relay mode: the strict remote MQTT
+    /// listener requires the account access token as the CONNECT
+    /// password (and the token's `sub` as the client_id name segment).
+    /// Unverified parsing of the token's payload is done at the call
+    /// site — the BROKER verifies the signature, so a locally-mis-read
+    /// `sub` only fails the broker's cross-check, never authenticates
+    /// anyone.
+    pub fn current_access_token(&self) -> Option<String> {
+        self.snapshot().0
+    }
+
     /// Wait for a token newer than `stale_epoch`, asking the webview to
     /// rotate once. Returns the renewed token, or `None` when the session is
     /// gone / the webview did not answer within [`AUTH_RENEW_TIMEOUT`].
@@ -1481,6 +1494,7 @@ mod tests {
             "author": "ACowork",
             "install_path": "/tmp/agents/com.test.agent",
             "alive": true,
+            "lifecycle": "sessions_ready",
             "ready": true,
             "pid": null,
             "started_at": null,

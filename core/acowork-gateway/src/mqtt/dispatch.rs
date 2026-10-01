@@ -2334,7 +2334,7 @@ mod tests {
             publisher_token: "publisher-tok".to_string(),
             http_token: None,
         };
-        let _handle = crate::mqtt::start_broker_with_auth(host, port, Some(auth))
+        let _handle = crate::mqtt::start_broker_with_auth(host, port, Some(auth), None)
             .expect("broker should start");
 
         // Gateway-side client: subscribes the persistent topics and

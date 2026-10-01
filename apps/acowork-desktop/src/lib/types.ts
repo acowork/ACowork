@@ -1,6 +1,12 @@
 import type { ContextUsageSection } from "./contextUsageBreakdown";
-/** Gateway deployment mode */
-export type GatewayMode = "local" | "remote";
+/**
+ * Gateway deployment mode (design doc 24 §8.0 — three-topology model):
+ * - "local"  — Desktop spawns/adopts a Gateway on this machine
+ * - "remote" — LAN direct connect to a pre-existing Gateway
+ * - "relay"  — connect through the cloud relay over the public internet
+ *              (WSS MQTT + user access token, no local spawn)
+ */
+export type GatewayMode = "local" | "remote" | "relay";
 
 /** Local Gateway process state */
 export type LocalGatewayState = "idle" | "starting" | "running" | "stopped" | "error";

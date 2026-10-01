@@ -188,6 +188,7 @@ impl NodeMqttClient {
             client_id: client_id.clone(),
             host: host.to_string(),
             port,
+            transport: acowork_mqtt_session::MqttTransport::Tcp,
             credentials: initial_credentials,
             last_will: Some(will),
             max_packet_size: acowork_core::defaults::GATEWAY_MQTT_MAX_PACKET_SIZE,

@@ -272,6 +272,12 @@ function AddWorkspaceDialog({ onClose, onAdd, recentPaths: _recentPaths }: { onC
   const [showRemotePicker, setShowRemotePicker] = useState(false);
 
   const handleBrowse = async () => {
+    // Relay mode: server-side fs browse is blocked by the Gateway's
+    // remote ACL (design doc 24 §7.2) and the local dialog is
+    // meaningless for a remote workspace host — button is disabled.
+    if (gatewayMode === "relay") {
+      return;
+    }
     if (gatewayMode === "remote") {
       setShowRemotePicker(true);
       return;
@@ -319,7 +325,8 @@ function AddWorkspaceDialog({ onClose, onAdd, recentPaths: _recentPaths }: { onC
               />
               <button
                 onClick={handleBrowse}
-                className="rounded-md border border-zinc-300 px-3 py-2 text-sm hover:bg-zinc-50 dark:border-zinc-600 dark:hover:bg-zinc-700"
+                disabled={gatewayMode === "relay"}
+                className="rounded-md border border-zinc-300 px-3 py-2 text-sm hover:bg-zinc-50 disabled:opacity-40 dark:border-zinc-600 dark:hover:bg-zinc-700"
               >
                 {gatewayMode === "remote" ? t("workspace.remoteBrowseBtn") : t("workspace.buttonBrowse")}
               </button>

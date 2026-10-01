@@ -28,7 +28,8 @@ pub use bootstrap::BootstrapAction;
 pub use client::{MqttClient, MqttClientError, MqttClientHandler};
 pub use config::{
     DEFAULT_MAX_PACKET_SIZE, FATAL_BACKOFF, FATAL_STREAK_LIMIT, KEEPALIVE_INTERVAL,
-    MqttClientConfig, POLL_WATCHDOG_TIMEOUT, POWER_PROBE_INTERVAL, WAKE_DETECT_THRESHOLD,
+    MqttClientConfig, MqttTransport, POLL_WATCHDOG_TIMEOUT, POWER_PROBE_INTERVAL,
+    WAKE_DETECT_THRESHOLD,
 };
 pub use err_class::{classify, ErrorDescriptor, ErrorKind, ErrClass, RefusedReason};
 pub use force_restart::ForceRestart;

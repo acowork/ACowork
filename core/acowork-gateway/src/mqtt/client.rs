@@ -222,6 +222,7 @@ impl GatewayMqttClient {
             client_id: client_id.to_string(),
             host: host.to_string(),
             port,
+            transport: acowork_mqtt_session::MqttTransport::Tcp,
             credentials: credentials.map(|(u, p)| (u.to_string(), p.to_string())),
             last_will: None,
             max_packet_size: defaults::GATEWAY_MQTT_MAX_PACKET_SIZE,

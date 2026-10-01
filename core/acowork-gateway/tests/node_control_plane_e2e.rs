@@ -381,7 +381,7 @@ async fn node_enrolls_and_reconnects_with_node_token_under_auth() {
         publisher_token: PUBLISHER_TOKEN.to_string(),
         http_token: Some("e2e-http-token".to_string()),
     };
-    let broker_handle = start_broker_with_auth("127.0.0.1", AUTH_TEST_PORT, Some(auth))
+    let broker_handle = start_broker_with_auth("127.0.0.1", AUTH_TEST_PORT, Some(auth), None)
         .expect("auth broker starts");
 
     // The collector impersonates the Gateway publisher — the only
@@ -906,7 +906,7 @@ async fn auth_broker_rejects_uncredentialed_node_connects() {
         publisher_token: PUBLISHER_TOKEN.to_string(),
         http_token: Some("e2e-http-token".to_string()),
     };
-    let broker_handle = start_broker_with_auth("127.0.0.1", AUTH_REJECT_PORT, Some(auth))
+    let broker_handle = start_broker_with_auth("127.0.0.1", AUTH_REJECT_PORT, Some(auth), None)
         .expect("auth broker starts");
 
     // Missing credential.

@@ -65,6 +65,66 @@ pub struct ConnectAuthContext<'a> {
     pub http_token: Option<&'a str>,
 }
 
+// ── Strict remote MQTT listener (design doc 24 §7.2) ────────────────
+
+/// Inputs for the strict listener (the second rumqttd v4 server).
+///
+/// The verifier is NOT captured at start time: `GatewayState.user_verifier`
+/// is loaded by the user supervisor once the user service publishes its
+/// Ed25519 public key, and unloaded again when that service stops — the
+/// handler re-reads it on every CONNECT so the remote listener follows the
+/// same lifecycle as HTTP authentication (no credential source divergence).
+#[derive(Clone)]
+pub struct RemoteMqttAuth {
+    /// Shared Gateway state — read on every CONNECT for the current
+    /// `user_verifier`.
+    pub gateway_state: std::sync::Arc<tokio::sync::RwLock<crate::gateway::state::GatewayState>>,
+}
+
+/// Admissible remote client-id shape (§7.2): `user:{name}:desktop:{id}`
+/// or `user:{name}:mobile:{id}`, both segments non-empty.
+///
+/// Returns the `{name}` segment on match (it is cross-checked against the
+/// token subject — a client may not wear another user's identity).
+fn remote_client_shape(client_id: &str) -> Option<&str> {
+    let rest = client_id.strip_prefix("user:")?;
+    for sep in [":desktop:", ":mobile:"] {
+        if let Some(idx) = rest.find(sep) {
+            let (name, tail) = rest.split_at(idx);
+            let device = &tail[sep.len()..];
+            if !name.is_empty() && !device.is_empty() && !name.contains(':') && !device.contains(':')
+            {
+                return Some(name);
+            }
+            return None;
+        }
+    }
+    None
+}
+
+/// Strict CONNECT decision for the remote listener (§7.2).
+///
+/// Allow: `user:{name}:desktop:{id}` / `user:{name}:mobile:{id}` with a
+/// valid access token whose subject IS `{name}`. Everything else —
+/// `node:*`, `agent:*`, internal publishers, unknown shapes — is rejected:
+/// there is no remote scenario where a Node/Runtime/machine identity
+/// should present itself (they live on the LAN and use `:19875`).
+pub fn check_remote_connect_auth(
+    client_id: &str,
+    password: &str,
+    verifier: &acowork_core::auth::TokenVerifier,
+    now: i64,
+) -> bool {
+    let Some(name) = remote_client_shape(client_id) else {
+        return false;
+    };
+    match verifier.verify_kind(password, acowork_core::auth::TokenKind::Access, now) {
+        Ok(claims) => claims.sub == name,
+        Err(_) => false,
+    }
+}
+
+
 /// Pure CONNECT authentication decision (ADR-055 §6.8, Phase 5a).
 ///
 /// client_id conventions (protocol docs §8.5):
@@ -161,13 +221,51 @@ pub struct MqttBrokerHandle {
     shutdown_tx: Option<std::sync::mpsc::Sender<()>>,
     /// The address the broker is listening on.
     pub listen_addr: SocketAddr,
+    /// The address of the strict remote listener, when it was started.
+    pub remote_listen_addr: Option<SocketAddr>,
+}
+
+/// The strict second v4 listener a broker may host (§7.2).
+pub struct RemoteMqttListener {
+    /// Bind host for the strict listener (always loopback — the only
+    /// path to it is the `/mqtt` WebSocket bridge on the remote HTTP
+    /// listener, itself loopback-only and fed by the relay tunnel).
+    pub host: String,
+    pub port: u16,
+    pub auth: RemoteMqttAuth,
 }
 
 /// Build the rumqttd `Config` from a TOML template (the library's intended API).
 ///
 /// Programmatic struct construction is fragile — rumqttd expects config via
 /// deserialization and fields like `ConsoleSettings` have non-trivial defaults.
-pub fn build_broker_config(host: &str, port: u16) -> Config {
+///
+/// `remote` adds the strict second v4 server (design doc 24 §7.2): same
+/// router/session state as the main server (remote Desktop clients and
+/// local Runtime publishers must see each other's traffic), but with its
+/// own listener address and auth handler.
+pub fn build_broker_config(host: &str, port: u16, remote: Option<(&str, u16)>) -> Config {
+    let remote_toml = remote
+        .map(|(h, p)| {
+            format!(
+                r#"
+[v4.acowork-remote]
+name = "acowork-remote"
+listen = "{h}:{p}"
+next_connection_delay_ms = 1
+
+[v4.acowork-remote.connections]
+connection_timeout_ms = 5000
+max_payload_size = {max_pkt}
+max_inflight_count = 100
+max_inflight_size = 1048576
+throttle_delay_ms = 0
+dynamic_filters = false
+"#,
+                max_pkt = defaults::GATEWAY_MQTT_MAX_PACKET_SIZE,
+            )
+        })
+        .unwrap_or_default();
     let config_toml = format!(
         r#"
 id = 0
@@ -192,7 +290,7 @@ max_inflight_count = 100
 max_inflight_size = 1048576
 throttle_delay_ms = 0
 dynamic_filters = false
-
+{remote_toml}
 [console]
 listen = "127.0.0.1:0"
 "#,
@@ -226,7 +324,7 @@ listen = "127.0.0.1:0"
 /// This is the ONLY public entry point for starting the broker; there
 /// is intentionally no "direct" (blocking) variant.
 pub fn start_broker(host: &str, port: u16) -> Result<MqttBrokerHandle, MqttBrokerError> {
-    start_broker_with_auth(host, port, None)
+    start_broker_with_auth(host, port, None, None)
 }
 
 /// Start the embedded MQTT broker with an optional CONNECT auth
@@ -234,10 +332,20 @@ pub fn start_broker(host: &str, port: u16) -> Result<MqttBrokerHandle, MqttBroke
 /// [`check_connect_auth`] into rumqttd's `set_auth_handler`;
 /// `None` keeps the historical permissive behavior (every connection
 /// passes).
+///
+/// `remote` (design doc 24 §7.2) additionally hosts a second v4 server
+/// with the STRICT handler ([`check_remote_connect_auth`]) on its own
+/// loopback listener. The two servers share one router, so remote
+/// Desktop clients and local Runtime publishers exchange traffic
+/// normally. A port conflict on the remote listener does NOT fail the
+/// broker — the main listener must stay up regardless; the strict
+/// listener is skipped with a warning.
+#[allow(clippy::too_many_arguments)]
 pub fn start_broker_with_auth(
     host: &str,
     port: u16,
     auth: Option<BrokerAuth>,
+    remote: Option<RemoteMqttListener>,
 ) -> Result<MqttBrokerHandle, MqttBrokerError> {
     let listen_addr: SocketAddr = format!("{}:{}", host, port)
         .parse()
@@ -246,6 +354,33 @@ pub fn start_broker_with_auth(
             host, port, e
         )))?;
 
+    // Pre-probe the remote port: rumqttd's `Broker::start` aborts the
+    // whole broker if ANY configured server cannot bind, and a remote
+    // -listener conflict must not take the main listener down with it.
+    // The probe is dropped before rumqttd binds — a tiny race window
+    // another process could theoretically steal, acceptable for a
+    // loopback dev-machine edge case.
+    let remote_bind: Option<(String, u16)> = remote.as_ref().and_then(|r| {
+        match std::net::TcpListener::bind((r.host.as_str(), r.port)) {
+            Ok(probe) => {
+                drop(probe);
+                Some((r.host.clone(), r.port))
+            }
+            Err(e) => {
+                tracing::warn!(
+                    port = r.port,
+                    error = %e,
+                    "remote MQTT listener port unavailable; strict listener disabled (main broker unaffected)"
+                );
+                None
+            }
+        }
+    });
+    let remote_listen_addr: Option<SocketAddr> = remote_bind
+        .as_ref()
+        .map(|(h, p)| format!("{}:{}", h, p))
+        .and_then(|s| s.parse().ok());
+
     let (tx, rx) = std::sync::mpsc::channel();
     let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel();
     let h = host.to_string();
@@ -253,7 +388,8 @@ pub fn start_broker_with_auth(
     std::thread::Builder::new()
         .name("mqtt-broker".into())
         .spawn(move || {
-            let mut config = build_broker_config(&h, port);
+            let mut config =
+                build_broker_config(&h, port, remote_bind.as_ref().map(|(h, p)| (h.as_str(), *p)));
             if let Some(auth) = auth {
                 let v4 = config.v4.as_mut().expect("v4 servers configured");
                 let server = v4.get_mut("acowork").expect("server 'acowork' configured");
@@ -285,6 +421,41 @@ pub fn start_broker_with_auth(
                             };
                             check_connect_auth(&client_id, &username, &password, &ctx)
                         })
+                    },
+                );
+            }
+            // Strict remote listener handler (§7.2): every CONNECT
+            // re-reads the CURRENT verifier from GatewayState, so the
+            // remote MQTT surface follows the user service lifecycle
+            // exactly like the HTTP surface does (fail closed while
+            // the verifier is not loaded). Guard = the server actually
+            // being present in the built config (a port conflict skips
+            // it above).
+            if let Some(remote) = remote.as_ref()
+                && let Some(server) = config
+                    .v4
+                    .as_mut()
+                    .and_then(|v4| v4.get_mut("acowork-remote"))
+            {
+                let state = remote.auth.gateway_state.clone();
+                tracing::info!(
+                    "strict remote MQTT CONNECT auth handler installed (design doc 24 §7.2)"
+                );
+                server.connections.set_auth_handler(
+                    move |client_id, _username, password| {
+                        let state = state.clone();
+                        async move {
+                            let gw = state.read().await;
+                            match &gw.user_verifier {
+                                Some(verifier) => check_remote_connect_auth(
+                                    &client_id,
+                                    &password,
+                                    verifier,
+                                    acowork_core::auth::now_unix(),
+                                ),
+                                None => false,
+                            }
+                        }
                     },
                 );
             }
@@ -364,6 +535,7 @@ pub fn start_broker_with_auth(
     Ok(MqttBrokerHandle {
         shutdown_tx: Some(shutdown_tx),
         listen_addr,
+        remote_listen_addr,
     })
 }
 
@@ -401,6 +573,7 @@ mod tests {
         let config = build_broker_config(
             defaults::GATEWAY_MQTT_HOST,
             defaults::GATEWAY_MQTT_PORT,
+            None,
         );
 
         assert_eq!(config.router.max_connections, 100);
@@ -418,14 +591,107 @@ mod tests {
             10 * 1024 * 1024
         );
         assert!(server.tls.is_none(), "TLS should be disabled for localhost");
+        assert!(
+            !v4.contains_key("acowork-remote"),
+            "no remote server without the strict listener"
+        );
     }
 
     #[test]
     fn test_build_broker_config_custom_host_port() {
-        let config = build_broker_config("127.0.0.1", 32100);
+        let config = build_broker_config("127.0.0.1", 32100, None);
         let v4 = config.v4.as_ref().expect("v4 servers must be configured");
         let server = v4.get("acowork").unwrap();
         assert_eq!(server.listen.port(), 32100);
+    }
+
+    #[test]
+    fn test_build_broker_config_with_remote() {
+        let config = build_broker_config("127.0.0.1", 32100, Some(("127.0.0.1", 19874)));
+        let v4 = config.v4.as_ref().expect("v4 servers must be configured");
+        let remote = v4
+            .get("acowork-remote")
+            .expect("strict remote server must exist");
+        assert_eq!(remote.listen.port(), 19874);
+        // Same payload limits as the main server.
+        assert_eq!(
+            remote.connections.max_payload_size,
+            v4.get("acowork").unwrap().connections.max_payload_size
+        );
+    }
+
+    #[test]
+    fn remote_client_shape_accepts_desktop_and_mobile() {
+        assert_eq!(remote_client_shape("user:alice:desktop:mac-1"), Some("alice"));
+        assert_eq!(remote_client_shape("user:alice:mobile:phone-1"), Some("alice"));
+        assert_eq!(remote_client_shape("user:大鱼:desktop:mac-1"), Some("大鱼"));
+    }
+
+    #[test]
+    fn remote_client_shape_rejects_everything_else() {
+        // Internal identities never allowed remotely (§7.2).
+        assert_eq!(remote_client_shape("node:local"), None);
+        assert_eq!(remote_client_shape("agent:com.example"), None);
+        assert_eq!(remote_client_shape("gateway:publisher"), None);
+        assert_eq!(remote_client_shape("user:service"), None);
+        // Malformed shapes.
+        assert_eq!(remote_client_shape("user:alice:web:mac-1"), None);
+        assert_eq!(remote_client_shape("user:alice:desktop:"), None);
+        assert_eq!(remote_client_shape("user::desktop:mac-1"), None);
+        assert_eq!(remote_client_shape("user:al:ice:desktop:x"), None);
+        assert_eq!(remote_client_shape("user:alice:desktop:a:b"), None);
+        assert_eq!(remote_client_shape("alice:desktop:mac-1"), None);
+        assert_eq!(remote_client_shape("random"), None);
+        assert_eq!(remote_client_shape(""), None);
+    }
+
+    #[test]
+    fn remote_connect_requires_matching_access_token() {
+        let verifier = crate::http::test_support::verifier();
+        let now = acowork_core::auth::now_unix();
+        let alice = crate::http::test_support::access_token("alice", "user");
+
+        // Matching subject + valid token → allowed.
+        assert!(check_remote_connect_auth(
+            "user:alice:desktop:mac-1",
+            &alice,
+            &verifier,
+            now
+        ));
+        // Valid token worn under ANOTHER user's client id → rejected.
+        assert!(!check_remote_connect_auth(
+            "user:bob:desktop:mac-1",
+            &alice,
+            &verifier,
+            now
+        ));
+        // Wrong password / refresh-kind token → rejected.
+        assert!(!check_remote_connect_auth(
+            "user:alice:desktop:mac-1",
+            "wrong-token",
+            &verifier,
+            now
+        ));
+        let issuer = acowork_core::auth::TokenIssuer::new(ed25519_dalek::SigningKey::from_bytes(
+            &{
+                // Same seed as test_support — a refresh token from the
+                // SAME issuer verifies as a signature but fails the
+                // kind check.
+                const S: [u8; 32] = [
+                    0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc,
+                    0xdd, 0xee, 0xff, 0x00, 0x0f, 0x1e, 0x2d, 0x3c, 0x4b, 0x5a, 0x69, 0x78,
+                    0x87, 0x96, 0xa5, 0xb4, 0xc3, 0xd2, 0xe1, 0xf0,
+                ];
+                S
+            },
+        ));
+        let refresh = issuer.sign_refresh("alice", "alice.family-1", now);
+        assert!(!check_remote_connect_auth(
+            "user:alice:desktop:mac-1",
+            &refresh,
+            &verifier,
+            now
+        ));
     }
 
     use std::path::PathBuf;

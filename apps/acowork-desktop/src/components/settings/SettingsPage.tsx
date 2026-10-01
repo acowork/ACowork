@@ -233,6 +233,7 @@ function GatewayTab() {
             options={[
               { label: t("settings.local"), value: "local" as GatewayMode },
               { label: t("settings.remote"), value: "remote" as GatewayMode },
+              { label: t("settings.relay"), value: "relay" as GatewayMode },
             ]}
             onChange={handleModeChange}
           />
@@ -328,8 +329,8 @@ function GatewayTab() {
         </ListBox>
       )}
 
-      {/* Remote mode: URL + test */}
-      {gatewayMode === "remote" && (
+      {/* Off-site modes (remote LAN / relay): URL + test */}
+      {gatewayMode !== "local" && (
         <ListBox dividers={false}>
           <ExpandableRow
             open={gatewayConnOpen}
@@ -348,7 +349,7 @@ function GatewayTab() {
                   onChange={setUrlDraft}
                   onCommit={handleUrlSave}
                   options={gatewayUrlHistory}
-                  placeholder={DEFAULT_GATEWAY_URL}
+                  placeholder={gatewayMode === "relay" ? "https://<gw-id>.relay.example.com" : DEFAULT_GATEWAY_URL}
                   ariaLabel={t("settings.gatewayUrl")}
                 />
                 {urlDraft !== gatewayUrl && (
@@ -397,6 +398,12 @@ function GatewayTab() {
           </ExpandableRow>
         </ListBox>
       )}
+
+      {/* Relay mode: tunnel status panel (polls GET /api/relay/status —
+          the Gateway's relay client snapshot, forwarded through the
+          tunnel itself). Read-only: enable/disable is Gateway-side
+          admin (the remote ACL blocks the mutating endpoints, §7.2). */}
+      {gatewayMode === "relay" && <RelayTunnelPanel />}
 
       {/* Nodes + their agents (shared between modes) */}
       <ListBox dividers={false}>
@@ -465,6 +472,139 @@ function GatewayTab() {
         </ExpandableRow>
       </ListBox>
     </div>
+  );
+}
+
+/** Mirror of the Gateway's `RelayClientStatus`
+ *  (`GET /api/relay/status`, core `relay/client.rs`). Only the fields
+ *  the panel renders — unknown fields are ignored by design so a
+ *  Gateway-side addition doesn't break older Desktops. */
+interface RelayStatus {
+  enabled: boolean;
+  relay_url: string | null;
+  gw_id: string | null;
+  connected: boolean;
+  session_id: string | null;
+  last_error: string | null;
+  connected_at: string | null;
+}
+
+/** Relay-mode tunnel status panel (design doc 24 §8.1 远程访问面板).
+ *
+ *  Self-contained card: polls the Gateway's relay tunnel snapshot every
+ *  5 s while mounted (the request itself travels through the tunnel,
+ *  so a successful poll with `connected: false` is meaningful — the
+ *  Gateway is reachable but its outbound tunnel to the relay is down).
+ *  Read-only by design: `POST /api/relay/enable|disable` are blocked
+ *  for relay-originated requests by the remote ACL (§7.2), so the
+ *  panel never offers them. */
+function RelayTunnelPanel() {
+  const { t } = useTranslation();
+  const [relayStatus, setRelayStatus] = useState<RelayStatus | null>(null);
+  const [relayError, setRelayError] = useState(false);
+  const [relayOpen, setRelayOpen] = useState(true);
+
+  const refreshRelay = useCallback(async () => {
+    try {
+      const resp = await fetch(`${getGatewayUrl()}/api/relay/status`);
+      if (resp.ok) {
+        setRelayStatus((await resp.json()) as RelayStatus);
+        setRelayError(false);
+      } else {
+        setRelayError(true);
+      }
+    } catch {
+      // Gateway unreachable through the relay — keep the last snapshot
+      // and flag the fetch failure.
+      setRelayError(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshRelay();
+    const id = setInterval(() => void refreshRelay(), 5000);
+    return () => clearInterval(id);
+  }, [refreshRelay]);
+
+  const connected = relayStatus?.connected ?? false;
+  const gwId = relayStatus?.gw_id ?? "—";
+  const relayUrl = relayStatus?.relay_url ?? "—";
+  const session = relayStatus?.session_id ?? "—";
+  const connectedAt = relayStatus?.connected_at
+    ? new Date(relayStatus.connected_at).toLocaleString()
+    : "—";
+
+  return (
+    <ListBox dividers={false}>
+      <ExpandableRow
+        open={relayOpen}
+        onToggle={() => setRelayOpen((v) => !v)}
+        title={t("settings.relayTunnel")}
+        ariaLabel={t("settings.relayTunnel")}
+        trailing={
+          <span onClick={(e) => e.stopPropagation()}>
+            <button
+              onClick={() => void refreshRelay()}
+              className="rounded btn-solid px-2 py-1 text-[11px] font-medium"
+            >
+              {t("settings.nodesRefresh")}
+            </button>
+          </span>
+        }
+        bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset p-3"
+      >
+        <div className="space-y-2 text-xs">
+          <div className="flex items-center gap-2">
+            <span className="text-text-tertiary">{t("settings.status")}</span>
+            <span
+              className={cn(
+                "h-2 w-2 rounded-full",
+                connected ? "bg-[var(--color-accent)]" : relayError ? "bg-red-500" : "bg-zinc-400",
+              )}
+            />
+            <span
+              className={cn(
+                connected
+                  ? "text-[var(--color-accent)]"
+                  : relayError
+                    ? "text-red-600 dark:text-red-400"
+                    : "text-text-tertiary",
+              )}
+            >
+              {connected
+                ? t("settings.relayTunnelOnline")
+                : relayError
+                  ? t("settings.error")
+                  : t("settings.relayTunnelOffline")}
+            </span>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <span className="text-text-tertiary">{t("settings.relayGwId")}</span>
+            <span className="font-mono">{gwId}</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-text-tertiary">{t("settings.relayUrl")}</span>
+            <span className="font-mono">{relayUrl}</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-text-tertiary">{t("settings.relaySession")}</span>
+            <span className="font-mono">{session}</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-text-tertiary">{t("settings.relayConnectedAt")}</span>
+            <span className="font-mono">{connectedAt}</span>
+          </div>
+
+          {relayStatus?.last_error && (
+            <div className="flex items-center gap-2">
+              <span className="text-text-tertiary">{t("settings.relayLastError")}</span>
+              <span className="text-red-600 dark:text-red-400">{relayStatus.last_error}</span>
+            </div>
+          )}
+        </div>
+      </ExpandableRow>
+    </ListBox>
   );
 }
 

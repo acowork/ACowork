@@ -80,6 +80,9 @@ pub struct AppState {
     /// ADR-076 §决策 12: the resolved deployment auth mode. `Local` =
     /// legacy bearer token, no account system.
     pub auth_mode: AuthMode,
+    /// Design doc 24 §6.3: relay tunnel client — runtime enable/disable
+    /// and status for the outbound WSS tunnel to an acowork-relay.
+    pub relay_client: Option<std::sync::Arc<crate::relay::RelayClient>>,
 }
 
 impl AppState {
@@ -100,6 +103,7 @@ impl AppState {
             operation_store: None,
             ip_allowlist: crate::security::IpAllowlist::default(),
             auth_mode: AuthMode::Local,
+            relay_client: None,
         }
     }
 }
@@ -270,6 +274,8 @@ pub fn build_router(state: AppState) -> Router {
         .merge(crate::http::doc_proxy::doc_proxy_routes())
         .merge(crate::http::debug_mqtt::debug_mqtt_routes())
         .merge(crate::http::settings_api::settings_routes())
+        // Design doc 24 §6.3: relay tunnel management.
+        .merge(crate::http::relay_api::relay_routes())
         .with_state(state)
         // Global body-size cap. See `GLOBAL_BODY_LIMIT` for why we
         // override axum's 2 MiB default at the root of the gateway

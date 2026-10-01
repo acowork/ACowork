@@ -16,6 +16,7 @@ members = [
     "acowork-pm",
     "acowork-doc",
     "acowork-user",
+    "acowork-relay",
 ]
 resolver = "2"
 
@@ -106,7 +107,9 @@ parking_lot = "0.12"
 
 # UUID
 uuid = { version = "1.22", features = ["v4", "std"] }
-futures-util = "0.3"
+# `sink`+`io`: WS sink/stream adapters and copy_bidirectional for the
+# relay tunnel data path (design doc 24).
+futures-util = { version = "0.3", features = ["sink", "io"] }
 
 # Stream
 futures-core = "0.3"
@@ -116,8 +119,15 @@ tokio-stream = { version = "0.1", features = ["io-util"] }
 # We only need the `io` feature, which exposes `tokio_util::io::ReaderStream`;
 # `io-util` would also work but pulls in `tokio/rt`. `tokio-stream`'s own
 # lib.rs explicitly defers these adapters to `tokio-util`.
-tokio-util = { version = "0.7", default-features = false, features = ["io"] }
+# `compat` (design doc 24): tokio↔futures IO bridging in the tunnel path.
+tokio-util = { version = "0.7", default-features = false, features = ["io", "compat"] }
 tokio-tungstenite = "0.29"
+
+# Relay TLS termination (design doc 24 §5.3): SNI-routed entry listener.
+# ring provider keeps a single crypto backend alongside tokio-tungstenite.
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-pemfile = "2"
 
 # Regex
 regex = "1.0"
@@ -172,8 +182,21 @@ prost-build = "0.13"
 protoc-bin-vendored = "3"
 
 # MQTT (ADR-033)
-rumqttc = "0.25"
+# `websocket` feature (design doc 24): MQTT-over-WSS transport for the
+# relay remote mode (rumqttc `Transport::Wss`).
+# `default-features = false` + `use-rustls-no-provider`: rumqttc's default
+# `use-rustls` enables tokio-rustls/default → rustls `aws-lc-rs`, which
+# collides with the workspace-wide `ring` provider (feature unification
+# would leave `ClientConfig::builder()` unable to auto-select a
+# CryptoProvider — runtime panic). TLS still works: the ring provider is
+# guaranteed by acowork-mqtt-session (rustls/ring dep + explicit
+# `install_default`).
+rumqttc = { version = "0.25", default-features = false, features = ["websocket", "use-rustls-no-provider"] }
 rumqttd = { version = "0.20", default-features = false }
+
+# Stream multiplexing inside the relay tunnel WSS connection
+# (design doc 24 §5.2): one logical yamux stream per client connection.
+yamux = "0.14"
 
 # ONNX Runtime — static or dynamic linking.
 #
@@ -219,6 +242,7 @@ acowork-embed = { path = "acowork-embed" }
 acowork-lsp-relay = { path = "acowork-lsp-relay" }
 acowork-mqtt-session = { path = "acowork-mqtt-session" }
 acowork-pm = { path = "acowork-pm" }
+acowork-relay = { path = "acowork-relay" }
 
 # The next build will work
 

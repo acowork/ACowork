@@ -67,11 +67,12 @@ export function AgentList({ width }: AgentListProps) {
   const agentsList = useMemo(() => Object.values(agentsMap).map((s) => s.meta), [agentsMap]);
 
   // ADR-073 §4: view mode is decided automatically by `gatewayMode`. In
-  // remote mode (multi-node Gateway) the sidebar groups agents by node and
-  // shows a collapsible 1/3-height header per node; in local mode the
-  // pre-existing flat list renders unchanged.
+  // an off-site mode (remote LAN or relay — multi-node Gateway) the
+  // sidebar groups agents by node and shows a collapsible 1/3-height
+  // header per node; in local mode the pre-existing flat list renders
+  // unchanged.
   const gatewayMode = useSettingsStore((s) => s.gatewayMode);
-  const isRemoteMode = gatewayMode === "remote";
+  const isRemoteMode = gatewayMode !== "local";
 
   // Node topology snapshot — owned by `agentStore` so the Gateway
   // connection lifecycle (drop → markNodesOffline, rise → fetchNodes)

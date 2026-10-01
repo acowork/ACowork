@@ -56,6 +56,7 @@ pub mod process;
 pub mod protocol;
 pub mod providers;
 pub mod rag;
+pub mod relay;
 pub mod shutdown;
 pub mod supervisor;
 pub mod timeout_config;

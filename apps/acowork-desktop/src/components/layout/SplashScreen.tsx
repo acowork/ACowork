@@ -334,8 +334,9 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
             // candidates (laptop moved LAN). Fires on a parallel track;
             // doesn't cancel the main boot pipeline. Skipped in local
             // mode (always 127.0.0.1) and when there's no history to
-            // probe.
-            if (gatewayMode === "remote" && !candidatesOffered) {
+            // probe. Applies to both off-site modes (remote LAN and
+            // relay — the relay device domain can change too).
+            if (gatewayMode !== "local" && !candidatesOffered) {
                 const history = useSettingsStore.getState().gatewayUrlHistory;
                 const currentUrl = useSettingsStore.getState().gatewayUrl;
                 const others = history.filter((u) => u !== currentUrl);
