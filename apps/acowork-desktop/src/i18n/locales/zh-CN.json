@@ -1079,7 +1079,10 @@
     "distillNow": "立即沉淀",
     "distillDone": "已蒸馏 {{scanned}} 条经历，晋升 {{promoted}} 条记忆",
     "distillEmpty": "没有待蒸馏的新经历",
-    "pagerOf": "第 {{current}} / {{total}} 页"
+    "pagerOf": "第 {{current}} / {{total}} 页",
+    "distillerDeferred": "{{deferred}} 条待模型裁决",
+    "distillerNoCandidates": "无相似既有记忆，直接沉淀 {{projected}} 条",
+    "distillerRunFailed": "上次蒸馏失败：{{error}}"
   },
   "skillsPanel": {
     "selectSkill": "选择技能",

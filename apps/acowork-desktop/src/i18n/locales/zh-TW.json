@@ -1022,7 +1022,10 @@
     "distillNow": "立即沉澱",
     "distillDone": "已蒸餾 {{scanned}} 條經歷，晉升 {{promoted}} 條記憶",
     "distillEmpty": "沒有待蒸餾的新經歷",
-    "pagerOf": "第 {{current}} / {{total}} 頁"
+    "pagerOf": "第 {{current}} / {{total}} 頁",
+    "distillerDeferred": "{{deferred}} 條待模型裁決",
+    "distillerNoCandidates": "無相似既有記憶，直接沉澱 {{projected}} 條",
+    "distillerRunFailed": "上次蒸餾失敗：{{error}}"
   },
   "skillsPanel": {
     "selectSkill": "選擇技能",

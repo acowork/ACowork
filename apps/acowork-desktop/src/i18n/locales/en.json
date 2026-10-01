@@ -1261,7 +1261,10 @@
     "distillNow": "Distill now",
     "distillDone": "Distilled {{scanned}} episodes; promoted {{promoted}} memories",
     "distillEmpty": "No new episodes to distill",
-    "pagerOf": "Page {{current}} of {{total}}"
+    "pagerOf": "Page {{current}} of {{total}}",
+    "distillerDeferred": "{{deferred}} awaiting a model verdict",
+    "distillerNoCandidates": "{{projected}} projected with no similar node",
+    "distillerRunFailed": "Last distill failed: {{error}}"
   },
   "statusBar": {
     "agent": "agent",

@@ -1,6 +1,7 @@
 # ADR-071: 记忆蒸馏运行时配置与触发接线(EpisodicDistiller 可运维化)
 
-**状态**:已实现(2026-09;W1–W5 落地,提交见实施路径表;W6 文档收尾)
+**状态**:已实现(2026-09;W1–W5 落地,提交见实施路径表;W6 文档收尾);2026-10 随 [ADR-068 Revision(2026-10)](./ADR-068-memory-layer-promotion-two-axis-orthogonal.md) 调整配置面,见下方修订说明
+**日期**:2026-09(2026-10 修订)
 **日期**:2026-09
 **决策者**:大鱼
 **前置**:
@@ -123,3 +124,20 @@ legacy offline(生命周期 cleanup)维持原 Pending 条件;两条管道各自�
 | ADR-063 | **扩展** — `OVERRIDABLE_PROMPTS` +2 |
 | ADR-053 | **依赖先例** — summary.md 覆盖与 Debug PromptList 范式 |
 | ADR-062 | **无冲突** — keyword sanitize 等质量门禁在 LLM 边界不变 |
+
+---
+
+## 修订说明(2026-10):配置面随「投影 + 合并」收敛
+
+本 ADR 的**触发口径、调度接线、手动蒸馏入口、模型选择**全部保持不变——线上故障不在触发(日志证明周期/积压/空闲每次都满足)。变的是蒸馏器内部,因此两处配置面跟着收缩:
+
+| 本 ADR 原条款 | 2026-10 实际 |
+|---|---|
+| D6:`OVERRIDABLE_PROMPTS` +2(`distiller-extraction.md` Step 2a 结构化提取、`distiller-judge.md` Step 4 Judge 仲裁) | **合并为 1 个槽位 `distiller-merge.md`**。提取段与判定段已下线,蒸馏器只剩一次 LLM 调用(在新陈述与 K 条候选之间判 `merge / no_merge / contradicts`),两个槽位没有两个消费者。白名单现为 system + 5 项 |
+| ADR-068 遗留的 5 个晋升门槛 + 墓碑 | **收敛为单一旋钮 `min_importance`**(`[memory.distiller].min_importance`,默认 `0.0` 即全投影)。语义:低于此值的 episode 不投影,但**不留墓碑**、每轮重新考虑——收紧后再放宽不丢历史数据,这是移除墓碑的前提 |
+| `DistillerConfig` 的聚簇/判定参数 | 保留 `batch_size`(100)、`merge_candidate_k`(5)、`merge_recall_threshold`(0.65);删除聚类与判定相关字段 |
+
+**`merge_recall_threshold` 的取舍**(常被问为什么偏低):阈值只决定「哪些旧节点被送去给模型判」,不决定「是否合并」。低于阈值 → 直接投影(零调用);高于阈值 → 多一次 `no_merge` 裁决(一次小 JSON 的成本)。因此**误候选的代价是一次调用,漏候选的代价是一个永不被再次 reunite 的重复节点**。放宽是有方向的。若面板过密,先调 `min_importance`,不要动这个阈值——调低阈值只会让更多 episode 绕过模型直接落库,重复更多。
+
+**运维事实**:召回到候选但无可用模型时,episode 停在「延后」而不猜测。生产路径始终传入模型(`run_episodic_distiller_step` 收 `&dyn ConsolidationLlm`),所以这只在模型配置异常时出现,表现为「积压数字不降但沉淀也不涨」。排障时先确认蒸馏有可用模型,再看触发参数。
+

@@ -89,3 +89,18 @@
 - `adr071_e2e` 2/2 ✅;`agent_config_impl` +4 ✅;`server.rs` distiller roundtrip +1 ✅;`embedding_bridge_tests` +3 ✅;`consolidation_bg` 全量 18 ✅
 - `acowork-runtime --lib` 1389 passed,唯一失败仍为预存基线 `restart_after_compression_preserves_todo_state`;clippy 0 新增
 - 测试补强后影响面映射:触发(W1)✅ 单测;手动端点(W2)✅ e2e + 单测;配置链(W3)✅ 单测 + HTTP roundtrip;prompt(W4)✅ grafeo/agent_core 单测;embedding 桥(W2)✅ 三路径;status(W2)✅ e2e
+
+---
+
+## 后续变更（2026-10）：本评审结论的时效性
+
+本文件是对 `e3ffe9f7..f4eaf46e` 的历史评审记录，正文按原样保留。但其中若干结论对应的代码在 [ADR-068 Revision(2026-10)](../adr/zh/ADR-068-memory-layer-promotion-two-axis-orthogonal.md)（沉淀收敛为「投影 + 合并」，提交 `d2745c21`/`5be91f91`）之后已不存在，按本文件行事会踩空：
+
+| 本文件结论 | 2026-10 之后 |
+|---|---|
+| D6 蒸馏 prompt 两槽（`distiller-extraction.md` / `distiller-judge.md`）✅ | **合并为一槽 `distiller-merge.md`**。提取段与 Judge 段下线，蒸馏只剩一次 LLM 调用，两个槽位没有两个消费者。`OVERRIDABLE_PROMPTS` 现为 5 项 |
+| D4/D5 蒸馏模型解析链、`distiller_enabled` 门控 | **不变**，仍然有效 |
+| D1/D2/D3 触发口径、手动端点、配置分层 | **不变**。线上「0 沉淀」故障不在触发——日志证明周期/积压/空闲每次都满足 |
+| `count_unconsolidated_episodes` 口径 | **不变**，但注意它只计有 `knowledge_subtype` 的 episode |
+
+新增的运维事实（本评审当时无从得知）：召回到候选但无可用模型时 episode 停在「延后」，面板表现为积压不降、沉淀不涨。生产路径始终传入模型，故只在模型配置异常时出现——排障顺序应是先确认蒸馏有可用模型，再看触发参数。

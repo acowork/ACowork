@@ -153,7 +153,7 @@ for episode in 扫描窗口:
 |---|---|
 | 两轴不变量（LLM 只写经历层） | 单一写入者、可审计，是正确的架构约束 |
 | `source_episode_ids` | 天然幂等键，同一 episode 不会被投影两次 |
-| 冲突消解三分类（evolution / correction / ambiguous） | 需要全局视野，确实只有离线能做 —— **本次不动** |
+| ~~冲突消解三分类（evolution / correction / ambiguous）~~ | **计划原文有误**：这套分类在代码里已经没有任何生产者 —— `ConflictType`、`conflicts_evolution/correction/ambiguous`、`should_trigger_confirmation` 全库零引用，旧管线停用后就是死代码。合并分支是重写时新写的，不是「接上原有的」。见 §8 |
 | `importance` 驱动的衰减 | 价值控制量的正确机制（已有），取代晋升门槛 |
 | episodic forgetting | 同上 |
 | `promote_event`（History 里程碑） | 事件触发通道，与 episode 聚类无关 |
@@ -224,7 +224,7 @@ for episode in 扫描窗口:
 | M2-2 | `count_unconsolidated_episodes` 与候选池口径对齐（只计有 subtype 的） | status 数字自洽 |
 | M2-3 | 投影路径：无候选 → 直接落库，零 LLM 调用 | 单测：全新 episode 不调 LLM |
 | M2-4 | 合并路径：LLM 输入 = 1 条新 + K 条候选，输出 = `same_fact / conflict / distinct` | 单测覆盖三个分支 |
-| M2-5 | `conflict` 分支接现有 evolution / correction 判定，**逻辑原样不动** | 现有冲突消解测试全绿 |
+| M2-5 | ~~接现有 evolution / correction 判定~~ → 合并分支新写（旧分类无生产者，见 §8） | 单测：`no_merge` 新建节点、幻觉 `target_id` 不采纳 |
 | M2-6 | 删除 §3.3 清单中的全部门槛与墓碑 | `cargo clippy -- -D warnings` 无 dead code |
 | M2-7 | 单条 episode 失败隔离 | 现有 `test_d15_single_episode_failure_isolated` 保持绿 |
 | M2-8 | 新增 `[memory.distiller].min_importance`（默认 0）作为唯一兜底开关 | 可一键收紧 |
@@ -235,7 +235,7 @@ for episode in 扫描窗口:
 
 **决策：用 `content` 直接投影，不重新抽取。** 理由：重新抽取等于再引入一次低质量结构化，正是本次要移除的东西；`content` 本身已经是写时 LLM 的判断产物，符合 §2.1 的立场。
 
-一次性脚本，跑完即删，不进产品代码路径。
+**实施修正**：不需要脚本。`Episode::statement()` 的 normalized→content 回退本身就是 backfill —— 存量行读出来就能投影。改用一个 `#[ignore]` 的手动测试在**真实 store 的副本**上验证（`memory_lifecycle_e2e.rs::backfill_on_a_real_store_drains_the_backlog_without_a_model`），结果见 §8。
 
 ### M4 — 文档（0.5d）
 
@@ -279,3 +279,49 @@ for episode in 扫描窗口:
 | Q2 | 合并候选数 K 取多少？ | **K=5**。再多就把合并判断变成又一次批量处理 |
 | Q3 | 召回阈值 0.65 是否偏低导致误合并？ | 宁可宽松。误合并可被用户纠正（面板可编辑），漏合并不被察觉——但漏合并**不会永久丢失**（无墓碑），与 §2.5 的不对称性一致 |
 | Q4 | M0 是否先独立发布？ | **是**。M0 是 M2 的验证工具，且即使重构取消，M0 也该落地 |
+
+---
+
+## 8. 实施结果与计划偏差
+
+提交：`d2745c21`（M0-M2 重构）、`5be91f91`（statement 收敛 + 端到端验证）。
+
+### 8.1 与计划不符的三处
+
+| # | 计划假设 | 实际 |
+|---|---|---|
+| 1 | 冲突消解逻辑「原样保留、本次不动」 | 该逻辑**早已无生产者**。`ConflictType`、`conflicts_evolution/correction/ambiguous`、`should_trigger_confirmation` 全库零引用，属死代码。合并分支是重写时新写的，不是接上旧的 |
+| 2 | M3 需要一次性 backfill 脚本 | 不需要。`Episode::statement()` 的 normalized→content 回退**本身就是** backfill，存量行读出来即可投影。改为在真实 store 副本上跑 `#[ignore]` 测试验证 |
+| 3 | `PromotionKind` 保留 Autobio 各变体 | 删除 `AutobioLimitation` / `AutobioPreference`（聚类管线已移除，无生产者）。保留 `AutobioRelationship`（30 天规则）与 `AutobioHistory`（里程碑事件）——两者与 episode 聚类无关 |
+
+### 8.2 真实 store 实测（回答「开关开了很久没产出一条记忆」）
+
+Ponytail 实例 `8f7be9a6`，重构前的 `private.sqlite` 副本：
+
+```
+episodic rows   : 269      pending backlog : 262      sediment before : knowledge=0 procedural=0
+无模型：run1 投影 30 / 延后 70 → run3 收敛，累计 projected=33, llm_calls=0
+有模型：3 轮清空积压，sediment after = knowledge=141 procedural=121
+```
+
+实例 `1de45b14`（7 条 episode，全部无向量）：无模型即投影 5 条，有模型 1 轮清空。
+
+结论：旧管线产出 0 不是因为触发条件（周期/积压/空闲都满足，日志可证），而是因为**提取→聚类→判定链路上的门槛从未同时通过**。重写后同一条数据在零 token 下即产出 33 条沉淀。
+
+### 8.3 需要知道的行为边界
+
+- **无模型时积压会停在「延后」状态。** 有向量近邻的 episode 需要模型裁决，没有就等。这是刻意的（猜错两个方向都不可逆），但面板上看起来像「卡住」。生产路径 `run_episodic_distiller_step` 始终传入模型，所以只在配置异常时出现。
+- **`batch_size=100`，262 条积压需要 3 轮。** 不是单轮清空。
+- **`KeepDistinct`（模型总说「不合并」）下 262 条 → 262 个节点**，即语义层密度上界由模型判断决定，不由代码决定。若面板过密，收紧 `min_importance` 是唯一兜底开关。
+
+### 8.4 验证方式
+
+`core/acowork-runtime/tests/memory_lifecycle_e2e.rs`（9 通过 + 1 ignored）。每条断言都做过变异测试确认能失败：
+
+| 注入的错误 | 被捕获的测试 |
+|---|---|
+| 衰减扫描同时扫 Knowledge | `forgetting_the_episode_keeps_the_sediment`、`sediment_stays_recallable_after_its_episodes_are_forgotten` |
+| 忽略 `dormant_threshold`（见到就休眠） | `a_recent_episode_survives_even_an_aggressive_decay_scan` |
+| 忽略 `archive_days`（见到 Dormant 就清除） | `a_dormant_episode_waits_out_its_grace_period_before_being_forgotten` |
+
+前两项最初**没有**失败，原因是测试只回拨了 episode 的时间、没有回拨沉淀节点的时间，以及断言只看「节点还在」而 Dormant 节点依然可召回。补齐后三项才真正咬人。

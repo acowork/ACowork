@@ -1024,7 +1024,10 @@
     "distillNow": "지금 증류",
     "distillDone": "{{scanned}}건 증류, {{promoted}}건 승격",
     "distillEmpty": "증류할 새 에피소드가 없습니다",
-    "pagerOf": "{{current}} / {{total}} 페이지"
+    "pagerOf": "{{current}} / {{total}} 페이지",
+    "distillerDeferred": "{{deferred}}개 모델 판정 대기",
+    "distillerNoCandidates": "유사 노드 없이 {{projected}}개 침전",
+    "distillerRunFailed": "최근 증류 실패: {{error}}"
   },
   "skillsPanel": {
     "selectSkill": "기술 선택",

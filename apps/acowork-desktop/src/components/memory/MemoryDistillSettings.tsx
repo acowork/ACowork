@@ -216,12 +216,39 @@ export function MemoryDistillSettings({
         </span>
         <span aria-hidden>·</span>
         {distillerStatus.last_run ? (
-          <span>
-            {t("memoryPanel.distillerLastRun", {
-              scanned: distillerStatus.last_run.episodes_scanned,
-              promoted: distillerStatus.last_run.total_promoted,
-            })}
-          </span>
+          <>
+            <span>
+              {t("memoryPanel.distillerLastRun", {
+                scanned: distillerStatus.last_run.episodes_scanned,
+                promoted: distillerStatus.last_run.total_promoted,
+              })}
+            </span>
+            {/* The three zero cases look identical without this: nothing to
+                do, everything deferred for want of a model, and the run
+                failing. Only the last one used to be distinguishable. */}
+            {distillerStatus.last_run.error ? (
+              <>
+                <span aria-hidden>·</span>
+                <span className="text-[var(--color-danger,#e5484d)]">
+                  {t("memoryPanel.distillerRunFailed", {
+                    error: distillerStatus.last_run.error,
+                  })}
+                </span>
+              </>
+            ) : (
+              distillerStatus.last_run.funnel &&
+              distillerStatus.last_run.funnel.episodes_deferred > 0 && (
+                <>
+                  <span aria-hidden>·</span>
+                  <span>
+                    {t("memoryPanel.distillerDeferred", {
+                      deferred: distillerStatus.last_run.funnel.episodes_deferred,
+                    })}
+                  </span>
+                </>
+              )
+            )}
+          </>
         ) : (
           <span>{t("memoryPanel.distillerNeverRun")}</span>
         )}

@@ -1023,7 +1023,10 @@
     "distillNow": "今すぐ蒸留",
     "distillDone": "{{scanned}} 件のエピソードを蒸留し、{{promoted}} 件の記憶を昇格しました",
     "distillEmpty": "蒸留する新しいエピソードはありません",
-    "pagerOf": "{{current}} / {{total}} ページ"
+    "pagerOf": "{{current}} / {{total}} ページ",
+    "distillerDeferred": "{{deferred}} 件はモデル判定待ち",
+    "distillerNoCandidates": "類似ノードなしで{{projected}}件を沈殿",
+    "distillerRunFailed": "前回蒸留失敗: {{error}}"
   },
   "skillsPanel": {
     "selectSkill": "スキルを選択",

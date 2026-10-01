@@ -1095,6 +1095,32 @@ export interface DistillerLastRun {
   procedures_promoted: number;
   autobio_promoted: number;
   episodes_marked_consolidated: number;
+  /**
+   * Why the run produced what it produced. Without this an empty panel is
+   * ambiguous between "nothing to do", "everything deferred" and "the
+   * distiller died every hour" — all three render as `promoted: 0`.
+   * Optional: older runtimes do not return it.
+   */
+  error?: string | null;
+  funnel?: DistillerFunnel;
+}
+
+/** Per-verdict counters of one distiller run (ADR-068 2026-10 project+merge). */
+export interface DistillerFunnel {
+  scanned: number;
+  backlog_remaining: number;
+  llm_calls: number;
+  llm_calls_failed: number;
+  llm_calls_truncated: number;
+  below_importance: number;
+  candidates_recalled: number;
+  projected: number;
+  verdict_no_merge: number;
+  verdict_merged: number;
+  verdict_superseded: number;
+  episodes_consolidated: number;
+  episodes_deferred: number;
+  errors: string[];
 }
 
 /**
