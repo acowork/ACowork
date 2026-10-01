@@ -409,6 +409,44 @@ async fn upload_attachment(
 /// Gateway's own origin would be a live script with the caller's token in
 /// reach of it. Images keep their type so the Desktop can still show them
 /// inline — `<img>` with a disposition of `attachment` renders fine.
+///
+/// `?thumb=1` serves the generated thumbnail sidecar instead (ADR-076
+/// §决策 9), which is what the chat row renders. Same auth, same `nosniff`
+/// disposition, but the mime is the *derived* one (jpeg / plain text), not
+/// the client-supplied original — the sidecar is written by this service.
+#[derive(Debug, Deserialize, Default)]
+pub struct ThumbQuery {
+    /// Accepts `1` as well as `true`, because `?thumb=1` is the flag spelling
+    /// the rest of the platform already uses (acowork-pm's attachment
+    /// download). A plain `bool` here rejected `1` outright — serde's bool
+    /// deserializer wants the literal `true` / `false` — and the request came
+    /// back 400 *before any handler code ran*, which from the outside is
+    /// indistinguishable from "the thumbnail route is broken".
+    #[serde(default, deserialize_with = "flag")]
+    pub thumb: bool,
+}
+
+/// `true` / `1` / `yes` / `on` (any case) → true; absent or anything else →
+/// false.
+///
+/// Deserialized as a string because the query value arrives quoted in some
+/// clients and bare in others, and a flag is not a value worth rejecting a
+/// request over: the caller's fallback (fetch the whole blob) is always
+/// correct, so an unrecognised spelling must be no worse than sending none.
+fn flag<'de, D>(de: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Option::<String>::deserialize(de)?;
+    Ok(match raw.as_deref() {
+        Some(v) => matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "true" | "1" | "yes" | "on"
+        ),
+        None => false,
+    })
+}
+
 /// Chunk size for `Body::from_stream` reads. 64 KiB is the sweet spot
 /// for our workload: large enough that a 7.5 MB PDF still gets ~120
 /// chunks (visible progress, no per-chunk IPC overhead worth caring
@@ -421,6 +459,7 @@ async fn download_attachment(
     State(state): State<AppState>,
     Extension(ctx): Extension<AuthContext>,
     Path((user_id, chat_id, attachment_id)): Path<(String, String, String)>,
+    Query(q): Query<ThumbQuery>,
 ) -> Result<Response, ApiError> {
     require_self_or_admin(&ctx, &user_id)?;
     peer_in(&chat_id, &user_id)?;
@@ -428,21 +467,45 @@ async fn download_attachment(
     let dir = data_dir(&state)?;
     // Metadata-only load — keeps the request worker from pinning the
     // blob in heap. The blob is streamed straight from disk to socket
-    // below via `ReaderStream`.
+    // below via `ReaderStream`. Both captured values are cloned because
+    // the `?thumb=1` branch below still needs them.
+    let (meta_dir, meta_chat, meta_id) = (dir.clone(), chat_id.clone(), attachment_id.clone());
     let (attachment, blob_path) = offload(move || {
-        chat::load_attachment_meta(&dir, &chat_id, &attachment_id)
+        chat::load_attachment_meta(&meta_dir, &meta_chat, &meta_id)
     })
     .await?
     .ok_or_else(|| ApiError::not_found("attachment not found"))?;
+
+    // `?thumb=1` swaps the blob for its sidecar. The sidecar path is
+    // rebuilt from the already-validated id against a closed extension set
+    // (see `chat::thumb_sidecar`) — nothing from the query or the
+    // attachment record reaches the filesystem unchecked.
+    let (path, content_type) = if q.thumb {
+        let sidecar = chat::thumb_sidecar(
+            &dir,
+            &chat_id,
+            &attachment_id,
+            attachment.thumb.as_deref(),
+        )
+        .ok_or_else(|| ApiError::not_found("no thumbnail"))?;
+        let ct = if attachment.thumb.as_deref() == Some("txt") {
+            "text/plain; charset=utf-8"
+        } else {
+            "image/jpeg"
+        };
+        (sidecar, ct)
+    } else {
+        (blob_path, attachment.mime.as_str())
+    };
 
     // Stream the blob through `ReaderStream`. `Body::from_stream`
     // forces chunked transfer encoding, so hyper will not wait for the
     // whole file before sending headers — the browser / Tauri WebView
     // sees real `data:` chunks and can drive a progress bar from the
     // growing `response.body`.
-    let file = tokio::fs::File::open(&blob_path)
+    let file = tokio::fs::File::open(&path)
         .await
-        .map_err(|e| ApiError::internal(&format!("open {}: {e}", blob_path.display())))?;
+        .map_err(|e| ApiError::internal(&format!("open {}: {e}", path.display())))?;
     // `ReaderStream` is re-exported by `tokio-util`, not `tokio-stream`
     // (tokio-stream 0.1.x deliberately defers `AsyncRead`/`AsyncWrite`
     // adapters to `tokio-util`); gated behind the `io` feature there.
@@ -453,7 +516,7 @@ async fn download_attachment(
     // fallbacks keep a corrupt record from turning into a 500 on download.
     headers.insert(
         header::CONTENT_TYPE,
-        HeaderValue::from_str(&attachment.mime)
+        HeaderValue::from_str(content_type)
             .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream")),
     );
     let disposition = chat::content_disposition(&attachment.filename);
@@ -1004,6 +1067,112 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// `?thumb=1` must serve the sidecar, and must not 400.
+    ///
+    /// The flag spelling is the whole point of this test: a `bool` field
+    /// rejects `1` at the extractor, so the request failed with 400 *before
+    /// any handler line ran* — indistinguishable from a dead route when you
+    /// only have the status code. That is exactly how the thumbnail shipped
+    /// looking broken.
+    #[tokio::test]
+    async fn the_thumb_flag_serves_the_sidecar_for_every_spelling() {
+        let f = fixture().await;
+        let (router, alice, bob) = (&f.router, &f.alice, &f.bob);
+        let (alice_token, bob_token) = (&f.alice_token, &f.bob_token);
+
+        // A real image, so the service actually produces a JPEG sidecar —
+        // a junk header would store a blob with `thumb: None` and the route
+        // would (correctly) 404, proving nothing about the flag.
+        let img = image::ImageBuffer::from_fn(4, 4, |_, _| image::Rgba([0, 128, 255, 255]));
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+
+        let resp = router
+            .clone()
+            .oneshot(upload_req(
+                &files_uri(alice, bob),
+                multipart("file", "chart.png", "image/png", &png),
+                Some(alice_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let att = json(resp).await;
+        let id = att["id"].as_str().unwrap().to_string();
+        assert_eq!(att["thumb"], "jpg", "an image upload records its sidecar");
+
+        let url = format!("{}/{id}", files_uri(bob, alice));
+
+        // The spelling the client uses, plus the others a caller might pick.
+        for flag in ["thumb=1", "thumb=true", "thumb=yes", "thumb=on"] {
+            let resp = router
+                .clone()
+                .oneshot(req("GET", &format!("{url}?{flag}"), None, Some(bob_token)))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "{flag} must serve the sidecar");
+            assert_eq!(
+                resp.headers().get("content-type").unwrap(),
+                "image/jpeg",
+                "{flag} must report the derived mime, not the stored one"
+            );
+            let body = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+            assert_eq!(&body[..3], &[0xFF, 0xD8, 0xFF], "{flag} must be the JPEG");
+            // And it is the *thumbnail*, not the original re-labelled: the
+            // unflagged request below returns these exact `png` bytes.
+            assert_ne!(&body[..], &png[..], "{flag} must not be the original blob");
+        }
+
+        // No flag: the original, with the client-supplied mime.
+        let resp = router
+            .clone()
+            .oneshot(req("GET", &url, None, Some(bob_token)))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers().get("content-type").unwrap(), "image/png");
+        let body = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+        assert_eq!(&body[..], &png[..], "unflagged must be the original bytes");
+
+        // A nonsense flag is "no thumbnail", never a 400 — the caller's
+        // fallback (fetch the whole blob) is always correct, so an
+        // unrecognised spelling must not be worse than sending none.
+        let resp = router
+            .clone()
+            .oneshot(req("GET", &format!("{url}?thumb=maybe"), None, Some(bob_token)))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers().get("content-type").unwrap(), "image/png");
+
+        // The sidecar is still behind the same auth as the blob: a
+        // non-participant must not reach it by adding a query parameter.
+        let resp = router
+            .clone()
+            .oneshot(req("GET", &format!("{url}?thumb=1"), None, Some(&f.admin)))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "admin read scope (ADR-076 §决策 4)");
+        let stranger = format!("{}/{id}", files_uri(&f.admin, &f.bob));
+        let resp = router
+            .clone()
+            .oneshot(req("GET", &format!("{stranger}?thumb=1"), None, Some(bob_token)))
+            .await
+            .unwrap();
+        // 403, not 404: `require_self_or_admin` rejects Bob before the
+        // chat is even resolved. Either way the sidecar is not served — the
+        // point of the assertion is that a query parameter is not a way
+        // around the authz the blob itself is behind.
+        assert!(
+            resp.status() == StatusCode::FORBIDDEN
+                || resp.status() == StatusCode::NOT_FOUND,
+            "a chat Bob is not in must not serve its sidecar, got {}",
+            resp.status()
+        );
     }
 
     #[tokio::test]

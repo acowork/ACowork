@@ -75,6 +75,11 @@ clap.workspace = true
 # Zero the plaintext admin password as soon as it is hashed
 zeroize = "1"
 
+# Attachment thumbnails (chat.rs `generate_thumb`) — same version and the
+# same `thumbnail` → JPEG shape as acowork-pm's feature-gated generator,
+# so the two services' thumbnails look the same.
+image = "0.25"
+
 [dev-dependencies]
 tempfile.workspace = true
 # `ServiceExt::oneshot` — driving the ported router tests (Gateway dev-dep).

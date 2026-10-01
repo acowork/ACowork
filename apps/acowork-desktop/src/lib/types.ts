@@ -1808,6 +1808,17 @@ export interface ChatAttachment {
   filename: string;
   mime: string;
   size: number;
+  /**
+   * Which thumbnail sidecar the service generated at upload: `"jpg"` for an
+   * image, `"txt"` for a text file's opening lines. Absent when there is no
+   * preview (a binary, or an image format the decoder rejects) — the row
+   * then shows the plain file chip.
+   *
+   * The token, not a path: it is served by the same blob route as the
+   * original with `?thumb=1`, and the service rebuilds the location from the
+   * attachment id. See `chat::thumb_sidecar`.
+   */
+  thumb?: string;
 }
 
 /** One line of `messages.jsonl` — matches `acowork_gateway::chat::ChatMessage`. */
