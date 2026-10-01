@@ -3094,7 +3094,7 @@ function ModelMenu({
     const CHAR_WIDTH = 7.5; // px per char for text-xs (model rows)
     const HEADER_CHAR_WIDTH = 7.5; // px per char for text-[10px] uppercase + tracking-wide
     const PADDING = 24; // px-3 on each side
-    const ROW_CHROME = 50; // feature icons + chevron + gaps on model rows
+    const ROW_CHROME = 66; // feature icons + check slot + chevron + gaps on model rows
     const HEADER_CHROME = 18; // 12 logo + 6 gap, before the provider name
     let maxWidth = 0;
 
@@ -3375,7 +3375,19 @@ function ModelMenu({
                             {m.input_modalities?.includes('image') && <Image size={10} className="text-blue-400" />}
                           </span>
                         </span>
-                        {drillsDown && <ChevronRight size={12} className="shrink-0 ml-2 text-text-tertiary" />}
+                        {/* Trailing cluster. The check box is a fixed w-3 slot
+                            whenever a chevron is possible, so every drill-down
+                            row's chevron lands on the same `pr-3` baseline
+                            whether or not the check inside it is filled —
+                            otherwise the active row's chevron shifts left. */}
+                        <span className="ml-2 flex shrink-0 items-center gap-1">
+                          {(isActive || drillsDown) && (
+                            <span className="flex w-3 shrink-0 justify-end">
+                              {isActive && <Check size={12} className="text-[var(--color-accent)]" />}
+                            </span>
+                          )}
+                          {drillsDown && <ChevronRight size={12} className="text-text-tertiary" />}
+                        </span>
                       </button>
                     );
                   })}
@@ -3586,6 +3598,7 @@ function ReasoningEffortMenu({
                   >
                     {opt.label}
                   </span>
+                  {isActive && <Check size={12} className="ml-auto text-[var(--color-accent)]" />}
                 </button>
               );
             })}
