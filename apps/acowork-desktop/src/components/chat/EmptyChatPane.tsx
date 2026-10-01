@@ -25,27 +25,3 @@ export function EmptyChatPane() {
     </div>
   );
 }
-
-/**
- * EmptyRightPane — the right column's capsule placeholder, sized to the
- * width RightPanel would occupy.
- *
- * Purely a frame: the workspace / status / memory tabs are all agent-scoped
- * (their data comes from the selected agent's Runtime), so there is nothing
- * truthful to render inside — but reserving the outlined slot keeps the
- * four-capsule layout intact instead of bleeding the chat pane to the
- * window edge whenever nothing is selected. Rendered only when
- * `rightPanelCollapsed` is false, so a deliberately collapsed panel still
- * gives the width back.
- */
-export function EmptyRightPane({ width }: { width: number }) {
-  return (
-    <div
-      className="relative flex shrink-0"
-      style={{ width }}
-      aria-hidden="true"
-    >
-      <div className={cn(CAPSULE_PANE_CN, "flex-1 bg-right-panel")} />
-    </div>
-  );
-}
