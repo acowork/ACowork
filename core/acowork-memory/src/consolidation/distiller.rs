@@ -487,7 +487,14 @@ async fn consolidate_one(
 
     // ---- project ----------------------------------------------------------
     let text = canonical_text(episode);
-    let embedding = embedding_fn.map(|f| f(&text));
+    // Reuse the write-time vector when there is one. The write path embeds
+    // `statement()` too, so a stored episode vector and a freshly embedded
+    // statement are the same key - re-embedding a 262-episode backlog would
+    // cost 262 calls for vectors the store already holds.
+    let embedding = match episode.embedding.as_deref() {
+        Some(v) if !v.is_empty() => Some(v.to_vec()),
+        _ => embedding_fn.map(|f| f(&text)),
+    };
     let label = semantic_label(&subtype);
     let recalled = recall(provider, label, embedding.as_ref(), &subtype, config)?;
     let n = recalled.len();
@@ -676,14 +683,12 @@ fn deferred_llm(episode_id: u64, kind: PromotionKind, candidates: usize, reason:
 ///
 /// Falling back to `content` is what keeps the rewrite backward compatible -
 /// every episode written before the `normalized` field existed still projects.
+///
+/// The fallback itself lives on [`Episode::statement()`], because the write
+/// path embeds the same string; two copies would drift apart and make the
+/// stored vector and the lookup vector disagree about what an episode says.
 fn canonical_text(episode: &Episode) -> String {
-    episode
-        .normalized
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or(episode.content.trim())
-        .to_string()
+    episode.statement().to_string()
 }
 
 /// Which semantic label a subtype projects into.

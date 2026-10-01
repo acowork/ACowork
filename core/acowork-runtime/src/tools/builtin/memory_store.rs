@@ -276,28 +276,6 @@ impl Tool for MemoryStoreTool {
                 let knowledge_subtype = category.knowledge_subtype();
                 let category_display = category.display();
 
-                // Bugfix (MEM): the handle already holds the embedding
-                // provider (set once at construction) but it was never
-                // wired into the write path, so every Knowledge node was
-                // stored without a vector (text-only). Generate the
-                // content embedding here so embedding-based dedup and
-                // vector indexing actually work. Degrade gracefully to
-                // text-only when no provider is available or embedding fails.
-                let content_embedding: Option<Vec<f32>> =
-                    match self.handle.as_ref().and_then(|h| h.embedding()) {
-                        Some(ep) => match ep.embed(&content).await {
-                            Ok(vec) => Some(vec),
-                            Err(e) => {
-                                tracing::warn!(
-                                    error = %e,
-                                    "memory_store: failed to embed content, storing text-only"
-                                );
-                                None
-                            }
-                        },
-                        None => None,
-                    };
-
                 // ADR-068: emit a normalized Episode into the episodic
                 // store. The distiller (background consolidation step)
                 // consumes episodes tagged with knowledge_subtype and
@@ -347,12 +325,12 @@ impl Tool for MemoryStoreTool {
                     );
                 }
 
-                let episode = Episode {
+                let mut episode = Episode {
                     session_id: self.agent_id.clone(),
                     turn_index: 0,
                     role: "assistant".to_string(),
                     content: content.clone(),
-                    embedding: content_embedding.clone(),
+                    embedding: None,
                     timestamp: now,
                     consolidated: false,
                     metadata,
@@ -360,6 +338,30 @@ impl Tool for MemoryStoreTool {
                     knowledge_subtype: Some(knowledge_subtype.clone()),
                     normalized: normalized.clone(),
                 };
+
+                // Bugfix (MEM): the handle already holds the embedding
+                // provider (set once at construction) but it was never
+                // wired into the write path, so every node was stored
+                // without a vector (text-only). Degrade gracefully to
+                // text-only when no provider is available or embedding
+                // fails.
+                //
+                // The vector is keyed on `statement()`, not `content`: the
+                // distiller recalls and merges on the same string, so
+                // embedding anything else makes the write path and the
+                // consolidation path disagree about which episodes are
+                // near-duplicates.
+                if let Some(ep) = self.handle.as_ref().and_then(|h| h.embedding()) {
+                    match ep.embed(episode.statement()).await {
+                        Ok(vec) => episode.embedding = Some(vec),
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                "memory_store: failed to embed statement, storing text-only"
+                            );
+                        }
+                    }
+                }
 
                 match provider.store_episode(&episode) {
                     Ok(_episode_id) => {
