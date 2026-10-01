@@ -223,7 +223,8 @@ mcp_http_path = "/api/pm/mcp"            # MCP HTTP 端点公开路径（含 /ap
 ```mermaid
 stateDiagram-v2
     [*] --> pending: 创建（human/Agent；Agent 的 review_status=pending）
-    pending --> in_progress: Agent claim（自领）
+    pending --> in_progress: Agent claim（自领；需 review_status≠pending）
+    pending --> rejected: 人类驳回创建（approve 只翻 review_status，不动 status）
     pending --> cancelled: 取消
     in_progress --> submitted: Agent submit（提交结果）
     in_progress --> pending: 退回（人类）
@@ -242,7 +243,11 @@ stateDiagram-v2
 - **submitted**：Agent `pm_submit_task` 提交结果后进入（写入 `result`），等待人类 review。
 - **done / rejected**：人类 `review(approved)` 决定（`submitted → done` 或 `submitted → rejected`）。
 - **退回**：done → in_progress（人类操作）。
-- **审核流**：Agent 创建任务 → `review_status=pending` → 人类 `POST /tasks/:tid/review {approved: true/false}` → 任务进入正式流转或 rejected。`pm_submit_task` 对 `checkpoint/bug` 等需审核类型在 submitted 后同样等待 review。
+- **审核流（两种语义，由 `status` 区分）**：
+  - **创建审批**（`status=pending` + `review_status=pending`，Agent 刚建、从未开工）：人类 `review{approved:true}` **只把 `review_status` 翻为 `approved`，`status` 留在 `pending`** —— 审批是*授权开工*而非*完成工作*，之后由 Agent 自己 `pm_claim_task` 推进；`approved:false` 则 `pending → rejected`（D-1：Agent 仍可重新自领重做）。
+  - **结果审核**（`status=submitted`，Agent 已交活）：`submitted → done` / `submitted → rejected`。
+- **审批闸门**：`review_status=pending` 的任务不得进入 `in_progress`。该闸门在 store 层挂在**所有**进入 `in_progress` 的写路径上（`claim_task` + `update_task(status)`），否则 Agent 换个 MCP 工具即可绕过；违反返回 409 `review_not_approved`。只卡 `pending` 一种——`rejected` 不卡（保留 D-1 的重做路径）。
+  - ponytail：闸门对人类操作面同样生效（REST `PATCH status`），即人类想强推一个 Agent 建的垃圾任务也需先点一次"批准"。有意的简化：审批是一个显式可审计的写入动作，比在闸门里开人类特权后门更简单也更可查。
 
 ---
 
@@ -265,7 +270,7 @@ stateDiagram-v2
 | DELETE | `/api/pm/tasks/:id` | 删除任务（级联子树） | Desktop |
 | POST | `/api/pm/tasks/:id/claim` | **Agent 自领**（pending → in_progress） | Agent（x-actor） |
 | POST | `/api/pm/tasks/:id/submit` | **Agent 提交结果**（in_progress → submitted，body `{text, attachment_ids?}`） | Agent（x-actor） |
-| POST | `/api/pm/tasks/:id/review` | **人类审核**（submitted → done/rejected，body `{approved}`） | Desktop |
+| POST | `/api/pm/tasks/:id/review` | **人类审核**（body `{approved}`）：`pending` 时只翻 `review_status` / `pending → rejected`；`submitted` 时 `→ done/rejected` | Desktop |
 | PATCH | `/api/pm/tasks/:id/parent` | **移动任务到新父下**（`parent_id=null` 提升为根任务；DFS 防环） | Desktop |
 | GET | `/api/pm/tasks/:id/children` | 直接子任务列表 | Desktop |
 | GET | `/api/pm/tasks/:id/attachments` | 附件元数据列表 | Desktop / Agent |

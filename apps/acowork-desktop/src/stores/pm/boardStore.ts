@@ -177,12 +177,20 @@ export const usePmBoardStore = create<PmBoardState>((set, get) => {
 
     reviewTask: async (taskId, approved, comment) => {
       const prev = get().tasks;
-      // 乐观：approved → done，否则 → rejected
-      const target: TaskStatus = approved ? "done" : "rejected";
+      // 乐观更新。服务端有两种审核语义，status 走向不同：
+      //  - submitted（Agent 交活待验收）：approve → done
+      //  - pending + review_status=pending（Agent 新建待批准开工）：approve 只翻
+      //    review_status，status 留在 pending 等 Agent 自己 claim —— 若这里也乐观
+      //    写成 done，卡片会闪跳到"已完成"列再弹回待办列。
+      // 两种情况 reject 都是 → rejected。
+      const cur = prev.find((t) => t.id === taskId);
+      const keepsStatus = cur?.status === "pending";
       set({
-        tasks: prev.map((t) =>
-          t.id === taskId ? { ...t, status: target } : t,
-        ),
+        tasks: prev.map((t) => {
+          if (t.id !== taskId) return t;
+          if (approved && keepsStatus) return { ...t, review_status: "approved" };
+          return { ...t, status: (approved ? "done" : "rejected") as TaskStatus };
+        }),
       });
       try {
         const updated = await pmApi.reviewTask(taskId, approved, comment);

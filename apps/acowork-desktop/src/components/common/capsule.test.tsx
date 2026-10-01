@@ -38,6 +38,7 @@ import { describe, expect, it } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { CAPSULE_PANE_CN } from "./capsule";
 import { EmptyChatPane, EmptyRightPane } from "../chat/EmptyChatPane";
+import { ExtensionsView } from "../../views/ExtensionsView";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -132,6 +133,10 @@ describe("pm / docs / extensions join the capsule layout", () => {
     // identical `bg-page-bg` planes hid it — and jsdom computes no layout,
     // so pin the class on the root div (the first `flex h-full` in each
     // file) instead.
+    //
+    // ExtensionsView's root may carry extra classes between `h-full` and
+    // `w-full` (it has `min-h-0` to let the two-column split shrink), so
+    // match the two tokens independently rather than one exact string.
     for (const rel of [
       "views/ProjectsView.tsx",
       "views/DocsView.tsx",
@@ -141,5 +146,75 @@ describe("pm / docs / extensions join the capsule layout", () => {
       expect(root, `${rel} has no <div className="flex h-full" root`).not.toBeNull();
       expect(root![0], `${rel} root must carry w-full`).toContain("w-full");
     }
+  });
+});
+
+describe("extensions view wears the two-column capsule layout", () => {
+  it("renders both columns as capsules", () => {
+    // The list sidebar and the detail placeholder must both draw the shared
+    // shell — a bare div on either side is exactly the split the constant
+    // exists to prevent.
+    const { container } = render(<ExtensionsView />);
+
+    const sidebar = container.querySelector("aside");
+    expect(sidebar, "no <aside> sidebar").not.toBeNull();
+    for (const cn of CAPSULE_PANE_CN.split(" ")) {
+      expect(sidebar!.className, `sidebar missing "${cn}"`).toContain(cn);
+    }
+    expect(sidebar!.className).toContain("bg-nav-surface");
+
+    const detail = container.querySelector("#extensions-detail");
+    expect(detail, "no detail placeholder").not.toBeNull();
+    for (const cn of CAPSULE_PANE_CN.split(" ")) {
+      expect(detail!.className, `detail missing "${cn}"`).toContain(cn);
+    }
+    // The detail column is a CONTENT main area, so it takes `bg-page-bg` —
+    // the same surface as ProjectBoard and DocEditor. `bg-right-panel` is the
+    // chat view's 6-tab inspector column (a step darker than page-bg); using
+    // it here would make the detail column darker than the list beside it and
+    // read as a demoted panel. The extensions view is list+detail like pm/doc,
+    // not body+inspector like chat, so the surface split follows pm/doc.
+    expect(detail!.className).toContain("bg-page-bg");
+    expect(detail!.className).not.toContain("bg-right-panel");
+  });
+
+  it("gives the two columns the pm / doc surface split", () => {
+    // Left list and right detail must differ, and each must match the view it
+    // was copied from: ProjectSidebar (nav-surface) + ProjectBoard (page-bg),
+    // DocTreeSidebar (nav-surface) + DocEditor pane (page-bg). One line, but
+    // it is the whole "these two panes read as one system" claim.
+    const { container } = render(<ExtensionsView />);
+    const sidebar = container.querySelector("aside")!.className;
+    const detail = container.querySelector("#extensions-detail")!.className;
+    expect(sidebar).toContain("bg-nav-surface");
+    expect(detail).toContain("bg-page-bg");
+    expect(sidebar).not.toBe(detail);
+  });
+
+  it("keeps the search box outside the scrolling list", () => {
+    // Search pinned above, list scrolls on its own. If the search box were
+    // inside the scroll root it would scroll away with a long list.
+    const { container } = render(<ExtensionsView />);
+    const input = screen.getByRole("textbox");
+    const list = screen.getByRole("listbox");
+    expect(list.contains(input), "search box must not be inside the listbox").toBe(false);
+    expect(list.className).toContain("overflow-y-auto");
+    expect(list.className).toContain("min-h-0");
+    expect(list.className).toContain("flex-1");
+  });
+
+  it("shows an empty placeholder, never fake extension rows", () => {
+    // The Gateway extensions endpoint doesn't exist yet, so the list is
+    // empty by construction. Pinning it: a demo row here would make it
+    // impossible to tell real data from placeholder data in review.
+    const { container } = render(<ExtensionsView />);
+    expect(screen.queryAllByRole("option")).toHaveLength(0);
+    expect(container.textContent).toContain("No extensions available yet.");
+  });
+
+  it("links the list to the detail column", () => {
+    const { container } = render(<ExtensionsView />);
+    expect(screen.getByRole("listbox").getAttribute("aria-controls")).toBe("extensions-detail");
+    expect(container.querySelector("#extensions-detail")?.getAttribute("aria-label")).toBeTruthy();
   });
 });

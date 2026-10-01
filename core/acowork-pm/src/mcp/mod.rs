@@ -533,6 +533,12 @@ mod tests {
         (router, state.store)
     }
 
+    /// 人类批准一个 Agent 创建的任务（`review_status: pending → approved`）。
+    /// Agent 侧任何"建完就 claim / 改状态"的测试都必须先过这一关，否则撞审批闸门。
+    async fn approve_creation(store: &TreePmStore, tid: &str) {
+        store.review_task(&TaskId(tid.to_string()), true, "human").await.unwrap();
+    }
+
     /// 白名单 Agent 目录（测试桩）：仅当 agent_id 在白名单内才返回 true。
     /// 用于验证 `pm_create_task` 的 assignee 存在性校验（设计 §9.1）。
     struct WhitelistAgentDirectory {
@@ -618,10 +624,11 @@ mod tests {
     }
 
     /// e2e：Agent 完整生命周期 —— create_project → create_task(assignee+due_at)
-    /// → claim → submit → check。断言审核语义（agent 创建 → pending review）。
+    /// → claim → submit → check。断言审核语义（agent 创建 → pending review，
+    /// 人类批准前不可 claim）。
     #[tokio::test]
     async fn e2e_full_lifecycle_claim_submit_check() {
-        let router = test_router().await;
+        let (router, store) = test_router_and_store().await;
         let agent = "agent-alpha";
 
         // 1. 创建项目
@@ -659,17 +666,32 @@ mod tests {
         assert_eq!(task["review_status"], "pending"); // agent 创建 → pending 待人类审核
         assert_eq!(task["assignee"], agent);
 
-        // 3. claim（assignee 本人）
+        // 3. 人类尚未批准 → claim 409 review_not_approved
         let v = call_tool(&router, Some(agent), 12, "pm_claim_task", json!({ "task_id": tid }))
+            .await;
+        let (code, prefix, msg) = assert_rpc_error(&v);
+        assert_eq!(prefix, "review_not_approved", "unapproved claim msg: {msg}");
+        assert_eq!(code, INTERNAL_ERROR, "unapproved claim code: {msg}");
+
+        // 人类批准创建 → review_status=approved，status 仍为 pending
+        approve_creation(&store, &tid).await;
+        let v = call_tool(&router, Some(agent), 13, "pm_check_task", json!({ "task_id": tid }))
+            .await;
+        let chk = tool_text(&v);
+        assert_eq!(chk["approved"], true, "approved after human review: {chk}");
+        assert_eq!(chk["status"], "pending", "creation approval keeps status: {chk}");
+
+        // 4. claim（assignee 本人，批准后放行）
+        let v = call_tool(&router, Some(agent), 14, "pm_claim_task", json!({ "task_id": tid }))
             .await;
         assert!(v["error"].is_null(), "claim failed: {v}");
         assert_eq!(tool_text(&v)["status"], "in_progress");
 
-        // 4. submit
+        // 5. submit
         let v = call_tool(
             &router,
             Some(agent),
-            13,
+            15,
             "pm_submit_task",
             json!({ "task_id": tid, "text": "done" }),
         )
@@ -677,14 +699,13 @@ mod tests {
         assert!(v["error"].is_null(), "submit failed: {v}");
         assert_eq!(tool_text(&v)["status"], "submitted");
 
-        // 5. check（创建者可查；人类尚未 approve → approved=false）
-        let v = call_tool(&router, Some(agent), 14, "pm_check_task", json!({ "task_id": tid }))
+        // 6. check（创建者可查；结果审核尚未发生，review_status 仍为已批准）
+        let v = call_tool(&router, Some(agent), 16, "pm_check_task", json!({ "task_id": tid }))
             .await;
         assert!(v["error"].is_null(), "check failed: {v}");
         let chk = tool_text(&v);
         assert_eq!(chk["status"], "submitted");
-        assert_eq!(chk["approved"], false);
-        assert_eq!(chk["review_status"], "pending");
+        assert_eq!(chk["review_status"], "approved");
     }
 
     /// 鉴权 403：非 assignee 调用 claim/submit/update 一律拒绝。
@@ -819,7 +840,7 @@ mod tests {
     /// e2e：pm_update_task happy path —— 改 title/status/priority/assignee。
     #[tokio::test]
     async fn e2e_update_task_happy_path() {
-        let router = test_router().await;
+        let (router, store) = test_router_and_store().await;
         let agent = "agent-updater";
 
         let v = call_tool(
@@ -841,11 +862,24 @@ mod tests {
         .await;
         let tid = tool_text(&v)["id"].as_str().unwrap().to_string();
 
-        // 改 title + priority + status（pending → in_progress 合法）
+        // 审批闸门：Agent 不得用 pm_update_task 绕过 claim 直接进 in_progress
         let v = call_tool(
             &router,
             Some(agent),
             42,
+            "pm_update_task",
+            json!({ "task_id": tid, "status": "in_progress" }),
+        )
+        .await;
+        let (_, prefix, msg) = assert_rpc_error(&v);
+        assert_eq!(prefix, "review_not_approved", "update bypass msg: {msg}");
+        approve_creation(&store, &tid).await;
+
+        // 改 title + priority + status（pending → in_progress 合法）
+        let v = call_tool(
+            &router,
+            Some(agent),
+            43,
             "pm_update_task",
             json!({ "task_id": tid, "title": "renamed", "priority": "high", "status": "in_progress" }),
         )
@@ -860,7 +894,7 @@ mod tests {
         let v = call_tool(
             &router,
             Some(agent),
-            43,
+            44,
             "pm_update_task",
             json!({ "task_id": tid, "assignee": null }),
         )
@@ -1027,6 +1061,7 @@ mod tests {
 
         // status 过滤：把第一个 claim 后，pending 只剩 1 个
         let my_tid = mine[0]["id"].as_str().unwrap().to_string();
+        approve_creation(&store, &my_tid).await;
         let v = call_tool(&router, Some(agent), 57, "pm_claim_task", json!({ "task_id": my_tid }))
             .await;
         assert!(v["error"].is_null(), "claim failed: {v}");
@@ -1767,6 +1802,10 @@ mod tests {
         let b = tool_text(&v);
         assert_eq!(b["is_blocked"], true, "B should be blocked: {b}");
         assert_eq!(b["blocked_by"][0], tid_a);
+
+        // 人类批准 A / B 的创建（否则先撞审批闸门，看不到依赖错误）
+        approve_creation(&store, &tid_a).await;
+        approve_creation(&store, &tid_b).await;
 
         // claim B → 409 dependency_not_satisfied
         let v = call_tool(&router, Some(agent), 70, "pm_claim_task", json!({ "task_id": tid_b }))

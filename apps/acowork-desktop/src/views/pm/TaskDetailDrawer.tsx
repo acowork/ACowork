@@ -483,6 +483,11 @@ function StatusMoveButton({ task, onMoved }: { task: PmTaskResponse; onMoved: ()
   const { t } = useTranslation();
   const moveTask = usePmBoardStore((s) => s.moveTask);
 
+  // Agent 新建、人类尚未批准 → 服务端审批闸门会 409 review_not_approved。
+  // 此时不渲染"移到进行中"按钮（卡片上有批准/拒绝按钮可用），别给一个
+  // 必然失败的操作。批准后 review_status 变 approved，按钮自然回来。
+  if (task.status === "pending" && task.review_status === "pending") return null;
+
   const next: Partial<Record<TaskStatus, TaskStatus>> = {
     pending: "in_progress",
     in_progress: "submitted",

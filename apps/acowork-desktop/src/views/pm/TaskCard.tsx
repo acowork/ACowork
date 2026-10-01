@@ -74,6 +74,11 @@ export function TaskCard({ task, onOpenTask, className, depth = 0 }: TaskCardPro
   const assigneeName = resolveAgentName(agents, task.assignee);
   const creatorName = resolveAgentName(agents, task.created_by);
 
+  /** 待人类审核：Agent 交活待验收（submitted），或 Agent 新建待批准开工（pending + review_status=pending） */
+  const needsReview =
+    task.status === "submitted" ||
+    (task.status === "pending" && task.review_status === "pending");
+
   // 截止日期格式化：MM-DD（跨年带年份），逾期红色
   const dueLabel = task.due_at ? formatDue(task.due_at) : null;
   const overdue = task.due_at ? isOverdue(task.due_at, task.status) : false;
@@ -108,6 +113,9 @@ export function TaskCard({ task, onOpenTask, className, depth = 0 }: TaskCardPro
           "hover:border-zinc-300 hover:shadow dark:bg-zinc-800 dark:hover:border-zinc-600",
           "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-accent)]",
           task.status === "submitted" && "border-amber-300 bg-amber-50/60 dark:border-amber-700/60 dark:bg-amber-950/30",
+          // Agent 新建待批准：同样琥珀高亮（设计 D-2「review_status=pending 高亮」），
+          // 让待办列里待审批的任务一眼可辨
+          task.status === "pending" && task.review_status === "pending" && "border-amber-300 bg-amber-50/60 dark:border-amber-700/60 dark:bg-amber-950/30",
           isDragging && "opacity-40",
           dropOver && "ring-2 ring-[var(--color-accent)]",
           depth > 0 && "ml-4",
@@ -158,8 +166,11 @@ export function TaskCard({ task, onOpenTask, className, depth = 0 }: TaskCardPro
           )}
         </div>
 
-        {/* T2-11：待审核卡片 —— 创建者 + 批准/拒绝 inline 操作 */}
-        {task.status === "submitted" && (
+        {/* 待审核卡片 —— 创建者 + 批准/拒绝 inline 操作。两种形态：
+            submitted = Agent 交活等验收；pending + review_status=pending =
+            Agent 刚建的任务等人类批准开工（批准后 status 仍留在待办列，
+            由 Agent 自己 pm_claim_task 推进）。 */}
+        {needsReview && (
           <div className="mt-2 border-t border-amber-200/70 pt-1.5 dark:border-amber-800/40">
             {creatorName && (
               <p className="mb-1.5 text-[10px] text-text-tertiary ">
