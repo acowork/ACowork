@@ -52,6 +52,11 @@ graph LR
 
 ## 2. ECS 准备
 
+> **账号约定**：本文所有带 `sudo` 的命令都在 **root（或 sudoer）账号**下执行。**不要 `su acowork-relay`**——
+> `acowork-relay` 是 nologin 的系统账号（`useradd -r -s /usr/sbin/nologin`），只给 systemd 用，不给人登录。
+> 你在 ECS 上的日常身份应该是 root 或你自己的 sudoer 账号。唯一不由你执行的是 relay 进程本身，
+> 它由 systemd 以 `User=acowork-relay` 拉起（§5）。
+
 ### 2.1 安全组（控制台 → ECS → 实例 → 安全组 → 配置规则）
 
 | 方向 | 协议类型 | 端口范围 | 授权对象 | 用途 |
@@ -85,6 +90,10 @@ sudo install -d -o acowork-relay -g acowork-relay -m 0750 /var/lib/acowork-relay
 ---
 
 ## 3. 通配符证书（Let's Encrypt，DNS-01）
+
+> 以下命令在 **root / sudoer 账号**下执行（账号约定见 §2）。certbot 的凭据和证书目录都在
+> `/etc/letsencrypt/`（root 属），中继进程以 `acowork-relay` 身份只**读**这些 PEM 文件——
+> certbot 保存的私钥默认 0600 root:root，如需放开读取权限见 §5 备注。
 
 relay 用的**不是**普通单域名证书，而是同时覆盖服务域和全部设备域的通配符：
 
@@ -236,6 +245,22 @@ sudo journalctl -u acowork-relay -f    # 实时日志
 
 **要点说明：**
 
+- **证书私钥权限（必做，否则服务起不来）**：certbot 保存的 `privkey.pem` 默认是 `0600 root:root`，
+  而 unit 里 relay 以 `User=acowork-relay` 身份运行，**读不到**它，`systemctl start` 会报
+  `Permission denied (os error 13)`。加一条 ACL 让该用户可读（推荐，权限更窄）：
+
+  ```bash
+  sudo setfacl -m u:acowork-relay:r /etc/letsencrypt/live/relay.acowork.ai/privkey.pem
+  sudo setfacl -m u:acowork-relay:r /etc/letsencrypt/live/relay.acowork.ai/fullchain.pem
+  sudo setfacl -m d:u:acowork-relay:r /etc/letsencrypt/live/relay.acowork.ai   # 续期后新文件自动继承
+
+  # 没有 setfacl 的系统（Alibaba Cloud Linux 需先 sudo dnf install -y acl）退而求其次：
+  # sudo chmod 640 /etc/letsencrypt/live/relay.acowork.ai/privkey.pem
+  # sudo usermod -aG root acowork-relay   # 加入 root 组（权限更宽，仅兜底）
+  ```
+
+  **验证**：`sudo -u acowork-relay head -c1 /etc/letsencrypt/live/relay.acowork.ai/privkey.pem` 能输出内容即通。
+
 - **443 端口以非 root 监听**：unit 里 `AmbientCapabilities=CAP_NET_BIND_SERVICE` 让 `acowork-relay` 用户也能绑 <1024 端口，全程无 root 运行。
 - **admin token 不进命令行**：`--admin-token` 会出现在 `ps aux` 输出里。生产环境把它写进 `/etc/acowork-relay/env`（`chmod 600`），unit 用 `EnvironmentFile=-/etc/acowork-relay/env` 读取；`ExecStart` 里把 `--admin-token ${ACOWORK_RELAY_ADMIN_TOKEN}` 取消注释（systemd 会对 `$` 做变量替换）。只在用 `--require-registration` 预注册模式时需要。
 - **设备记录持久化**：`--data-dir /var/lib/acowork-relay` 存 `devices.json`（已注册设备的 Ed25519 公钥）。换服务器/重建时拷这个目录，设备不必重新 TOFU 绑定。
@@ -327,6 +352,7 @@ curl -sS https://relay.acowork.ai/api/admin/tunnels \
 - [ ] ECS 安全组 443/TCP 对全网开放，22 仅限办公 IP
 - [ ] `/usr/local/bin/acowork-relay` 已上传（x86_64 或 aarch64 与实例匹配）
 - [ ] 通配符证书已签发，SAN 含两个域名
+- [ ] **证书私钥已授权 `acowork-relay` 可读**（`setfacl`，否则 relay 起不来）
 - [ ] `systemd` 服务 running + `enabled`
 - [ ] `curl https://relay.acowork.ai/health` → `ok`
 - [ ] `certbot renew --dry-run` 通过（含 deploy hook）
