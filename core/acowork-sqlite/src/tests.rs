@@ -1536,10 +1536,80 @@ fn admin_stats_shape() {
     assert_eq!(stats.by_type.get(labels::KNOWLEDGE), Some(&1));
     assert_eq!(stats.by_status.get("Dormant"), Some(&1));
     assert_eq!(stats.by_status.get("purged"), Some(&0));
-    assert_eq!(stats.index_health, "healthy");
     assert_eq!(stats.stored_dim, DIM as u64);
     assert_eq!(stats.nodes_with_embedding, 0);
+    assert_eq!(stats.vectors_of_other_dim, 0);
     assert!(stats.storage_bytes > 0);
+    // Two nodes, no vectors. `index_health` used to be the literal "healthy"
+    // regardless of what the counters said, so this is the case that proves it
+    // is now derived from them.
+    assert_eq!(stats.index_health, "missing_embeddings");
+}
+
+/// The health string must distinguish "a node has no vector" from "a node has a
+/// vector of a width the store no longer declares".
+///
+/// Only the first was ever reportable, and only by luck: `vector_search` skips
+/// foreign-width rows silently, so a store whose dimension was moved over
+/// vectors still at the previous width looks complete to every count of
+/// *missing* embeddings while being half invisible to retrieval.
+#[test]
+fn admin_stats_reports_foreign_width_vectors() {
+    let store = store();
+    let mut a = episode("first");
+    a.embedding = Some(emb(0.1));
+    let mut b = episode("second");
+    b.embedding = Some(emb(0.9));
+    store.store_episode(&a).unwrap();
+    store.store_episode(&b).unwrap();
+
+    let stats = store.get_stats();
+    assert_eq!(stats.total_nodes, 2);
+    assert_eq!(stats.nodes_with_embedding, 2);
+    assert_eq!(stats.index_health, "healthy", "every node has a vector");
+
+    // A model swap flips the declared width; the rows do not move with it.
+    store.set_embedding_dim(2).unwrap();
+    let stats = store.get_stats();
+    assert_eq!(stats.stored_dim, 2);
+    assert_eq!(
+        stats.nodes_with_embedding, 2,
+        "they still have vectors - nothing is 'missing'"
+    );
+    assert_eq!(stats.vectors_of_other_dim, 2);
+    assert_eq!(
+        stats.index_health, "stale_vectors",
+        "both vectors are now invisible to search"
+    );
+}
+
+/// `nodes_with_embedding` must be counted over the labels `total_nodes` counts,
+/// or the two are not comparable.
+///
+/// Conversation messages are in the vectors table but not in `labels::ALL`, so
+/// counting the whole table made `nodes_with_embedding < total_nodes` false on
+/// any store with chat history - which is every store the panel is used on.
+#[test]
+fn admin_stats_embedding_count_excludes_conversation_rows() {
+    let store = std::sync::Arc::new(SqliteStore::open_in_memory(DIM).expect("open"));
+    let index = conversation::ConversationStore::from_store(store.clone()).expect("index");
+    for line in 0..3 {
+        index
+            .index_message("s1", line, "user", &format!("message {line}"), &emb(0.2))
+            .expect("index message");
+    }
+    let mut with = episode("has a vector");
+    with.embedding = Some(emb(0.4));
+    store.store_episode(&with).unwrap();
+    store.store_episode(&episode("has none")).unwrap();
+
+    let stats = store.get_stats();
+    assert_eq!(stats.total_nodes, 2, "memory nodes only");
+    assert_eq!(
+        stats.nodes_with_embedding, 1,
+        "and its vector count must be over those same 2 nodes, not over all 5 rows"
+    );
+    assert_eq!(stats.index_health, "missing_embeddings");
 }
 
 /// `migrate_embedding_dimension` must re-embed what it can, count what it

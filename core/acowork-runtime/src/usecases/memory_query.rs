@@ -109,6 +109,11 @@ pub struct MemoryStats {
     /// Number of nodes with a non-NULL `embedding` field. Compared against
     /// `total_nodes` to detect missing embeddings.
     pub nodes_with_embedding: u64,
+    /// Vectors stored at a width other than `stored_dim`, and therefore
+    /// invisible to vector search. Mirrored from
+    /// `acowork_memory::admin::AdminStats::vectors_of_other_dim`; the desktop
+    /// Memory panel shows its "Rebuild Index" banner on this being non-zero.
+    pub vectors_of_other_dim: u64,
     /// Embedding dimension of the active embedding model (0 if none).
     pub model_dim: u64,
     /// On-disk schema version of the underlying store (`PRAGMA user_version`

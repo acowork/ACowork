@@ -267,9 +267,17 @@ impl MemoryAdminService for SqliteStore {
 
         let nodes_with_embedding = SqliteStore::count_nodes_with_embedding(self).unwrap_or(0);
         let stored_dim = SqliteStore::embedding_dim(self) as u64;
+        // A store that has not recorded a dimension yet holds no vectors either,
+        // and `<> 0 bytes` would match every row in it. Treat "no dimension" as
+        // "nothing to be stale about".
+        let vectors_of_other_dim = if stored_dim == 0 {
+            0
+        } else {
+            self.count_vectors_of_other_dim(stored_dim as usize).unwrap_or(0)
+        };
 
-        // The desktop Memory panel shows "部分节点缺少向量嵌入" on exactly this
-        // condition, so log it with an explicit grep target for support runs.
+        // The desktop Memory panel shows its health banner on exactly these two
+        // conditions, so log them with an explicit grep target for support runs.
         if total_nodes > 0 && nodes_with_embedding < total_nodes {
             tracing::warn!(
                 target: "memory_diag",
@@ -280,15 +288,25 @@ impl MemoryAdminService for SqliteStore {
                 "memory_store: detected nodes without vector embeddings"
             );
         }
+        if vectors_of_other_dim > 0 {
+            tracing::warn!(
+                target: "memory_diag",
+                vectors_of_other_dim,
+                stored_dim,
+                "memory_store: detected vectors at a foreign width, invisible to search"
+            );
+        }
 
         AdminStats {
             total_nodes,
             storage_bytes: self.storage_size_bytes().unwrap_or(0),
             by_type,
             by_status,
-            index_health: "healthy".to_string(),
+            index_health: derive_index_health(total_nodes, nodes_with_embedding, vectors_of_other_dim)
+                .to_string(),
             stored_dim,
             nodes_with_embedding,
+            vectors_of_other_dim,
             // `PRAGMA user_version` is a 32-bit integer SQLite preserves
             // across connections; bump it from `schema.rs` whenever the
             // table layout changes. 0 is the implicit value before any
@@ -751,6 +769,24 @@ fn f64_prop(props: &Value, key: &str) -> f64 {
 /// Failures (no DB, pragma rejected) are swallowed and reported as 0 —
 /// `user_version` is observability metadata, not a correctness invariant,
 /// and a stuck read must not prevent the stats endpoint from returning.
+/// One-word summary of what the two health counters below say about the store.
+///
+/// Was hardcoded to `"healthy"`, which made the field a constant rather than a
+/// report: a store whose recorded dimension had been moved over vectors still
+/// at the previous width - the exact state a model swap can leave - read back
+/// as healthy, because nothing in the string was computed from anything.
+/// Foreign width wins over missing embeddings: those rows exist and are
+/// silently excluded from search, which is the harder failure to notice.
+fn derive_index_health(total_nodes: u64, nodes_with_embedding: u64, stale: u64) -> &'static str {
+    if stale > 0 {
+        "stale_vectors"
+    } else if total_nodes > 0 && nodes_with_embedding < total_nodes {
+        "missing_embeddings"
+    } else {
+        "healthy"
+    }
+}
+
 fn read_user_version(conn: &rusqlite::Connection) -> u64 {
     conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
         .ok()

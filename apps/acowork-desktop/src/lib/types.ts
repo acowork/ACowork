@@ -1046,6 +1046,17 @@ export interface MemoryStatsResponse {
    */
   nodes_with_embedding: number;
   /**
+   * Vectors stored at a width other than `stored_dim`, and therefore skipped
+   * silently by vector search. They are not missing, so no count of missing
+   * embeddings reports them; the panel shows its rebuild banner on this being
+   * non-zero.
+   *
+   * Optional because the panel and the runtime are built separately: an older
+   * runtime simply omits it, which must read as "nothing stale" rather than
+   * crash the banner.
+   */
+  vectors_of_other_dim?: number;
+  /**
    * Embedding dimension of the active embedding provider (model output).
    * 0 if no embedding provider is currently configured. Used together with
    * `stored_dim` to detect a dimension mismatch.

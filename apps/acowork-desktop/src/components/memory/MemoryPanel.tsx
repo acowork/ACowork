@@ -14,6 +14,7 @@ import { ErrorBox } from "../common/ErrorBox";
 import { Dropdown } from "../common/Dropdown";
 import { ListBox, ExpandableRow } from "../common/list";
 import { subTypeOptions } from "./nodeTypeI18n";
+import { indexHealthBanner } from "./indexHealth";
 import { cn } from "../../lib/utils";
 
 export function MemoryPanel() {
@@ -189,25 +190,9 @@ export function MemoryPanel() {
     void rebuildIndex(selectedAgentId);
   };
 
-  // True when the persisted HNSW index dimension disagrees with the active
-  // embedding model's output dimension. `stored_dim == 0` means the index
-  // hasn't been built yet (fresh store) — not a mismatch, just an empty state.
-  // `model_dim == 0` means no provider is configured — also not actionable.
-  const dimMismatch =
-    !!stats &&
-    stats.stored_dim > 0 &&
-    stats.model_dim > 0 &&
-    stats.stored_dim !== stats.model_dim;
-
-  // True when some memory nodes are missing vector embeddings (NULL or failed
-  // write). This is common after an embedding model change where existing nodes
-  // were stored with a different dimension and their embeddings were rejected
-  // by the HNSW index — they exist as metadata-only nodes.
-  const missingEmbeddings =
-    !!stats &&
-    stats.model_dim > 0 &&
-    stats.total_nodes > 0 &&
-    stats.nodes_with_embedding < stats.total_nodes;
+  // Which index-health problem, if any, to show the banner for. The rule lives
+  // in ./indexHealth so it can be tested without rendering the panel.
+  const healthBanner = indexHealthBanner(stats);
 
   // While migration is in flight, show the rebuilt/total fraction so the
   // user can see progress. Falls back to plain "重建中…" if the Gateway has
@@ -254,12 +239,11 @@ export function MemoryPanel() {
         </div>
       )}
 
-      {/* Index-health banner — shown when:
-          1. Dim-mismatch: persisted HNSW index dim differs from active model dim.
-          2. Missing embeddings: some nodes lack vector embeddings (nodes_with_embedding < total_nodes).
-          Clicking the button triggers the same /api/embedding-models/{id}/start-migration
-          flow that the Harness tab already uses. */}
-      {(dimMismatch || missingEmbeddings) && stats && (
+      {/* Index-health banner: dimension mismatch, vectors left at a foreign
+          width, or memory nodes without embeddings. The button triggers the
+          same /api/embedding-models/{id}/start-migration flow the Harness tab
+          uses. */}
+      {healthBanner && stats && (
         <div
           className="flex items-center gap-2 border-b border-amber-200 bg-amber-50 px-panel-gutter py-2 text-amber-900 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-100"
           role="alert"
@@ -268,29 +252,12 @@ export function MemoryPanel() {
           <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
           <div className="min-w-0 flex-1">
             <p className="truncate text-[11px] font-semibold">
-              {dimMismatch
-                ? t("memoryPanel.dimMismatchTitle")
-                : t("memoryPanel.missingEmbeddingsTitle")}
+              {t(healthBanner.titleKey)}
             </p>
             <p className="truncate text-[10px] opacity-80">
-              {dimMismatch
-                ? t("memoryPanel.dimMismatchDetail", {
-                    stored: stats.stored_dim,
-                    model: stats.model_dim,
-                  })
-                : t("memoryPanel.missingEmbeddingsDetail", {
-                    indexed: stats.nodes_with_embedding,
-                    total: stats.total_nodes,
-                  })}
-              {dimMismatch && stats.total_nodes > 0 && (
-                <>
-                  {" · "}
-                  {t("memoryPanel.dimMismatchIndexedDetail", {
-                    indexed: stats.nodes_with_embedding,
-                    total: stats.total_nodes,
-                  })}
-                </>
-              )}
+              {t(healthBanner.detailKey, healthBanner.vars)}
+              {healthBanner.extraKey &&
+                ` · ${t(healthBanner.extraKey, healthBanner.vars)}`}
             </p>
           </div>
           <button

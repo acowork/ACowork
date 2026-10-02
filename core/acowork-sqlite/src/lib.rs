@@ -283,9 +283,26 @@ impl SqliteStore {
     }
 
     /// Number of nodes that have a stored embedding.
+    /// Memory nodes that hold a vector, counted over the same label set as
+    /// `AdminStats::total_nodes`.
+    ///
+    /// Counted `vectors` alone, this also returned every conversation-message
+    /// row - which the panel's `total_nodes` deliberately does not count - so
+    /// `nodes_with_embedding < total_nodes` was false on any store with chat
+    /// history no matter how many of its memory nodes had lost their vectors.
+    /// The two sides of that comparison must be the same set of nodes.
     pub fn count_nodes_with_embedding(&self) -> Result<u64> {
         let conn = self.lock();
-        let n: i64 = conn.query_row("SELECT COUNT(*) FROM vectors", [], |r| r.get(0))?;
+        let placeholders: Vec<String> =
+            (1..=labels::ALL.len()).map(|i| format!("?{i}")).collect();
+        let sql = format!(
+            "SELECT COUNT(*) FROM vectors v JOIN nodes n ON n.id = v.node_id              WHERE n.label IN ({})",
+            placeholders.join(", ")
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let args: Vec<&dyn rusqlite::types::ToSql> =
+            labels::ALL.iter().map(|l| l as &dyn rusqlite::types::ToSql).collect();
+        let n: i64 = stmt.query_row(args.as_slice(), |r| r.get(0))?;
         Ok(n as u64)
     }
 
