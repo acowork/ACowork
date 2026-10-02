@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { getGatewayUrl } from "../lib/config";
-import type { HealthResponse, GatewayStatus, LocalGatewayState, GatewayOwnership, GatewayBootResult, AgentMigrationProgress } from "../lib/types";
+import type { HealthResponse, GatewayStatus, LocalGatewayState, GatewayOwnership, GatewayBootResult, AgentMigrationProgress, MigrationAgentEntry } from "../lib/types";
 import { fetchMigrationProgress } from "../lib/gateway-api";
 import { log } from "../lib/logger";
 
@@ -193,6 +193,31 @@ interface GatewayStore {
   /** Migration progress for all agents (polled from Gateway) */
   migrationProgress: Record<string, AgentMigrationProgress>;
   /**
+   * The active migration session — the agents being re-embedded, whether the
+   * rebuild has actually started, and which model it is rebuilding for.
+   *
+   * This lives in the store, not in EmbeddingModelTab's `useState`, because a
+   * migration outlives the component that began it. The tab unmounts whenever
+   * the user visits the chat, and with the session held locally the progress
+   * list simply vanished mid-rebuild and never came back — the job kept
+   * running on the Gateway with no way to watch or stop it. A store slice
+   * survives the unmount, so the panel reappears exactly as it was.
+   *
+   * `started` is the difference between "we know these agents need
+   * re-embedding" (the pre-flight list, dismissible) and "the Gateway is
+   * rebuilding them right now" (the live list, which must not be dismissible
+   * and must not vanish).
+   */
+  migrationSession: MigrationSession | null;
+  /** Begin a migration session (pre-flight: agents awaiting confirmation). */
+  beginMigrationSession: (session: MigrationSession) => void;
+  /** Mark the session as actually started on the Gateway. */
+  markMigrationStarted: () => void;
+  /** Replace the selected agent set (pre-flight checkbox toggles). */
+  setMigrationSelection: (instanceIds: Set<string>) => void;
+  /** Dismiss the session — pre-flight cancel, or close a finished rebuild. */
+  clearMigrationSession: () => void;
+  /**
    * Reachable gateway URLs discovered by SplashScreen's 5s fallback probe.
    * Populated only when the persisted URL fails to respond; cleared once
    * the user picks one (or the normal boot completes). Stays empty during
@@ -215,6 +240,26 @@ interface GatewayStore {
   clearCandidates: () => void;
 }
 
+/**
+ * An embedding-dimension migration in flight (or awaiting confirmation).
+ * Owned by the store so it outlives the tab that started it.
+ */
+export interface MigrationSession {
+  /** Model the agents are being rebuilt onto. */
+  modelId: string;
+  /** Old → new vector width, for the "why" line. Null when unknown. */
+  oldDimension: number | null;
+  newDimension: number;
+  /** Backend's explanation of why a rebuild is required. */
+  message: string;
+  /** Agents in the session; a progress poll updates each entry's status. */
+  agents: MigrationAgentEntry[];
+  /** Agents the user has ticked (pre-flight only). */
+  selected: Set<string>;
+  /** False until the Gateway confirms the rebuild is running. */
+  started: boolean;
+}
+
 export const useGatewayStore = create<GatewayStore>((set, get) => ({
   // ADR-051 + ADR-052 (lifecycle ownership):
   //   `SplashScreen` is the SOLE owner of startup-time health probing.
@@ -232,7 +277,27 @@ export const useGatewayStore = create<GatewayStore>((set, get) => ({
   localState: "idle",
   localOwnership: "none",
   migrationProgress: {},
+  migrationSession: null,
   candidates: [],
+
+  beginMigrationSession: (session) => set({ migrationSession: session }),
+
+  markMigrationStarted: () =>
+    set((s) =>
+      s.migrationSession
+        ? { migrationSession: { ...s.migrationSession, started: true } }
+        : s,
+    ),
+
+  setMigrationSelection: (instanceIds) =>
+    set((s) =>
+      s.migrationSession
+        ? { migrationSession: { ...s.migrationSession, selected: instanceIds } }
+        : s,
+    ),
+
+  clearMigrationSession: () =>
+    set({ migrationSession: null, migrationProgress: {} }),
 
   checkHealth: async () => {
     const prev = get().status;

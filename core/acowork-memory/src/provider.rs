@@ -57,20 +57,14 @@ pub trait MemoryProvider: Send + Sync {
     /// Mark episodes as consolidated.
     fn mark_consolidated(&self, ids: &[u64]) -> Result<()>;
 
-    /// Record a permanent "skip" tombstone on episodes whose cluster the LLM
-    /// judge declined to promote (ADR-068 Step 4 `skip`).
+    /// Exact cosine top-`k` scan over one label's stored vectors.
     ///
-    /// Skipped episodes stay in the episodic layer (their content remains
-    /// retrievable) but are excluded from all future distiller runs — the
-    /// judge verdict is sticky, which prevents the same cluster from being
-    /// re-extracted and re-judged on every consolidation cycle (infinite
-    /// retry + repeated LLM cost). `defer` verdicts must NOT use this method:
-    /// they keep the retry semantics (the episode may become promotable once
-    /// more evidence accumulates).
-    ///
-    /// The marker is written under [`crate::types::DISTILLER_SKIP_METADATA_KEY`]
-    /// in the episode metadata as `{cluster_key, reason, at}`.
-    fn mark_episodes_skipped(&self, ids: &[u64], cluster_key: &str, reason: &str) -> Result<()>;
+    /// Used by the distiller's merge step to recall the existing semantic
+    /// nodes most similar to one new statement. Deliberately *not*
+    /// [`Self::hybrid_search`]: that pipeline applies abstention, decay and
+    /// token-budget logic meant for answering a user, all of which would
+    /// distort a dedup recall. Returns `(node_id, cosine)` pairs, best first.
+    fn vector_search(&self, label: &str, query: &[f32], k: usize) -> Result<Vec<(u64, f64)>>;
 
     /// Cleanup consolidated episodes older than the given duration.
     fn cleanup_episodes(&self, older_than: Duration) -> Result<u64>;
@@ -89,25 +83,31 @@ pub trait MemoryProvider: Send + Sync {
     /// mark episodes consolidated after promotion and to record
     /// `source_episode_ids` on promoted nodes.
     ///
-    /// Episodes carrying a distiller "skip" tombstone
-    /// ([`DISTILLER_SKIP_METADATA_KEY`](crate::types::DISTILLER_SKIP_METADATA_KEY))
-    /// are excluded here — the judge verdict is sticky (ADR-068 Step 4) and a
-    /// skipped episode must never be re-extracted or re-judged.
+    /// Ordered by timestamp descending (newest first).
     ///
-    /// Ordered by timestamp ascending (oldest first) so evidence accumulates
-    /// across runs in a stable order.
+    /// The window used to be oldest-first, which starved permanently: a run
+    /// reads at most `limit` rows, so an episode that repeatedly failed (and
+    /// was therefore left unconsolidated for retry) sat at the head of every
+    /// subsequent window and blocked everything behind it. Newest-first makes
+    /// the freshest memories consolidate first and lets a stuck episode drift
+    /// to the tail instead of holding the queue.
     fn get_episodes_by_subtype(
         &self,
         subtype: Option<KnowledgeSubType>,
         limit: usize,
     ) -> Result<Vec<(u64, Episode)>>;
 
-    /// Count unconsolidated, non-skipped episodes (ADR-071 D1).
+    /// Count unconsolidated episodes (ADR-071 D1).
     ///
     /// This is the EpisodicDistiller's candidate backlog and drives the
     /// background scheduler's distiller trigger — decoupled from the legacy
     /// `Pending` sediment-node count, which has had no producer since
     /// ADR-068 and therefore can no longer gate the distiller.
+    ///
+    /// Must use the same predicate as
+    /// [`get_episodes_by_subtype`](Self::get_episodes_by_subtype), or the
+    /// scheduler's backlog number and the distiller's actual work queue drift
+    /// apart and the status panel reports a queue that no run will ever drain.
     fn count_unconsolidated_episodes(&self) -> Result<usize>;
 
     /// Collaboration span across all episodes (ADR-068 M8).
@@ -127,6 +127,16 @@ pub trait MemoryProvider: Send + Sync {
     /// Returns the storage id of the written node — the id of the existing
     /// node when the write was a dedup merge, otherwise the fresh id.
     fn store_knowledge(&self, node: &KnowledgeNode) -> Result<u64>;
+
+    /// Load a knowledge node by id.
+    fn get_knowledge(&self, id: u64) -> Result<Option<KnowledgeNode>>;
+
+    /// Overwrite an existing knowledge node.
+    ///
+    /// [`KnowledgeNode`] carries no id, so the target is explicit. Used by the
+    /// distiller's merge step, which must update a node in place rather than
+    /// insert a near-duplicate.
+    fn update_knowledge(&self, id: u64, node: &KnowledgeNode) -> Result<()>;
 
     /// Store or update a procedural memory node.
     /// Returns the storage id of the written node.

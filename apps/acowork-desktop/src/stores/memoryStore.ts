@@ -14,6 +14,7 @@ import {
   fetchEmbeddingModels,
   startMigration,
 } from "../lib/gateway-api";
+import i18n from "../i18n";
 import { useGatewayStore } from "./gatewayStore";
 import { log } from "../lib/logger";
 import { with503Retry, WRITE_503_RETRY } from "../lib/httpRetry";
@@ -127,6 +128,16 @@ interface MemoryStore {
    * 2s until the agent reports `done` or an error.
    */
   rebuildIndex: (agentId: string) => Promise<void>;
+
+  /**
+   * Re-attach to a rebuild that is already running for `agentId`.
+   *
+   * Called when the memory panel opens or switches agents. Without it the
+   * panel forgets an in-flight rebuild on every agent switch (clearMemory
+   * drops the poll and the flag) and re-arms a button whose only remaining
+   * effect is to queue a second migration over the same store.
+   */
+  resumeRebuild: (agentId: string) => Promise<void>;
   setFilters: (partial: Partial<MemoryFilters>) => void;
   setPage: (page: number) => void;
   setSelectedNodeId: (id: number | null) => void;
@@ -137,6 +148,58 @@ interface MemoryStore {
 // the store so clearing memory / switching agents cancels any active poll
 // without needing to thread the handle through state.
 let rebuildPollingTimer: ReturnType<typeof setInterval> | null = null;
+
+/** Stop the migration poll, if one is running. */
+function stopRebuildPoll() {
+  if (rebuildPollingTimer) {
+    clearInterval(rebuildPollingTimer);
+    rebuildPollingTimer = null;
+  }
+}
+
+/**
+ * Watch the Gateway's migration state for one agent until it settles.
+ *
+ * Shared by the Rebuild button and the re-attach path below: the rebuild runs
+ * detached in the Gateway and Runtime and outlives any particular panel, so
+ * this poll is only the UI's handle on it - dropping the handle never stopped
+ * the work, which is what made the button lie.
+ */
+function watchRebuild(agentId: string) {
+  stopRebuildPoll();
+  // The Gateway records migration state synchronously before start-migration
+  // returns, so a missing entry normally means the agent stopped or was
+  // removed mid-rebuild. Tolerate a couple of empty polls (the first tick can
+  // race the response) before concluding there is nothing left to watch.
+  let misses = 0;
+  rebuildPollingTimer = setInterval(async () => {
+    const gateway = useGatewayStore.getState();
+    await gateway.pollMigrationProgress();
+    const mine = gateway.migrationProgress[agentId];
+    if (!mine) {
+      if (++misses < 3) return;
+      stopRebuildPoll();
+      useMemoryStore.setState({ migrationInProgress: false });
+      return;
+    }
+    misses = 0;
+    if (!mine.done && !mine.error) return;
+    stopRebuildPoll();
+    useMemoryStore.setState({ migrationInProgress: false });
+    try {
+      // Refresh the stats the banner reads: a finished rebuild is exactly the
+      // moment the panel should stop warning about stale vectors.
+      await useMemoryStore.getState().fetchStats(agentId);
+    } catch {
+      // Best-effort - the progress record still says whether it succeeded.
+    }
+    if (mine.error) {
+      useMemoryStore.setState({
+        error: `${i18n.t("memoryPanel.rebuildFailed", { error: mine.error })}`,
+      });
+    }
+  }, 2000);
+}
 
 export const useMemoryStore = create<MemoryStore>((set, get) => ({
   nodes: [],
@@ -322,10 +385,7 @@ export const useMemoryStore = create<MemoryStore>((set, get) => ({
 
   rebuildIndex: async (agentId: string) => {
     // Guard: cancel any in-flight poll before starting a new rebuild.
-    if (rebuildPollingTimer) {
-      clearInterval(rebuildPollingTimer);
-      rebuildPollingTimer = null;
-    }
+    stopRebuildPoll();
     set({ migrationInProgress: true, error: null });
     try {
       // Resolve the currently active embedding model — start-migration ignores
@@ -347,44 +407,34 @@ export const useMemoryStore = create<MemoryStore>((set, get) => ({
       if (resp.status === "error") {
         throw new Error(resp.message || `Migration start failed: ${resp.status}`);
       }
-
-      // Poll progress every 2s. We piggy-back on gatewayStore.pollMigrationProgress
-      // (the same helper the Harness tab uses) so the progress map stays in sync
-      // with the rest of the app.
-      const gateway = useGatewayStore.getState();
-      const finish = async () => {
-        if (rebuildPollingTimer) {
-          clearInterval(rebuildPollingTimer);
-          rebuildPollingTimer = null;
-        }
-        set({ migrationInProgress: false });
-        try {
-          await get().fetchStats(agentId);
-        } catch {
-          // Best-effort refresh — the MigrationProgress array still tells the
-          // user whether it succeeded; a fetch failure here shouldn't blank
-          // the "in progress" flag back on.
-        }
-        const final = useGatewayStore.getState().migrationProgress[agentId];
-        if (final?.error) {
-          set({ error: `索引重建失败: ${final.error}` });
-        }
-      };
-      rebuildPollingTimer = setInterval(async () => {
-        const stillInProgress = await gateway.pollMigrationProgress();
-        if (!stillInProgress) {
-          await finish();
-        }
-      }, 2000);
+      // An agent whose migration is still running is reported per-agent as
+      // `already_running` rather than as a request error - the Gateway refuses
+      // to stack a second migration on it, and watching the existing one is
+      // what the user asked for either way.
+      watchRebuild(agentId);
     } catch (e) {
-      if (rebuildPollingTimer) {
-        clearInterval(rebuildPollingTimer);
-        rebuildPollingTimer = null;
-      }
+      stopRebuildPoll();
       set({
         migrationInProgress: false,
         error: e instanceof Error ? e.message : "Rebuild index failed",
       });
+    }
+  },
+
+  resumeRebuild: async (agentId: string) => {
+    if (get().migrationInProgress) return; // already watching
+    // `pollMigrationProgress` leaves the cached map untouched when the Gateway
+    // is unreachable, so a stale entry would otherwise read as "still running".
+    if (useGatewayStore.getState().status !== "connected") return;
+    try {
+      await useGatewayStore.getState().pollMigrationProgress();
+    } catch {
+      return; // best-effort; the next panel interaction retries
+    }
+    const mine = useGatewayStore.getState().migrationProgress[agentId];
+    if (mine && !mine.done && !mine.error) {
+      set({ migrationInProgress: true });
+      watchRebuild(agentId);
     }
   },
 

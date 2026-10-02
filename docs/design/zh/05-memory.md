@@ -424,6 +424,9 @@ AutobiographicalNode 不参与遗忘，但需要容量控制防止无限膨胀�
 ```
 Episode：
   content              自然语言内容（不拆三元组）
+  normalized           可选——去掉对话语境后仍然成立的单句陈述（ADR-068 2026-10）。
+                       蒸馏器的主输入与召回/embedding 键。留空时
+                       Episode::statement() 回退到 content，因此旧数据无需迁移
   knowledge_subtype    Fact | Preference | Relation | Procedure（LLM 自选 4 类之一）
   confidence           LLM 自评（high/medium/low → 0.85/0.7/0.5，可选）
   keywords             经 ADR-062 keyword sanitize 门禁后进 metadata（可选）
@@ -432,6 +435,8 @@ Episode：
 已下线：PendingKnowledgeNode / status=Pending / confidence>=0.85 直写 KnowledgeNode
 ——这些机制随 ADR-068 M5/M6 整体删除。沉淀层晋升是 EpisodicDistiller 的唯一职责。
 ```
+
+> **`normalized` 为什么由写时模型产出**：「这句话去掉语境后还成立什么」是语义判断，写时模型手上有完整对话上下文，离线重读者没有。让离线管线重新提取一次，等于用一个信息更少的判断覆盖一个信息更多的判断。
 
 **设计决策：Tool Call 而非单独调用**
 
@@ -560,28 +565,36 @@ LLM 生成回复（含 tool call 判断）
 
 > **实现状态（ADR-068 M1-M8 落地；ADR-071 触发/配置接线 2026-09 已实现 W1–W5）**：离线巩固由 `EpisodicDistiller`（`core/acowork-memory/src/consolidation/distiller.rs`）承载。后台调度与运行时配置按 [ADR-071](../../adr/zh/ADR-071-distiller-runtime-config-and-trigger.md)：触发口径与 legacy Pending 解耦（基于 unconsolidated episode 积压/空闲）、配置分层（manifest 初值 → `agent_config.json` 运行时层）、手动蒸馏端点、模型选择复用摘要模型 UI、蒸馏 prompt 纳入 ADR-063 per-agent 覆盖、记忆面板"记忆蒸馏"卡片与"立即蒸馏"按钮已上线。旧 Phase 3 规划中的 PendingKnowledgeNode 升级制、rule-based generalization、自动自我评估、History 压缩均已下线。
 
-**蒸馏输入/输出**：
+**蒸馏输入/输出（2026-10 收敛为「投影 + 合并」，见 ADR-068 Revision(2026-10)）**：
 
 ```
 输入：consolidated=false 且带 knowledge_subtype 标注的 Episode
   （LLM 端唯一写入方 = memory_store 工具，§4.1）
+  陈述文本 = Episode::statement()（normalized 优先，回退 content）——
+  写路径的 embedding 与这里的召回键共用同一个函数，避免两处回退逻辑漂移
 
-6 步流水线（详见 ADR-068 §3.4）：
-  ① 扫描候选 episode（knowledge_subtype 过滤 + 数量上限）
-  ② LLM 结构化提取（Fact/Preference/Relation → subject/predicate/object，
-     Procedure → trigger_condition/action_pattern）+ autobio 候选识别（布尔分类 + aspect）
-  ③ embedding 聚簇 + 证据累计（min_evidence 阈值门控）
-  ④ LLM Judge 仲裁（合并/拒绝/确认晋升）
-  ⑤ 晋升落库：KnowledgeNode / ProceduralNode / AutobiographicalNode
-     （节点携带 promotion_metadata：证据 episode id 链 + Judge reasoning + 时间戳）
-  ⑥ 标记 episode consolidated + 清理
+每条 episode 两步（详见 ADR-068 §3.4）：
+  ① 扫描候选 episode（knowledge_subtype 过滤 + batch_size 上限，newest-first）
+  ② 按 statement() 召回同 label 下相似度 ≥ merge_recall_threshold 的既有语义节点
+     ├─ 召不到（0 候选）→ **投影**：statement() 直接落成
+     │    KnowledgeNode / ProceduralNode / AutobiographicalNode，零 LLM 调用
+     └─ 召到（1..K 候选）→ **合并**：一次 LLM 调用判
+          merge / no_merge / contradicts，输入规模与 store 大小无关
+  ③ 标记 episode consolidated（仅投影/合并成功时；失败或无模型时保持未沉淀，
+     下一轮重新考虑，不留墓碑）
 
-输出：沉淀层节点（唯一生产者）+ 完整审计（DistillerResult.promotion_evaluations）
+输出：沉淀层节点（唯一生产者）+ 完整审计（DistillerResult.funnel 记录
+  projected / merged / deferred / llm_calls / below_importance，
+  DistillerResult.promotion_evaluations 记录每节点证据链与 reasoning）
 ```
+
+**为什么只剩一次 LLM 调用**：写时模型已经判断过「这条经历值得记」，离线再判一次「它有没有价值」是重复且不更可靠的判断。旧管线（LLM 结构化提取 → embedding 聚簇 → LLM Judge → 5 个 min_evidence 门槛 + 墓碑）在线上出现过开了数周、269 条 episode、0 条沉淀的情况——触发条件每次都满足，问题在链路。新管线对同一份存量数据零 token 即产出 33 条沉淀，有模型时 3 轮清空积压。
+
+**体积控制只有一个旋钮**：`min_importance`（默认 0.0 = 全投影）。旧管线的 5 个证据门槛全部删除。语义层过密时收紧它即可；未投影的 episode 不留墓碑，放宽阈值后会被重新考虑，不丢历史数据。
 
 **可信沉淀方式原则（2026-09 revision）**：沉淀层节点只允许两类语义生产者——
 1. **图/统计归纳**：基于 `nodes`/`edges` 表统计节点/边关系（应用层实现）
-2. **LLM 分析归纳**：`EpisodicDistiller`（服务端 LLM 提取 + LLM Judge）
+2. **LLM 分析归纳**：`EpisodicDistiller`（投影 + 合并；LLM 只在合并裁决时被调用）
 规则式替代（字符串全等计数、文本特征 grep、30 天/10 条等启发式）一律不得用于"经历→沉淀"语义归纳；规则只保留在幂等/去重门槛、生命周期、权威数据源导入（manifest bootstrap）、事件触发判定四类位置。
 
 **蒸馏触发与配置（ADR-071）**：
@@ -590,7 +603,7 @@ LLM 生成回复（含 tool call 判断）
 - **后台触发（与 legacy Pending 计数解耦）**：周期到点（`distiller_interval_minutes`，默认 60）∧（unconsolidated episode 积压 ≥ `distiller_accumulation_threshold`(默认 50) ∨ 空闲 ≥ `distiller_idle_minutes`(默认 30)）→ 跑 `run_episodic_distiller_step`；受 `distiller_enabled` 门控（默认 false，opt-in 保持）
 - **手动触发**：`POST /memory/distill` 立即跑一次（绕过周期，与后台共用同一实现；仍守 opt-in，关闭时返回 409）；`consolidation/status` 返回蒸馏配置与上次运行结果。记忆面板底部"合并节点"按钮已退役，替换为"立即蒸馏"（legacy consolidate action 删除，episodic cleanup 随周期 consolidation 自动执行）
 - **蒸馏模型**：独立字段 `distiller_model`（provider_id/model_id），UI 复用摘要模型下拉逻辑（vault keys + provider 名，与 Harness compact-model 卡片同源）；解析链 agent_config → manifest → `default_compact_model` → provider 第一模型（现状保底）
-- **prompt per-agent**：`distiller-extraction.md` / `distiller-judge.md` 进 ADR-063 覆盖白名单，Debug 界面 PromptList 可见可编辑，reload 生效；`DistillerConfig.extraction_prompt_override`/`judge_prompt_override` 在 `distiller_scheduler_config()` 组装时注入；`acowork-memory` 内置常量保留为默认
+- **prompt per-agent**：`distiller-merge.md` 进 ADR-063 覆盖白名单（原 `distiller-extraction.md` / `distiller-judge.md` 两槽随提取段、Judge 段下线合并为一槽），Debug 界面 PromptList 可见可编辑，reload 生效；`DistillerConfig.extraction_prompt_override`/`judge_prompt_override` 在 `distiller_scheduler_config()` 组装时注入；`acowork-memory` 内置常量保留为默认
 - **配置热更新**：`ConsolidationTimer` 持有 `RwLock<SchedulerConfig>`，PUT agent config 后 `update_config()` 换值、后台 loop 每 tick 重读（≤60s 生效），不重建后台任务
 - 失败/证据不足的 episode 原样保留，下轮重试；不存在降级到规则路径的 fallback
 
@@ -601,8 +614,8 @@ LLM 生成回复（含 tool call 判断）
 | 触发   | LLM 在回复时自主调用                     | 后台周期任务（per-agent opt-in）      |
 | 粒度   | 单轮对话中的显式信息                     | 跨 episode 的证据聚簇 + 语义归纳      |
 | 写入   | 只写 Episode（content + knowledge_subtype） | 晋升沉淀层节点（含审计证据链）     |
-| LLM 判断 | LLM 自评 confidence/category           | 服务端结构化提取 + Judge 仲裁         |
-| 成本   | 零额外 API 调用（工具定义随主回复）      | 每批 2 次 LLM 调用（Step 2a + Step 4）|
+| LLM 判断 | LLM 自评 confidence/category + normalized 陈述  | 仅合并裁决时调用模型（投影零调用）  |
+| 成本   | 零额外 API 调用（工具定义随主回复）      | 每条 episode 0 或 1 次调用（有候选才 1 次）|
 
 ## 5. 遗忘机制
 
@@ -669,6 +682,10 @@ retention = exp(-ln2 × age_days / half_life_days)
 
 沉淀层沿用旧的乘法衰减模型（`forgetting/scan.rs` + `run_decay_scan`，importance × activity_signal），
 但**当前不在任何生产路径调度**——保留实现，待语义层衰减需求明确后再启用。
+
+> **实现保证（有端到端测试覆盖）**：`run_episodic_decay_scan` 的扫描集合是 `WHERE label = 'Episodic'`，语义标签根本不在候选集里，因此「沉淀层不被遗忘」由查询形状保证，不靠运行时判断。同理，遗忘是两阶段——Active → Dormant（retention < `dormant_threshold`）→ 超过 `archive_days` 才 purge，且 purge 前整行复制进 `purge_log`，是**可恢复的归档而非删除**。
+>
+> 覆盖这些不变量的测试在 `core/acowork-runtime/tests/memory_lifecycle_e2e.rs`：沉淀在其证据被遗忘后仍可召回；衰减扫描误扫 Knowledge 会被捕获；`dormant_threshold`、`archive_days`、`enabled` 各自的失效都有对应断言。每条断言都经过变异测试确认能失败。
 
 ### 5.3 不参与遗忘的节点
 
@@ -805,33 +822,33 @@ Level 3（内存模式）
 
 详见 `docs/_internal/archive/review/zh/04-p2-s2-design-review.md` §6.2、§6.3
 
-### 6.4 冲突处理（ADR-068 2026-09 revision — 仲裁收敛到蒸馏器 Judge）
+### 6.4 冲突处理（ADR-068 2026-10 revision — 收敛为合并裁决的一个分支）
 
-**位置**：经历→沉淀只有一条管道（EpisodicDistiller），冲突仲裁因此只发生在蒸馏的 **Step 3 聚簇 + Step 4 LLM Judge**，不再存在"即时阶段写入节点时的两层信号冲突检测"（该机制随即时直写沉淀层一并下线）。
+**位置**：冲突只在蒸馏的**合并裁决**这一步被识别，即某条 episode 按 `statement()` 召回到 ≥ `merge_recall_threshold` 的既有语义节点、需要判断「是不是同一件事」时。不存在独立的冲突检测阶段——旧文档描述的 Step 3 embedding 聚簇与 Step 4 LLM Judge 已随 ADR-068 Revision(2026-10) 下线（聚簇把「相似」当「同一件事」，而是否同一件事是语义判断；`ConflictType` / `conflicts_evolution/correction/ambiguous` / `should_trigger_confirmation` 在删除前已是零引用死代码）。
 
-**候选冲突的产生（Step 3）**：
-
-```
-embedding 聚簇（cluster_threshold，默认 0.85，per-agent 可调 0.80~0.92）：
-  → 同一候选主题的多条 episode 落入同一簇 → 证据累计（evidence_count）
-  → 相似但语义不同的 episode 也同簇 → 交 Judge 仲裁（防误聚）
-```
-
-**仲裁与解决（Step 4 LLM Judge）**：
+**裁决输入/输出**：
 
 ```
-输入：同簇 episode 文本 + 各自时间戳 + 已有沉淀层节点上下文
-输出：
-  - type: "evolution" | "correction" | "ambiguous" | "duplicate" | "distinct"
-  - action: "promote" | "replace" | "merge_into_existing" | "keep_both" | "reject"
-  - reasoning（写入 promotion_metadata，人工可审计回滚）
+输入：1 条新陈述 + 至多 merge_candidate_k（默认 5）条候选节点
+      → 输入规模与 store 大小无关，回复是固定形状的小 JSON
+输出：action = merge | no_merge | contradicts
+      target_id（候选 id 或 null）、statement（合并后的单句陈述或 null）、reasoning
 
-时间语义：Judge 依据 episode 时间戳判断——
-  → 短窗口内矛盾陈述更可能是纠正（correction）
-  → 长间隔陈述变化更可能是演进（evolution）
+时间语义由模型自行从候选与 episode 的时间戳推断，不再有显式窗口规则。
 ```
 
-**已下线（ADR-068）**：即时路径的 conflict_candidate 标记、`ConflictType::Ambiguous`、`conflict_group_id`、新节点暂不参与 graph_expand——因为 memory_store 不再创建沉淀层节点，全部候选冲突只在蒸馏阶段被识别。
+**三条防线**（都有对应测试）：
+
+| 风险 | 处置 |
+|---|---|
+| 模型幻觉出一个不存在的 `target_id` | 只接受本次请求里真实发给它的候选 id，否则整条 episode 延后重试，绝不改写无关节点 |
+| 误合并不可逆 | 合并只追加 `source_episode_ids`，证据链完整保留，面板可人工纠正 |
+| 召回到候选但没有可用模型 | 延后，不猜。猜错两个方向都不可逆（误合并丢证据、漏合并造重复节点） |
+
+**阈值取向**：`merge_recall_threshold` 默认 0.65，刻意偏宽松。阈值只决定「谁被送去给模型判」，不决定「是否合并」——误候选的代价是一次 `no_merge` 调用，漏候选的代价是一个此后永不被重新聚拢的重复节点。语义层过密时应收紧 `min_importance`，而不是调这个阈值。
+
+**已下线（ADR-068）**：即时路径的 conflict_candidate 标记、`ConflictType::Ambiguous`、`conflict_group_id`、新节点暂不参与 graph_expand——因为 `memory_store` 不再创建沉淀层节点，全部候选冲突只在蒸馏阶段被识别。
+
 ### 6.5 Abstention（拒答）机制（v3.7 新增）
 
 **设计动机**：当检索结果的置信度不足时，Agent 应选择拒答而非生成可能不准确的回答。这是检索系统的最终质量门控——比检索降级策略（Level 0-3）更后置，是在检索结果已返回后的语义级别保障。

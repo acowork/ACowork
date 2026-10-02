@@ -103,12 +103,6 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     let memory_store_shared: crate::http::SharedMemoryStore =
         Arc::new(std::sync::RwLock::new(None));
 
-    // Shared embedding-provider dimension. Starts at 0 (no provider) and
-    // is updated once `embed_dimension` is resolved below (after the HTTP
-    // server has already started listening). The memory-stats handler
-    // surfaces this as `model_dim` for HNSW dimension-mismatch detection.
-    let embed_dim_shared: crate::http::SharedEmbedDimension = Arc::new(std::sync::RwLock::new(0));
-
     // Shared degradation reasons. Created empty here and populated by
     // Phase B if session persistence fails. The same Arc is passed to
     // the HTTP server so `/health` can surface non-fatal startup errors.
@@ -273,7 +267,6 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
             session_snapshots.clone(),
             latest_session.clone(),
             http_dispatch_shared,
-            embed_dim_shared.clone(),
             degraded_reasons.clone(),
             mqtt_client_slot.clone(),
             session_metadata_slot.clone(),
@@ -634,18 +627,13 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     let title_prompt = load_or_trace("title.md", "TITLE_PROMPT");
     let abstention_prompt = load_or_trace("abstention.md", "DEFAULT_ABSTENTION_PROMPT (memory)");
 
-    // ADR-071 D7/D9: two distiller prompt overrides. The grafeo offline
-    // distiller owns its own built-in prompt constants
-    // (`EXTRACTION_SYSTEM_PROMPT` / `JUDGE_SYSTEM_PROMPT`); when a package
-    // ships `prompts/distiller-extraction.md` or `prompts/distiller-judge.md`,
-    // they replace the built-ins per-agent. Loaded in Phase A like the
-    // ADR-063 overrides above so Gateway and Standalone modes agree.
-    let distiller_extraction_prompt = load_or_trace(
-        "distiller-extraction.md",
-        "distiller Step 2a extraction prompt",
-    );
-    let distiller_judge_prompt =
-        load_or_trace("distiller-judge.md", "distiller Step 4 judge prompt");
+    // ADR-071 D7/D9: the distiller prompt override. The offline distiller
+    // owns its built-in `MERGE_SYSTEM_PROMPT`; when a package ships
+    // `prompts/distiller-merge.md` it replaces the built-in per-agent.
+    // Loaded in Phase A like the ADR-063 overrides above so Gateway and
+    // Standalone modes agree.
+    let distiller_merge_prompt =
+        load_or_trace("distiller-merge.md", "distiller merge-decision prompt");
 
     // ── Step 3.5: Load skill registry ───────────────────────────────
     // Kept alive on the boot context (not discarded) so Phase B injects it
@@ -865,9 +853,12 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
                         provider_name = %name,
                         "✅ Embedding provider initialized successfully (Tier 1: local ONNX)"
                     );
-                    if let Ok(mut slot) = embed_dim_shared.write() {
-                        *slot = dim as u64;
-                    }
+                    // Nothing records this dimension any more, on purpose. The
+                    // provider is the record: `update_embedding_provider` puts
+                    // it in the shared cell and readers ask it. A separate copy
+                    // of the number is what the memory panel kept showing after
+                    // a model switch - stale, because the session that adopts a
+                    // new provider never reaches this one.
                     Some(Arc::new(ep))
                 }
                 Err(e) => {
@@ -1279,8 +1270,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         // ADR-071 D7/D9: two distiller prompt overrides (see load_or_trace
         // above). They ride the same `AgentBootContext` → `AgentCore`
         // injection chain as the ADR-063 fields.
-        distiller_extraction_prompt,
-        distiller_judge_prompt,
+        distiller_merge_prompt,
         memory_session,
         mcp_notifier,
         workspace_resolver,
@@ -1295,11 +1285,10 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         latest_session,
         agent_id,
         http_dispatch_rx: Some(http_dispatch_rx),
-        // ADR-033: shared memory store + embed dim are populated by Phase B
-        // and read by the Runtime HTTP memory handlers. The HTTP server was
-        // already given clones of these Arcs in the `start(...)` call above.
+        // ADR-033: shared memory store is populated by Phase B and read by the
+        // Runtime HTTP memory handlers. The HTTP server was already given a
+        // clone of that Arc in the `start(...)` call above.
         memory_store_shared,
-        embed_dim_shared,
         degraded_reasons,
         // Same Arc as the local `mqtt_client_slot` above — both Phase C
         // (subsystems) and the runtime `/api/debug/enable` route read

@@ -5,8 +5,8 @@ use acowork_core::EmbeddingProvider;
 use acowork_core::tools::traits::Tool;
 
 use acowork_memory::consolidation::{
-    DefaultEpisodicDistiller, DistillerConfig, EpisodicDistiller, LlmMessage, LlmResponse,
-    PromotionDecision, PromotionKind, TripleExtractorLlm,
+    ConsolidationLlm, DefaultEpisodicDistiller, DistillerConfig, EmbeddingFn, EpisodicDistiller,
+    LlmMessage, LlmResponse, PromotionDecision, PromotionKind,
 };
 use acowork_memory::types::{AutobioCategory, Episode, KnowledgeSubType};
 use acowork_memory::{MemoryManager, MemoryManagerConfig, MemoryProvider, MemoryQuery, labels};
@@ -52,7 +52,7 @@ impl EmbeddingProvider for DeterministicEmbedding {
 // Scripted server-side LLM for distiller Step 2a (extract) + Step 4 (judge)
 // ============================================================================
 
-/// A fake `TripleExtractorLlm` returning a fixed response queue. The distiller
+/// A fake `ConsolidationLlm` returning a fixed response queue. The distiller
 /// pops one response per LLM call: first the batch extraction JSON, then one
 /// judge JSON per candidate cluster.
 struct ScriptedDistillerLlm {
@@ -68,7 +68,7 @@ impl ScriptedDistillerLlm {
 }
 
 #[async_trait::async_trait]
-impl TripleExtractorLlm for ScriptedDistillerLlm {
+impl ConsolidationLlm for ScriptedDistillerLlm {
     async fn chat(&self, _messages: Vec<LlmMessage>) -> std::result::Result<LlmResponse, String> {
         let resp = self
             .responses
@@ -79,38 +79,35 @@ impl TripleExtractorLlm for ScriptedDistillerLlm {
         Ok(LlmResponse {
             content: resp,
             usage_tokens: None,
+            ..Default::default()
         })
     }
 }
 
-/// Build the Step 2a extraction JSON for one episode.
-fn raw_extract(episode_id: u64, kind: &str, a: &str, b: &str) -> String {
-    match kind {
-        "triple" => format!(
-            "{{\"episode_id\": {id}, \"structure\": {{\"kind\": \"triple\", \"subject\": \"user\", \"predicate\": \"{a}\", \"object\": \"{b}\"}}, \"autobio_candidate\": null}}",
-            id = episode_id
-        ),
-        "autobio" => format!(
-            "{{\"episode_id\": {id}, \"structure\": null, \"autobio_candidate\": {{\"aspect\": \"{a}\", \"key_hint\": \"{b}\"}}}}",
-            id = episode_id
-        ),
-        _ => String::new(),
-    }
+/// Build one merge verdict (the distiller's only LLM touchpoint).
+fn merge_verdict(action: &str, target_id: Option<u64>, statement: Option<&str>) -> String {
+    serde_json::json!({
+        "action": action,
+        "target_id": target_id,
+        "statement": statement,
+        "reasoning": "scripted adr068 verdict",
+    })
+    .to_string()
 }
 
-fn extraction_response(items: &[(u64, &str, &str, &str)]) -> String {
-    let arr: Vec<String> = items
-        .iter()
-        .map(|(id, k, a, b)| raw_extract(*id, k, a, b))
-        .collect();
-    format!("[{}]", arr.join(","))
+/// Deterministic text->vector bridge, so a test can put the distiller on the
+/// merge path (candidates exist) instead of the projection path.
+fn embedding_fn() -> EmbeddingFn {
+    Arc::new(|text: &str| acowork_memory::manager::procedural_embedding_fallback(text))
 }
 
-/// Build the Step 4 judge JSON.
-fn judge_response(decision: &str, confidence: f32, content: &str) -> String {
-    format!(
-        "{{\"decision\": \"{decision}\", \"confidence\": {confidence}, \"reasoning\": \"r\", \"merged_content\": \"{content}\"}}"
-    )
+/// An embedding that makes every text identical, so *any* pair of episodes
+/// recalls each other. Used to reach the `no_merge` / `contradicts` verdicts
+/// with two statements that are genuinely different facts — the hash-based
+/// [`embedding_fn`] puts unrelated texts near cosine 0, which would hide those
+/// branches behind a recall that never fires.
+fn blind_embedding_fn() -> EmbeddingFn {
+    Arc::new(|_text: &str| vec![1.0; acowork_memory::manager::PROCEDURAL_FALLBACK_DIM])
 }
 
 // ============================================================================
@@ -146,7 +143,19 @@ impl Adr068E2e {
 
     /// Store a classified episode directly (as if written earlier by the LLM
     /// tool at `timestamp`).
-    fn seed_episode(&self, content: &str, subtype: KnowledgeSubType, ts: DateTime<Utc>) {
+    fn seed_episode(&self, content: &str, subtype: KnowledgeSubType, ts: DateTime<Utc>) -> u64 {
+        self.seed_episode_with(content, subtype, ts, 0.5)
+    }
+
+    /// As [`Self::seed_episode`], with an explicit `importance` so a test can
+    /// sit an episode on either side of `min_importance`.
+    fn seed_episode_with(
+        &self,
+        content: &str,
+        subtype: KnowledgeSubType,
+        ts: DateTime<Utc>,
+        importance: f32,
+    ) -> u64 {
         let ep = Episode {
             session_id: "com.test.adr068".to_string(),
             turn_index: 0,
@@ -156,12 +165,11 @@ impl Adr068E2e {
             timestamp: ts,
             consolidated: false,
             metadata: Default::default(),
-            importance: 0.5,
+            importance,
             knowledge_subtype: Some(subtype),
+            normalized: None,
         };
-        self.provider()
-            .store_episode(&ep)
-            .expect("store_episode ok");
+        self.provider().store_episode(&ep).expect("store_episode ok")
     }
 }
 
@@ -267,127 +275,29 @@ async fn tool_write_creates_preference_episode() {
 }
 
 // ============================================================================
-// E3/E4 — EpisodicDistiller promotes evidence-backed clusters
+// E3/E4 — EpisodicDistiller projects and merges episodes
 // ============================================================================
 
-/// E3 (+ D10): three limitation-feedback Preference episodes spread across
-/// 14+ days promote to a single `AutobiographicalNode{category=Limitation,
-/// key="verbose_response"}`, episodes are marked consolidated, and the
-/// `promotion_evaluations` audit contains exactly one matching entry.
+/// E3: Preference episodes reporting agent feedback are user preferences, not
+/// autobiographical lessons, so they project into `KnowledgeNode` rows. With no
+/// embedding function nothing can be recalled, which means the whole backlog
+/// consolidates **without a single LLM call** — the property that decouples
+/// consolidation from model availability.
 #[tokio::test]
-async fn distiller_promotes_autobio_limitation_and_audits() {
+async fn distiller_projects_preference_episodes_without_any_llm() {
     let e2e = Adr068E2e::new();
     let now = Utc::now();
-    for i in 0..3 {
-        e2e.seed_episode(
-            "You are too verbose, give shorter answers",
-            KnowledgeSubType::Preference,
-            now - ChronoDuration::days(i * 7),
-        );
-    }
+    let ids: Vec<u64> = (0..3)
+        .map(|i| {
+            e2e.seed_episode(
+                "You are too verbose, give shorter answers",
+                KnowledgeSubType::Preference,
+                now - ChronoDuration::days(i * 7),
+            )
+        })
+        .collect();
 
-    let eps = e2e
-        .provider()
-        .get_episodes_by_subtype(Some(KnowledgeSubType::Preference), 10)
-        .expect("scan ok");
-    assert_eq!(eps.len(), 3);
-    let ids: Vec<u64> = eps.iter().map(|(id, _)| *id).collect();
-
-    let llm = ScriptedDistillerLlm::new(vec![
-        extraction_response(
-            &ids.iter()
-                .map(|id| (*id, "autobio", "limitation", "verbose_response"))
-                .collect::<Vec<_>>(),
-        ),
-        judge_response("promote", 0.95, "agent should be concise"),
-    ]);
-
-    let distiller = DefaultEpisodicDistiller;
-    let result = distiller
-        .run(
-            e2e.provider().as_ref(),
-            Some(&llm),
-            None,
-            &DistillerConfig::default(),
-        )
-        .await
-        .expect("distiller run ok");
-
-    // D10: audit ↔ outcome one-to-one for the promoted cluster.
-    assert_eq!(result.promotion_evaluations.len(), 1);
-    let eval = &result.promotion_evaluations[0];
-    assert_eq!(eval.promoted_kind, PromotionKind::AutobioLimitation);
-    assert!(matches!(eval.decision, PromotionDecision::Promoted));
-    assert_eq!(eval.source_episode_ids.len(), 3);
-    assert!(eval.llm_confidence > 0.0);
-    assert!(!eval.llm_reasoning.is_empty());
-
-    assert_eq!(result.autobio_promoted, 1);
-    assert_eq!(result.episodes_marked_consolidated, 3);
-
-    // Sediment node present with full provenance.
-    let node = e2e
-        .store
-        .find_autobiographical_by_key("verbose_response")
-        .expect("lookup ok")
-        .expect("AutobiographicalNode exists");
-    assert_eq!(node.category, AutobioCategory::Limitation);
-    assert_eq!(node.source_episode_ids.len(), 3);
-    let meta = node
-        .promotion_metadata
-        .as_ref()
-        .expect("promotion metadata");
-    assert_eq!(meta.promoted_by, "episodic_distiller");
-    assert_eq!(meta.evidence_episode_ids.len(), 3);
-    assert!(meta.llm_judge_confidence > 0.0);
-
-    // A4: the audit entry must map to the REAL storage id of the promoted
-    // node (rollback requires the mapping to exist in the data).
-    assert_eq!(
-        eval.promoted_node_id,
-        node.id,
-        "promoted_node_id must equal the stored node id"
-    );
-    assert!(eval.promoted_node_id.is_some());
-
-    // Episodes are consolidated — a second run must not re-promote them.
-    let remaining = e2e
-        .provider()
-        .get_episodes_by_subtype(None, 10)
-        .expect("scan ok");
-    assert!(remaining.is_empty(), "all evidence episodes consolidated");
-}
-
-/// E4: two Fact episodes with the same predicate promote to a single
-/// `KnowledgeNode` through the same audit path (evidence + judge + write).
-#[tokio::test]
-async fn distiller_promotes_fact_with_two_evidence_episodes() {
-    let e2e = Adr068E2e::new();
-    let now = Utc::now();
-    for i in 0..2 {
-        e2e.seed_episode(
-            "User lives in Shanghai",
-            KnowledgeSubType::Fact,
-            now - ChronoDuration::days(i as i64),
-        );
-    }
-
-    let eps = e2e
-        .provider()
-        .get_episodes_by_subtype(Some(KnowledgeSubType::Fact), 10)
-        .expect("scan ok");
-    assert_eq!(eps.len(), 2);
-    let ids: Vec<u64> = eps.iter().map(|(id, _)| *id).collect();
-
-    let llm = ScriptedDistillerLlm::new(vec![
-        extraction_response(
-            &ids.iter()
-                .map(|id| (*id, "triple", "lives_in", "Shanghai"))
-                .collect::<Vec<_>>(),
-        ),
-        judge_response("promote", 0.95, "user lives in Shanghai"),
-    ]);
-
+    let llm = ScriptedDistillerLlm::new(vec![]);
     let result = DefaultEpisodicDistiller
         .run(
             e2e.provider().as_ref(),
@@ -398,112 +308,284 @@ async fn distiller_promotes_fact_with_two_evidence_episodes() {
         .await
         .expect("distiller run ok");
 
-    assert_eq!(result.facts_promoted, 1);
-    assert_eq!(result.episodes_marked_consolidated, 2);
-    assert_eq!(result.promotion_evaluations.len(), 1);
-    let eval = &result.promotion_evaluations[0];
-    assert_eq!(eval.promoted_kind, PromotionKind::Fact);
-    assert!(matches!(eval.decision, PromotionDecision::Promoted));
+    assert_eq!(result.preferences_promoted, 3);
+    assert_eq!(result.episodes_marked_consolidated, 3);
+    assert_eq!(result.funnel.llm_calls, 0, "projection spends no tokens");
+    assert_eq!(result.funnel.projected, 3);
+    assert_eq!(result.funnel.episodes_deferred, 0);
+
+    // One audit entry per episode, not per cluster: the unit of work is now a
+    // single memory, so consolidating three memories reports three decisions.
+    assert_eq!(result.promotion_evaluations.len(), 3);
+    let node_ids: Vec<Option<u64>> = result
+        .promotion_evaluations
+        .iter()
+        .map(|e| e.promoted_node_id)
+        .collect();
+    assert!(
+        node_ids.iter().all(|id| *id == node_ids[0]) && node_ids[0].is_some(),
+        "all three episodes folded into the same node: {node_ids:?}"
+    );
+    for eval in &result.promotion_evaluations {
+        assert!(matches!(eval.decision, PromotionDecision::Promoted));
+        assert_eq!(eval.promoted_kind, PromotionKind::Preference);
+    }
+
+    // The store collapses identical statements onto one row and unions their
+    // provenance, so every episode behind the statement stays traceable.
+    let (node_id, node) = e2e
+        .store
+        .find_knowledge_by_subject("user", "you_are_too_verbose_give_shorter_answers")
+        .expect("lookup ok")
+        .expect("Preference KnowledgeNode exists");
+    assert_eq!(node.sub_type, KnowledgeSubType::Preference);
+    assert_eq!(node.source_episode_ids, ids);
+    let meta = node.promotion_metadata.as_ref().expect("promotion metadata");
+    assert_eq!(meta.promoted_by, "episodic_distiller");
+    assert_eq!(meta.evidence_episode_ids, ids);
+    assert_eq!(Some(node_id), node_ids[0]);
+
+    assert!(
+        e2e
+            .provider()
+            .get_episodes_by_subtype(None, 10)
+            .expect("scan ok")
+            .is_empty(),
+        "a second run must find nothing left to do"
+    );
+}
+
+/// E4: distinct Fact episodes with nothing similar to merge against still
+/// consolidate with no LLM and no embedding function. This is the case the old
+/// pipeline got wrong — an unavailable model used to mean zero output.
+#[tokio::test]
+async fn distiller_consolidates_distinct_facts_without_a_model() {
+    let e2e = Adr068E2e::new();
+    let now = Utc::now();
+    let shanghai =
+        e2e.seed_episode("User lives in Shanghai", KnowledgeSubType::Fact, now);
+    let bicycle =
+        e2e.seed_episode("User drives a bicycle", KnowledgeSubType::Fact, now - ChronoDuration::days(1));
+
+    let result = DefaultEpisodicDistiller
+        .run(
+            e2e.provider().as_ref(),
+            None,
+            None,
+            &DistillerConfig::default(),
+        )
+        .await
+        .expect("distiller run ok");
+
+    assert_eq!(result.episodes_scanned, 2);
+    assert_eq!(result.facts_promoted, 2, "no LLM, no deferral: {result:?}");
+    assert_eq!(result.funnel.projected, 2);
+    assert_eq!(result.funnel.llm_calls, 0);
 
     let (node_id, node) = e2e
         .store
-        .find_knowledge_by_subject("user", "lives_in")
+        .find_knowledge_by_subject("user", "user_lives_in_shanghai")
         .expect("lookup ok")
-        .expect("KnowledgeNode exists");
-    assert_eq!(node.sub_type, KnowledgeSubType::Fact);
-    assert_eq!(node.source_episode_ids.len(), 2);
+        .expect("Fact KnowledgeNode exists");
+    assert_eq!(node.object, "User lives in Shanghai");
+    assert_eq!(node.source_episode_ids, vec![shanghai]);
     assert!(node.promotion_metadata.is_some());
+    let (other_id, other) = e2e
+        .store
+        .find_knowledge_by_subject("user", "user_drives_a_bicycle")
+        .expect("lookup ok")
+        .expect("second Fact node");
+    assert_eq!(other.source_episode_ids, vec![bicycle]);
 
-    // A4: the audit entry maps to the REAL storage id of the promoted node.
-    assert_eq!(
-        eval.promoted_node_id,
-        Some(node_id),
-        "promoted_node_id must equal the stored node id"
-    );
-    assert!(eval.promoted_node_id.is_some());
+    // A4: the audit trail names the REAL storage ids, which rollback needs.
+    let mut audited: Vec<u64> = result
+        .promotion_evaluations
+        .iter()
+        .map(|e| e.promoted_node_id.expect("both episodes promoted"))
+        .collect();
+    audited.sort();
+    assert_eq!(audited, vec![node_id, other_id], "one row per statement");
 }
 
-/// Step-2 failure handling: with no server-side LLM the run is a no-op —
-/// episodes stay unconsolidated and can be retried later (ADR-068 §3.4.2).
+/// The merge path, and the retry that precedes it. Given an embedding function,
+/// a restated episode *does* see the projected node as a candidate — so a run
+/// with no model must defer it rather than guess, and the deferred episode must
+/// come back next run instead of being tombstoned.
 #[tokio::test]
-async fn distiller_noop_without_llm_keeps_episodes_pending() {
+async fn distiller_defers_a_candidate_without_a_model_then_merges_on_retry() {
     let e2e = Adr068E2e::new();
     let now = Utc::now();
-    for i in 0..3 {
-        e2e.seed_episode(
-            "User lives in Shanghai",
-            KnowledgeSubType::Fact,
-            now - ChronoDuration::days(i as i64),
-        );
-    }
+    let older = e2e.seed_episode("User lives in Shanghai", KnowledgeSubType::Fact, now);
+    let newer = e2e.seed_episode(
+        "User lives in Shanghai",
+        KnowledgeSubType::Fact,
+        now + ChronoDuration::hours(1),
+    );
+    let embed = embedding_fn();
 
+    // Run 1: no LLM. Newest-first, so `newer` projects and `older` is the one
+    // left staring at a candidate nobody can judge.
     let result = DefaultEpisodicDistiller
         .run(
             e2e.provider().as_ref(),
             None,
-            None,
+            Some(&embed),
             &DistillerConfig::default(),
         )
         .await
-        .expect("distiller run ok (no-op)");
+        .expect("run 1 ok");
+    assert_eq!(result.episodes_marked_consolidated, 1);
+    assert_eq!(result.funnel.projected, 1);
+    assert_eq!(
+        result.funnel.episodes_deferred, 1,
+        "a candidate with no model to judge it defers: {result:?}"
+    );
+    let deferred = &result.promotion_evaluations[1];
+    assert_eq!(deferred.source_episode_ids, vec![older]);
+    assert!(matches!(
+        deferred.decision,
+        PromotionDecision::Deferred { .. }
+    ));
 
-    assert_eq!(result.facts_promoted, 0);
-    assert_eq!(result.promotion_evaluations.len(), 0);
-    assert_eq!(result.episodes_marked_consolidated, 0);
-
-    let remaining = e2e
+    // Nothing was lost: the deferred episode is back in the backlog.
+    let backlog = e2e
         .provider()
         .get_episodes_by_subtype(Some(KnowledgeSubType::Fact), 10)
         .expect("scan ok");
-    assert_eq!(remaining.len(), 3, "episodes untouched, awaiting retry");
+    assert_eq!(
+        backlog.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+        vec![older],
+        "an unconsolidated episode must be re-offered on the next run"
+    );
+
+    // Run 2: the model is back and names the node run 1 wrote.
+    let (node_id, _) = e2e
+        .store
+        .find_knowledge_by_subject("user", "user_lives_in_shanghai")
+        .expect("lookup ok")
+        .expect("node from run 1");
+    let llm = ScriptedDistillerLlm::new(vec![merge_verdict(
+        "merge",
+        Some(node_id),
+        Some("User lives in Shanghai"),
+    )]);
+    let result = DefaultEpisodicDistiller
+        .run(
+            e2e.provider().as_ref(),
+            Some(&llm),
+            Some(&embed),
+            &DistillerConfig::default(),
+        )
+        .await
+        .expect("run 2 ok");
+    assert_eq!(result.funnel.llm_calls, 1, "exactly one merge call");
+    assert_eq!(result.funnel.verdict_merged, 1);
+    assert_eq!(result.funnel.projected, 0, "nothing was a lone voice");
+    assert_eq!(result.episodes_marked_consolidated, 1);
+
+    let (_, node) = e2e
+        .store
+        .find_knowledge_by_subject("user", "user_lives_in_shanghai")
+        .expect("lookup ok")
+        .expect("node survives the merge");
+    assert_eq!(
+        node.source_episode_ids,
+        vec![newer, older],
+        "merged into the existing row, appending the deferred episode"
+    );
+}
+
+/// A hallucinated `target_id` must defer the episode rather than rewrite an
+/// unrelated node.
+#[tokio::test]
+async fn distiller_rejects_a_target_id_that_was_not_a_candidate() {
+    let e2e = Adr068E2e::new();
+    let now = Utc::now();
+    let older = e2e.seed_episode("User lives in Shanghai", KnowledgeSubType::Fact, now);
+    let newer = e2e.seed_episode(
+        "User lives in Shanghai",
+        KnowledgeSubType::Fact,
+        now + ChronoDuration::hours(1),
+    );
+    let embed = embedding_fn();
+    DefaultEpisodicDistiller
+        .run(
+            e2e.provider().as_ref(),
+            None,
+            Some(&embed),
+            &DistillerConfig::default(),
+        )
+        .await
+        .expect("seed run ok");
+
+    let llm = ScriptedDistillerLlm::new(vec![merge_verdict("merge", Some(9999), None)]);
+    let result = DefaultEpisodicDistiller
+        .run(
+            e2e.provider().as_ref(),
+            Some(&llm),
+            Some(&embed),
+            &DistillerConfig::default(),
+        )
+        .await
+        .expect("second run ok");
+    assert_eq!(
+        result.funnel.episodes_deferred, 1,
+        "a made-up id defers instead of corrupting a node"
+    );
+    assert_eq!(result.funnel.verdict_merged, 0);
+    assert_eq!(result.funnel.llm_calls, 1);
+
+    let (_, node) = e2e
+        .store
+        .find_knowledge_by_subject("user", "user_lives_in_shanghai")
+        .expect("lookup ok")
+        .expect("node untouched");
+    assert_eq!(
+        node.source_episode_ids,
+        vec![newer],
+        "the declined node kept its original provenance"
+    );
+    assert!(
+        e2e
+            .provider()
+            .get_episodes_by_subtype(Some(KnowledgeSubType::Fact), 10)
+            .expect("scan ok")
+            .iter()
+            .any(|(id, _)| *id == older),
+        "and its episode is still eligible"
+    );
 }
 
 // ============================================================================
 // E5 — promoted sediment nodes reach MemoryManager::retrieve
 // ============================================================================
 
-/// E5: after the distiller promotes the cluster, the resulting
-/// AutobiographicalNode is retrievable through the real `MemoryManager`
-/// chain (the node appears as an `Autobiographical` memory).
+/// E5: a projected node is retrievable through the real `MemoryManager` chain,
+/// i.e. consolidation actually feeds recall.
 #[tokio::test]
-async fn retrieve_surfaces_promoted_autobiographical_node() {
+async fn retrieve_surfaces_promoted_knowledge_node() {
     let e2e = Adr068E2e::new();
     let now = Utc::now();
     for i in 0..3 {
         e2e.seed_episode(
-            "You are too verbose, give shorter answers",
+            "User prefers concise answers",
             KnowledgeSubType::Preference,
             now - ChronoDuration::days(i * 7),
         );
     }
-    let eps = e2e
-        .provider()
-        .get_episodes_by_subtype(Some(KnowledgeSubType::Preference), 10)
-        .expect("scan ok");
-    let ids: Vec<u64> = eps.iter().map(|(id, _)| *id).collect();
-
-    let llm = ScriptedDistillerLlm::new(vec![
-        extraction_response(
-            &ids.iter()
-                .map(|id| (*id, "autobio", "limitation", "verbose_response"))
-                .collect::<Vec<_>>(),
-        ),
-        judge_response("promote", 0.95, "agent should be concise"),
-    ]);
     let result = DefaultEpisodicDistiller
         .run(
             e2e.provider().as_ref(),
-            Some(&llm),
+            None,
             None,
             &DistillerConfig::default(),
         )
         .await
         .expect("distiller run ok");
-    assert_eq!(result.autobio_promoted, 1);
+    assert_eq!(result.preferences_promoted, 3);
 
-    // The promoted node must be retrievable through the real manager chain.
     let manager = MemoryManager::new(MemoryManagerConfig::default());
-    let mut query = MemoryQuery::new("concise shorter answers".to_string());
+    let mut query = MemoryQuery::new("concise answers".to_string());
     query.abstention_enabled = false;
     let retrieved = manager
         .retrieve(&*e2e.store, &mut query, Some(&DeterministicEmbedding))
@@ -511,17 +593,216 @@ async fn retrieve_surfaces_promoted_autobiographical_node() {
         .expect("retrieve ok");
 
     assert!(
-        retrieved
-            .memories
-            .iter()
-            .any(|m| m.label == labels::AUTOBIOGRAPHICAL),
-        "promoted AutobiographicalNode must be retrievable, got: {:?}",
+        retrieved.memories.iter().any(|m| m.label == labels::KNOWLEDGE),
+        "promoted KnowledgeNode must be retrievable, got: {:?}",
         retrieved
             .memories
             .iter()
             .map(|m| (m.label.clone(), m.content.clone()))
             .collect::<Vec<_>>()
     );
+}
+
+// ============================================================================
+// Verdict branches
+// ============================================================================
+
+/// A `no_merge` verdict must create a second node. Recall is deliberately
+/// permissive (a vector hit is only a *guess* that two statements match), so a
+/// false positive must not be able to fold two different facts together.
+#[tokio::test]
+async fn distiller_keeps_two_nodes_when_the_model_says_no_merge() {
+    let e2e = Adr068E2e::new();
+    let now = Utc::now();
+    let shanghai = e2e.seed_episode("User lives in Shanghai", KnowledgeSubType::Fact, now);
+    let bicycle = e2e.seed_episode(
+        "User drives a bicycle",
+        KnowledgeSubType::Fact,
+        now + ChronoDuration::hours(1),
+    );
+    let embed = blind_embedding_fn();
+
+    // Run 1 projects the newest and defers the older one onto a candidate.
+    DefaultEpisodicDistiller
+        .run(
+            e2e.provider().as_ref(),
+            None,
+            Some(&embed),
+            &DistillerConfig::default(),
+        )
+        .await
+        .expect("seed run ok");
+    let (bicycle_id, _) = e2e
+        .store
+        .find_knowledge_by_subject("user", "user_drives_a_bicycle")
+        .expect("lookup ok")
+        .expect("projected node");
+
+    let llm = ScriptedDistillerLlm::new(vec![merge_verdict("no_merge", None, None)]);
+    let result = DefaultEpisodicDistiller
+        .run(
+            e2e.provider().as_ref(),
+            Some(&llm),
+            Some(&embed),
+            &DistillerConfig::default(),
+        )
+        .await
+        .expect("second run ok");
+    assert_eq!(result.funnel.verdict_no_merge, 1);
+    assert_eq!(result.funnel.verdict_merged, 0);
+    assert_eq!(result.episodes_marked_consolidated, 1);
+
+    let (shanghai_id, shanghai_node) = e2e
+        .store
+        .find_knowledge_by_subject("user", "user_lives_in_shanghai")
+        .expect("lookup ok")
+        .expect("no_merge wrote a second node");
+    assert_ne!(shanghai_id, bicycle_id, "two statements, two rows");
+    assert_eq!(shanghai_node.source_episode_ids, vec![shanghai]);
+    let untouched = e2e
+        .store
+        .get_knowledge(bicycle_id)
+        .expect("get ok")
+        .expect("the declined node still exists");
+    assert_eq!(
+        untouched.source_episode_ids,
+        vec![bicycle],
+        "the false-positive recall must not have written into it"
+    );
+}
+
+/// A `contradicts` verdict replaces the node's statement but keeps the
+/// displaced one, so a wrong verdict is recoverable by a human reading the row.
+#[tokio::test]
+async fn distiller_supersedes_a_contradicted_node_and_keeps_the_old_statement() {
+    let e2e = Adr068E2e::new();
+    let now = Utc::now();
+    let shanghai = e2e.seed_episode("User lives in Shanghai", KnowledgeSubType::Fact, now);
+    let bicycle = e2e.seed_episode(
+        "User drives a bicycle",
+        KnowledgeSubType::Fact,
+        now + ChronoDuration::hours(1),
+    );
+    let embed = blind_embedding_fn();
+    DefaultEpisodicDistiller
+        .run(
+            e2e.provider().as_ref(),
+            None,
+            Some(&embed),
+            &DistillerConfig::default(),
+        )
+        .await
+        .expect("seed run ok");
+    let (bicycle_id, _) = e2e
+        .store
+        .find_knowledge_by_subject("user", "user_drives_a_bicycle")
+        .expect("lookup ok")
+        .expect("projected node");
+
+    let llm = ScriptedDistillerLlm::new(vec![merge_verdict(
+        "contradicts",
+        Some(bicycle_id),
+        Some("User moved to Shanghai"),
+    )]);
+    let result = DefaultEpisodicDistiller
+        .run(
+            e2e.provider().as_ref(),
+            Some(&llm),
+            Some(&embed),
+            &DistillerConfig::default(),
+        )
+        .await
+        .expect("second run ok");
+    assert_eq!(result.funnel.verdict_superseded, 1);
+    assert_eq!(result.episodes_marked_consolidated, 1);
+
+    let (_, node) = e2e
+        .store
+        .find_knowledge_by_subject("user", "user_drives_a_bicycle")
+        .expect("lookup ok")
+        .expect("same row, new statement");
+    assert_eq!(node.object, "User moved to Shanghai", "the new fact wins");
+    assert_eq!(
+        node.source_episode_ids,
+        vec![bicycle, shanghai],
+        "and both episodes are still cited"
+    );
+    assert_eq!(
+        node.metadata.get("superseded_statements"),
+        Some(&serde_json::json!(["User drives a bicycle"])),
+        "the displaced statement stays recoverable"
+    );
+    assert!(
+        e2e
+            .store
+            .find_knowledge_by_subject("user", "user_lives_in_shanghai")
+            .expect("lookup ok")
+            .is_none(),
+        "supersede rewrites the target rather than adding a duplicate row"
+    );
+}
+
+/// `min_importance` is the run's only remaining filter, and it is opt-in: at
+/// the default 0.0 nothing is ever dropped for being unimportant.
+#[tokio::test]
+async fn distiller_honours_the_min_importance_floor() {
+    let e2e = Adr068E2e::new();
+    let now = Utc::now();
+    let kept = e2e.seed_episode("User lives in Shanghai", KnowledgeSubType::Fact, now);
+    let quiet = e2e.seed_episode_with(
+        "User glanced at a clock",
+        KnowledgeSubType::Fact,
+        now + ChronoDuration::hours(1),
+        0.2,
+    );
+
+    let config = DistillerConfig {
+        min_importance: 0.5,
+        ..DistillerConfig::default()
+    };
+    let result = DefaultEpisodicDistiller
+        .run(e2e.provider().as_ref(), None, None, &config)
+        .await
+        .expect("run ok");
+
+    assert_eq!(result.funnel.below_importance, 1);
+    assert_eq!(result.episodes_marked_consolidated, 1);
+    assert_eq!(result.facts_promoted, 1);
+    // Newest-first, so the floored episode is scanned *first* — select by
+    // decision rather than by position.
+    let promoted: Vec<&_> = result
+        .promotion_evaluations
+        .iter()
+        .filter(|e| matches!(e.decision, PromotionDecision::Promoted))
+        .collect();
+    assert_eq!(promoted.len(), 1);
+    assert_eq!(
+        promoted[0].source_episode_ids,
+        vec![kept],
+        "only the episode at or above the floor consolidated"
+    );
+    assert!(result.promotion_evaluations.iter().any(|e| matches!(
+        e.decision,
+        PromotionDecision::Skipped { .. }
+    )));
+
+    // The floor is a filter for this run, not a tombstone: the quiet episode is
+    // still in the backlog and a run without the floor picks it up.
+    let backlog = e2e
+        .provider()
+        .get_episodes_by_subtype(Some(KnowledgeSubType::Fact), 10)
+        .expect("scan ok");
+    assert_eq!(backlog.iter().map(|(id, _)| *id).collect::<Vec<_>>(), vec![quiet]);
+    let result = DefaultEpisodicDistiller
+        .run(
+            e2e.provider().as_ref(),
+            None,
+            None,
+            &DistillerConfig::default(),
+        )
+        .await
+        .expect("run without a floor");
+    assert_eq!(result.episodes_marked_consolidated, 1);
 }
 
 // ============================================================================
@@ -532,6 +813,14 @@ async fn retrieve_surfaces_promoted_autobiographical_node() {
 /// (subject/predicate/object/trigger/action) and NO autobiographical routing
 /// fields (aspect/key/source/category) — the two axes (knowledge_subtype for
 /// routing, content+metadata for evidence) are the only channels.
+///
+/// `normalized` is allowed because it stays inside those two axes: it is
+/// free-text evidence the writing LLM attaches to its own episodic node (like
+/// `content`, which it restates canonically), not a routing field and not a
+/// structured-knowledge schema. The two-axis invariant that actually matters —
+/// the semantic layer is produced ONLY by the distiller — is untouched: the
+/// distiller reads `normalized`, the LLM never writes a semantic node.
+/// Adding a real SPO field here would still fail this test.
 #[test]
 fn episode_schema_is_two_axis_clean() {
     let ep = Episode {
@@ -545,6 +834,7 @@ fn episode_schema_is_two_axis_clean() {
         metadata: Default::default(),
         importance: 0.5,
         knowledge_subtype: Some(KnowledgeSubType::Fact),
+        normalized: None,
     };
 
     let value = serde_json::to_value(&ep).expect("episode serializes");
@@ -562,6 +852,10 @@ fn episode_schema_is_two_axis_clean() {
         "metadata",
         "importance",
         "knowledge_subtype",
+        // Canonical restatement of `content`, written by the LLM into its own
+        // episodic node. Free text, not a routing field and not an SPO schema —
+        // see the D16 doc-comment for why this stays inside the two axes.
+        "normalized",
     ];
     for key in &keys {
         assert!(

@@ -244,3 +244,13 @@ graph LR
 | 记忆写入入口收敛 | [memory-write-entrypoints.md](../../memory-write-entrypoints.md) |
 
 > 注：本文为分析报告，未改动任何代码。方向 A/B 的实施需你确认后再立项（含测试与迁移方案）。
+
+---
+
+## 时效性说明（2026-10）
+
+本文件分析的四段式管线（Step2 LLM 结构化提取 → Step3 embedding 聚簇 + 分类证据门槛 → Step4 LLM Judge）已在 [ADR-068 Revision(2026-10)](../adr/zh/ADR-068-memory-layer-promotion-two-axis-orthogonal.md) 中整体下线，沉淀改为「投影 + 合并」：召不到近邻就零调用投影，召到就一次 LLM 判 `merge / no_merge / contradicts`。
+
+因此本文件里的行号引用、聚簇键表、各分类的证据门槛均已失效，**不要按其中的门槛数值调参**——体积控制现在只剩 `min_importance` 一个旋钮（默认 0.0）。
+
+本文件的分析结论中仍然成立的部分：分类轴与两轴不变量的关系、`KnowledgeSubType` 作为写侧路由提示的定位、以及「三元组缺少结构消费者」这一判断——后者正是移除提取段的直接依据。

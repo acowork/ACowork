@@ -60,6 +60,10 @@ struct InMemoryNode {
 pub struct InMemoryProvider {
     nodes: RwLock<HashMap<u64, InMemoryNode>>,
     episodes: RwLock<Vec<(u64, Episode)>>,
+    /// Full semantic nodes alongside the `nodes` projection, so the distiller's
+    /// merge path (`get_knowledge` / `update_knowledge`) round-trips.
+    knowledge: RwLock<HashMap<u64, KnowledgeNode>>,
+    procedural: RwLock<HashMap<u64, ProceduralNode>>,
     edges: RwLock<Vec<(u64, u64, String)>>,
     next_id: AtomicU64,
 }
@@ -70,6 +74,8 @@ impl InMemoryProvider {
         Self {
             nodes: RwLock::new(HashMap::new()),
             episodes: RwLock::new(Vec::new()),
+            knowledge: RwLock::new(HashMap::new()),
+            procedural: RwLock::new(HashMap::new()),
             edges: RwLock::new(Vec::new()),
             next_id: AtomicU64::new(1),
         }
@@ -174,22 +180,6 @@ impl MemoryProvider for InMemoryProvider {
         Ok(())
     }
 
-    fn mark_episodes_skipped(&self, ids: &[u64], cluster_key: &str, reason: &str) -> Result<()> {
-        let marker = serde_json::json!({
-            "cluster_key": cluster_key,
-            "reason": reason,
-            "at": chrono::Utc::now().to_rfc3339(),
-        });
-        let mut episodes = self.episodes.write().unwrap();
-        for (id, ep) in episodes.iter_mut() {
-            if ids.contains(id) {
-                ep.metadata
-                    .insert("distiller_skip".to_string(), marker.clone());
-            }
-        }
-        Ok(())
-    }
-
     fn cleanup_episodes(&self, _older_than: Duration) -> Result<u64> {
         Ok(0)
     }
@@ -216,14 +206,14 @@ impl MemoryProvider for InMemoryProvider {
             .iter()
             .filter(|(_, e)| {
                 !e.consolidated
-                    && !e.metadata.contains_key("distiller_skip")
+                    && e.knowledge_subtype.is_some()
                     && subtype
                         .as_ref()
                         .is_none_or(|st| e.knowledge_subtype == Some(st.clone()))
             })
             .map(|(id, e)| (*id, e.clone()))
             .collect();
-        unconsolidated.sort_by_key(|(_, e)| e.timestamp);
+        unconsolidated.sort_by_key(|(_, ep)| std::cmp::Reverse(ep.timestamp));
         unconsolidated.truncate(limit);
         Ok(unconsolidated)
     }
@@ -245,6 +235,7 @@ impl MemoryProvider for InMemoryProvider {
 
     fn store_knowledge(&self, node: &KnowledgeNode) -> Result<u64> {
         let id = self.alloc_id();
+        self.knowledge.write().unwrap().insert(id, node.clone());
         let content = format!("{} {} {}", node.subject, node.predicate, node.object);
         self.nodes.write().unwrap().insert(
             id,
@@ -262,8 +253,34 @@ impl MemoryProvider for InMemoryProvider {
         Ok(id)
     }
 
+    fn get_knowledge(&self, id: u64) -> Result<Option<KnowledgeNode>> {
+        Ok(self.knowledge.read().unwrap().get(&id).cloned())
+    }
+
+    fn update_knowledge(&self, id: u64, node: &KnowledgeNode) -> Result<()> {
+        self.knowledge.write().unwrap().insert(id, node.clone());
+        Ok(())
+    }
+
+    fn vector_search(&self, label: &str, query: &[f32], k: usize) -> Result<Vec<(u64, f64)>> {
+        let nodes = self.nodes.read().unwrap();
+        let mut hits: Vec<(u64, f64)> = nodes
+            .values()
+            .filter(|n| n.label == label)
+            .filter_map(|n| {
+                n.embedding
+                    .as_ref()
+                    .map(|e| (n.id, Self::cosine_similarity(query, e)))
+            })
+            .collect();
+        hits.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        hits.truncate(k);
+        Ok(hits)
+    }
+
     fn store_procedural(&self, node: &ProceduralNode) -> Result<u64> {
         let id = node.id.unwrap_or_else(|| self.alloc_id());
+        self.procedural.write().unwrap().insert(id, node.clone());
         let content = format!("{}: {}", node.trigger_condition, node.action_pattern);
         // Memory contract: Vec (empty = no vector); storage side is Option.
         let embedding = if node.embedding.is_empty() {
@@ -452,11 +469,13 @@ impl MemoryProvider for InMemoryProvider {
         Ok(Vec::new())
     }
 
-    fn get_procedural(&self, _node_id: u64) -> Result<Option<ProceduralNode>> {
-        Ok(None)
+    fn get_procedural(&self, node_id: u64) -> Result<Option<ProceduralNode>> {
+        Ok(self.procedural.read().unwrap().get(&node_id).cloned())
     }
 
-    fn update_procedural(&self, _node: &ProceduralNode) -> Result<()> {
+    fn update_procedural(&self, node: &ProceduralNode) -> Result<()> {
+        let Some(id) = node.id else { return Ok(()) };
+        self.procedural.write().unwrap().insert(id, node.clone());
         Ok(())
     }
 
@@ -620,6 +639,7 @@ mod tests {
             metadata: Default::default(),
             importance: 0.5,
             knowledge_subtype: Some(KnowledgeSubType::Fact),
+            normalized: None,
         };
         provider.store_episode(&episode).unwrap();
 

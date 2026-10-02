@@ -146,6 +146,7 @@ fn empty_stats_output(embed_provider_dim: u64) -> StatsOutput {
         index_health: "no_store".to_string(),
         stored_dim: 0,
         nodes_with_embedding: 0,
+        vectors_of_other_dim: 0,
         model_dim: embed_provider_dim,
         // No store → no schema version either. 0 is the implicit
         // `user_version` value, mirroring SQLite's own default.
@@ -263,6 +264,7 @@ pub(crate) fn get_stats(
         index_health: stats.index_health,
         stored_dim: stats.stored_dim,
         nodes_with_embedding: stats.nodes_with_embedding,
+        vectors_of_other_dim: stats.vectors_of_other_dim,
         model_dim: embed_provider_dim,
         schema_version: stats.schema_version,
     }

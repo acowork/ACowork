@@ -38,6 +38,7 @@ fn episode(content: &str) -> Episode {
         metadata: HashMap::new(),
         importance: 0.5,
         knowledge_subtype: None,
+        normalized: None,
     }
 }
 
@@ -269,6 +270,7 @@ fn props_keys_are_complete_per_type() {
             "importance",
             "knowledge_subtype",
             "metadata",
+            "normalized",
             "role",
             "session_id",
             "timestamp",
@@ -401,8 +403,15 @@ fn episodes_by_session_and_recent_first() {
 #[test]
 fn mark_and_cleanup_consolidated() {
     let store = store();
-    let old = store.store_episode(&episode("old")).unwrap();
-    let recent = store.store_episode(&episode("recent")).unwrap();
+    // `count_unconsolidated_episodes` is the distiller's backlog gauge, so it
+    // only counts subtype-classified episodes; unclassified fragments stay in
+    // the episodic layer forever and must not inflate it.
+    let mut old_ep = episode("old");
+    old_ep.knowledge_subtype = Some(KnowledgeSubType::Fact);
+    let mut recent_ep = episode("recent");
+    recent_ep.knowledge_subtype = Some(KnowledgeSubType::Fact);
+    let old = store.store_episode(&old_ep).unwrap();
+    let recent = store.store_episode(&recent_ep).unwrap();
     store.mark_episode_consolidated(old).unwrap();
     assert_eq!(store.count_unconsolidated_episodes().unwrap(), 1);
 
@@ -443,13 +452,17 @@ fn text_search_matches_chinese_substring() {
 fn text_search_ors_whitespace_separated_terms() {
     let store = store();
     store
-        .store_episode(&episode("the gateway binds 19876 while the broker takes 19875"))
+        .store_episode(&episode(
+            "the gateway binds 19876 while the broker takes 19875",
+        ))
         .unwrap();
 
     // The two words are far apart in the text, so matching the query as one
     // phrase would find nothing — the union of terms is what makes a plain
     // multi-word ask work.
-    let hits = store.search_episodes_by_keyword("gateway broker", 10).unwrap();
+    let hits = store
+        .search_episodes_by_keyword("gateway broker", 10)
+        .unwrap();
     assert_eq!(hits.len(), 1, "terms must be OR'd, not required adjacent");
 }
 
@@ -991,32 +1004,8 @@ fn provider_status_reads_column_not_props() {
     );
 }
 
-/// A skipped episode is a sticky judge verdict: it must leave the distiller
-/// backlog (both count and enumeration) while staying retrievable.
-#[test]
-fn provider_skip_tombstone_removes_from_distiller_backlog() {
-    let store = store();
-    let keep = store.store_episode(&episode("keep me")).unwrap();
-    let skip = store.store_episode(&episode("skip me")).unwrap();
-    assert_eq!(store.count_unconsolidated_episodes().unwrap(), 2);
-
-    store
-        .mark_episodes_skipped(&[skip], "cluster-1", "declined")
-        .unwrap();
-
-    assert_eq!(store.count_unconsolidated_episodes().unwrap(), 1);
-    let backlog = store.get_episodes_by_subtype(None, 10).unwrap();
-    assert_eq!(backlog.len(), 1);
-    assert_eq!(backlog[0].0, keep);
-    // Still retrievable — the content stays in the episodic layer.
-    assert_eq!(
-        store.get_node_content(skip).unwrap().as_deref(),
-        Some("skip me")
-    );
-}
-
-/// `get_episodes_by_subtype` honours the subtype filter and orders oldest
-/// first so evidence accumulates deterministically across distiller runs.
+/// `get_episodes_by_subtype` honours the subtype filter and orders newest
+/// first, and the backlog count uses the same predicate as the scan.
 #[test]
 fn provider_episodes_by_subtype_filters_and_orders() {
     let store = store();
@@ -1039,8 +1028,11 @@ fn provider_episodes_by_subtype_filters_and_orders() {
     let all = store.get_episodes_by_subtype(None, 10).unwrap();
     assert_eq!(
         all.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
-        vec![older_id, newer_id]
+        vec![newer_id, older_id],
+        "newest first: an episode that keeps failing must not hold the queue"
     );
+    // Both carry a subtype, so the backlog count sees both (same predicate).
+    assert_eq!(store.count_unconsolidated_episodes().unwrap(), 2);
 }
 
 /// Forgetting: Active → Dormant once retention drops below the threshold, but
@@ -1544,10 +1536,80 @@ fn admin_stats_shape() {
     assert_eq!(stats.by_type.get(labels::KNOWLEDGE), Some(&1));
     assert_eq!(stats.by_status.get("Dormant"), Some(&1));
     assert_eq!(stats.by_status.get("purged"), Some(&0));
-    assert_eq!(stats.index_health, "healthy");
     assert_eq!(stats.stored_dim, DIM as u64);
     assert_eq!(stats.nodes_with_embedding, 0);
+    assert_eq!(stats.vectors_of_other_dim, 0);
     assert!(stats.storage_bytes > 0);
+    // Two nodes, no vectors. `index_health` used to be the literal "healthy"
+    // regardless of what the counters said, so this is the case that proves it
+    // is now derived from them.
+    assert_eq!(stats.index_health, "missing_embeddings");
+}
+
+/// The health string must distinguish "a node has no vector" from "a node has a
+/// vector of a width the store no longer declares".
+///
+/// Only the first was ever reportable, and only by luck: `vector_search` skips
+/// foreign-width rows silently, so a store whose dimension was moved over
+/// vectors still at the previous width looks complete to every count of
+/// *missing* embeddings while being half invisible to retrieval.
+#[test]
+fn admin_stats_reports_foreign_width_vectors() {
+    let store = store();
+    let mut a = episode("first");
+    a.embedding = Some(emb(0.1));
+    let mut b = episode("second");
+    b.embedding = Some(emb(0.9));
+    store.store_episode(&a).unwrap();
+    store.store_episode(&b).unwrap();
+
+    let stats = store.get_stats();
+    assert_eq!(stats.total_nodes, 2);
+    assert_eq!(stats.nodes_with_embedding, 2);
+    assert_eq!(stats.index_health, "healthy", "every node has a vector");
+
+    // A model swap flips the declared width; the rows do not move with it.
+    store.set_embedding_dim(2).unwrap();
+    let stats = store.get_stats();
+    assert_eq!(stats.stored_dim, 2);
+    assert_eq!(
+        stats.nodes_with_embedding, 2,
+        "they still have vectors - nothing is 'missing'"
+    );
+    assert_eq!(stats.vectors_of_other_dim, 2);
+    assert_eq!(
+        stats.index_health, "stale_vectors",
+        "both vectors are now invisible to search"
+    );
+}
+
+/// `nodes_with_embedding` must be counted over the labels `total_nodes` counts,
+/// or the two are not comparable.
+///
+/// Conversation messages are in the vectors table but not in `labels::ALL`, so
+/// counting the whole table made `nodes_with_embedding < total_nodes` false on
+/// any store with chat history - which is every store the panel is used on.
+#[test]
+fn admin_stats_embedding_count_excludes_conversation_rows() {
+    let store = std::sync::Arc::new(SqliteStore::open_in_memory(DIM).expect("open"));
+    let index = conversation::ConversationStore::from_store(store.clone()).expect("index");
+    for line in 0..3 {
+        index
+            .index_message("s1", line, "user", &format!("message {line}"), &emb(0.2))
+            .expect("index message");
+    }
+    let mut with = episode("has a vector");
+    with.embedding = Some(emb(0.4));
+    store.store_episode(&with).unwrap();
+    store.store_episode(&episode("has none")).unwrap();
+
+    let stats = store.get_stats();
+    assert_eq!(stats.total_nodes, 2, "memory nodes only");
+    assert_eq!(
+        stats.nodes_with_embedding, 1,
+        "and its vector count must be over those same 2 nodes, not over all 5 rows"
+    );
+    assert_eq!(stats.index_health, "missing_embeddings");
 }
 
 /// `migrate_embedding_dimension` must re-embed what it can, count what it
@@ -1633,4 +1695,174 @@ fn admin_embedding_dim_persists_across_reopen() {
     let reopened = SqliteStore::open(&path, 8).expect("reopen");
     assert_eq!(reopened.embedding_dim(), 4, "stored dimension must win");
     assert_eq!(MemoryAdminService::count_nodes_with_embedding(&reopened), 1);
+}
+
+/// A model swap must still heal a store whose declared dimension already
+/// matches the target.
+///
+/// This is the state a live store was left in: the meta had been flipped to the
+/// new width before the migration bailed out, the provider has since caught up,
+/// and the message rows are still at the old width. Nothing compares the two
+/// dimensions any more, so the only way back is the manual rebuild - which
+/// reaches this same call with `new_dim == embedding_dim()`. An early bail on
+/// matching dimensions would leave those rows permanently invisible.
+#[test]
+fn admin_embedding_migration_heals_a_store_whose_dim_was_flipped_early() {
+    let store = std::sync::Arc::new(SqliteStore::open_in_memory(DIM).expect("open"));
+    let index = conversation::ConversationStore::from_store(store.clone()).expect("index");
+    for (line, text) in [
+        (0, "where does the temp dir point"),
+        (1, "the installer is built with wix"),
+    ] {
+        index
+            .index_message("s1", line, "user", text, &emb(0.2 + line as f32))
+            .expect("index message");
+    }
+    // The memory layer made it across to the new width; the conversation layer
+    // never did, and the recorded dimension was flipped anyway.
+    let mut migrated = episode("already migrated");
+    migrated.embedding = Some(vec![0.5, 0.5]);
+    store.store_episode(&migrated).expect("store");
+    store.set_embedding_dim(2).expect("flip");
+
+    let stats = store
+        .migrate_embedding_dimension(&|_| Some(vec![0.5, 0.5]), 2)
+        .expect("rebuild after a flip must not bail on matching dimensions");
+
+    assert_eq!(
+        stats.rebuilt, 3,
+        "the rebuild re-embeds every row in scope, stale or not, got {stats:?}"
+    );
+    assert_eq!(store.embedding_dim(), 2);
+    let hits = store
+        .vector_search(conversation::LABEL, &[0.5, 0.5], 10)
+        .expect("search");
+    assert_eq!(
+        hits.len(),
+        2,
+        "the healed messages must be visible to vector search"
+    );
+}
+
+/// The model-switch UI polls a progress slot, so the migration must actually
+/// fill it. The trait's default implementation discards the callback, which
+/// made every rebuild read "0 of 0" for its whole duration - the work was
+/// happening, only the numbers were missing.
+#[test]
+fn admin_embedding_migration_reports_progress() {
+    let store = store();
+    let mut a = episode("first");
+    a.embedding = Some(emb(0.1));
+    store.store_episode(&a).unwrap();
+    let mut b = episode("   ");
+    b.content = String::new();
+    store.store_episode(&b).unwrap();
+    let mut c = episode("third");
+    c.embedding = Some(emb(0.3));
+    store.store_episode(&c).unwrap();
+
+    let seen = std::sync::Mutex::new(Vec::new());
+    let stats = MemoryAdminService::migrate_embedding_dimension_with_progress(
+        &store,
+        &|_: &str| Some(vec![0.5, 0.5]),
+        2,
+        Some(&|done, total| seen.lock().unwrap().push((done, total))),
+    )
+    .expect("migrate");
+
+    let seen = seen.into_inner().unwrap();
+    assert_eq!(
+        seen.len(),
+        3,
+        "one report per row, including the row skipped for having no content"
+    );
+    assert_eq!(seen[0], (1, 3));
+    assert_eq!(
+        *seen.last().unwrap(),
+        (3, 3),
+        "the bar must reach the total, got {seen:?}"
+    );
+    assert_eq!(stats.total_scanned, 3);
+}
+
+/// A model swap must re-embed conversation messages as well as memory nodes.
+///
+/// The memory-browser scope (`all_rows`) deliberately excludes them so the panel
+/// does not list chat transcripts; the migration may not, because the
+/// conversation index is append-only by line watermark and never re-embeds an
+/// already-indexed row. Leaving the label out stranded the entire conversation
+/// index at the previous width, where `vector_search` skips those rows without
+/// saying anything - which is how a live store ended up with 294 of 311 message
+/// vectors invisible after a switch to a 1024-dim model.
+#[test]
+fn admin_embedding_migration_covers_conversation_messages() {
+    let store = std::sync::Arc::new(SqliteStore::open_in_memory(DIM).expect("open"));
+    let index = conversation::ConversationStore::from_store(store.clone()).expect("index");
+    index
+        .index_message("s1", 0, "user", "where does the temp dir point", &emb(0.2))
+        .expect("index message");
+
+    let stats = store
+        .migrate_embedding_dimension(&|_| Some(vec![0.5, 0.5]), 2)
+        .expect("migrate");
+
+    assert_eq!(
+        stats.rebuilt, 1,
+        "the indexed message row must be inside the migration's scope"
+    );
+    assert_eq!(store.embedding_dim(), 2);
+    // And it is searchable at the new width, not skipped as foreign.
+    let hits = store
+        .vector_search(conversation::LABEL, &[0.5, 0.5], 10)
+        .expect("search");
+    assert_eq!(
+        hits.len(),
+        1,
+        "the re-embedded message must be visible to search"
+    );
+}
+
+/// The store may only *claim* a dimension it actually holds everywhere.
+///
+/// Flipping `embedding_dim` over a half-migrated store is what made the memory
+/// panel report "no rebuild needed" while most vectors were still the old width:
+/// the declared dimension is the only thing the panel and the retrieval path
+/// compare, and `vector_search` hides the mismatch by skipping rows silently.
+#[test]
+fn admin_embedding_migration_does_not_claim_a_width_the_store_does_not_have() {
+    let store = store();
+    let mut reachable = episode("re-embed me");
+    reachable.embedding = Some(emb(0.3));
+    store.store_episode(&reachable).expect("store");
+    let mut unreachable = episode("this one the model cannot reach");
+    unreachable.embedding = Some(emb(0.7));
+    store.store_episode(&unreachable).expect("store");
+
+    // One node re-embeds, the other's embed call fails, so one row is left at
+    // the old width. Note this is about the *row*, not about the counters: a
+    // node that never had a vector does not block the move.
+    let stats = store
+        .migrate_embedding_dimension(
+            &|content: &str| {
+                if content.contains("cannot") {
+                    None
+                } else {
+                    Some(vec![0.5, 0.5])
+                }
+            },
+            2,
+        )
+        .expect("migrate");
+    assert_eq!(stats.rebuilt, 1);
+    assert_eq!(
+        store.embedding_dim(),
+        DIM,
+        "a store still holding an old-width row must not report the new width"
+    );
+
+    // Once the remaining row can be embedded, the same call finishes the move.
+    store
+        .migrate_embedding_dimension(&|_| Some(vec![0.5, 0.5]), 2)
+        .expect("second migrate");
+    assert_eq!(store.embedding_dim(), 2);
 }

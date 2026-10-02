@@ -71,12 +71,25 @@ pub struct LlmMessage {
 }
 
 /// Response from the LLM abstraction.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct LlmResponse {
     /// The text content of the assistant's reply.
     pub content: String,
     /// Token usage (if available).
     pub usage_tokens: Option<u64>,
+    /// API finish reason (`"stop"`, `"length"`, `"tool_calls"`, ...), when the
+    /// provider reports one. `Some("length")` means the reply was cut off by
+    /// `max_tokens` — a JSON array in `content` is then guaranteed to be
+    /// incomplete, which is a different diagnosis from "the model returned
+    /// malformed JSON".
+    pub finish_reason: Option<String>,
+}
+
+impl LlmResponse {
+    /// Whether the provider reported that the reply hit the output token cap.
+    pub fn truncated(&self) -> bool {
+        self.finish_reason.as_deref() == Some("length")
+    }
 }
 
 /// Trait for making LLM calls during triple extraction.
@@ -85,7 +98,7 @@ pub struct LlmResponse {
 /// This trait keeps the consolidation pipeline independent of
 /// the provider ecosystem while still supporting LLM-driven consolidation.
 #[async_trait::async_trait]
-pub trait TripleExtractorLlm: Send + Sync {
+pub trait ConsolidationLlm: Send + Sync {
     /// Send a chat request and return the response text.
     async fn chat(&self, messages: Vec<LlmMessage>) -> std::result::Result<LlmResponse, String>;
 }
@@ -444,8 +457,7 @@ impl Default for SchedulerConfig {
             distiller_accumulation: 50,
             distiller_idle_secs: 1800,
             forgetting_enabled: crate::types::EpisodicDecayConfig::default().enabled,
-            forgetting_half_life_days: crate::types::EpisodicDecayConfig::default()
-                .half_life_days,
+            forgetting_half_life_days: crate::types::EpisodicDecayConfig::default().half_life_days,
             forgetting_dormant_threshold: crate::types::EpisodicDecayConfig::default()
                 .dormant_threshold,
             forgetting_archive_days: crate::types::EpisodicDecayConfig::default().archive_days,
@@ -507,53 +519,6 @@ impl std::str::FromStr for AutobioAspect {
     }
 }
 
-/// Autobiographical candidate identified by the server-side LLM during
-/// Step 2a. Never persisted on the Episode — exists only in the distiller's
-/// in-memory extraction results (ADR-068 §3.4.2 design decision 2/3).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AutobioCandidate {
-    /// Which self-knowledge aspect this episode evidences.
-    pub aspect: AutobioAspect,
-    /// LLM-provided hint key (e.g. "verbose_response").
-    pub key_hint: String,
-}
-
-/// Structured representation extracted by the server-side LLM from an
-/// Episode's content. Exists only in distiller memory (ADR-068 §9.2).
-#[derive(Debug, Clone, PartialEq)]
-pub struct ExtractedStructure {
-    /// Episode storage node id this structure was extracted from.
-    pub episode_id: u64,
-    /// Structured knowledge (triple / procedure / autobio-only / failure).
-    pub kind: ExtractedKind,
-    /// Autobiographical candidate detected in the same LLM call (independent
-    /// of `kind` — an episode may carry both a triple and agent self-feedback).
-    pub autobio_candidate: Option<AutobioCandidate>,
-}
-
-/// The kind of structure extracted for clustering (ADR-068 §3.4.2, 二次修正版).
-#[derive(Debug, Clone, PartialEq)]
-pub enum ExtractedKind {
-    /// Triple (used for Fact/Preference/Relation clustering).
-    Triple {
-        subject: String,
-        predicate: String,
-        object: String,
-    },
-    /// Procedural pattern (used for Procedure clustering).
-    Procedure {
-        trigger_condition: String,
-        action_pattern: String,
-    },
-    /// Autobiographical candidate (used when the episode carries no
-    /// knowledge triple but does carry agent self-feedback).
-    AutobioCandidate {
-        aspect: AutobioAspect,
-        key_hint: String,
-    },
-    /// Extraction failed — episode is skipped (deferred to next run).
-    ExtractionFailed { reason: String },
-}
 
 /// What kind of semantic node a promotion produced (audit trail).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -566,10 +531,6 @@ pub enum PromotionKind {
     Relation,
     /// `ProceduralNode`
     Procedure,
-    /// `AutobiographicalNode{category=Limitation}`
-    AutobioLimitation,
-    /// `AutobiographicalNode{category=Preference}`
-    AutobioPreference,
     /// `AutobiographicalNode{category=Relationship}`
     AutobioRelationship,
     /// `AutobiographicalNode{category=History}`
@@ -610,79 +571,74 @@ pub struct PromotionMetadata {
     pub llm_judge_reasoning: String,
 }
 
-/// One auditable promotion decision for one candidate cluster (ADR-068 §3.4.1).
+/// One auditable promotion decision for one episode (ADR-068 §3.4.1).
 #[derive(Debug, Clone, PartialEq)]
 pub struct PromotionEvaluation {
     /// Episode node ids that form the evidence for this decision.
     pub source_episode_ids: Vec<u64>,
-    /// Which semantic node kind this cluster targets.
+    /// Which semantic node kind this decision produced.
     pub promoted_kind: PromotionKind,
-    /// Storage id of the created node (None when the cluster was not
-    /// promoted — Deferred/Skipped).
+    /// Storage id of the written node (None when the episode was not
+    /// consolidated — Deferred / below the importance floor).
     pub promoted_node_id: Option<u64>,
-    /// LLM judge's reasoning (full audit trail).
+    /// LLM's stated reason (full audit trail). Empty on the zero-LLM
+    /// projection path, which by definition has no reason to explain.
     pub llm_reasoning: String,
-    /// LLM judge confidence [0.0, 1.0].
+    /// LLM confidence [0.0, 1.0]. 1.0 on paths that never asked the LLM.
     pub llm_confidence: f32,
-    /// Evidence strength [0.0, 1.0].
-    pub evidence_score: f32,
     /// Final outcome.
     pub decision: PromotionDecision,
 }
 
 /// Configuration for one `EpisodicDistiller` run (ADR-068 §3.4.1).
+///
+/// The distiller is *projection + merge*: it restates each episode as one
+/// canonical sentence and asks the LLM only when an existing node looks like
+/// the same fact. Every former evidence gate
+/// (`fact_min_evidence`, `preference_min_evidence`, `procedure_min_evidence`,
+/// `relation_min_evidence`, `autobio_min_evidence`, `autobio_min_span_days`,
+/// `promotion_confidence_threshold`, `cluster_threshold`, `max_cluster_size`)
+/// is gone: the writing LLM already judged an episode worth remembering, and a
+/// second, weaker judgement on the same text only loses memories — see
+/// `docs/plan/zh/memory-consolidation-normalization-plan.md` §2.
 #[derive(Debug, Clone)]
 pub struct DistillerConfig {
-    /// Max episodes scanned per distillation run. Default: 100.
+    /// Max episodes processed per distillation run. Default: 100.
     pub batch_size: usize,
-    /// Embedding cosine threshold for cluster merging (Step 2b).
-    /// Default: 0.85.
-    pub cluster_threshold: f32,
-    /// Max members per cluster (OOM guard). Default: 1000.
-    pub max_cluster_size: usize,
-    /// Min episodes per (predicate) cluster required to promote a Fact.
-    /// Default: 2 (same predicate, different episodes).
-    pub fact_min_evidence: usize,
-    /// Min episodes required to promote a Preference. Default: 3.
-    pub preference_min_evidence: usize,
-    /// Min episodes required to promote a Relation. Default: 2.
-    pub relation_min_evidence: usize,
-    /// Min episodes required to promote a Procedure. Default: 5.
-    pub procedure_min_evidence: usize,
-    /// Min episodes + min span required to promote autobiographical.
-    /// Default: 3.
-    pub autobio_min_evidence: usize,
-    /// Min time span (days) between oldest/newest evidence for autobio
-    /// promotion. Default: 14.
-    pub autobio_min_span_days: i64,
-    /// Min LLM judge confidence for promotion. Default: 0.85.
-    pub promotion_confidence_threshold: f32,
-    /// Per-agent override for the Step 2a extraction system prompt
-    /// (ADR-071 D7). `None` = the built-in `EXTRACTION_SYSTEM_PROMPT`
-    /// in this module is used. Sourced from the package-level
-    /// `prompts/distiller-extraction.md` override.
-    pub extraction_prompt_override: Option<String>,
-    /// Per-agent override for the Step 4 judge system prompt (ADR-071 D7).
-    /// `None` = the built-in `JUDGE_SYSTEM_PROMPT` in this module is
-    /// used. Sourced from the package-level `prompts/distiller-judge.md`.
-    pub judge_prompt_override: Option<String>,
+    /// Existing semantic nodes recalled as merge candidates for one episode.
+    /// The LLM sees the new statement plus these `k`, so the reply stays one
+    /// small JSON object regardless of store size. Default: 5.
+    pub merge_candidate_k: usize,
+    /// Cosine similarity above which an existing node is offered to the LLM as
+    /// a merge candidate. Deliberately loose: a false candidate costs one
+    /// "distinct" verdict, a missed candidate costs a duplicate node that no
+    /// later run will ever reunite. Default: 0.65.
+    pub merge_recall_threshold: f32,
+    /// Floor below which an episode is not projected at all. The single
+    /// remaining volume-control knob, replacing the five evidence gates: if
+    /// the semantic layer gets too dense this tightens in one place, and
+    /// raising it back to 0.0 loses nothing (unprojected episodes stay in the
+    /// episodic layer and are reconsidered every run — there is no tombstone).
+    /// Default: 0.0 (project everything).
+    pub min_importance: f32,
+    /// Per-agent override for the merge system prompt (ADR-071 D7). `None` =
+    /// the built-in `MERGE_SYSTEM_PROMPT` in `distiller` is used. Sourced from
+    /// the package-level `prompts/distiller-merge.md` override.
+    ///
+    /// ADR-071 D7 defined two override slots (extraction + judge); the
+    /// projection rewrite collapsed both into the single merge call, so one
+    /// slot remains.
+    pub merge_prompt_override: Option<String>,
 }
 
 impl Default for DistillerConfig {
     fn default() -> Self {
         Self {
             batch_size: 100,
-            cluster_threshold: 0.85,
-            max_cluster_size: 1000,
-            fact_min_evidence: 2,
-            preference_min_evidence: 3,
-            relation_min_evidence: 2,
-            procedure_min_evidence: 5,
-            autobio_min_evidence: 3,
-            autobio_min_span_days: 14,
-            promotion_confidence_threshold: 0.85,
-            extraction_prompt_override: None,
-            judge_prompt_override: None,
+            merge_candidate_k: 5,
+            merge_recall_threshold: 0.65,
+            min_importance: 0.0,
+            merge_prompt_override: None,
         }
     }
 }
@@ -704,8 +660,86 @@ pub struct DistillerResult {
     pub autobio_promoted: usize,
     /// Episodes marked `consolidated = true` after promotion.
     pub episodes_marked_consolidated: usize,
-    /// One entry per candidate cluster evaluated — the audit trail.
+    /// One entry per scanned episode — the audit trail.
     pub promotion_evaluations: Vec<PromotionEvaluation>,
+    /// Stage-by-stage counters for this run. The promoted/deferred tallies
+    /// above say what came out; the funnel says *where the episodes went*.
+    /// Without it a run that silently produced nothing is indistinguishable
+    /// from a run that had nothing to do.
+    pub funnel: ConsolidationFunnel,
+}
+
+/// Per-run funnel counters (ADR-068 §3.4.2 observability).
+///
+/// Each stage counts episodes *entering* it, so a drop between two adjacent
+/// stages localises where the pipeline lost them. This exists because
+/// consolidation's failure modes are all silent: the original incident produced
+/// 29 scheduler triggers, 24 failed LLM calls and zero user-visible memories,
+/// with nothing in the API to distinguish it from an idle agent.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct ConsolidationFunnel {
+    /// Unconsolidated episodes read from the store.
+    pub scanned: usize,
+    /// Left out because the run hit [`DistillerConfig::batch_size`] — retried
+    /// next run. Distinguishes "working through a queue" from "stuck".
+    pub backlog_remaining: usize,
+    /// Episodes below [`DistillerConfig::min_importance`] — left in the
+    /// episodic layer, reconsidered every run (never tombstoned).
+    pub below_importance: usize,
+    /// Merge candidates recalled for an episode. Non-zero with `llm_calls` at
+    /// zero means episodes are being projected without ever being deduplicated.
+    pub candidates_recalled: usize,
+    /// Episodes that took the zero-LLM projection path (no candidate at all).
+    /// The share of the run that consolidation costs nothing in.
+    pub projected: usize,
+    /// LLM merge calls made — at most one per episode that had a candidate.
+    pub llm_calls: usize,
+    /// Merge calls whose reply could not be used (transport error, unparseable
+    /// JSON, or truncated output). The episode is deferred, not lost.
+    pub llm_calls_failed: usize,
+    /// Of the failed calls, how many the provider reported as truncated
+    /// (`finish_reason == "length"`). Separates "ask for less" from "the model
+    /// is broken".
+    pub llm_calls_truncated: usize,
+    /// `no_merge` verdicts: the candidate list was a false positive. A high
+    /// count relative to `llm_calls` says `merge_recall_threshold` is too loose.
+    pub verdict_no_merge: usize,
+    /// `merge` verdicts: the episode folded into an existing node.
+    pub verdict_merged: usize,
+    /// `contradicts` verdicts: the episode superseded an existing node.
+    pub verdict_superseded: usize,
+    /// Episodes marked `consolidated = true`.
+    pub episodes_consolidated: usize,
+    /// Episodes still eligible next run (LLM unavailable or failed, write
+    /// error). The absence of a tombstone is the point: nothing here is lost.
+    pub episodes_deferred: usize,
+    /// Per-episode errors. One episode failing does not abort the run, so
+    /// these are the only errors a distillation pass can carry.
+    pub errors: Vec<String>,
+}
+
+impl ConsolidationFunnel {
+    /// One-line summary for the `tracing` log. Ordered along the pipeline so
+    /// the first number that goes to zero is the stage that broke.
+    pub fn summary(&self) -> String {
+        format!(
+            "scanned={} backlog_left={} below_importance={} recalled={} projected={}              llm_calls={} llm_failed={} (truncated={})              no_merge={} merged={} superseded={} consolidated={} deferred={} errors={}",
+            self.scanned,
+            self.backlog_remaining,
+            self.below_importance,
+            self.candidates_recalled,
+            self.projected,
+            self.llm_calls,
+            self.llm_calls_failed,
+            self.llm_calls_truncated,
+            self.verdict_no_merge,
+            self.verdict_merged,
+            self.verdict_superseded,
+            self.episodes_consolidated,
+            self.episodes_deferred,
+            self.errors.len(),
+        )
+    }
 }
 
 // ============================================================================

@@ -38,7 +38,6 @@ async fn spawn_server(tag: &str) -> (u16, std::path::PathBuf) {
     let snapshots = Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
     let latest = Arc::new(std::sync::RwLock::new(None));
     let dispatch_tx = Arc::new(tokio::sync::Mutex::new(None));
-    let embed_dim = Arc::new(std::sync::RwLock::new(0));
     let degraded_reasons = Arc::new(std::sync::RwLock::new(Vec::new()));
     let mqtt_client = Arc::new(tokio::sync::Mutex::new(None));
     let session_metadata = Arc::new(tokio::sync::Mutex::new(None));
@@ -74,7 +73,6 @@ async fn spawn_server(tag: &str) -> (u16, std::path::PathBuf) {
         snapshots,
         latest,
         dispatch_tx,
-        embed_dim,
         degraded_reasons,
         mqtt_client,
         session_metadata,
@@ -103,8 +101,8 @@ async fn spawn_server(tag: &str) -> (u16, std::path::PathBuf) {
 // ── list ───────────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn test_list_prompts_returns_all_8_with_overridden_false() {
-    let (port, temp_dir) = spawn_server("list-all-8").await;
+async fn test_list_prompts_returns_all_6_with_overridden_false() {
+    let (port, temp_dir) = spawn_server("list-all-6").await;
 
     let resp = reqwest::get(format!(
         "http://127.0.0.1:{}/agents/{}/prompts",
@@ -122,8 +120,8 @@ async fn test_list_prompts_returns_all_8_with_overridden_false() {
         .expect("prompts must be an array");
     assert_eq!(
         prompts.len(),
-        8,
-        "PROMPT_ENTRIES contract: 8 entries must always be advertised (7 OVERRIDABLE_PROMPTS + required system.md). See ADR-068 (grafeo 3 removed) + ADR-071 (2 distiller added)."
+        6,
+        "PROMPT_ENTRIES contract: 6 entries must always be advertised (5 OVERRIDABLE_PROMPTS + required system.md). See ADR-068 (grafeo 3 removed) + ADR-071 (distiller) + the projection+merge rewrite, which collapsed the two distiller slots into one."
     );
 
     // Every entry must be `overridden=false, size_bytes=0` because the
@@ -159,7 +157,7 @@ async fn test_list_prompts_returns_all_8_with_overridden_false() {
         );
     }
 
-    // Spot-check the 8 names by sorting the response — keeps the test
+    // Spot-check the 6 names by sorting the response — keeps the test
     // resilient to reordering of `PROMPT_ENTRIES` in prompts.rs.
     let mut names: Vec<&str> = prompts
         .iter()
@@ -171,14 +169,12 @@ async fn test_list_prompts_returns_all_8_with_overridden_false() {
         vec![
             "abstention",
             "compact-template",
-            "distiller-extraction",
-            "distiller-judge",
-            "search",
+            "distiller-merge",
             "summary",
             "system",
             "title",
         ],
-        "the 8 names must be exactly the canonical set"
+        "the 6 names must be exactly the canonical set"
     );
 
     // Cleanup so the per-test temp dir doesn't accumulate.
@@ -202,18 +198,16 @@ async fn test_get_prompt_unknown_name_returns_404_with_canonical_list() {
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["error"], "unknown_prompt");
     // The error message lists every PROMPT_ENTRIES name (the required
-    // `system.md` dialog section + the 7 OVERRIDABLE_PROMPTS), so
+    // `system.md` dialog section + the 5 OVERRIDABLE_PROMPTS), so
     // operators can see what they should have typed.
     let msg = body["message"].as_str().unwrap_or("");
     for canonical in [
         "system",
         "summary",
-        "search",
         "compact-template",
         "title",
         "abstention",
-        "distiller-extraction",
-        "distiller-judge",
+        "distiller-merge",
     ] {
         assert!(
             msg.contains(canonical),
@@ -536,8 +530,8 @@ async fn test_instance_id_mismatch_returns_404() {
 #[tokio::test]
 async fn test_put_does_not_mutate_other_prompts_overridden_state() {
     // After PUTting prompt A, listing must report `overridden=true`
-    // ONLY for A; the other 7 must remain `overridden=false` (8 PROMPT_ENTRIES
-    // total: required `system.md` + 7 OVERRIDABLE_PROMPTS, per
+    // ONLY for A; the other 5 must remain `overridden=false` (6 PROMPT_ENTRIES
+    // total: required `system.md` + 5 OVERRIDABLE_PROMPTS, per
     // ADR-068 + ADR-071). This pins down that PUT does not
     // accidentally re-touch sibling files.
     let (port, _temp) = spawn_server("put-isolation").await;

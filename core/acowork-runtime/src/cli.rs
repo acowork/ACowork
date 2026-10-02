@@ -370,7 +370,11 @@ async fn async_main(
             None, // no conversation session in standalone cold-start
         );
 
-        agent_loop.core.embedding_provider = agent_ctx.emb_provider.clone();
+        // Via the setter so the shared provider cell is bound too - see the
+        // equivalent line in `startup/session_init.rs`.
+        if let Some(provider) = agent_ctx.emb_provider.clone() {
+            agent_loop.core.update_embedding_provider(provider);
+        }
         agent_loop.core.memory_session = Some(agent_ctx.memory_session.clone());
         // ADR-053: this branch bypasses `phase_b_init_session`, so the
         // agent-specific compaction prompt (prompts/summary.md) must be
@@ -392,10 +396,8 @@ async fn async_main(
 
         // ADR-071 D7/D9: mirror the two distiller prompt overrides for the
         // standalone path (see session_init.rs Phase B for Gateway mode).
-        *agent_loop.core.distiller_extraction_prompt.write().unwrap() =
-            agent_ctx.distiller_extraction_prompt.clone();
-        *agent_loop.core.distiller_judge_prompt.write().unwrap() =
-            agent_ctx.distiller_judge_prompt.clone();
+        *agent_loop.core.distiller_merge_prompt.write().unwrap() =
+            agent_ctx.distiller_merge_prompt.clone();
         let work_dir_path = std::path::Path::new(&config.work_dir);
         agent_loop.init_memory_store(work_dir_path);
 

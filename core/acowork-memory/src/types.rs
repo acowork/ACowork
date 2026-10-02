@@ -23,12 +23,6 @@ pub use acowork_core::memory::traits::{MemoryNode, PrivacyLevel};
 /// to decouple Runtime from the grafeo crate.
 pub const DEFAULT_EMBEDDING_DIM: usize = 384;
 
-/// Episode metadata key holding the sticky distiller "skip" tombstone
-/// (ADR-068 Step 4). Present on episodes whose cluster the LLM judge
-/// declined to promote; the value is a JSON object
-/// `{cluster_key, reason, at}`. The EpisodicDistiller excludes episodes
-/// carrying this key from every future run.
-pub const DISTILLER_SKIP_METADATA_KEY: &str = "distiller_skip";
 
 // ============================================================================
 // Query Types
@@ -409,6 +403,37 @@ pub struct Episode {
     /// promoted to the semantic layer by EpisodicDistiller".
     #[serde(default)]
     pub knowledge_subtype: Option<KnowledgeSubType>,
+    /// De-contextualised restatement of this episode in one sentence — the
+    /// form that stays true once the conversation around it is gone.
+    ///
+    /// The write-time LLM produces this alongside `content`; it is the
+    /// distiller's primary input, because normalisation (what is the durable
+    /// claim here?) is a judgement the writing model is already positioned to
+    /// make and an offline re-reader is not. `None` on episodes stored before
+    /// the field existed, and when the model declined to offer one — the
+    /// distiller falls back to `content` in that case.
+    #[serde(default)]
+    pub normalized: Option<String>,
+}
+
+impl Episode {
+    /// The durable claim this episode carries — what to consolidate, embed,
+    /// and recall on.
+    ///
+    /// `normalized` when the writing model offered one, otherwise the raw
+    /// `content`. Every path that needs "the statement of an episode" goes
+    /// through here: the write path embeds it, the distiller projects and
+    /// recalls on it. Two copies of that fallback would drift, and a drift
+    /// between the vector an episode is stored under and the vector it is
+    /// looked up by is exactly the kind of bug that makes consolidation
+    /// silently stop matching.
+    pub fn statement(&self) -> &str {
+        self.normalized
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(self.content.trim())
+    }
 }
 
 fn default_importance() -> f32 {
@@ -786,4 +811,74 @@ pub struct DistilledEpisode {
     /// Whether this episode has been consolidated to the semantic layer.
     /// Initial value is always `false`.
     pub consolidated: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn episode(content: &str, normalized: Option<&str>) -> Episode {
+        Episode {
+            session_id: "s".to_string(),
+            turn_index: 0,
+            role: "assistant".to_string(),
+            content: content.to_string(),
+            embedding: None,
+            timestamp: chrono::Utc::now(),
+            consolidated: false,
+            metadata: HashMap::new(),
+            importance: 0.5,
+            knowledge_subtype: None,
+            normalized: normalized.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn statement_prefers_the_normalized_restatement() {
+        assert_eq!(
+            episode(
+                "In the deploy meeting Nancy said she prefers concise answers",
+                Some("User prefers concise answers"),
+            )
+            .statement(),
+            "User prefers concise answers"
+        );
+    }
+
+    #[test]
+    fn statement_falls_back_to_content() {
+        assert_eq!(episode("User lives in Beijing", None).statement(), "User lives in Beijing");
+        // A blank restatement is not a restatement; the content still has to
+        // be usable, or a legacy row projects an empty node.
+        assert_eq!(episode("User lives in Beijing", Some("   ")).statement(), "User lives in Beijing");
+    }
+
+    #[test]
+    fn statement_trims_the_result() {
+        assert_eq!(episode("  padded  ", None).statement(), "padded");
+    }
+
+    /// The whole backfill depends on this: 269 live episodes were written
+    /// before `normalized` existed, so their `props` JSON has no such key at
+    /// all. A missing key must deserialize to `None` rather than failing the
+    /// read - a read error here would make the backlog invisible to the
+    /// distiller, which is the original "no sediment ever appeared" symptom.
+    #[test]
+    fn legacy_episode_json_without_normalized_or_subtype_deserializes() {
+        let legacy = r#"{
+            "session_id": "s",
+            "turn_index": 3,
+            "role": "assistant",
+            "content": "User prefers dark mode over light mode",
+            "embedding": null,
+            "timestamp": "2025-01-01T00:00:00Z",
+            "consolidated": false,
+            "metadata": {},
+            "importance": 0.7
+        }"#;
+        let ep: Episode = serde_json::from_str(legacy).expect("legacy props must deserialize");
+        assert_eq!(ep.normalized, None);
+        assert_eq!(ep.knowledge_subtype, None);
+        assert_eq!(ep.statement(), "User prefers dark mode over light mode");
+    }
 }

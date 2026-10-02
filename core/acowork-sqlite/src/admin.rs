@@ -267,9 +267,17 @@ impl MemoryAdminService for SqliteStore {
 
         let nodes_with_embedding = SqliteStore::count_nodes_with_embedding(self).unwrap_or(0);
         let stored_dim = SqliteStore::embedding_dim(self) as u64;
+        // A store that has not recorded a dimension yet holds no vectors either,
+        // and `<> 0 bytes` would match every row in it. Treat "no dimension" as
+        // "nothing to be stale about".
+        let vectors_of_other_dim = if stored_dim == 0 {
+            0
+        } else {
+            self.count_vectors_of_other_dim(stored_dim as usize).unwrap_or(0)
+        };
 
-        // The desktop Memory panel shows "部分节点缺少向量嵌入" on exactly this
-        // condition, so log it with an explicit grep target for support runs.
+        // The desktop Memory panel shows its health banner on exactly these two
+        // conditions, so log them with an explicit grep target for support runs.
         if total_nodes > 0 && nodes_with_embedding < total_nodes {
             tracing::warn!(
                 target: "memory_diag",
@@ -280,15 +288,25 @@ impl MemoryAdminService for SqliteStore {
                 "memory_store: detected nodes without vector embeddings"
             );
         }
+        if vectors_of_other_dim > 0 {
+            tracing::warn!(
+                target: "memory_diag",
+                vectors_of_other_dim,
+                stored_dim,
+                "memory_store: detected vectors at a foreign width, invisible to search"
+            );
+        }
 
         AdminStats {
             total_nodes,
             storage_bytes: self.storage_size_bytes().unwrap_or(0),
             by_type,
             by_status,
-            index_health: "healthy".to_string(),
+            index_health: derive_index_health(total_nodes, nodes_with_embedding, vectors_of_other_dim)
+                .to_string(),
             stored_dim,
             nodes_with_embedding,
+            vectors_of_other_dim,
             // `PRAGMA user_version` is a 32-bit integer SQLite preserves
             // across connections; bump it from `schema.rs` whenever the
             // table layout changes. 0 is the implicit value before any
@@ -310,11 +328,43 @@ impl MemoryAdminService for SqliteStore {
         embed_fn: &(dyn Fn(&str) -> Option<Vec<f32>> + Send + Sync),
         new_dim: usize,
     ) -> AcoworkResult<RebuildStats> {
-        let mut stats = RebuildStats::default();
-        let rows = self.all_rows()?;
+        self.migrate_embedding_dimension_with_progress(embed_fn, new_dim, None)
+    }
 
+    /// The trait's default implementation drops the progress callback on the
+    /// floor, which left the desktop's model-switch UI showing "rebuilding,
+    /// 0 of 0" for the entire run - the work was real, only the numbers were
+    /// missing. SQLite knows the row count before it starts, so report it.
+    fn migrate_embedding_dimension_with_progress(
+        &self,
+        embed_fn: &(dyn Fn(&str) -> Option<Vec<f32>> + Send + Sync),
+        new_dim: usize,
+        progress: Option<&dyn Fn(u64, u64)>,
+    ) -> AcoworkResult<RebuildStats> {
+        let mut stats = RebuildStats::default();
+        // The migration's scope is wider than the memory browser's: a model
+        // swap changes the width of *every* vector in the store, and
+        // `vector_search` silently skips rows of a foreign width, so leaving
+        // `ConversationMessage` out would strand the whole conversation index -
+        // it is append-only by line watermark and never re-embeds an indexed
+        // row, so nothing else would ever heal those vectors.
+        let rows = self.rows_with_labels(&[
+            labels::EPISODIC,
+            labels::KNOWLEDGE,
+            labels::PROCEDURAL,
+            labels::AUTOBIOGRAPHICAL,
+            crate::conversation::LABEL,
+        ])?;
+
+        let total = rows.len() as u64;
         for row in rows {
             stats.total_scanned += 1;
+            // Reported before the work, not after: a row the embedder skips must
+            // still move the bar, otherwise a store whose model rejects most of
+            // its content shows a progress bar stuck at zero and then done.
+            if let Some(p) = progress {
+                p(stats.total_scanned, total);
+            }
             let content = crate::provider::render_content(&row.props);
             if content.trim().is_empty() {
                 stats.skipped_no_content += 1;
@@ -345,7 +395,28 @@ impl MemoryAdminService for SqliteStore {
             }
         }
 
-        self.set_embedding_dim(new_dim)?;
+        // Only declare the store to be at `new_dim` when nothing was left behind
+        // at another width. `vector_search` skips foreign-width rows silently, so
+        // flipping the recorded dimension over a half-migrated store makes the
+        // store claim a width it does not have - which is what let the memory
+        // panel report "no rebuild needed" while 294 conversation vectors were
+        // still 512-wide and invisible to retrieval.
+        //
+        // Measured from the rows themselves rather than from the counters: a node
+        // the embedder returned nothing *for* only matters if it is holding an old
+        // vector, and a node with no vector at all is simply not yet embedded.
+        let stale = self.count_vectors_of_other_dim(new_dim)?;
+        if stale == 0 {
+            self.set_embedding_dim(new_dim)?;
+        } else {
+            tracing::warn!(
+                new_dim,
+                rebuilt = stats.rebuilt,
+                stale,
+                "embedding migration: store left at its previous dimension - \
+                 {stale} rows are still at another width, so a rebuild is still required"
+            );
+        }
         Ok(stats)
     }
 }
@@ -353,20 +424,48 @@ impl MemoryAdminService for SqliteStore {
 // ── Internal helpers ─────────────────────────────────────────────────────
 
 impl SqliteStore {
-    /// Every memory row, in whatever order SQLite returns them.
-    fn all_rows(&self) -> crate::Result<Vec<AdminRow>> {
+    /// Rows in `vectors` whose blob is not `dim` floats wide.
+    ///
+    /// The migration uses this to decide whether the store may *claim* the new
+    /// dimension: `vector_search` ignores rows of a foreign width without
+    /// reporting it, so any row left here is a row retrieval will never see.
+    fn count_vectors_of_other_dim(&self, dim: usize) -> crate::Result<u64> {
         let conn = self.lock();
-        let mut stmt = conn.prepare(
-            "SELECT id, label, status, props, created_at FROM nodes \
-             WHERE label IN (?1, ?2, ?3, ?4)",
+        let bytes = dim.saturating_mul(4) as i64;
+        let n: u64 = conn.query_row(
+            "SELECT COUNT(*) FROM vectors WHERE length(embedding) <> ?1",
+            params![{ bytes }],
+            |r| r.get(0),
         )?;
+        Ok(n)
+    }
+
+    /// Every memory row, in whatever order SQLite returns them.
+    ///
+    /// Deliberately narrower than [`Self::rows_with_labels`]: this is the
+    /// memory-browser scope, and `ConversationMessage` rows are excluded so the
+    /// panel does not fill with chat transcripts. The embedding migration needs
+    /// a wider scope and asks for it explicitly.
+    fn all_rows(&self) -> crate::Result<Vec<AdminRow>> {
+        self.rows_with_labels(&[
+            labels::EPISODIC,
+            labels::KNOWLEDGE,
+            labels::PROCEDURAL,
+            labels::AUTOBIOGRAPHICAL,
+        ])
+    }
+
+    /// Every row carrying one of `labels`.
+    fn rows_with_labels(&self, labels: &[&str]) -> crate::Result<Vec<AdminRow>> {
+        let conn = self.lock();
+        let placeholders: Vec<String> = (1..=labels.len()).map(|i| format!("?{i}")).collect();
+        let sql = format!(
+            "SELECT id, label, status, props, created_at FROM nodes WHERE label IN ({})",
+            placeholders.join(", ")
+        );
+        let mut stmt = conn.prepare(&sql)?;
         let mapped = stmt.query_map(
-            params![
-                labels::EPISODIC,
-                labels::KNOWLEDGE,
-                labels::PROCEDURAL,
-                labels::AUTOBIOGRAPHICAL
-            ],
+            rusqlite::params_from_iter(labels.iter().map(|s| s.to_string())),
             |r| {
                 Ok((
                     r.get::<_, i64>(0)?,
@@ -670,6 +769,24 @@ fn f64_prop(props: &Value, key: &str) -> f64 {
 /// Failures (no DB, pragma rejected) are swallowed and reported as 0 —
 /// `user_version` is observability metadata, not a correctness invariant,
 /// and a stuck read must not prevent the stats endpoint from returning.
+/// One-word summary of what the two health counters below say about the store.
+///
+/// Was hardcoded to `"healthy"`, which made the field a constant rather than a
+/// report: a store whose recorded dimension had been moved over vectors still
+/// at the previous width - the exact state a model swap can leave - read back
+/// as healthy, because nothing in the string was computed from anything.
+/// Foreign width wins over missing embeddings: those rows exist and are
+/// silently excluded from search, which is the harder failure to notice.
+fn derive_index_health(total_nodes: u64, nodes_with_embedding: u64, stale: u64) -> &'static str {
+    if stale > 0 {
+        "stale_vectors"
+    } else if total_nodes > 0 && nodes_with_embedding < total_nodes {
+        "missing_embeddings"
+    } else {
+        "healthy"
+    }
+}
+
 fn read_user_version(conn: &rusqlite::Connection) -> u64 {
     conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
         .ok()
