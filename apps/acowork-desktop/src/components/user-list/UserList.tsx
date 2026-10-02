@@ -337,12 +337,13 @@ export const UserList = forwardRef<UserListHandle>(function UserList(_props, ref
             </div>
           )}
 
-          {rows.map((account) => (
+          {rows.map((account, index) => (
             <UserRow
               key={account.user_id}
               account={account}
               isAdmin={isAdmin}
               isSelf={account.user_id === self?.user_id}
+              isLast={index === rows.length - 1}
               onOpen={() => openThread(account)}
               onContextMenu={(e) => menu.openAt(e, account)}
             />
@@ -444,12 +445,14 @@ function UserRow({
   account,
   isAdmin,
   isSelf,
+  isLast,
   onOpen,
   onContextMenu,
 }: {
   account: UserAccount;
   isAdmin: boolean;
   isSelf: boolean;
+  isLast: boolean;
   onOpen: () => void;
   onContextMenu: (e: MouseEvent) => void;
 }) {
@@ -482,6 +485,12 @@ function UserRow({
         "gap-3",
         !isSelf && "cursor-pointer hover:bg-nav-item-hover",
         active && "bg-[var(--color-accent)]/90 text-white hover:bg-[var(--color-accent)]",
+        // Same hairline the agent rows carry, so the two groups read as one
+        // list. `isLast` is passed in rather than derived here: the rows are
+        // flat (accounts are Gateway-wide, never partitioned by node), so
+        // the caller alone knows which row closes the group.
+        !isLast &&
+          "after:absolute after:bottom-0 after:left-1.5 after:right-1.5 after:border-b after:border-nav-divider/40 dark:after:border-zinc-600/40",
       )}
     >
       <UserAvatar
