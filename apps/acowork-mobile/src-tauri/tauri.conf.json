@@ -1,0 +1,37 @@
+{
+  "$schema": "https://raw.githubusercontent.com/nicovite96/tauri-v2-schema/main/schema.json",
+  "productName": "ACowork Mobile",
+  "version": "0.1.0",
+  "identifier": "com.acowork.mobile",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:19877",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "security": {
+      "capabilities": ["main-capability"]
+    },
+    "windows": [
+      {
+        "title": "ACowork",
+        "width": 390,
+        "height": 844,
+        "resizable": true,
+        "fullscreen": false
+      }
+    ]
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/256x256.png",
+      "icons/512x512.png"
+    ]
+  }
+}

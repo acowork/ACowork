@@ -1,0 +1,104 @@
+/* Mobile design tokens. Values track the iOS Human Interface Guidelines'
+ * 44pt minimum touch target and standard system spacing, so the shell
+ * matches native-feeling apps rather than looking like a shrunken desktop. */
+
+:root {
+  --color-bg: #ffffff;
+  --color-bg-elevated: #ffffff;
+  --color-bg-grouped: #f2f2f7;
+  --color-separator: #c6c6c8;
+  --color-label: #000000;
+  --color-label-secondary: #8e8e93;
+  --color-tint: #007aff;
+  --color-destructive: #ff3b30;
+  --color-success: #34c759;
+  --color-warning: #ff9500;
+  --color-bubble-self: #007aff;
+  --color-bubble-self-text: #ffffff;
+  --color-bubble-peer: #e9e9eb;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+
+  --touch-min: 44px;
+  --tabbar-height: 49px;
+  --navbar-height: 44px;
+
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+
+  --font: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'PingFang SC',
+    'Helvetica Neue', 'Segoe UI', Roboto, sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-bg: #000000;
+    --color-bg-elevated: #1c1c1e;
+    --color-bg-grouped: #000000;
+    --color-separator: #38383a;
+    --color-label: #ffffff;
+    --color-label-secondary: #98989d;
+    --color-tint: #0a84ff;
+    --color-destructive: #ff453a;
+    --color-bubble-peer: #26262a;
+    --color-bubble-self: #0a84ff;
+  }
+}
+
+* {
+  box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: var(--font);
+  font-size: 17px;
+  line-height: 1.4;
+  color: var(--color-label);
+  background: var(--color-bg);
+  /* The IM shell manages its own scrolling regions; the document must not
+     rubber-band, or a pull-down reveals a white gap under the TabBar. */
+  overflow: hidden;
+  overscroll-behavior: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* Every interactive element clears the 44pt minimum. */
+button,
+[role='button'],
+a {
+  min-height: var(--touch-min);
+  min-width: var(--touch-min);
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+}
+
+input,
+textarea {
+  font: inherit;
+  color: inherit;
+  -webkit-user-select: text;
+  user-select: text;
+}
