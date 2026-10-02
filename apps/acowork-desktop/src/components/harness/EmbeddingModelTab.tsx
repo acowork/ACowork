@@ -10,7 +10,7 @@ import { fetchEmbeddingModels, downloadEmbeddingModel, selectEmbeddingModel, fet
 import { fetchCloudEmbeddingProviders, selectCloudEmbeddingModel, setCloudEmbeddingApiKey, deleteCloudEmbeddingApiKey, testCloudEmbeddingProvider, addCloudEmbeddingProvider } from "../../lib/gateway-api";
 import type { EmbeddingTestResponse } from "../../lib/types";
 import { Download, Check, Loader2, Cpu, Languages, Zap, CheckCircle2, XCircle, Trash2, Cloud, KeyRound, HardDrive, Plus, RefreshCw } from "lucide-react";
-import { Badge, EmptyState, ExpandableRow, ListBox } from "../common/list";
+import { Badge, EmptyState, ExpandableRow, ListBox, ListRow } from "../common/list";
 import { Tooltip } from "../common/Tooltip";
 
 export function EmbeddingModelTab() {
@@ -835,7 +835,19 @@ export function EmbeddingModelTab() {
     );
 }
 
-/** Migration progress panel — shows agent migration queue and progress */
+/** Migration panel — the agents that must re-embed for a new model.
+ *
+ * Standard settings-card chrome (ListBox + ListRow), the same grammar as the
+ * sibling service-status / local-models cards. It was a hand-rolled
+ * `border-amber-200 bg-amber-50` box, which read as an alert that never
+ * cleared — the tint had nothing to do with severity, only with "this box needs
+ * a rebuild".
+ *
+ * Accent is now rationed: the only accent-coloured pixels are the primary
+ * action and the in-flight progress bar, the two things the user is waiting on.
+ * Row state is carried by Badge tones, which read as status rather than as a
+ * background wash. Interaction is unchanged — still checkbox-per-row.
+ */
 function MigrationPanel({
     migrationResponse,
     migrationAgentIds,
@@ -855,6 +867,7 @@ function MigrationPanel({
     onStartMigration: () => void;
     onCancel: () => void;
 }) {
+    const { t } = useTranslation();
     const allDone = migrationResponse.agents
         .filter((a) => migrationAgentIds.has(a.instance_id))
         .every((a) => {
@@ -863,98 +876,103 @@ function MigrationPanel({
         });
 
     return (
-        <div className="rounded-md border border-amber-200 bg-amber-50 p-4 dark:border-amber-800 dark:bg-amber-900/20">
-            <h2 className="mb-2 text-xs font-medium text-amber-800 dark:text-amber-300">
-                {migrationStarted
-                    ? "Embedding Migration in Progress"
-                    : "Embedding Dimension Migration Required"}
-            </h2>
-            <p className="mb-3 text-[11px] text-amber-700 dark:text-amber-400">
-                {migrationResponse.message}
-                {` (Old: ${migrationResponse.old_dimension ?? "?"}, New: ${migrationResponse.new_dimension})`}
-            </p>
+        <ListBox dividers={false}>
+            <ExpandableRow
+                open
+                // Collapsing means "cancel" here, which is what the old panel's
+                // Cancel button did, so the chevron takes over that role — but
+                // only before the rebuild starts. Once a job is in flight the
+                // header must not hide live progress over work that keeps
+                // running, so the title switches to the in-progress wording and
+                // the chevron goes inert rather than lying about being clickable.
+                onToggle={migrationStarted ? () => {} : onCancel}
+                title={migrationStarted
+                    ? t("embedding.migrationInProgress")
+                    : t("embedding.migrationRequired")}
+                ariaLabel={t("embedding.migrationRequired")}
+                bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset p-3"
+            >
+                <p className="mb-3 text-[11px] text-text-secondary">
+                    {migrationResponse.message}
+                    {` (Old: ${migrationResponse.old_dimension ?? "?"}, New: ${migrationResponse.new_dimension})`}
+                </p>
 
-            {/* Agent list */}
-            <div className="mb-3 space-y-1.5">
-                {migrationResponse.agents.map((agent) => {
-                    const isSelected = migrationAgentIds.has(agent.instance_id);
-                    const prog = migrationProgress[agent.instance_id];
-                    const pct = prog?.progress?.total_scanned
-                        ? Math.round((prog.progress.rebuilt / prog.progress.total_scanned) * 100)
-                        : 0;
-                    const isDone = prog?.done;
-                    const hasError = prog?.error;
+                {/* Agent list */}
+                <ListBox variant="plain" className="mb-3">
+                    {migrationResponse.agents.map((agent) => {
+                        const isSelected = migrationAgentIds.has(agent.instance_id);
+                        const prog = migrationProgress[agent.instance_id];
+                        const pct = prog?.progress?.total_scanned
+                            ? Math.round((prog.progress.rebuilt / prog.progress.total_scanned) * 100)
+                            : 0;
+                        const isDone = prog?.done;
+                        const hasError = prog?.error;
+                        const inFlight = migrationStarted && !!prog && !isDone && !hasError;
 
-                    return (
-                        <div
-                            key={agent.instance_id}
-                            className="flex items-center gap-2 rounded border border-amber-200 bg-modal-surface px-3 py-2 text-xs dark:border-amber-700"
-                        >
-                            {/* Checkbox (only before migration starts) */}
-                            {!migrationStarted && (
-                                <input
-                                    type="checkbox"
-                                    checked={isSelected}
-                                    disabled={!agent.is_running}
-                                    onChange={() => onToggleAgent(agent.instance_id)}
-                                    className="h-3.5 w-3.5"
-                                />
-                            )}
+                        return (
+                            <ListRow
+                                key={agent.instance_id}
+                                disabled={!agent.is_running && !migrationStarted}
+                                trailing={
+                                    <>
+                                        {!agent.is_running ? (
+                                            <Badge tone="neutral">{t("embedding.notRunning")}</Badge>
+                                        ) : isDone ? (
+                                            <Badge tone="success">{t("embedding.done")} ✓</Badge>
+                                        ) : hasError ? (
+                                            <Badge tone="danger">{t("embedding.failed")} ✗</Badge>
+                                        ) : inFlight ? (
+                                            <Badge tone="accent">{pct}%</Badge>
+                                        ) : (
+                                            <Badge tone="neutral">{t("embedding.pending")}</Badge>
+                                        )}
 
-                            {/* Agent name */}
-                            <span className="min-w-[100px] truncate font-medium">
-                                {/* ADR-073: backend currently fills `name` with the
-                                 * package `agent_id` (reverse-domain) — fine for display.
-                                 * Fallback is a SHORT instance id (first 8 hex chars,
-                                 * mirroring acowork_core::AgentInstanceId::short()) so
-                                 * we never leak a full 36-char UUID into the UI when
-                                 * `name` is unexpectedly empty. */}
-                                {agent.name
-                                    || agent.instance_id.slice(0, 8)
-                                    || agent.instance_id}
-                            </span>
-
-                            {/* Status badge */}
-                            {!agent.is_running ? (
-                                <span className="rounded bg-zinc-200 px-1.5 py-0.5 text-[10px] text-text-secondary dark:bg-zinc-700 ">
-                                    Not Running
-                                </span>
-                            ) : isDone ? (
-                                <span className="rounded bg-green-100 px-1.5 py-0.5 text-[10px] text-green-700 dark:bg-green-900/50 dark:text-green-400">
-                                    Done ✓
-                                </span>
-                            ) : hasError ? (
-                                <span className="rounded bg-red-100 px-1.5 py-0.5 text-[10px] text-red-700 dark:bg-red-900/50 dark:text-red-400">
-                                    Failed ✗
-                                </span>
-                            ) : migrationStarted && prog ? (
-                                <span className="rounded bg-blue-100 px-1.5 py-0.5 text-[10px] text-blue-700 dark:bg-blue-900/50 dark:text-blue-400">
-                                    {pct}%
-                                </span>
-                            ) : (
-                                <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] text-amber-700 dark:bg-amber-900/50 dark:text-amber-400">
-                                    Pending
-                                </span>
-                            )}
-
-                            {/* Progress bar */}
-                            {migrationStarted && prog && !isDone && !hasError && (
-                                <div className="ml-auto flex w-24 items-center gap-1">
-                                    <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-700">
-                                        <div
-                                            className="h-full rounded-full bg-blue-500 transition-all"
-                                            style={{ width: `${pct}%` }}
+                                        {/* Accent because this bar is the one thing the
+                                            user is actively waiting on. */}
+                                        {inFlight && (
+                                            <div className="flex w-24 items-center gap-1">
+                                                <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-700">
+                                                    <div
+                                                        className="h-full rounded-full bg-[var(--color-accent)] transition-all"
+                                                        style={{ width: `${pct}%` }}
+                                                    />
+                                                </div>
+                                                <span className="text-[10px] tabular-nums text-text-tertiary">
+                                                    {prog?.progress?.rebuilt ?? 0}/{prog?.progress?.total_scanned ?? "?"}
+                                                </span>
+                                            </div>
+                                        )}
+                                    </>
+                                }
+                            >
+                                {/* Checkbox is the only control, as before — a
+                                 * restyle must not change who can be clicked. */}
+                                <span className="flex items-center gap-2 text-xs">
+                                    {!migrationStarted && (
+                                        <input
+                                            type="checkbox"
+                                            checked={isSelected}
+                                            disabled={!agent.is_running}
+                                            onChange={() => onToggleAgent(agent.instance_id)}
+                                            className="h-3.5 w-3.5"
                                         />
-                                    </div>
-                                    <span className="text-[10px] tabular-nums text-text-tertiary">
-                                        {prog.progress?.rebuilt ?? 0}/{prog.progress?.total_scanned ?? "?"}
+                                    )}
+                                    {/* ADR-073: backend currently fills `name` with the
+                                     * package `agent_id` (reverse-domain) — fine for display.
+                                     * Fallback is a SHORT instance id (first 8 hex chars,
+                                     * mirroring acowork_core::AgentInstanceId::short()) so
+                                     * we never leak a full 36-char UUID into the UI when
+                                     * `name` is unexpectedly empty. */}
+                                    <span className="min-w-[100px] truncate font-medium">
+                                        {agent.name
+                                            || agent.instance_id.slice(0, 8)
+                                            || agent.instance_id}
                                     </span>
-                                </div>
-                            )}
-                        </div>
-                    );
-                })}
-            </div>
+                                </span>
+                            </ListRow>
+                        );
+                    })}
+                </ListBox>
 
             {/* Actions */}
             <div className="flex items-center gap-2">
@@ -963,9 +981,9 @@ function MigrationPanel({
                         <button
                             onClick={onStartMigration}
                             disabled={migrationStarting || migrationAgentIds.size === 0}
-                            className="rounded btn-solid px-3 py-[var(--ui-btn-py)] text-xs font-medium disabled:opacity-50"
+                            className="rounded btn-accent px-3 py-[var(--ui-btn-py)] text-xs font-medium disabled:opacity-50"
                         >
-                            {migrationStarting ? "Starting..." : "Start Migration"}
+                            {migrationStarting ? t("embedding.starting") : t("embedding.startMigration")}
                         </button>
                         <button
                             onClick={onCancel}
@@ -977,17 +995,19 @@ function MigrationPanel({
                 ) : allDone ? (
                     <button
                         onClick={onCancel}
-                        className="rounded btn-solid px-3 py-[var(--ui-btn-py)] text-xs font-medium"
+                        className="rounded btn-accent px-3 py-[var(--ui-btn-py)] text-xs font-medium"
                     >
-                        Migration Complete — Dismiss
+                        {t("embedding.migrationComplete")}
                     </button>
                 ) : (
-                    <span className="text-xs text-amber-700 dark:text-amber-400">
-                        ⏳ Migrating agents... Do not close this panel.
+                    <span className="flex items-center gap-1.5 text-xs text-text-tertiary">
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                        {t("embedding.migratingAgents")}
                     </span>
                 )}
             </div>
-        </div>
+            </ExpandableRow>
+        </ListBox>
     );
 }
 
