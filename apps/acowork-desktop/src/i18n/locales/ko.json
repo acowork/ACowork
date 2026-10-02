@@ -709,6 +709,7 @@
     "connectingDebug": "디버그 서버에 연결 중...",
     "debugConnectionLost": "디버그 연결 끊김",
     "enterDebug": "디버그 진입",
+    "debugRemoteUnavailable": "릴레이 모드에서는 디버그 사용 불가",
     "enteringDebug": "디버그 진입 중...",
     "noAgentDebug": "디버그 모드의 Agent 없음",
     "iteration": "반복",

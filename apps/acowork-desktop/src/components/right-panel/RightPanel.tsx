@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { useChatStore } from "../../stores/chatStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { useDebugStore } from "../../stores/debugStore";
+import { useSettingsStore } from "../../stores/settingsStore";
 import type { ChatMessage, ProviderAccount, SessionStatus } from "../../lib/types";
 import { getProcessingPhase } from "../../lib/types";
 import { cn, formatPercent } from "../../lib/utils";
@@ -57,6 +58,12 @@ const RIGHT_PANEL_TOP_SHADOW_THRESHOLD_PX = 4;
 export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTab, onTabChange }: RightPanelProps & { width: number }) {
   const { selectedAgentId } = useAgentStore();
   const selectedAgent = useAgentStore((s) => s.selectedAgentId ? s.agents[s.selectedAgentId]?.meta : undefined);
+  // Design doc 24 §8.2 (F7): the debug RPC tunnels through the Gateway
+  // `/api/debug/*` endpoints, which the relay's remote guard 404s on
+  // purpose. DevMode stays a same-machine / LAN feature — in relay mode
+  // the toggle is disabled so the user isn't invited to enable a
+  // session that could never attach.
+  const debugRemoteUnavailable = useSettingsStore((s) => s.gatewayMode === "relay");
   const activeSessionId = useChatStore((s) => selectedAgentId ? s.agentStates[selectedAgentId]?.activeSessionId ?? null : null);
   const tokenUsage = useChatStore((s) => {
     if (!selectedAgentId) return null;
@@ -556,16 +563,18 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
                         }
                       }
                     }}
-                    disabled={enablingDebug || disablingDebug}
+                    disabled={enablingDebug || disablingDebug || debugRemoteUnavailable}
                     size="sm"
                     label={
-                      enablingDebug
-                        ? t("rightPanel.enteringDebug")
-                        : disablingDebug
-                          ? t("rightPanel.exitingDebug")
-                          : selectedAgent?.debug_state === "enabled"
-                            ? t("rightPanel.buttonExitDebug")
-                            : t("rightPanel.enterDebug")
+                      debugRemoteUnavailable
+                        ? t("rightPanel.debugRemoteUnavailable")
+                        : enablingDebug
+                          ? t("rightPanel.enteringDebug")
+                          : disablingDebug
+                            ? t("rightPanel.exitingDebug")
+                            : selectedAgent?.debug_state === "enabled"
+                              ? t("rightPanel.buttonExitDebug")
+                              : t("rightPanel.enterDebug")
                     }
                     labelPosition="right"
                   />

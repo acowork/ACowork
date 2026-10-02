@@ -990,6 +990,7 @@
     "connectingDebug": "Connecting to debug server...",
     "debugConnectionLost": "Debug connection lost",
     "enterDebug": "Enter Debug",
+    "debugRemoteUnavailable": "Debug unavailable via relay",
     "enteringDebug": "Entering Debug...",
     "noAgentDebug": "No agent in debug mode",
     "iteration": "Iteration",

@@ -33,7 +33,7 @@ import type {
   DefaultCompactModelResponse,
   NodeInfo,
 } from "./types";
-import { getGatewayUrl } from "./config";
+import { getGatewayUrl, getGatewayMode } from "./config";
 
 // ── LSP Relay endpoint cache ───────────────────────────────────────────
 //
@@ -559,6 +559,11 @@ export async function getLspRelayUrl(
   gatewayUrl = getGatewayUrl(),
 ): Promise<string | null> {
   if (!agentId) return null;
+  // F7 degradation list (design doc 24 §8.2): the LSP relay is a
+  // node-local sidecar — its advertised endpoint is a LAN/loopback
+  // address the Desktop cannot dial through the cloud relay tunnel.
+  // Report "not available" instead of probing an unreachable host.
+  if (getGatewayMode() === "relay") return null;
   return getCachedLspRelayEndpoint(agentId, gatewayUrl);
 }
 

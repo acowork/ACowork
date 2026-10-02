@@ -708,6 +708,7 @@
     "connectingDebug": "デバッグサーバーに接続中...",
     "debugConnectionLost": "デバッグ接続が切断されました",
     "enterDebug": "デバッグに入る",
+    "debugRemoteUnavailable": "リレーモードではデバッグ不可",
     "enteringDebug": "デバッグに入る...",
     "noAgentDebug": "デバッグモードのAgentはありません",
     "iteration": "反復",

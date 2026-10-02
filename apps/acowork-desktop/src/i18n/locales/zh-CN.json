@@ -760,6 +760,7 @@
     "connectingDebug": "正在连接调试服务器...",
     "debugConnectionLost": "调试连接已断开",
     "enterDebug": "进入调试",
+    "debugRemoteUnavailable": "中继模式下不可调试",
     "enteringDebug": "正在进入调试...",
     "noAgentDebug": "没有 Agent 处于调试模式",
     "iteration": "迭代",

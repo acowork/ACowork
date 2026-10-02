@@ -707,6 +707,7 @@
     "connectingDebug": "正在連線除錯伺服器...",
     "debugConnectionLost": "除錯連線已中斷",
     "enterDebug": "進入偵錯",
+    "debugRemoteUnavailable": "中繼模式下無法偵錯",
     "enteringDebug": "正在進入偵錯...",
     "noAgentDebug": "沒有 Agent 處於除錯模式",
     "iteration": "迭代",
