@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { useGatewayStore } from "../../stores/gatewayStore";
+import { useGatewayStore, type MigrationSession } from "../../stores/gatewayStore";
 import { useTranslation } from "../../i18n/useTranslation";
-import type { EmbeddingModelWithStatus, SelectModelMigrationResponse, CloudEmbeddingProvider, ActiveCloudEmbeddingProvider, CloudEmbeddingProvidersResponse } from "../../lib/types";
+import type { EmbeddingModelWithStatus, CloudEmbeddingProvider, ActiveCloudEmbeddingProvider, CloudEmbeddingProvidersResponse } from "../../lib/types";
 import { cn } from "../../lib/utils";
 import { ConfirmDialog } from "../common/ConfirmDialog";
 import { ErrorBox } from "../common/ErrorBox";
@@ -29,11 +29,16 @@ export function EmbeddingModelTab() {
     const [downloadProgress, setDownloadProgress] = useState<Record<string, number>>({});
     const [error, setError] = useState<string | null>(null);
     const [dimensionConfirm, setDimensionConfirm] = useState<{ modelId: string; message: string } | null>(null);
-    const [migrationResponse, setMigrationResponse] = useState<SelectModelMigrationResponse | null>(null);
-    const [migrationAgentIds, setMigrationAgentIds] = useState<Set<string>>(new Set());
     const [migrationStarting, setMigrationStarting] = useState(false);
-    const [migrationStarted, setMigrationStarted] = useState(false);
-    const migrationPollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
+    // The migration session lives in the store, not here: a rebuild outlives
+    // this tab, and holding it in `useState` meant that visiting the chat
+    // unmounted the panel and the progress list never came back. See
+    // `MigrationSession` in gatewayStore.
+    const migrationSession = useGatewayStore((s) => s.migrationSession);
+    const beginMigrationSession = useGatewayStore((s) => s.beginMigrationSession);
+    const markMigrationStarted = useGatewayStore((s) => s.markMigrationStarted);
+    const setMigrationSelection = useGatewayStore((s) => s.setMigrationSelection);
+    const clearMigrationSession = useGatewayStore((s) => s.clearMigrationSession);
     const [testing, setTesting] = useState(false);
     const [testResult, setTestResult] = useState<EmbeddingTestResponse | null>(null);
     // Tools-tab level-1 collapsible group shells for Local / Cloud, default open.
@@ -231,17 +236,28 @@ export function EmbeddingModelTab() {
                 // Use migration-aware endpoint for forced selects
                 const result = await selectEmbeddingModelWithMigration(modelId, force);
                 if ("agents" in result && result.status === "migration_required") {
-                    // Dimension changed — show migration agent list
-                    setMigrationResponse(result);
-                    setMigrationAgentIds(new Set(result.agents.filter(a => a.is_running).map(a => a.instance_id)));
+                    // Dimension changed — show migration agent list. The
+                    // session goes to the store, not local state: a rebuild
+                    // outlives this tab (the user will go back to chat), and
+                    // local state took the whole progress list with it.
+                    beginMigrationSession({
+                        modelId: result.model_id,
+                        oldDimension: result.old_dimension ?? null,
+                        newDimension: result.new_dimension,
+                        message: result.message,
+                        agents: result.agents,
+                        selected: new Set(
+                            result.agents.filter((a) => a.is_running).map((a) => a.instance_id),
+                        ),
+                        started: false,
+                    });
                     setSelectingId(null);
                     await loadModels();
                     return;
                 }
                 // Same dimension or simple loaded response
                 if (result.status === "loaded" || result.status === "migration_started") {
-                    setMigrationResponse(null);
-                    setMigrationStarted(false);
+                    clearMigrationSession();
                 }
                 await loadModels();
             } else {
@@ -257,7 +273,7 @@ export function EmbeddingModelTab() {
         } finally {
             setSelectingId(null);
         }
-    }, [loadModels]);
+    }, [loadModels, beginMigrationSession, clearMigrationSession]);
 
     const handleDimensionConfirm = useCallback(async () => {
         if (!dimensionConfirm) return;
@@ -266,55 +282,64 @@ export function EmbeddingModelTab() {
     }, [dimensionConfirm, handleSelect]);
 
     const handleStartMigration = useCallback(async () => {
-        if (!migrationResponse || migrationAgentIds.size === 0) return;
-        const modelId = migrationResponse.model_id;
+        if (!migrationSession || migrationSession.selected.size === 0) return;
         setMigrationStarting(true);
         setError(null);
         try {
-            const instanceIds = Array.from(migrationAgentIds);
-            await startMigration(modelId, instanceIds);
-            setMigrationStarted(true);
-            // Start polling migration progress
-            if (migrationPollingRef.current) clearInterval(migrationPollingRef.current);
-            migrationPollingRef.current = setInterval(async () => {
-                const inProgress = await pollMigrationProgress();
-                if (!inProgress) {
-                    if (migrationPollingRef.current) {
-                        clearInterval(migrationPollingRef.current);
-                        migrationPollingRef.current = null;
-                    }
-                    setMigrationStarted(false);
-                    await loadModels();
-                }
-            }, 2000);
+            const instanceIds = Array.from(migrationSession.selected);
+            await startMigration(migrationSession.modelId, instanceIds);
+            markMigrationStarted();
+            // Polling itself lives in the effect below, keyed on
+            // `migrationSession.started`, so it survives this tab unmounting
+            // and resumes when the user comes back.
+            await pollMigrationProgress();
         } catch (e) {
             setError(e instanceof Error ? e.message : "Migration start failed");
         } finally {
             setMigrationStarting(false);
         }
-    }, [migrationResponse, migrationAgentIds, pollMigrationProgress, loadModels]);
+    }, [migrationSession, markMigrationStarted, pollMigrationProgress]);
 
     const handleMigrationCancel = useCallback(() => {
-        setMigrationResponse(null);
-        setMigrationAgentIds(new Set());
-        setMigrationStarted(false);
-        if (migrationPollingRef.current) {
-            clearInterval(migrationPollingRef.current);
-            migrationPollingRef.current = null;
-        }
-    }, []);
+        // Only reachable pre-flight or once the rebuild has finished — the
+        // running rebuild offers no cancel, because the Gateway has no way to
+        // stop a half-finished re-embed.
+        clearMigrationSession();
+    }, [clearMigrationSession]);
 
     const toggleMigrationAgent = useCallback((agentId: string) => {
-        setMigrationAgentIds((prev) => {
-            const next = new Set(prev);
-            if (next.has(agentId)) {
-                next.delete(agentId);
-            } else {
-                next.add(agentId);
-            }
-            return next;
-        });
-    }, []);
+        if (!migrationSession) return;
+        const next = new Set(migrationSession.selected);
+        if (next.has(agentId)) {
+            next.delete(agentId);
+        } else {
+            next.add(agentId);
+        }
+        setMigrationSelection(next);
+    }, [migrationSession, setMigrationSelection]);
+
+    // Poll progress while a rebuild is running.
+    //
+    // Keyed on the store's session rather than a ref, so it restarts when the
+    // user returns to this tab: the interval used to be a local ref whose
+    // callback set local state, so after one visit to the chat it was polling
+    // into a dead component. It also stops of its own accord the moment every
+    // agent reports done or failed — the panel stays until the work is
+    // actually over, and the user dismisses it.
+    useEffect(() => {
+        if (!migrationSession?.started) return;
+        let cancelled = false;
+        const tick = async () => {
+            const inProgress = await pollMigrationProgress();
+            if (cancelled) return;
+            if (!inProgress) await loadModels();
+        };
+        const timer = setInterval(tick, 2000);
+        return () => {
+            cancelled = true;
+            clearInterval(timer);
+        };
+    }, [migrationSession?.started, pollMigrationProgress, loadModels]);
 
     const handleTest = useCallback(async () => {
         setTesting(true);
@@ -583,13 +608,12 @@ export function EmbeddingModelTab() {
                 />
             )}
 
-            {/* Migration panel */}
-            {migrationResponse && (
+            {/* Migration panel — rendered from the store-held session, so it is
+                still here after a round trip to the chat. */}
+            {migrationSession && (
                 <MigrationPanel
-                    migrationResponse={migrationResponse}
-                    migrationAgentIds={migrationAgentIds}
+                    session={migrationSession}
                     migrationStarting={migrationStarting}
-                    migrationStarted={migrationStarted}
                     migrationProgress={migrationProgress}
                     onToggleAgent={toggleMigrationAgent}
                     onStartMigration={handleStartMigration}
@@ -849,27 +873,24 @@ export function EmbeddingModelTab() {
  * background wash. Interaction is unchanged — still checkbox-per-row.
  */
 function MigrationPanel({
-    migrationResponse,
-    migrationAgentIds,
+    session,
     migrationStarting,
-    migrationStarted,
     migrationProgress,
     onToggleAgent,
     onStartMigration,
     onCancel,
 }: {
-    migrationResponse: SelectModelMigrationResponse;
-    migrationAgentIds: Set<string>;
+    session: MigrationSession;
     migrationStarting: boolean;
-    migrationStarted: boolean;
     migrationProgress: Record<string, { progress?: { rebuilt: number; total_scanned: number; errors: number; phase: string; label: string } | null; done: boolean; error?: string | null }>;
     onToggleAgent: (agentId: string) => void;
     onStartMigration: () => void;
     onCancel: () => void;
 }) {
     const { t } = useTranslation();
-    const allDone = migrationResponse.agents
-        .filter((a) => migrationAgentIds.has(a.instance_id))
+    const { started } = session;
+    const allDone = session.agents
+        .filter((a) => session.selected.has(a.instance_id))
         .every((a) => {
             const p = migrationProgress[a.instance_id];
             return p?.done;
@@ -885,34 +906,34 @@ function MigrationPanel({
                 // header must not hide live progress over work that keeps
                 // running, so the title switches to the in-progress wording and
                 // the chevron goes inert rather than lying about being clickable.
-                onToggle={migrationStarted ? () => {} : onCancel}
-                title={migrationStarted
+                onToggle={started ? () => {} : onCancel}
+                title={started
                     ? t("embedding.migrationInProgress")
                     : t("embedding.migrationRequired")}
                 ariaLabel={t("embedding.migrationRequired")}
                 bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset p-3"
             >
                 <p className="mb-3 text-[11px] text-text-secondary">
-                    {migrationResponse.message}
-                    {` (Old: ${migrationResponse.old_dimension ?? "?"}, New: ${migrationResponse.new_dimension})`}
+                    {session.message}
+                    {` (Old: ${session.oldDimension ?? "?"}, New: ${session.newDimension})`}
                 </p>
 
                 {/* Agent list */}
                 <ListBox variant="plain" className="mb-3">
-                    {migrationResponse.agents.map((agent) => {
-                        const isSelected = migrationAgentIds.has(agent.instance_id);
+                    {session.agents.map((agent) => {
+                        const isSelected = session.selected.has(agent.instance_id);
                         const prog = migrationProgress[agent.instance_id];
                         const pct = prog?.progress?.total_scanned
                             ? Math.round((prog.progress.rebuilt / prog.progress.total_scanned) * 100)
                             : 0;
                         const isDone = prog?.done;
                         const hasError = prog?.error;
-                        const inFlight = migrationStarted && !!prog && !isDone && !hasError;
+                        const inFlight = started && !!prog && !isDone && !hasError;
 
                         return (
                             <ListRow
                                 key={agent.instance_id}
-                                disabled={!agent.is_running && !migrationStarted}
+                                disabled={!agent.is_running && !started}
                                 trailing={
                                     <>
                                         {!agent.is_running ? (
@@ -948,7 +969,7 @@ function MigrationPanel({
                                 {/* Checkbox is the only control, as before — a
                                  * restyle must not change who can be clicked. */}
                                 <span className="flex items-center gap-2 text-xs">
-                                    {!migrationStarted && (
+                                    {!started && (
                                         <input
                                             type="checkbox"
                                             checked={isSelected}
@@ -976,11 +997,11 @@ function MigrationPanel({
 
             {/* Actions */}
             <div className="flex items-center gap-2">
-                {!migrationStarted ? (
+                {!started ? (
                     <>
                         <button
                             onClick={onStartMigration}
-                            disabled={migrationStarting || migrationAgentIds.size === 0}
+                            disabled={migrationStarting || session.selected.size === 0}
                             className="rounded btn-accent px-3 py-[var(--ui-btn-py)] text-xs font-medium disabled:opacity-50"
                         >
                             {migrationStarting ? t("embedding.starting") : t("embedding.startMigration")}

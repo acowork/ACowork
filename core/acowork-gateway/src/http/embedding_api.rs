@@ -732,6 +732,11 @@ pub async fn get_migration_progress(
             info.migration.as_ref().map(|m| {
                 serde_json::json!({
                     "instance_id": info.instance_id,
+                    // The agent's display identity, so a client that re-reads
+                    // this endpoint (the migration panel survives a tab switch)
+                    // can name the agent without joining against a separate
+                    // agent list keyed by instance id.
+                    "agent_id": info.agent_id,
                     "request_id": m.request_id,
                     "target_model_id": m.target_model_id,
                     "target_dimension": m.target_dimension,
