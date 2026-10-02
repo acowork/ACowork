@@ -498,8 +498,19 @@ async fn run_monitor_session(
     // session was restarted but the embed was fine the whole time).
     // We only do this on session start; later state transitions
     // arrive via the SSE stream.
-    if let Err(e) = bootstrap_state_from_health(port, state).await {
-        tracing::warn!(error = %e, "Initial /health bootstrap failed; continuing with SSE only");
+    //
+    // Polled, not read once. The sidecar binds its listener and spawns
+    // `bootstrap_default_model` concurrently, so `/events` answering
+    // does NOT mean the model is loaded — and the `Ready` event it
+    // eventually publishes is a broadcast, so an event emitted before we
+    // subscribed is gone for good. A single read therefore loses a race
+    // it usually loses with a large model (2.2 GB of ONNX), leaving
+    // `active_model_id` stuck at None while the sidecar is happily
+    // serving. The memory panel then cannot tell which model is live and
+    // the rebuild flow has nothing to key off. `/health` is authoritative
+    // and cheap, so we keep asking until it says ready.
+    if !await_state_from_health(port, state).await {
+        tracing::warn!("Embed /health did not report a ready model during bootstrap; continuing with SSE only");
     }
 
     // Verify the model can actually produce embeddings, not just respond
@@ -581,16 +592,42 @@ async fn run_monitor_session(
     }
 }
 
-/// Bootstrap the gateway's view of the loaded model from the embed's
-/// `/health` endpoint. Used once at the start of each monitor session
-/// to recover state when the supervisor's connection lagged behind the
-/// embed's startup (e.g. the embed was already ready when the
-/// supervisor's SSE connect finally went through, so the `Ready` SSE
-/// state event was already published and lost).
-async fn bootstrap_state_from_health(
-    port: u16,
-    state: &SharedEmbedState,
-) -> Result<(), String> {
+/// Poll the embed's `/health` until it reports a loaded model, or the
+/// grace window expires. Returns whether a model was observed.
+///
+/// Used at the start of each monitor session to recover state when the
+/// supervisor's connection lagged behind the embed's startup: the sidecar
+/// binds its listener and spawns its model load concurrently, so `/events`
+/// answering does not mean the model is in memory, and the `Ready` event it
+/// later publishes is a broadcast that an earlier emission loses for good.
+///
+/// `ponytail:` the cap is a wall-clock deadline, not a poll count, so a slow
+/// model costs startup latency but never livelocks. Raise
+/// `supervisor_defaults::STARTUP_GRACE` if genuinely huge models need longer.
+async fn await_state_from_health(port: u16, state: &SharedEmbedState) -> bool {
+    let deadline = Instant::now() + supervisor_defaults::STARTUP_GRACE;
+    loop {
+        match read_model_from_health(port).await {
+            // Ready. `apply_health_model` declines to overwrite a value it
+            // already trusts, so arriving here with state already set is fine.
+            Ok(Some((id, dim))) => return apply_health_model(state, Some(id), Some(dim)).await,
+            // Reachable, but no model in memory yet — the normal cold start.
+            Ok(None) => {}
+            Err(e) => tracing::debug!(error = %e, "Embed /health not readable yet"),
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(supervisor_defaults::STARTUP_POLL).await;
+    }
+}
+
+/// Read the currently loaded model from the embed's `/health`.
+///
+/// `Ok(None)` means "reachable, but nothing loaded yet"; `Err` means the
+/// endpoint could not be read at all. The distinction matters: the first is a
+/// state to wait out, the second a fault to retry.
+async fn read_model_from_health(port: u16) -> Result<Option<(String, usize)>, String> {
     let url = format!("http://127.0.0.1:{port}/health");
     let client = http_client();
     let body: serde_json::Value = client
@@ -603,34 +640,52 @@ async fn bootstrap_state_from_health(
         .await
         .map_err(|e| e.to_string())?;
 
-    let status = body.get("status").and_then(|s| s.as_str()).unwrap_or("");
-    let (model_id, dimension) = if status == "ready" {
-        let id = body
-            .get("model")
-            .and_then(|m| m.get("id"))
-            .and_then(|s| s.as_str())
-            .map(String::from);
-        let dim = body
-            .get("model")
-            .and_then(|m| m.get("dimension"))
-            .and_then(|d| d.as_u64())
-            .map(|d| d as usize);
-        (id, dim)
-    } else {
-        (None, None)
-    };
+    if body.get("status").and_then(|s| s.as_str()) != Some("ready") {
+        return Ok(None);
+    }
+    let id = body
+        .get("model")
+        .and_then(|m| m.get("id"))
+        .and_then(|s| s.as_str())
+        .map(String::from);
+    let dim = body
+        .get("model")
+        .and_then(|m| m.get("dimension"))
+        .and_then(|d| d.as_u64())
+        .map(|d| d as usize);
+    Ok(match (id, dim) {
+        (Some(id), Some(dim)) => Some((id, dim)),
+        // "ready" with no model block is malformed — wait rather than trust
+        // half a record and report a width we cannot attribute to a model.
+        _ => None,
+    })
+}
 
+/// Write a model observed on `/health` into shared state. Returns whether the
+/// state names a model afterwards.
+///
+/// A read that reports *no* model never clears a model we already know: a
+/// transient "loading" or a half-built `/health` must not erase the last good
+/// answer, because the UI reads this to decide which model is live and would
+/// otherwise show nothing at all.
+async fn apply_health_model(
+    state: &SharedEmbedState,
+    model_id: Option<String>,
+    dimension: Option<usize>,
+) -> bool {
     let (changed, applied) = {
         let mut gw = state.write().await;
         let Some(eps) = gw.embed_process.as_mut() else {
-            return Err("no embed state".to_string());
+            return false;
         };
-        let changed = eps.active_model_id != model_id || eps.active_dimension != dimension;
-        eps.active_model_id = model_id;
-        eps.active_dimension = dimension;
-        if eps.active_model_id.is_some() {
-            eps.ready = true;
-        }
+        let (Some(id), Some(dim)) = (model_id, dimension) else {
+            return eps.active_model_id.is_some();
+        };
+        let changed = eps.active_model_id.as_deref() != Some(id.as_str())
+            || eps.active_dimension != Some(dim);
+        eps.active_model_id = Some(id);
+        eps.active_dimension = Some(dim);
+        eps.ready = true;
         (changed, (eps.active_model_id.clone(), eps.active_dimension))
     };
 
@@ -641,7 +696,7 @@ async fn bootstrap_state_from_health(
             "Embed state bootstrapped from /health"
         );
     }
-    Ok(())
+    true
 }
 
 /// Probe the embed's actual inference capability by sending a lightweight
@@ -787,5 +842,98 @@ mod tests {
         // fresh window.
         stale = None;
         assert!(!stale_should_restart(&mut stale, t0, timeout));
+    }
+
+    fn state_with_embed(active: Option<(&str, usize)>) -> SharedEmbedState {
+        let mut gw = crate::gateway::state::GatewayState::new("test-vault");
+        gw.embed_process = Some(super::super::embed::EmbedProcessState {
+            pid: 4242,
+            port: 18080,
+            active_model_id: active.map(|(id, _)| id.to_string()),
+            active_dimension: active.map(|(_, d)| d),
+            ready: active.is_some(),
+        });
+        Arc::new(RwLock::new(gw))
+    }
+
+    /// The `Ready` SSE event is a broadcast: if the sidecar publishes it
+    /// before the supervisor subscribes, nobody ever delivers it. The only
+    /// recovery is `/health`, and a single read taken while the model is
+    /// still loading reported "no model" and wrote that over the state —
+    /// leaving `active_model_id` at None forever while the sidecar served
+    /// happily. A load of a couple of GB of ONNX reliably loses that race.
+    #[tokio::test]
+    async fn a_health_read_without_a_model_never_clears_a_known_one() {
+        let state = state_with_embed(Some(("bge-m3", 1024)));
+
+        // /health answered, but reported nothing loaded (still loading).
+        assert!(apply_health_model(&state, None, None).await);
+
+        let eps = state.read().await.embed_process.clone().unwrap();
+        assert_eq!(
+            eps.active_model_id.as_deref(),
+            Some("bge-m3"),
+            "a transient not-yet-loaded read must not erase the last good answer"
+        );
+        assert_eq!(eps.active_dimension, Some(1024));
+    }
+
+    /// The recovery path itself: a late `/health` that does name a model
+    /// populates state that was empty, which is the state a cold start
+    /// with a lost `Ready` event lands in.
+    #[tokio::test]
+    async fn a_late_health_read_populates_state_the_lost_ready_event_left_empty() {
+        let state = state_with_embed(None);
+        assert!(eps_is_unknown(&state).await);
+
+        assert!(apply_health_model(&state, Some("bge-m3".into()), Some(1024)).await);
+
+        let eps = state.read().await.embed_process.clone().unwrap();
+        assert_eq!(eps.active_model_id.as_deref(), Some("bge-m3"));
+        assert_eq!(eps.active_dimension, Some(1024));
+        assert!(eps.ready, "a model in memory means the sidecar is ready");
+    }
+
+    /// A real model arriving via `/health` still overwrites a stale one —
+    /// the no-clobber rule must not turn into "first value always wins".
+    #[tokio::test]
+    async fn a_real_model_from_health_does_overwrite_a_stale_one() {
+        let state = state_with_embed(Some(("bge-small-zh-v1.5", 512)));
+
+        assert!(apply_health_model(&state, Some("bge-m3".into()), Some(1024)).await);
+
+        let eps = state.read().await.embed_process.clone().unwrap();
+        assert_eq!(eps.active_model_id.as_deref(), Some("bge-m3"));
+        assert_eq!(eps.active_dimension, Some(1024));
+    }
+
+    /// `Ok(None)` must mean "not loaded yet", not "endpoint broken" — the
+    /// poll loop treats the first as a state to wait out and only logs the
+    /// second. A sidecar that reports `ready` with no model block is the
+    /// former: half a record is not a model.
+    #[tokio::test]
+    async fn a_ready_health_without_a_model_block_is_not_treated_as_a_model() {
+        let state = state_with_embed(None);
+        assert!(eps_is_unknown(&state).await);
+
+        // Mirrors what read_model_from_health returns for that payload: an
+        // id with no width. It reports "still not loaded", so the poll loop
+        // keeps waiting instead of exiting on a half record.
+        assert!(!apply_health_model(&state, Some("half".into()), None).await);
+        let eps = state.read().await.embed_process.clone().unwrap();
+        assert_eq!(
+            eps.active_model_id, None,
+            "a width we cannot attribute to a full model record must not be published"
+        );
+    }
+
+    async fn eps_is_unknown(state: &SharedEmbedState) -> bool {
+        state
+            .read()
+            .await
+            .embed_process
+            .as_ref()
+            .map(|e| e.active_model_id.is_none())
+            .unwrap_or(false)
     }
 }
