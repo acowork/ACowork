@@ -1005,6 +1005,7 @@
     "staleVectorsDetail": "{{stale}} 件のベクトルが {{stored}} 次元ではなく、検索時にスキップされます",
     "rebuildIndex": "インデックスを再構築",
     "rebuildIndexInProgress": "再構築中…",
+    "rebuildFailed": "インデックス再構築に失敗しました：{{error}}",
     "distillerTitle": "記憶蒸留",
     "distillerEnabled": "記憶蒸留を有効化",
     "distillerModel": "蒸留モデル（順に試行）",

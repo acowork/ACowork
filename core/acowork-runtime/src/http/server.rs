@@ -1720,6 +1720,27 @@ async fn rebuild_embeddings(
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     };
 
+    // Reject a second concurrent rebuild of this store. The Gateway already
+    // refuses to re-queue an agent whose migration is in flight, but this is
+    // the layer that spawns the work, and a repeat would run two migrations
+    // over the same rows at once - double the embedding cost, and both tasks
+    // writing the single progress slot below, so the numbers the UI reads stop
+    // meaning anything. A finished run (`done == true`) is not a collision:
+    // re-running is how a partially-completed rebuild gets retried.
+    {
+        let slot = state
+            .rebuild_progress
+            .lock()
+            .expect("rebuild progress mutex poisoned");
+        if slot.as_ref().is_some_and(|p| !p.done) {
+            tracing::warn!(
+                target: "migration_diag",
+                "rebuild_embeddings: rejected - a rebuild is already running in this runtime"
+            );
+            return Err(StatusCode::CONFLICT);
+        }
+    }
+
     // Mark the slot as running so GET /memory/rebuild-progress returns a
     // live (0/total) answer even before the first progress callback fires.
     *state

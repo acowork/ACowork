@@ -1243,6 +1243,7 @@
     "staleVectorsDetail": "{{stale}} vectors are not {{stored}}-dimensional and are skipped by search",
     "rebuildIndex": "Rebuild Index",
     "rebuildIndexInProgress": "Rebuilding…",
+    "rebuildFailed": "Index rebuild failed: {{error}}",
     "distillerTitle": "Memory Distiller",
     "distillerEnabled": "Enable memory distiller",
     "distillerModel": "Distiller models (tried in order)",

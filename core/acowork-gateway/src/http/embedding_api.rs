@@ -945,27 +945,58 @@ pub async fn start_migration(
         axum::http::header::CONTENT_TYPE,
         axum::http::HeaderValue::from_static("application/json"),
     );
+    let mut already_running: Vec<String> = Vec::new();
     for agent_id in &target_ids {
         // 3a. Initial state — `done=false, progress=(0,0,0,"reembed","starting")`.
         let request_id = uuid::Uuid::new_v4().to_string();
-        {
+        let start = {
             let mut gw = state.gateway_state.write().await;
-            if let Some(info) = gw.running_agents.get_mut(agent_id) {
-                info.migration = Some(crate::gateway::state::AgentMigrationState {
-                    request_id: request_id.clone(),
-                    target_model_id: embed_model_id.clone(),
-                    target_dimension: embed_dimension,
-                    progress: Some((
-                        0,
-                        0,
-                        0,
-                        "reembed".to_string(),
-                        "starting".to_string(),
-                    )),
-                    done: false,
-                    error: None,
-                });
+            match gw.running_agents.get_mut(agent_id) {
+                Some(info) => {
+                    // Do not stack a second migration on an agent that is still
+                    // working. Nothing downstream rejects a repeat: the Runtime
+                    // overwrites its progress slot and spawns another detached
+                    // task, so a second request re-embeds the same store
+                    // concurrently, and the two tasks take turns writing the one
+                    // progress slot the UI reads - the displayed numbers become
+                    // noise. Reachable in practice because the desktop's memory
+                    // panel forgets an in-flight rebuild when you switch agents
+                    // and re-arms the button, so the user is invited to click it
+                    // again while the work is still running.
+                    //
+                    // A *finished* state is not a collision: re-running a
+                    // completed migration is how a partial one gets retried.
+                    let in_flight = info.migration.as_ref().is_some_and(|m| !m.done);
+                    if !in_flight {
+                        info.migration = Some(crate::gateway::state::AgentMigrationState {
+                            request_id: request_id.clone(),
+                            target_model_id: embed_model_id.clone(),
+                            target_dimension: embed_dimension,
+                            progress: Some((
+                                0,
+                                0,
+                                0,
+                                "reembed".to_string(),
+                                "starting".to_string(),
+                            )),
+                            done: false,
+                            error: None,
+                        });
+                    }
+                    !in_flight
+                }
+                None => false,
             }
+        };
+        if !start {
+            tracing::info!(
+                target: "migration_diag",
+                model_id = %model_id,
+                agent_id = %agent_id,
+                "start_migration: skipped - a migration is already in flight for this agent"
+            );
+            already_running.push(agent_id.clone());
+            continue;
         }
 
         // 3b. Build the body the Runtime's `rebuild_embeddings` handler
@@ -1036,7 +1067,19 @@ pub async fn start_migration(
                 }
             };
             let text = String::from_utf8_lossy(&body_bytes).to_string();
-            if !status_code.is_success() {
+            if status_code == axum::http::StatusCode::CONFLICT {
+                // The Runtime refuses to run two rebuilds over one store. Not a
+                // failure: a Gateway restart re-queues agents whose Runtime task
+                // survived the restart, so what is happening is the run the user
+                // asked for. Fall through and watch the job that exists, rather
+                // than reporting "rebuild failed" while it is still working.
+                tracing::info!(
+                    target: "migration_diag",
+                    agent_id = %agent_id_owned,
+                    request_id = %request_id_owned,
+                    "start_migration_bg: runtime already rebuilding, attaching to the running job"
+                );
+            } else if !status_code.is_success() {
                 let error_msg = if text.is_empty() {
                     format!("HTTP {} (empty body)", status_code.as_u16())
                 } else {
@@ -1198,18 +1241,32 @@ pub async fn start_migration(
         }));
     }
 
+    for agent_id in &already_running {
+        // Reported per agent rather than as a request-level error: a migration
+        // that is genuinely in flight is the outcome the caller wanted, and the
+        // settings page may legitimately ask for a batch where only some
+        // members are busy.
+        results.push(serde_json::json!({
+            "instance_id": agent_id,
+            "status": "already_running",
+            "message": "A migration is already running for this agent; poll /api/embedding-models/migration-progress for progress",
+        }));
+    }
+
     tracing::info!(
         target: "migration_diag",
         model_id = %model_id,
-        queued_count = target_ids.len(),
+        queued_count = target_ids.len() - already_running.len(),
+        already_running = ?already_running,
         "start_migration: handler returning 200 OK (work continues in background)"
     );
 
     Json(serde_json::json!({
         "model_id": model_id,
         "status": "ok",
-        "message": format!("Migration queued for {} agent(s)", target_ids.len()),
+        "message": format!("Migration queued for {} agent(s)", target_ids.len() - already_running.len()),
         "results": results,
+        "already_running": already_running,
     }))
     .into_response()
 }
@@ -1544,4 +1601,172 @@ mod tests {
             m.progress
         );
     }
+
+    /// A migration that is still running must not be started a second time.
+    ///
+    /// Why this is reachable: the desktop's memory panel forgets an in-flight
+    /// rebuild as soon as you switch agents (`clearMemory` drops the poll and
+    /// the flag), so the Rebuild button comes back and invites a second click
+    /// while the first is still working. Nothing used to reject it - the state
+    /// was overwritten and another task spawned, so two migrations re-embedded
+    /// the same store at once: double the embedding work, and both writing the
+    /// one progress slot the UI reads, which made the displayed numbers
+    /// meaningless. The rows themselves survived only because each is written
+    /// idempotently at the same target width.
+    #[tokio::test]
+    async fn start_migration_refuses_to_stack_on_a_running_migration() {
+        fn agent_with(
+            migration: Option<crate::gateway::state::AgentMigrationState>,
+        ) -> crate::gateway::state::RunningAgentInfo {
+            crate::gateway::state::RunningAgentInfo {
+                instance_id: "3d4e5f6a-7b8c-4d9d-8e0e-bf1f2a3b4c5d".to_string(),
+                agent_id: "com.test.architect".to_string(),
+                pid: 9999,
+                started_at: chrono::Utc::now(),
+                workspace: "/tmp/test".to_string(),
+                node_id: "local".to_string(),
+                lifecycle: acowork_core::mqtt_proto::AgentLifecycleState::SessionsReady,
+                lifecycle_detail: String::new(),
+                dev_mode: false,
+                debug_state: crate::gateway::state::DebugState::Disabled,
+                debug_port: None,
+                workspace_config_json: None,
+                current_embed_dim: Some(1024),
+                migration,
+            }
+        }
+
+        let in_flight = crate::gateway::state::AgentMigrationState {
+            request_id: "orig-request-id".to_string(),
+            target_model_id: "bge-m3".to_string(),
+            target_dimension: 1024,
+            progress: Some((36, 1024, 0, "reembed".to_string(), "running".to_string())),
+            done: false,
+            error: None,
+        };
+
+        let dir = std::env::temp_dir().join(format!(
+            "acowork-test-migration-collision-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut gw_state = crate::gateway::state::GatewayState::new(&dir.to_string_lossy());
+        gw_state.embed_process = Some(crate::lifecycle::embed::EmbedProcessState {
+            pid: 0,
+            port: 18080,
+            active_model_id: Some("bge-m3".to_string()),
+            active_dimension: Some(1024),
+            ready: true,
+        });
+        gw_state.running_agents.insert(
+            "com.test.architect".to_string(),
+            agent_with(Some(in_flight)),
+        );
+
+        let state = crate::http::routes::AppState::new(
+            Arc::new(tokio::sync::RwLock::new(gw_state)),
+            Arc::new(crate::http::auth::HttpAuth::new(false)),
+        );
+
+        // A closure rather than an async block: the block itself is not
+        // `Clone`, and this test posts twice.
+        let post = {
+            let state = state.clone();
+            move || {
+                let state = state.clone();
+                async move {
+                    super::embedding_routes()
+                        .with_state(state)
+                        .oneshot(
+                            axum::http::Request::builder()
+                                .method("POST")
+                                .uri("/api/embedding-models/bge-m3/start-migration")
+                                .header("content-type", "application/json")
+                                .body(axum::body::Body::from(
+                                    r#"{"instance_ids":["com.test.architect"]}"#,
+                                ))
+                                .unwrap(),
+                        )
+                        .await
+                        .unwrap()
+                }
+            }
+        };
+
+        // ── 1. In flight: refused, and the running migration's state untouched.
+        let resp = post().await;
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            json["results"][0]["status"],
+            "already_running",
+            "a busy agent must be reported as already_running, got {}",
+            json_pretty(&json)
+        );
+        assert_eq!(
+            json["already_running"][0], "com.test.architect",
+            "the refused agent must also be listed at the top level"
+        );
+        assert!(
+            json["message"]
+                .as_str()
+                .map(|s| s.contains("0 agent"))
+                .unwrap_or(false),
+            "nothing was queued, so the count must say so, got {}",
+            json_pretty(&json)
+        );
+
+        let gw = state.gateway_state.read().await;
+        let m = gw
+            .running_agents
+            .get("com.test.architect")
+            .and_then(|i| i.migration.as_ref())
+            .expect("migration state must still be present");
+        assert_eq!(
+            m.request_id, "orig-request-id",
+            "the running migration's identity must survive a refused restart"
+        );
+        assert_eq!(
+            m.progress,
+            Some((36, 1024, 0, "reembed".to_string(), "running".to_string())),
+            "overwriting progress is what made the UI numbers meaningless"
+        );
+        drop(gw);
+
+        // ── 2. Finished: not a collision. Re-running is how a partial
+        //     rebuild gets retried, so this must still be accepted.
+        state
+            .gateway_state
+            .write()
+            .await
+            .running_agents
+            .get_mut("com.test.architect")
+            .unwrap()
+            .migration
+            .as_mut()
+            .unwrap()
+            .done = true;
+        let resp = post().await;
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            json["results"][0]["status"],
+            "queued",
+            "a completed migration must be restartable, got {}",
+            json_pretty(&json)
+        );
+    }
+
+    /// Compact JSON for assertion messages.
+    fn json_pretty(v: &serde_json::Value) -> String {
+        serde_json::to_string(v).unwrap_or_else(|_| "<unprintable>".to_string())
+    }
 }
+

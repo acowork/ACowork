@@ -53,6 +53,7 @@ export function MemoryPanel() {
     fetchDistillerStatus,
     fetchForgettingStatus,
     rebuildIndex,
+    resumeRebuild,
     setFilters,
     setPage,
     setSelectedNodeId,
@@ -106,6 +107,11 @@ export function MemoryPanel() {
     void fetchStats(selectedAgentId);
     void fetchDistillerStatus(selectedAgentId);
     void fetchForgettingStatus(selectedAgentId);
+    // `clearMemory` above drops the rebuild flag along with everything else,
+    // but the rebuild itself is running in the Gateway and Runtime and does
+    // not care that we switched agents. Re-attach, or this button comes back
+    // offering to queue a second migration over the same store.
+    void resumeRebuild(selectedAgentId);
   }, [
     selectedAgentId,
     isAgentRunning,
@@ -114,6 +120,7 @@ export function MemoryPanel() {
     fetchStats,
     fetchDistillerStatus,
     fetchForgettingStatus,
+    resumeRebuild,
   ]);
 
   // Re-fetch when filters or pagination change
@@ -132,6 +139,7 @@ export function MemoryPanel() {
     void fetchStats(selectedAgentId);
     void fetchDistillerStatus(selectedAgentId);
     void fetchForgettingStatus(selectedAgentId);
+    void resumeRebuild(selectedAgentId);
   }, [
     activePanelTab,
     selectedAgentId,
@@ -140,6 +148,7 @@ export function MemoryPanel() {
     fetchStats,
     fetchDistillerStatus,
     fetchForgettingStatus,
+    resumeRebuild,
   ]);
 
   // Auto-dismiss consolidate message after 6 seconds

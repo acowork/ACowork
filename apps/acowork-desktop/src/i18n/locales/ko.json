@@ -1006,6 +1006,7 @@
     "staleVectorsDetail": "{{stale}}개 벡터가 {{stored}}차원이 아니므로 검색에서 건너뜁니다",
     "rebuildIndex": "인덱스 재구축",
     "rebuildIndexInProgress": "재구축 중…",
+    "rebuildFailed": "인덱스 재구축 실패: {{error}}",
     "distillerTitle": "메모리 증류",
     "distillerEnabled": "메모리 증류 활성화",
     "distillerModel": "증류 모델 (순서대로 시도)",

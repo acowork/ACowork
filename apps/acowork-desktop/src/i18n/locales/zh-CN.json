@@ -1061,6 +1061,7 @@
     "staleVectorsDetail": "{{stale}} 条向量宽度不是 {{stored}}，检索时会被跳过",
     "rebuildIndex": "重建索引",
     "rebuildIndexInProgress": "重建中…",
+    "rebuildFailed": "索引重建失败：{{error}}",
     "distillerTitle": "记忆沉淀",
     "distillerEnabled": "启用记忆蒸馏",
     "distillerModel": "蒸馏模型（按序尝试）",
