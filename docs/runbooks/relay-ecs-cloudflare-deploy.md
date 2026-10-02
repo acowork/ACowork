@@ -64,15 +64,23 @@ graph LR
 
 ### 2.2 系统初始化
 
+ECS 上**不需要 Rust 工具链**——二进制在本地交叉编译（§4），服务器只负责执行。
+
 ```bash
-# 以 root 登录 ECS
-dnf install -y curl tar rust  # Alibaba Cloud Linux 3 / CentOS Stream 9
-# 或 Debian/Ubuntu: apt install -y curl tar build-essential
+# 以 root 登录 ECS。系统自带 openssl / tar 即可，仅 certbot 缺失时需要装：
+#   dnf install -y certbot python3-pip        # Alibaba Cloud Linux 3 / CentOS Stream 9
+#   apt install -y certbot                    # Debian / Ubuntu（§3.1）
+#   certbot-dns-cloudflare 插件见 §3.1
 
 # 专用系统用户
 sudo useradd -r -s /usr/sbin/nologin acowork-relay
 sudo install -d -o acowork-relay -g acowork-relay -m 0750 /var/lib/acowork-relay
 ```
+
+> **不要 `dnf install rust`**：Aliyun 源里的 Rust 是 1.75，而项目要求 `rust-version = "1.95"`
+> 且使用 `edition = "2024"`（需 1.85+）——1.75 连 manifest 都解析不了，Cargo 会直接拒绝
+> 报 `package requires rustc 1.95 or newer`。若确实要在服务器上编译，用 rustup
+> 装现代工具链（见 §4.1 兜底方案），不要用发行版打包的版本。
 
 ---
 
@@ -172,8 +180,21 @@ scp dev/deploy/relay/acowork-relay.service \
 ssh root@<ECS公网IP> 'chmod +x /usr/local/bin/acowork-relay && acowork-relay --help'
 ```
 
-> **ECS 架构提醒**：先在 ECS 控制台确认实例是 `x86_64` 还是 `arm64`（Aliyun 神龙/倚天实例是 arm64）。arm64 就把上面的 target 换成 `aarch64-unknown-linux-musl`。
+> **ECS 架构提醒**：先在 ECS 控制台确认实例是 `x86_64` 还是 `arm64`（Aliyun 神龙/倚天实例是 arm64）。arm64 就把上面的 target 换成 `aarch64-unknown-linux-musl`。架构选错运行时报 `cannot execute binary file: exec format error`。
 > **C 依赖**：musl 静态目标仍需一个 C 工具链做最后链接（macOS 上装 `brew install musl`）。若报错，安装交叉链接器 `cargo install cross`（Docker 化交叉编译，避免本机污染）。
+
+### 4.1 兜底：确实要在 ECS 上直接编译（不建议）
+
+只为调试用。多 300MB 工具链 + 编译依赖，纯属给一台无状态字节管道增加攻击面。
+
+```bash
+sudo dnf install -y curl gcc          # 或 apt install -y curl build-essential
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+source ~/.cargo/env
+rustc --version                        # 必须 ≥ 1.95
+```
+
+**必须走 rustup，不能用 `dnf install rust`**：Aliyun 源是 1.75，而本项目 `rust-version = "1.95"` + `edition = "2024"`（需 1.85+）。1.75 会在 manifest 解析阶段就被 Cargo 拒绝，症状是 `package requires rustc 1.95 or newer`。
 
 ---
 
