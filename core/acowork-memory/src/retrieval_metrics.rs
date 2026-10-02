@@ -446,6 +446,11 @@ pub struct BenchmarkMetrics {
     pub recall_at_k: Vec<(usize, f32)>,
     /// Mean Reciprocal Rank — average of 1/rank of first relevant result.
     pub mrr: f32,
+    /// Normalised DCG at k — rank-aware, and the only headline metric here
+    /// that has no structural ceiling on a small-qrel corpus. See
+    /// [`ndcg_at_k`].
+    #[serde(default)]
+    pub ndcg_at_k: Vec<(usize, f32)>,
     /// Number of queries evaluated.
     pub num_queries: usize,
 }
@@ -465,18 +470,24 @@ pub struct EvalQuery {
 
 /// Compute precision@k for a ranked list of results.
 ///
-/// Precision@k = |relevant ∩ retrieved[:k]| / k
+/// Precision@k = |relevant ∩ retrieved[:k]| / **k**
+///
+/// The denominator is `k`, not the number of results actually returned. That
+/// is the standard definition, and it matters here: dividing by
+/// `min(k, returned.len())` lets a retriever that returns one correct item
+/// score a perfect 1.0 while one that fills the slot and is equally right on
+/// rank 1 scores 0.2. The metric would then reward truncating the result list
+/// — the opposite of what a retrieval quality gate should do.
 pub fn precision_at_k(retrieved: &[u64], relevant: &[u64], k: usize) -> f32 {
     if k == 0 || retrieved.is_empty() {
         return 0.0;
     }
-    let actual_k = k.min(retrieved.len());
     let relevant_set: std::collections::HashSet<u64> = relevant.iter().copied().collect();
-    let hits = retrieved[..actual_k]
+    let hits = retrieved[..k.min(retrieved.len())]
         .iter()
         .filter(|id| relevant_set.contains(id))
         .count();
-    hits as f32 / actual_k as f32
+    hits as f32 / k as f32
 }
 
 /// Compute recall@k for a ranked list of results.
@@ -493,6 +504,38 @@ pub fn recall_at_k(retrieved: &[u64], relevant: &[u64], k: usize) -> f32 {
         .filter(|id| relevant_set.contains(id))
         .count();
     hits as f32 / relevant.len() as f32
+}
+
+/// Compute normalised Discounted Cumulative Gain at k (binary relevance).
+///
+/// `nDCG@k = DCG@k / IDCG@k`, with `DCG@k = Σ rel_i / log2(i + 1)` over the
+/// top k positions and `IDCG@k` the same sum for the ideal ordering, i.e. all
+/// `min(|relevant|, k)` relevant items in the first positions.
+///
+/// This is the metric to gate a small ground-truth corpus on. Precision@k has
+/// a hard ceiling of `min(|relevant|, k) / k` — a query with one relevant
+/// document can never exceed 1/k — so on a corpus where each question has one
+/// or two correct answers an absolute Precision@5 gate is unreachable by
+/// construction rather than by poor retrieval. nDCG divides by that same ideal,
+/// so 1.0 means "the ranking is as good as it could have been".
+pub fn ndcg_at_k(retrieved: &[u64], relevant: &[u64], k: usize) -> f32 {
+    if k == 0 || relevant.is_empty() {
+        return 0.0;
+    }
+    let relevant_set: std::collections::HashSet<u64> = relevant.iter().copied().collect();
+    let gain = |rank_one_based: usize| 1.0 / (rank_one_based as f32 + 1.0).log2();
+
+    let dcg: f32 = retrieved[..k.min(retrieved.len())]
+        .iter()
+        .enumerate()
+        .filter(|(_, id)| relevant_set.contains(id))
+        .map(|(i, _)| gain(i + 1))
+        .sum();
+    let idcg: f32 = (1..=relevant.len().min(k)).map(gain).sum();
+    if idcg == 0.0 {
+        return 0.0;
+    }
+    dcg / idcg
 }
 
 /// Compute Mean Reciprocal Rank (MRR) across multiple queries.
@@ -528,19 +571,23 @@ pub fn evaluate_retrieval_quality(
 ) -> BenchmarkMetrics {
     let mut precision_results = Vec::new();
     let mut recall_results = Vec::new();
+    let mut ndcg_results = Vec::new();
 
     for &k in k_values {
         let mut total_precision = 0.0;
         let mut total_recall = 0.0;
+        let mut total_ndcg = 0.0;
 
         for (query, retrieved) in queries.iter().zip(retrieval_results.iter()) {
             total_precision += precision_at_k(retrieved, &query.relevant_ids, k);
             total_recall += recall_at_k(retrieved, &query.relevant_ids, k);
+            total_ndcg += ndcg_at_k(retrieved, &query.relevant_ids, k);
         }
 
         let n = queries.len() as f32;
         precision_results.push((k, total_precision / n));
         recall_results.push((k, total_recall / n));
+        ndcg_results.push((k, total_ndcg / n));
     }
 
     let mrr_queries: Vec<(Vec<u64>, Vec<u64>)> = queries
@@ -555,6 +602,7 @@ pub fn evaluate_retrieval_quality(
         precision_at_k: precision_results,
         recall_at_k: recall_results,
         mrr,
+        ndcg_at_k: ndcg_results,
         num_queries: queries.len(),
     }
 }
@@ -591,6 +639,27 @@ mod tests {
         let retrieved: Vec<u64> = vec![];
         let relevant = vec![1, 2];
         assert!((precision_at_k(&retrieved, &relevant, 3)).abs() < f32::EPSILON);
+    }
+
+    /// The denominator is `k`, never the number returned.
+    ///
+    /// A one-item answer that happens to be right used to score 1.0 at k=5,
+    /// which meant "return less" improved the benchmark. This is the case that
+    /// made an archived P@5 of 0.8 unreproducible: the old retrieval returned
+    /// almost nothing and was rewarded for it.
+    #[test]
+    fn test_precision_at_k_divides_by_k_not_by_result_count() {
+        let retrieved = vec![1];
+        let relevant = vec![1];
+        assert!(
+            (precision_at_k(&retrieved, &relevant, 5) - 0.2).abs() < f32::EPSILON,
+            "a single correct item at k=5 is 1/5, not 1/1"
+        );
+        // k larger than the list still divides by k.
+        assert!(
+            (precision_at_k(&[1, 2], &[1, 2, 3], 5) - 0.4).abs() < f32::EPSILON,
+            "2 correct out of a k=5 slot is 0.4"
+        );
     }
 
     // =====================================================================
@@ -677,12 +746,49 @@ mod tests {
             precision_at_k: vec![(1, 0.8), (3, 0.6)],
             recall_at_k: vec![(1, 0.4), (3, 0.7)],
             mrr: 0.75,
+            ndcg_at_k: vec![(1, 0.8), (3, 0.65)],
             num_queries: 10,
         };
         let json = serde_json::to_string(&metrics).unwrap();
         let decoded: BenchmarkMetrics = serde_json::from_str(&json).unwrap();
         assert_eq!(metrics.num_queries, decoded.num_queries);
         assert!((metrics.mrr - decoded.mrr).abs() < f32::EPSILON);
+    }
+
+    // =====================================================================
+    // Test: nDCG@k
+    // =====================================================================
+
+    #[test]
+    fn test_ndcg_at_k_is_one_for_the_ideal_ranking() {
+        // Both relevant items in the first two positions.
+        assert!((ndcg_at_k(&[7, 9, 1], &[7, 9], 3) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_ndcg_at_k_penalises_a_deeper_hit() {
+        let first = ndcg_at_k(&[7, 9], &[7, 9], 2);
+        let swapped = ndcg_at_k(&[9, 7], &[7, 9], 2);
+        // Binary relevance over two items is order-insensitive when both are in
+        // the top two, so these must agree; the penalty appears only when one
+        // falls out of the window.
+        assert!((first - swapped).abs() < 1e-6, "{first} vs {swapped}");
+        let buried = ndcg_at_k(&[0, 0, 0, 7, 9], &[7, 9], 5);
+        assert!(buried < first, "a hit pushed to rank 4/5 must score lower");
+    }
+
+    #[test]
+    fn test_ndcg_at_k_is_not_capped_by_the_number_of_relevant_items() {
+        // The reason the benchmark gates on this instead of Precision@5: one
+        // relevant document still reaches 1.0 when it is ranked first.
+        assert!((ndcg_at_k(&[42, 1, 2, 3, 4], &[42], 5) - 1.0).abs() < 1e-6);
+        assert!(precision_at_k(&[42, 1, 2, 3, 4], &[42], 5) <= 0.2);
+    }
+
+    #[test]
+    fn test_ndcg_at_k_zero_when_nothing_relevant_is_returned() {
+        assert_eq!(ndcg_at_k(&[1, 2], &[99], 2), 0.0);
+        assert_eq!(ndcg_at_k(&[1, 2], &[], 2), 0.0);
     }
 
     // =====================================================================
