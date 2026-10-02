@@ -817,6 +817,130 @@ pub async fn drain_node_via_mqtt(
     Ok(())
 }
 
+/// Split `acowork/nodes/{node_id}/agents/{instance_id}/installed` into
+/// (node_id, instance_id). Used by the CLI `package` inventory scan.
+fn split_installed_topic(topic: &str) -> Option<(String, String)> {
+    let rest = topic.strip_prefix("acowork/nodes/")?;
+    let rest = rest.strip_suffix("/installed")?;
+    let (node_id, instance_id) = rest.split_once("/agents/")?;
+    if node_id.is_empty() || instance_id.is_empty() || instance_id.contains('/') {
+        return None;
+    }
+    Some((node_id.to_string(), instance_id.to_string()))
+}
+
+/// `acowork-gateway package <agent-id>` — build a `.agent` package from an
+/// installed agent on the node that hosts it (ADR-055 §6.13.3; replaces
+/// the pre-node-topology local build).
+///
+/// Runs as a standalone CLI process: connects to the running Gateway's
+/// broker, collects the retained `installed` inventory to resolve the
+/// package-id (or instance UUID) to a (node, instance) pair, then issues
+/// a blocking `publish_build` round-trip. `output_dir` and `key_dir` are
+/// **node-local** paths — empty `output_dir` builds into the node's own
+/// packages dir (same default as the HTTP publish API).
+pub async fn package_agent_via_mqtt(
+    mqtt_host: &str,
+    mqtt_port: u16,
+    agent_id: &str,
+    output_dir: &str,
+    sign: bool,
+    key_dir: &str,
+) -> crate::error::Result<()> {
+    use acowork_core::mqtt_proto::{data_envelope, DataEnvelope, InstalledAgentInfo};
+    use prost::Message;
+    use std::sync::OnceLock;
+    use tokio::sync::Mutex;
+
+    use crate::mqtt::client::{GatewayMqttClient, MqttMessageCallback};
+
+    let inventory: Arc<Mutex<Vec<(String, InstalledAgentInfo)>>> = Arc::new(Mutex::new(Vec::new()));
+    let control_slot: Arc<OnceLock<Arc<NodeControlClient>>> = Arc::new(OnceLock::new());
+
+    let cb_inventory = inventory.clone();
+    let cb_control = control_slot.clone();
+    let callback: MqttMessageCallback = Arc::new(move |topic, payload| {
+        let inventory = cb_inventory.clone();
+        let control = cb_control.clone();
+        let topic = topic.to_string();
+        let payload = payload.to_vec();
+        tokio::spawn(async move {
+            if let Some((node_id, _)) = split_installed_topic(&topic)
+                && !payload.is_empty()
+                && let Ok(envelope) = DataEnvelope::decode(payload.as_slice())
+                && let Some(data_envelope::Payload::InstalledAgentInfo(info)) = envelope.payload
+            {
+                inventory.lock().await.push((node_id, info));
+            } else if topic.ends_with("/events")
+                && let Some(control) = control.get()
+                && let Ok(envelope) = DataEnvelope::decode(payload.as_slice())
+                && let Some(data_envelope::Payload::NodeEvent(event)) = envelope.payload
+            {
+                control.handle_event(event).await;
+            }
+        });
+    });
+
+    let client = GatewayMqttClient::new_publisher_with_callback(mqtt_host, mqtt_port, callback)
+        .await
+        .map_err(|e| {
+            crate::error::GatewayError::Config(format!(
+                "Cannot reach the Gateway MQTT broker at {mqtt_host}:{mqtt_port} — is the Gateway daemon running? ({e})"
+            ))
+        })?;
+    let client = Arc::new(client);
+    let _ = control_slot.set(Arc::new(NodeControlClient::new(client.clone())));
+
+    // Let retained `installed` messages drain in (same window as drain).
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+
+    // Resolve the CLI argument: instance UUID first (exact, ADR-073),
+    // then package-id match. Multiple package-id matches are ambiguous
+    // and must be disambiguated by instance UUID.
+    let all = inventory.lock().await;
+    let matches: Vec<&(String, InstalledAgentInfo)> = all
+        .iter()
+        .filter(|(_, info)| info.instance_id == agent_id || info.agent_id == agent_id)
+        .collect();
+    let (node_id, info) = match matches.len() {
+        0 => {
+            return Err(crate::error::GatewayError::Package(format!(
+                "Agent '{agent_id}' is not installed on any online node (retained inventory was empty — is the Node Agent running?)"
+            )))
+        }
+        1 => (matches[0].0.clone(), matches[0].1.clone()),
+        n => {
+            let list: Vec<String> = matches
+                .iter()
+                .map(|(node, info)| format!("{} (node {node})", info.instance_id))
+                .collect();
+            return Err(crate::error::GatewayError::Package(format!(
+                "{n} instances of '{agent_id}' are installed — pass the instance UUID instead: {}",
+                list.join(", ")
+            )));
+        }
+    };
+
+    let control = control_slot.get().cloned().expect("control slot set above");
+    let event = control
+        .publish_build(&node_id, &info.instance_id, &info.agent_id, output_dir, sign, key_dir)
+        .await
+        .map_err(|e| crate::error::GatewayError::Lifecycle(e.to_string()))?;
+    NodeControlClient::check_reply(&info.instance_id, &event)
+        .map_err(|e| crate::error::GatewayError::Lifecycle(e.to_string()))?;
+
+    let json = event.result_json.as_deref().ok_or_else(|| {
+        crate::error::GatewayError::Lifecycle("node reply missing result_json".to_string())
+    })?;
+    let result: crate::http::publish_api::BuildResponse = serde_json::from_str(json)
+        .map_err(|e| crate::error::GatewayError::Lifecycle(format!("bad build result: {e}")))?;
+    println!(
+        "Packaged '{}' v{} → {} (signed: {}, {} bytes, on node '{node_id}' — path is node-local)",
+        info.agent_id, info.version, result.output_path, result.signed, result.file_size
+    );
+    Ok(())
+}
+
 /// `nodes remove <node_id>` — remove a node's records by clearing its
 /// retained topics (ADR-055 §6.13.3). The empty retained status is the
 /// removal signal: the Gateway dispatcher reacts to it by deregistering
@@ -1082,6 +1206,19 @@ pub async fn stop_agent_via_mqtt(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn split_installed_topic_parses_node_and_instance() {
+        assert_eq!(
+            split_installed_topic("acowork/nodes/gpu-1/agents/0f1e2d3c-4b5a-4671-9992-8589a917451c/installed"),
+            Some(("gpu-1".to_string(), "0f1e2d3c-4b5a-4671-9992-8589a917451c".to_string()))
+        );
+        // Not an installed topic / malformed shapes → None.
+        assert_eq!(split_installed_topic("acowork/nodes/gpu-1/agents/x/status"), None);
+        assert_eq!(split_installed_topic("acowork/nodes//agents/x/installed"), None);
+        assert_eq!(split_installed_topic("acowork/nodes/n/agents//installed"), None);
+        assert_eq!(split_installed_topic("acowork/nodes/n/agents/a/b/installed"), None);
+    }
 
     #[test]
     fn read_node_identity_id_extracts_only_the_id() {

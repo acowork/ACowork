@@ -209,11 +209,13 @@ pub enum Commands {
     },
     /// List installed agents
     List,
-    /// Package an installed agent into .agent file
+    /// Package an installed agent into .agent file (built on the hosting
+    /// node; --output/--key-dir are node-local paths, empty output uses
+    /// the node's packages dir)
     Package {
-        /// Agent ID to package
+        /// Agent ID (package id) or instance UUID to package
         agent_id: String,
-        /// Output directory (default: ./build)
+        /// Output directory on the hosting node (default: node packages dir)
         #[arg(long, env = "ACOWORK_PACKAGE_OUTPUT")]
         output: Option<String>,
         /// Sign the package with developer key
@@ -437,8 +439,18 @@ impl Cli {
                     .enable_all()
                     .build()
                     .map_err(GatewayError::Io)?;
-                let msg = rt.block_on(gateway.package_agent(&agent_id, output.as_deref(), sign, key_dir.as_deref()))?;
-                println!("{}", msg);
+                // ADR-055: the package lives on the hosting node — the
+                // build is dispatched over the MQTT control plane.
+                // output/key_dir are node-local paths; empty output →
+                // the node's own packages dir.
+                rt.block_on(crate::gateway::node_manager::package_agent_via_mqtt(
+                    &mqtt_host,
+                    mqtt_port,
+                    &agent_id,
+                    output.as_deref().unwrap_or(""),
+                    sign,
+                    key_dir.as_deref().unwrap_or(""),
+                ))?;
             }
             Some(Commands::Nodes { cmd: NodesCommands::List }) => {
                 let rt = tokio::runtime::Builder::new_current_thread()

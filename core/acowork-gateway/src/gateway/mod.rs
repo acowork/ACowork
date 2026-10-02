@@ -1578,21 +1578,6 @@ impl Gateway {
             .collect()
     }
 
-    /// Package an installed agent into .agent file (CLI command).
-    ///
-    /// Disabled until Phase 3 — publish build is delegated to the node.
-    pub async fn package_agent(
-        &self,
-        _agent_id: &str,
-        _output_dir: Option<&str>,
-        _sign: bool,
-        _key_dir: Option<&str>,
-    ) -> Result<String, GatewayError> {
-        Err(GatewayError::Lifecycle(
-            "Publish build is not available in the node topology yet (ADR-055 Phase 3)".to_string(),
-        ))
-    }
-
     /// Ensure the Gateway's own directories exist.
     ///
     /// `packages_dir` is deliberately absent: it points at the **node's**
