@@ -34,24 +34,40 @@
 //!
 //! * **lexical** - BM25 alone, the fallback the runtime takes with no embedding.
 //!   Deterministic on any machine, so this is the mode carrying the primary gates.
-//! * **hybrid + live model** - the production path, fused with bge-small-zh-v1.5
-//!   over HTTP. Skips rather than fails where no model service is listening.
+//! * **hybrid + live model** - the production path, fused over HTTP with
+//!   whichever model the embedding service currently has loaded (asked from its
+//!   `/health`, not hardcoded, so a model swap is measured instead of missed).
+//!   Skips rather than fails where no model service is listening.
 //! * **hybrid + identity-hash vector** - `procedural_embedding_fallback`, a
 //!   semantically null vector. Reported, and asserted never to beat the lexical
 //!   tier: an arbitrary second source must not out-vote a correct first one.
 //!
 //! ## The finding this file records
 //!
-//! On this corpus the vector tier does not add to BM25, it subtracts. Sweeping
-//! the fusion weight gives MRR 0.33 at vector 0.8 (`Semantic`, the manager's
-//! default hint), 0.59 at 0.5 (`Factual`), 0.70 at 0.3 and **0.90 with no vector
-//! source at all**. The live model ranks correctly on most queries, but its
+//! The variable that dominates the vector tier is the encoder's language match,
+//! not the fusion weight. Measured on this corpus of English sediment:
+//!
+//! | vector source           | Recall@5 | MRR   | nDCG@5 |
+//! |-------------------------|----------|-------|--------|
+//! | none (BM25 alone)       | 0.729    | 0.903 | 0.740  |
+//! | bge-small-zh-v1.5 (512) | 0.688    | 0.774 | -      |
+//! | identity-hash fallback  | 0.493    | 0.549 | 0.411  |
+//! | bge-m3 (1024)           | 0.854    | 0.896 | 0.801  |
+//!
+//! The zh encoder did subtract from BM25: sweeping the fusion weight gave MRR
+//! 0.33 at vector 0.8 (`Semantic`, the manager's default hint), 0.59 at 0.5
+//! (`Factual`), 0.70 at 0.3 and 0.90 with no vector at all, because its
 //! similarities collapse into a 0.44-0.69 band on short English sentences - the
-//! anisotropy `manager::retrieve` already warns about - so RRF lets that noise
-//! out-vote the lexical tier's correct rank-1. Two consequences are open
-//! questions for the retriever rather than for this benchmark: whether the
-//! default hint should lean text-ward for fact-shaped recall, and whether an
-//! English corpus should be served by a zh-trained encoder at all.
+//! anisotropy `manager::retrieve` warns about - and RRF let that noise out-vote
+//! the lexical tier's correct rank-1. Switching to the multilingual model
+//! removes the collapse: the vector tier now adds 12.5 points of Recall@5 over
+//! BM25 alone while giving back 0.007 of MRR.
+//!
+//! Two things survive the swap. A semantically null vector still loses to BM25
+//! by a wide margin, which is the assertion that keeps the fallback honest. And
+//! MRR is still marginally better with no vector source at all, so the vector
+//! tier earns its place by finding answers BM25 misses, not by improving the
+//! ones BM25 already ranks first.
 //!
 //! Run with `-- --nocapture` to see the per-query report and all three modes.
 
@@ -244,27 +260,59 @@ enum Mode {
     /// run measures how RRF fusion reacts to a *semantically null* second
     /// source - a property of the fusion, not of retrieval quality.
     NullVector,
-    /// The live embedding service: bge-small-zh-v1.5, 512-dim, the same model
-    /// and dimension recorded in the live store's `meta` table. This is the
-    /// path production actually runs, and the only one whose score describes
-    /// real retrieval quality.
+    /// The live embedding service: whichever model the desktop app currently
+    /// has loaded, at the dimension it reports. This is the path production
+    /// actually runs, and the only one whose score describes real retrieval
+    /// quality.
     LiveVector,
 }
 
 /// The service the desktop app keeps running. Unreachable on a machine with no
 /// model downloaded, which is why the live run skips rather than fails.
-const EMBED_BASE_URL: &str = "http://127.0.0.1:18080/v1";
-const EMBED_MODEL: &str = "bge-small-zh-v1.5";
-const EMBED_DIM: usize = 512;
+const EMBED_BASE_URL: &str = "http://127.0.0.1:18080";
 
 type Live = acowork_runtime::embedding::remote::RemoteEmbeddingProvider;
 
-async fn live_embedder() -> Option<Arc<Live>> {
-    let provider = Live::with_config(EMBED_BASE_URL, None, EMBED_MODEL, EMBED_DIM);
+/// Which model is actually loaded, asked of the service itself.
+///
+/// Not a constant: switching the embedding model is precisely the event this
+/// benchmark exists to measure, and a hardcoded id would keep scoring the old
+/// model after the swap. `/health` reports the loaded model and its dimension.
+async fn loaded_model() -> Option<(String, usize)> {
+    let v: serde_json::Value = reqwest::get(format!("{EMBED_BASE_URL}/health"))
+        .await
+        .ok()?
+        .error_for_status()
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+    if v.get("status")?.as_str()? != "ready" {
+        return None;
+    }
+    Some((
+        v["model"]["id"].as_str()?.to_string(),
+        v["model"]["dimension"].as_u64()? as usize,
+    ))
+}
+
+struct LiveService {
+    provider: Arc<Live>,
+    model: String,
+    dim: usize,
+}
+
+async fn live_embedder() -> Option<LiveService> {
+    let (model, dim) = loaded_model().await?;
+    let provider = Live::with_config(&format!("{EMBED_BASE_URL}/v1"), None, &model, dim);
     // One short probe: an absent or cold service must not turn into a wall of
     // connection errors across every corpus document.
     match provider.embed("ping").await {
-        Ok(v) if v.len() == EMBED_DIM => Some(Arc::new(provider)),
+        Ok(v) if v.len() == dim => Some(LiveService {
+            provider: Arc::new(provider),
+            model,
+            dim,
+        }),
         _ => None,
     }
 }
@@ -273,7 +321,7 @@ struct Bench {
     store: Arc<acowork_sqlite::SqliteStore>,
     ids: HashMap<&'static str, u64>,
     mode: Mode,
-    live: Option<Arc<Live>>,
+    live: Option<LiveService>,
 }
 
 impl Bench {
@@ -283,10 +331,9 @@ impl Bench {
         } else {
             None
         };
-        let dim = if mode == Mode::LiveVector {
-            EMBED_DIM
-        } else {
-            acowork_memory::types::DEFAULT_EMBEDDING_DIM
+        let dim = match &live {
+            Some(svc) => svc.dim,
+            None => acowork_memory::types::DEFAULT_EMBEDDING_DIM,
         };
         let store = Arc::new(
             acowork_sqlite::SqliteStore::open_in_memory(dim).expect("in-memory store"),
@@ -294,7 +341,7 @@ impl Bench {
         let mut ids = HashMap::new();
         for (key, content, importance, dormant) in CORPUS {
             let embedding = match &live {
-                Some(e) => e.embed(content).await.expect("embed corpus node"),
+                Some(svc) => svc.provider.embed(content).await.expect("embed corpus node"),
                 None => NullEmbedding.embed(content).await.expect("embed"),
             };
             let node = KnowledgeNode {
@@ -344,7 +391,10 @@ impl Bench {
         let embedding: Option<&dyn EmbeddingProvider> = match self.mode {
             Mode::Lexical => None,
             Mode::NullVector => Some(&NullEmbedding),
-            Mode::LiveVector => self.live.as_ref().map(|e| e.as_ref() as &dyn EmbeddingProvider),
+            Mode::LiveVector => self
+                .live
+                .as_ref()
+                .map(|svc| svc.provider.as_ref() as &dyn EmbeddingProvider),
         };
         manager
             .retrieve(&*self.store, &mut q, embedding)
@@ -374,18 +424,16 @@ const MIN_RECALL_AT_5: f32 = 0.70;
 const MIN_MRR: f32 = 0.85;
 const MIN_NDCG_AT_5: f32 = 0.70;
 
-/// Regression gates for the live-model hybrid run, set below its measured
-/// values (Recall@5 0.688, MRR 0.586) rather than at the lexical run's.
+/// Regression gates for the live-model hybrid run, set just under what the
+/// configured model measures (Recall@5 0.854, MRR 0.896 with bge-m3).
 ///
-/// That gap is the finding this benchmark was written around: on a corpus of
-/// English sediment scored by the configured bge-small-zh-v1.5, the vector
-/// source does not add to BM25, it subtracts. Similarities collapse into a
-/// 0.44-0.69 band, so the ranking inside that band is close to noise and RRF
-/// lets the noise out-vote the lexical tier's correct rank-1. The gate is here
-/// so the hybrid path cannot get worse unnoticed, and so the number stays in
-/// front of whoever next reaches for a heavier vector weight.
-const MIN_LIVE_RECALL_AT_5: f32 = 0.60;
-const MIN_LIVE_MRR: f32 = 0.50;
+/// They were 0.60 / 0.50 when the configured model was bge-small-zh-v1.5, which
+/// scored below BM25 alone; raising them to sit above the lexical run's
+/// Recall@5 (0.729) is what makes the gate say something - the vector tier must
+/// now earn its place, and a swap to an encoder that does not earn it fails
+/// here rather than in someone's context window.
+const MIN_LIVE_RECALL_AT_5: f32 = 0.75;
+const MIN_LIVE_MRR: f32 = 0.80;
 
 /// One benchmark run: retrieve every query, score it, keep what the report needs.
 struct Run {
@@ -500,7 +548,12 @@ async fn hybrid_with_the_live_embedding_model_does_not_regress() {
     assert_eq!(bench.ids.len(), CORPUS.len(), "every corpus row got an id");
     banner();
     let run = score(&bench).await;
-    report(&bench, "hybrid (BM25 + bge-small-zh-v1.5, RRF fused)", &run);
+    let label = format!(
+        "hybrid (BM25 + {}, {}-dim, RRF fused)",
+        bench.live.as_ref().unwrap().model,
+        bench.live.as_ref().unwrap().dim
+    );
+    report(&bench, &label, &run);
 
     assert_eq!(
         run.dormant_in_context, 0,
