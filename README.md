@@ -200,6 +200,68 @@ npm run dev               # → http://localhost:5173
 npm run tauri dev
 ```
 
+### ☁️ Remote access via cloud relay (optional)
+
+By default Gateway binds HTTP/MQTT to localhost only. To reach a NAT'd Gateway from the public internet, deploy
+`acowork-relay` — a **thin, protocol-agnostic relay**: Gateway dials out one WSS tunnel (`wss://relay.../tunnel`),
+the relay routes traffic purely by TLS SNI / Host header and never parses HTTP or MQTT. The relay holds **zero
+accounts and zero secrets** (only each Gateway's pinned Ed25519 public key); all authentication is decided by your
+Gateway. Design: [docs/design/zh/24-cloud-relay-remote-access.md](./docs/design/zh/24-cloud-relay-remote-access.md).
+
+**1) Deploy the relay on a public server.** Requirements: a domain `relay.example.com` with a wildcard DNS record
+`*.relay.example.com → <server IP>` and a public CA certificate (e.g. Let's Encrypt — Desktop validates TLS).
+
+```bash
+cd core && cargo build --release -p acowork-relay   # copy target/release/acowork-relay to the server
+
+acowork-relay \
+  --listen 0.0.0.0:443 \
+  --service-domain relay.example.com \
+  --device-domain-suffix relay.example.com \
+  --tls-cert /etc/letsencrypt/live/relay.example.com/fullchain.pem \
+  --tls-key  /etc/letsencrypt/live/relay.example.com/privkey.pem \
+  --data-dir /var/lib/acowork-relay \
+  --admin-token <secret>          # optional; enables /api/admin/* (list/pre-register/revoke devices, list tunnels)
+```
+
+Omit `--tls-cert/--tls-key` for plain `ws://` (dev/test only). Device registration is TOFU by default (Gateway's
+public key is pinned on first connect); add `--require-registration` for pre-registration-only deployments.
+Device public keys persist under `--data-dir`.
+
+**2) Enable the tunnel on the Gateway (behind NAT).** Add to `~/.acowork/acowork-gateway/config/gateway.toml`
+(restart to apply), or toggle at runtime via `POST /api/relay/enable {"url": "wss://relay.example.com/tunnel"}` /
+`POST /api/relay/disable`:
+
+```toml
+[relay]
+enabled = true
+url = "wss://relay.example.com/tunnel"
+```
+
+On first enable the Gateway mints `relay_identity.json` (0600, private key never leaves the machine). Query
+`GET /api/relay/status` for the tunnel state and your **gw-id** (a stable UUID).
+
+**3) Connect Desktop from anywhere.** Settings → connection mode **Relay** → enter
+`https://<gw-id>.relay.example.com`, then log in with your normal account — the login request itself travels the
+tunnel back to your Gateway. Remote-origin requests are served by a dedicated loopback listener with a stricter
+ACL (debug / fs-browse / config-write endpoints are 404'd remotely). `relay.enabled=false` fully disables the path
+with zero outbound connections.
+
+**Production deployment (Linux).** Build `acowork-relay` with `cargo build --release -p acowork-relay` (or cross-compile
+for the server), drop the binary at `/usr/local/bin/`, and install the ready-made unit + renewal hook from
+[dev/deploy/relay/](./dev/deploy/relay/):
+
+```bash
+sudo useradd -r -s /usr/sbin/nologin acowork-relay
+sudo install -d -o acowork-relay /var/lib/acowork-relay
+sudo cp dev/deploy/relay/acowork-relay.service /etc/systemd/system/
+sudo systemctl enable --now acowork-relay
+```
+
+Wildcard TLS (`*.relay.example.com`) requires a DNS-01 challenge — see
+[dev/deploy/relay/certbot-wildcard.sh](./dev/deploy/relay/certbot-wildcard.sh) for a copy-paste example; the relay
+picks up rotated certs on restart, and Gateway tunnels reconnect automatically.
+
 ### ✍️ Try it: write a manifest in 30 seconds
 
 ```toml

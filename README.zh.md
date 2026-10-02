@@ -193,6 +193,64 @@ npm run dev                # → http://localhost:5173
 npm run tauri dev
 ```
 
+### ☁️ 云端中继远程访问（可选）
+
+默认情况下 Gateway 的 HTTP/MQTT 只绑定 localhost。若要在公网访问位于 NAT 之后的 Gateway，可部署 `acowork-relay`
+——一个**协议无关的瘦中继**：Gateway 主动拨出建立一条 WSS 隧道（`wss://relay.../tunnel`），中继仅按 TLS SNI /
+Host 头路由字节流，不解析 HTTP/MQTT。中继**零账号、零秘密**（只保存每个 Gateway 的 Ed25519 公钥），所有鉴权
+由你的 Gateway 裁决。设计详见
+[docs/design/zh/24-cloud-relay-remote-access.md](./docs/design/zh/24-cloud-relay-remote-access.md)。
+
+**1）在公网服务器上部署中继。** 前置：域名 `relay.example.com` + 泛解析记录 `*.relay.example.com → <服务器 IP>`，
+以及公共 CA 证书（如 Let's Encrypt——Desktop 侧按公网 CA 校验 TLS）。
+
+```bash
+cd core && cargo build --release -p acowork-relay   # 将 target/release/acowork-relay 拷到服务器
+
+acowork-relay \
+  --listen 0.0.0.0:443 \
+  --service-domain relay.example.com \
+  --device-domain-suffix relay.example.com \
+  --tls-cert /etc/letsencrypt/live/relay.example.com/fullchain.pem \
+  --tls-key  /etc/letsencrypt/live/relay.example.com/privkey.pem \
+  --data-dir /var/lib/acowork-relay \
+  --admin-token <secret>          # 可选；开启 /api/admin/*（设备列表/预注册/吊销、隧道列表）
+```
+
+不传 `--tls-cert/--tls-key` 即为明文 `ws://`（仅限开发/测试）。设备注册默认 TOFU（首连即固定公钥）；企业部署可加
+`--require-registration` 改为仅接受管理 API 预注册的设备。设备公钥持久化在 `--data-dir` 下。
+
+**2）在 Gateway 侧（NAT 内）开启隧道。** 在 `~/.acowork/acowork-gateway/config/gateway.toml` 增加配置段（重启生效），
+或运行时调用 `POST /api/relay/enable {"url": "wss://relay.example.com/tunnel"}` / `POST /api/relay/disable`：
+
+```toml
+[relay]
+enabled = true
+url = "wss://relay.example.com/tunnel"
+```
+
+首次 enable 时 Gateway 生成设备身份 `relay_identity.json`（0600，私钥永不出机器）。`GET /api/relay/status`
+可查询隧道状态与本机 **gw-id**（稳定 UUID）。
+
+**3）Desktop 随时随地连接。** 设置 → 连接模式选 **Relay** → 填入 `https://<gw-id>.relay.example.com`，
+用普通账号登录即可——登录请求本身经隧道回到你的内网 Gateway 完成鉴权。远程请求由专用回环 listener 承接，
+并施加更严格的 ACL（debug / fs-browse / 配置写端点对远程来源返回 404）。`relay.enabled=false` 即完全关闭该
+路径，零出站连接。
+
+**生产部署（Linux）。** 用 `cargo build --release -p acowork-relay`（或为服务器交叉编译）构建二进制，放到
+`/usr/local/bin/`，再安装 [dev/deploy/relay/](./dev/deploy/relay/) 中现成的 systemd unit 与证书续期示例：
+
+```bash
+sudo useradd -r -s /usr/sbin/nologin acowork-relay
+sudo install -d -o acowork-relay /var/lib/acowork-relay
+sudo cp dev/deploy/relay/acowork-relay.service /etc/systemd/system/
+sudo systemctl enable --now acowork-relay
+```
+
+通配符证书（`*.relay.example.com`）必须走 DNS-01 验证——见
+[dev/deploy/relay/certbot-wildcard.sh](./dev/deploy/relay/certbot-wildcard.sh) 的可复制示例；中继重启后即加载
+轮换后的证书，Gateway 隧道会自动重连。
+
 ### ✍️ 30 秒写出第一个 Agent
 
 ```toml

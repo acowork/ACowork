@@ -1,0 +1,58 @@
+# acowork-relay — systemd unit for the ACowork cloud relay (design doc 24).
+#
+# Install:
+#   sudo cp acowork-relay.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now acowork-relay
+#
+# Prerequisites:
+#   - binary at /usr/local/bin/acowork-relay
+#   - wildcard DNS: *.relay.example.com -> server IP
+#   - cert at /etc/letsencrypt/live/relay.example.com/ (see certbot-wildcard.sh)
+#   - optional admin token in /etc/acowork-relay/env (chmod 600):
+#       ACOWORK_RELAY_ADMIN_TOKEN=<random secret>
+#     Only needed if you use the admin API (pre-registration mode etc.).
+
+[Unit]
+Description=ACowork cloud relay (tunnel + SNI router)
+Documentation=docs/design/zh/24-cloud-relay-remote-access.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=acowork-relay
+Group=acowork-relay
+
+# Bind to :443 as an unprivileged user via ambient capabilities — no root.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+EnvironmentFile=-/etc/acowork-relay/env
+ExecStart=/usr/local/bin/acowork-relay \
+  --listen 0.0.0.0:443 \
+  --service-domain relay.example.com \
+  --device-domain-suffix relay.example.com \
+  --tls-cert /etc/letsencrypt/live/relay.example.com/fullchain.pem \
+  --tls-key /etc/letsencrypt/live/relay.example.com/privkey.pem \
+  --data-dir /var/lib/acowork-relay
+# Uncomment only when running in pre-registration (enterprise) mode:
+#  --require-registration \
+#  --admin-token ${ACOWORK_RELAY_ADMIN_TOKEN}
+
+Restart=always
+RestartSec=2
+
+# Hardening. The relay holds zero business data; if it falls over,
+# Gateways simply reconnect — so sandbox tightly.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=true
+ReadWritePaths=/var/lib/acowork-relay
+
+[Install]
+WantedBy=multi-user.target
