@@ -1674,6 +1674,47 @@ fn admin_embedding_migration_heals_a_store_whose_dim_was_flipped_early() {
     );
 }
 
+/// The model-switch UI polls a progress slot, so the migration must actually
+/// fill it. The trait's default implementation discards the callback, which
+/// made every rebuild read "0 of 0" for its whole duration - the work was
+/// happening, only the numbers were missing.
+#[test]
+fn admin_embedding_migration_reports_progress() {
+    let store = store();
+    let mut a = episode("first");
+    a.embedding = Some(emb(0.1));
+    store.store_episode(&a).unwrap();
+    let mut b = episode("   ");
+    b.content = String::new();
+    store.store_episode(&b).unwrap();
+    let mut c = episode("third");
+    c.embedding = Some(emb(0.3));
+    store.store_episode(&c).unwrap();
+
+    let seen = std::sync::Mutex::new(Vec::new());
+    let stats = MemoryAdminService::migrate_embedding_dimension_with_progress(
+        &store,
+        &|_: &str| Some(vec![0.5, 0.5]),
+        2,
+        Some(&|done, total| seen.lock().unwrap().push((done, total))),
+    )
+    .expect("migrate");
+
+    let seen = seen.into_inner().unwrap();
+    assert_eq!(
+        seen.len(),
+        3,
+        "one report per row, including the row skipped for having no content"
+    );
+    assert_eq!(seen[0], (1, 3));
+    assert_eq!(
+        *seen.last().unwrap(),
+        (3, 3),
+        "the bar must reach the total, got {seen:?}"
+    );
+    assert_eq!(stats.total_scanned, 3);
+}
+
 /// A model swap must re-embed conversation messages as well as memory nodes.
 ///
 /// The memory-browser scope (`all_rows`) deliberately excludes them so the panel

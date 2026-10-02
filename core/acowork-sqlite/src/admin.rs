@@ -310,6 +310,19 @@ impl MemoryAdminService for SqliteStore {
         embed_fn: &(dyn Fn(&str) -> Option<Vec<f32>> + Send + Sync),
         new_dim: usize,
     ) -> AcoworkResult<RebuildStats> {
+        self.migrate_embedding_dimension_with_progress(embed_fn, new_dim, None)
+    }
+
+    /// The trait's default implementation drops the progress callback on the
+    /// floor, which left the desktop's model-switch UI showing "rebuilding,
+    /// 0 of 0" for the entire run - the work was real, only the numbers were
+    /// missing. SQLite knows the row count before it starts, so report it.
+    fn migrate_embedding_dimension_with_progress(
+        &self,
+        embed_fn: &(dyn Fn(&str) -> Option<Vec<f32>> + Send + Sync),
+        new_dim: usize,
+        progress: Option<&dyn Fn(u64, u64)>,
+    ) -> AcoworkResult<RebuildStats> {
         let mut stats = RebuildStats::default();
         // The migration's scope is wider than the memory browser's: a model
         // swap changes the width of *every* vector in the store, and
@@ -325,8 +338,15 @@ impl MemoryAdminService for SqliteStore {
             crate::conversation::LABEL,
         ])?;
 
+        let total = rows.len() as u64;
         for row in rows {
             stats.total_scanned += 1;
+            // Reported before the work, not after: a row the embedder skips must
+            // still move the bar, otherwise a store whose model rejects most of
+            // its content shows a progress bar stuck at zero and then done.
+            if let Some(p) = progress {
+                p(stats.total_scanned, total);
+            }
             let content = crate::provider::render_content(&row.props);
             if content.trim().is_empty() {
                 stats.skipped_no_content += 1;
