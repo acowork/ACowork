@@ -452,13 +452,17 @@ fn text_search_matches_chinese_substring() {
 fn text_search_ors_whitespace_separated_terms() {
     let store = store();
     store
-        .store_episode(&episode("the gateway binds 19876 while the broker takes 19875"))
+        .store_episode(&episode(
+            "the gateway binds 19876 while the broker takes 19875",
+        ))
         .unwrap();
 
     // The two words are far apart in the text, so matching the query as one
     // phrase would find nothing — the union of terms is what makes a plain
     // multi-word ask work.
-    let hits = store.search_episodes_by_keyword("gateway broker", 10).unwrap();
+    let hits = store
+        .search_episodes_by_keyword("gateway broker", 10)
+        .unwrap();
     assert_eq!(hits.len(), 1, "terms must be OR'd, not required adjacent");
 }
 
@@ -1621,4 +1625,133 @@ fn admin_embedding_dim_persists_across_reopen() {
     let reopened = SqliteStore::open(&path, 8).expect("reopen");
     assert_eq!(reopened.embedding_dim(), 4, "stored dimension must win");
     assert_eq!(MemoryAdminService::count_nodes_with_embedding(&reopened), 1);
+}
+
+/// A model swap must still heal a store whose declared dimension already
+/// matches the target.
+///
+/// This is the state a live store was left in: the meta had been flipped to the
+/// new width before the migration bailed out, the provider has since caught up,
+/// and the message rows are still at the old width. Nothing compares the two
+/// dimensions any more, so the only way back is the manual rebuild - which
+/// reaches this same call with `new_dim == embedding_dim()`. An early bail on
+/// matching dimensions would leave those rows permanently invisible.
+#[test]
+fn admin_embedding_migration_heals_a_store_whose_dim_was_flipped_early() {
+    let store = std::sync::Arc::new(SqliteStore::open_in_memory(DIM).expect("open"));
+    let index = conversation::ConversationStore::from_store(store.clone()).expect("index");
+    for (line, text) in [
+        (0, "where does the temp dir point"),
+        (1, "the installer is built with wix"),
+    ] {
+        index
+            .index_message("s1", line, "user", text, &emb(0.2 + line as f32))
+            .expect("index message");
+    }
+    // The memory layer made it across to the new width; the conversation layer
+    // never did, and the recorded dimension was flipped anyway.
+    let mut migrated = episode("already migrated");
+    migrated.embedding = Some(vec![0.5, 0.5]);
+    store.store_episode(&migrated).expect("store");
+    store.set_embedding_dim(2).expect("flip");
+
+    let stats = store
+        .migrate_embedding_dimension(&|_| Some(vec![0.5, 0.5]), 2)
+        .expect("rebuild after a flip must not bail on matching dimensions");
+
+    assert_eq!(
+        stats.rebuilt, 3,
+        "the rebuild re-embeds every row in scope, stale or not, got {stats:?}"
+    );
+    assert_eq!(store.embedding_dim(), 2);
+    let hits = store
+        .vector_search(conversation::LABEL, &[0.5, 0.5], 10)
+        .expect("search");
+    assert_eq!(
+        hits.len(),
+        2,
+        "the healed messages must be visible to vector search"
+    );
+}
+
+/// A model swap must re-embed conversation messages as well as memory nodes.
+///
+/// The memory-browser scope (`all_rows`) deliberately excludes them so the panel
+/// does not list chat transcripts; the migration may not, because the
+/// conversation index is append-only by line watermark and never re-embeds an
+/// already-indexed row. Leaving the label out stranded the entire conversation
+/// index at the previous width, where `vector_search` skips those rows without
+/// saying anything - which is how a live store ended up with 294 of 311 message
+/// vectors invisible after a switch to a 1024-dim model.
+#[test]
+fn admin_embedding_migration_covers_conversation_messages() {
+    let store = std::sync::Arc::new(SqliteStore::open_in_memory(DIM).expect("open"));
+    let index = conversation::ConversationStore::from_store(store.clone()).expect("index");
+    index
+        .index_message("s1", 0, "user", "where does the temp dir point", &emb(0.2))
+        .expect("index message");
+
+    let stats = store
+        .migrate_embedding_dimension(&|_| Some(vec![0.5, 0.5]), 2)
+        .expect("migrate");
+
+    assert_eq!(
+        stats.rebuilt, 1,
+        "the indexed message row must be inside the migration's scope"
+    );
+    assert_eq!(store.embedding_dim(), 2);
+    // And it is searchable at the new width, not skipped as foreign.
+    let hits = store
+        .vector_search(conversation::LABEL, &[0.5, 0.5], 10)
+        .expect("search");
+    assert_eq!(
+        hits.len(),
+        1,
+        "the re-embedded message must be visible to search"
+    );
+}
+
+/// The store may only *claim* a dimension it actually holds everywhere.
+///
+/// Flipping `embedding_dim` over a half-migrated store is what made the memory
+/// panel report "no rebuild needed" while most vectors were still the old width:
+/// the declared dimension is the only thing the panel and the retrieval path
+/// compare, and `vector_search` hides the mismatch by skipping rows silently.
+#[test]
+fn admin_embedding_migration_does_not_claim_a_width_the_store_does_not_have() {
+    let store = store();
+    let mut reachable = episode("re-embed me");
+    reachable.embedding = Some(emb(0.3));
+    store.store_episode(&reachable).expect("store");
+    let mut unreachable = episode("this one the model cannot reach");
+    unreachable.embedding = Some(emb(0.7));
+    store.store_episode(&unreachable).expect("store");
+
+    // One node re-embeds, the other's embed call fails, so one row is left at
+    // the old width. Note this is about the *row*, not about the counters: a
+    // node that never had a vector does not block the move.
+    let stats = store
+        .migrate_embedding_dimension(
+            &|content: &str| {
+                if content.contains("cannot") {
+                    None
+                } else {
+                    Some(vec![0.5, 0.5])
+                }
+            },
+            2,
+        )
+        .expect("migrate");
+    assert_eq!(stats.rebuilt, 1);
+    assert_eq!(
+        store.embedding_dim(),
+        DIM,
+        "a store still holding an old-width row must not report the new width"
+    );
+
+    // Once the remaining row can be embedded, the same call finishes the move.
+    store
+        .migrate_embedding_dimension(&|_| Some(vec![0.5, 0.5]), 2)
+        .expect("second migrate");
+    assert_eq!(store.embedding_dim(), 2);
 }

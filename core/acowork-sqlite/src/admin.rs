@@ -311,7 +311,19 @@ impl MemoryAdminService for SqliteStore {
         new_dim: usize,
     ) -> AcoworkResult<RebuildStats> {
         let mut stats = RebuildStats::default();
-        let rows = self.all_rows()?;
+        // The migration's scope is wider than the memory browser's: a model
+        // swap changes the width of *every* vector in the store, and
+        // `vector_search` silently skips rows of a foreign width, so leaving
+        // `ConversationMessage` out would strand the whole conversation index -
+        // it is append-only by line watermark and never re-embeds an indexed
+        // row, so nothing else would ever heal those vectors.
+        let rows = self.rows_with_labels(&[
+            labels::EPISODIC,
+            labels::KNOWLEDGE,
+            labels::PROCEDURAL,
+            labels::AUTOBIOGRAPHICAL,
+            crate::conversation::LABEL,
+        ])?;
 
         for row in rows {
             stats.total_scanned += 1;
@@ -345,7 +357,28 @@ impl MemoryAdminService for SqliteStore {
             }
         }
 
-        self.set_embedding_dim(new_dim)?;
+        // Only declare the store to be at `new_dim` when nothing was left behind
+        // at another width. `vector_search` skips foreign-width rows silently, so
+        // flipping the recorded dimension over a half-migrated store makes the
+        // store claim a width it does not have - which is what let the memory
+        // panel report "no rebuild needed" while 294 conversation vectors were
+        // still 512-wide and invisible to retrieval.
+        //
+        // Measured from the rows themselves rather than from the counters: a node
+        // the embedder returned nothing *for* only matters if it is holding an old
+        // vector, and a node with no vector at all is simply not yet embedded.
+        let stale = self.count_vectors_of_other_dim(new_dim)?;
+        if stale == 0 {
+            self.set_embedding_dim(new_dim)?;
+        } else {
+            tracing::warn!(
+                new_dim,
+                rebuilt = stats.rebuilt,
+                stale,
+                "embedding migration: store left at its previous dimension - \
+                 {stale} rows are still at another width, so a rebuild is still required"
+            );
+        }
         Ok(stats)
     }
 }
@@ -353,20 +386,48 @@ impl MemoryAdminService for SqliteStore {
 // ── Internal helpers ─────────────────────────────────────────────────────
 
 impl SqliteStore {
-    /// Every memory row, in whatever order SQLite returns them.
-    fn all_rows(&self) -> crate::Result<Vec<AdminRow>> {
+    /// Rows in `vectors` whose blob is not `dim` floats wide.
+    ///
+    /// The migration uses this to decide whether the store may *claim* the new
+    /// dimension: `vector_search` ignores rows of a foreign width without
+    /// reporting it, so any row left here is a row retrieval will never see.
+    fn count_vectors_of_other_dim(&self, dim: usize) -> crate::Result<u64> {
         let conn = self.lock();
-        let mut stmt = conn.prepare(
-            "SELECT id, label, status, props, created_at FROM nodes \
-             WHERE label IN (?1, ?2, ?3, ?4)",
+        let bytes = dim.saturating_mul(4) as i64;
+        let n: u64 = conn.query_row(
+            "SELECT COUNT(*) FROM vectors WHERE length(embedding) <> ?1",
+            params![{ bytes }],
+            |r| r.get(0),
         )?;
+        Ok(n)
+    }
+
+    /// Every memory row, in whatever order SQLite returns them.
+    ///
+    /// Deliberately narrower than [`Self::rows_with_labels`]: this is the
+    /// memory-browser scope, and `ConversationMessage` rows are excluded so the
+    /// panel does not fill with chat transcripts. The embedding migration needs
+    /// a wider scope and asks for it explicitly.
+    fn all_rows(&self) -> crate::Result<Vec<AdminRow>> {
+        self.rows_with_labels(&[
+            labels::EPISODIC,
+            labels::KNOWLEDGE,
+            labels::PROCEDURAL,
+            labels::AUTOBIOGRAPHICAL,
+        ])
+    }
+
+    /// Every row carrying one of `labels`.
+    fn rows_with_labels(&self, labels: &[&str]) -> crate::Result<Vec<AdminRow>> {
+        let conn = self.lock();
+        let placeholders: Vec<String> = (1..=labels.len()).map(|i| format!("?{i}")).collect();
+        let sql = format!(
+            "SELECT id, label, status, props, created_at FROM nodes WHERE label IN ({})",
+            placeholders.join(", ")
+        );
+        let mut stmt = conn.prepare(&sql)?;
         let mapped = stmt.query_map(
-            params![
-                labels::EPISODIC,
-                labels::KNOWLEDGE,
-                labels::PROCEDURAL,
-                labels::AUTOBIOGRAPHICAL
-            ],
+            rusqlite::params_from_iter(labels.iter().map(|s| s.to_string())),
             |r| {
                 Ok((
                     r.get::<_, i64>(0)?,

@@ -1422,26 +1422,40 @@ impl SessionTask {
                         let migration_provider = std::sync::Arc::new(migration_provider)
                             as std::sync::Arc<dyn crate::embedding::EmbeddingProvider>;
 
-                        // Bridge async embed into a sync closure for
-                        // MemoryAdminService::migrate_embedding_dimension.
-                        let handle = tokio::runtime::Handle::current();
-                        let provider_for_fn = migration_provider.clone();
-                        let embed_fn = move |text: &str| -> Option<Vec<f32>> {
-                            let text_owned = text.to_string();
-                            match handle.block_on(provider_for_fn.embed(&text_owned)) {
-                                Ok(vec) => Some(vec),
-                                Err(e) => {
-                                    tracing::warn!(
-                                        error = %e,
-                                        "Re-embedding failed during migration, skipping node"
-                                    );
-                                    None
+                        // `MemoryAdminService::migrate_embedding_dimension` is a
+                        // sync trait method, so re-embedding means driving the
+                        // async provider with `block_on`. That is only legal on a
+                        // thread that is not already polling a future. This code
+                        // used to call `Handle::current().block_on(...)` directly
+                        // here, on the session task's own async thread, and panicked
+                        // with "Cannot start a runtime from within a runtime" -
+                        // which promoted the session to Errored and the agent
+                        // stopped answering. Run the whole migration on a blocking
+                        // thread, the same pattern
+                        // `MemoryQueryUseCase::rebuild_embeddings_with_progress`
+                        // already uses for the identical job.
+                        let migration = tokio::task::spawn_blocking(move || {
+                            let handle = tokio::runtime::Handle::current();
+                            let provider_for_fn = migration_provider.clone();
+                            let embed_fn = move |text: &str| -> Option<Vec<f32>> {
+                                let text_owned = text.to_string();
+                                match handle.block_on(provider_for_fn.embed(&text_owned)) {
+                                    Ok(vec) => Some(vec),
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            error = %e,
+                                            "Re-embedding failed during migration, skipping node"
+                                        );
+                                        None
+                                    }
                                 }
-                            }
-                        };
+                            };
+                            admin.migrate_embedding_dimension(&embed_fn, embed_dimension)
+                        })
+                        .await;
 
-                        match admin.migrate_embedding_dimension(&embed_fn, embed_dimension) {
-                            Ok(stats) => {
+                        match migration {
+                            Ok(Ok(stats)) => {
                                 tracing::info!(
                                     rebuilt = stats.rebuilt,
                                     skipped = stats.skipped_no_embedding + stats.skipped_no_content,
@@ -1449,10 +1463,16 @@ impl SessionTask {
                                     "Embedding migration complete"
                                 );
                             }
-                            Err(e) => {
+                            Ok(Err(e)) => {
                                 tracing::error!(
                                     error = %e,
                                     "Embedding migration failed, vector search may be broken"
+                                );
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    error = %e,
+                                    "Embedding migration task died, vector search may be broken"
                                 );
                             }
                         }
