@@ -19,7 +19,7 @@ import { fetchMigrationProgress } from "../../lib/gateway-api";
 
 vi.mock("../../lib/gateway-api", () => ({
   fetchEmbeddingModels: vi.fn().mockResolvedValue({
-    models: [], active_model_id: null, service_running: true, embed_port: 18080, models_detail: []
+    models: [], active_model_id: null, service_running: true
   }),
   fetchCloudEmbeddingProviders: vi.fn().mockResolvedValue({ providers: [] }),
   fetchMigrationProgress: vi.fn().mockResolvedValue({ agents: [] }),
