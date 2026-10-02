@@ -245,7 +245,13 @@ impl ConversationIndexer {
             guard
                 .as_ref()
                 .and_then(|g| g.as_ref())
-                .and_then(|c| c.embedding_provider.clone())
+                // The cell, not `.embedding_provider`: the published snapshot
+                // is an immutable `Arc<AgentCore>` clone, so its field froze at
+                // session start while the session went on to adopt a new model.
+                // Reading the field is what made this sweep defer forever after
+                // a model switch - provider_dim stayed on the old width while
+                // the index had already been re-embedded at the new one.
+                .and_then(|c| c.live_embedding_provider())
         };
 
         // Discover current JSONL sessions.

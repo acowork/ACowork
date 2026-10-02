@@ -370,7 +370,11 @@ async fn async_main(
             None, // no conversation session in standalone cold-start
         );
 
-        agent_loop.core.embedding_provider = agent_ctx.emb_provider.clone();
+        // Via the setter so the shared provider cell is bound too - see the
+        // equivalent line in `startup/session_init.rs`.
+        if let Some(provider) = agent_ctx.emb_provider.clone() {
+            agent_loop.core.update_embedding_provider(provider);
+        }
         agent_loop.core.memory_session = Some(agent_ctx.memory_session.clone());
         // ADR-053: this branch bypasses `phase_b_init_session`, so the
         // agent-specific compaction prompt (prompts/summary.md) must be

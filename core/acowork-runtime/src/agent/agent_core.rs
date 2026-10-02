@@ -321,7 +321,16 @@ pub struct AgentCore {
     /// Memory session handle — shared between agent loop and memory tools.
     pub(crate) memory_session: Option<Arc<crate::memory::MemorySessionHandle>>,
     /// Embedding provider for vector-based memory retrieval.
+    ///
+    /// This field is the *private* view of the provider. Anything outside this
+    /// clone must read [`Self::embedding_provider_shared`] instead, because
+    /// `AgentCore` is `Clone` and the runtime publishes an `Arc<AgentCore>`
+    /// snapshot for the conversation indexer and the HTTP layer: a write here
+    /// never reaches those readers.
     pub(crate) embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
+    /// The provider as one shared cell, identical across every clone of this
+    /// core. See [`crate::embedding::SharedEmbedProvider`].
+    pub(crate) embedding_provider_shared: crate::embedding::SharedEmbedProvider,
     /// P3-1: Retrieval quality metrics aggregator (shared across sessions).
     /// ADR-051 C3: Replaced grafeo MetricsAggregator with Runtime-internal
     /// RetrievalMetricsAggregator (data from acowork_memory::RetrievalMetrics).
@@ -564,6 +573,7 @@ impl AgentCore {
             // slot and the workspace resolver are both available.
             git_nudge: None,
             embedding_provider: None,
+            embedding_provider_shared: Arc::new(std::sync::RwLock::new(None)),
             metrics_aggregator: Arc::new(std::sync::Mutex::new(
                 crate::memory::RetrievalMetricsAggregator::with_defaults(1.0),
             )),
@@ -835,12 +845,29 @@ impl AgentCore {
             .unwrap_or("none")
             .to_string();
         let new_name = new_provider.name().to_string();
+        let new_dim = new_provider.dimension();
+        if let Ok(mut cell) = self.embedding_provider_shared.write() {
+            *cell = Some(new_provider.clone());
+        }
         self.embedding_provider = Some(new_provider);
         tracing::info!(
             old_provider = %old_name,
             new_provider = %new_name,
-            "Embedding provider updated at runtime via SidecarEndpointUpdate"
+            new_dimension = new_dim,
+            "Embedding provider updated"
         );
+    }
+
+    /// The provider every clone of this core currently agrees on.
+    ///
+    /// Readers that outlive a single clone - the conversation indexer, the HTTP
+    /// stats endpoint - must go through this rather than the
+    /// [`Self::embedding_provider`] field, which is per-clone.
+    pub(crate) fn live_embedding_provider(&self) -> Option<Arc<dyn EmbeddingProvider>> {
+        self.embedding_provider_shared
+            .read()
+            .ok()
+            .and_then(|cell| cell.clone())
     }
 
     /// Clear the embedding provider (set to `None`).
@@ -856,6 +883,9 @@ impl AgentCore {
             .map(|p| p.name())
             .unwrap_or("none")
             .to_string();
+        if let Ok(mut cell) = self.embedding_provider_shared.write() {
+            *cell = None;
+        }
         self.embedding_provider = None;
         tracing::info!(
             old_provider = %old_name,
@@ -1953,6 +1983,10 @@ impl Clone for AgentCore {
             // so a nudge from one session is published exactly once.
             git_nudge: self.git_nudge.clone(),
             embedding_provider: self.embedding_provider.clone(),
+            // Deliberately `Arc::clone`, not a fresh cell: the published
+            // snapshot and the session's working copy must see one provider,
+            // or an adopted model reaches only one of them.
+            embedding_provider_shared: Arc::clone(&self.embedding_provider_shared),
             metrics_aggregator: self.metrics_aggregator.clone(),
             consolidation_bg_task: None, // sessions don't own bg task
             consolidation_timer: self.consolidation_timer.clone(), // shared timer for idle reset
@@ -3392,5 +3426,69 @@ batch_size = 20
         template.merge_token_totals((Some(50_000_000), None, None, None));
         assert_eq!(session_a.agent_token_totals().0, 50_000_000);
         assert_eq!(session_b.agent_token_totals().0, 50_000_000);
+    }
+
+    /// A provider adopted at runtime must be visible to every clone.
+    ///
+    /// The bug this pins: switching embedding model reached the session's own
+    /// `AgentCore` but not the `Arc<AgentCore>` snapshot published for the
+    /// conversation indexer and the HTTP layer, because `AgentCore` is `Clone`
+    /// and the provider was a plain per-clone field. The symptom was silent:
+    /// the indexer kept embedding with the previous model against a store that
+    /// had already been re-embedded, its dimension guard deferred the sweep
+    /// forever, and the memory panel reported a dimension the process no longer
+    /// used.
+    #[test]
+    fn adopted_provider_is_visible_through_every_clone() {
+        struct Switchable(usize);
+        #[async_trait::async_trait]
+        impl EmbeddingProvider for Switchable {
+            fn name(&self) -> &str {
+                "switchable-test"
+            }
+            async fn embed(&self, _t: &str) -> Result<Vec<f32>, acowork_core::embedding::EmbeddingError> {
+                Ok(vec![0.0; self.0])
+            }
+            async fn embed_batch(&self, ts: &[&str]) -> Result<Vec<Vec<f32>>, acowork_core::embedding::EmbeddingError> {
+                Ok(ts.iter().map(|_| vec![0.0; self.0]).collect())
+            }
+            fn dimension(&self) -> usize {
+                self.0
+            }
+            async fn is_available(&self) -> bool {
+                true
+            }
+        }
+
+        let core = make_minimal_core();
+        // The three real roles: the published snapshot, the session's working
+        // copy, and any other clone derived before the switch.
+        let published = Arc::new(core.clone());
+        let mut session = core.clone();
+
+        session.update_embedding_provider(Arc::new(Switchable(768)));
+        assert_eq!(
+            published.live_embedding_provider().map(|p| p.dimension()),
+            Some(768),
+            "readers of the published snapshot must see the adopted provider"
+        );
+
+        session.clear_embedding_provider();
+        assert_eq!(
+            published.live_embedding_provider().map(|p| p.dimension()),
+            None,
+            "clearing must propagate too, or the indexer embeds into a store              whose model is gone"
+        );
+
+        // The per-clone field is the trap the cell exists to avoid: it says
+        // nothing to anybody else. Asserting it stays per-clone documents why
+        // `live_embedding_provider` must be the read path for shared readers.
+        let mut first = core.clone();
+        let second = core.clone();
+        first.update_embedding_provider(Arc::new(Switchable(512)));
+        assert!(
+            first.embedding_provider.is_some() && second.embedding_provider.is_none(),
+            "the plain field is per-clone; shared readers must not use it"
+        );
     }
 }

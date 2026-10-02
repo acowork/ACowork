@@ -176,12 +176,12 @@ pub type SharedRagProvider =
 /// HTTP response — agent totals live on the live push path only.
 pub type SharedAgentCore = Arc<std::sync::RwLock<Option<Arc<crate::agent::agent_core::AgentCore>>>>;
 
-/// Shared embedding-provider dimension (0 = no provider).
-///
-/// Surfaced by the memory-stats endpoint as `model_dim` so the desktop
-/// can detect dimension mismatches with the persisted HNSW index.
-pub type SharedEmbedDimension = Arc<std::sync::RwLock<u64>>;
-
+// `SharedEmbedDimension` — a u64 slot holding the model's width — is retired.
+// It was written once, when the provider was built, and never again. After a model
+// switch the memory panel therefore reported a width the process no longer used, and
+// no amount of re-embedding could clear the banner. Its readers now ask the live
+// provider (`AgentCore::live_embedding_provider`), the one value a session updates
+// when it adopts a new model.
 /// Shared degradation reasons — startup-phase failures that are not
 /// fatal enough to abort the runtime but degrade functionality.
 ///
@@ -277,7 +277,6 @@ pub(crate) struct HttpState {
     dispatch_tx: SharedDispatchSender,
     /// Active embedding provider dimension. Set once at Phase A
     /// and read by the usecase service (via the memory_query slot).
-    embed_provider_dim: SharedEmbedDimension,
     /// Startup degradation reasons surfaced via `/health`.
     /// Populated by Phase B when non-fatal errors occur.
     degraded_reasons: SharedDegradation,
@@ -417,6 +416,26 @@ impl HttpState {
     /// accepted in the path — a package-addressed request is a caller bug
     /// (misconfigured Gateway / old client) and must fail loudly, not
     /// silently hit an arbitrary instance of the package.
+    /// The dimension the agent's live embedding provider produces, 0 if none.
+    ///
+    /// Derived from the published `AgentCore`'s provider cell rather than kept
+    /// as a number on this struct: the session that adopts a new embedding
+    /// provider has no handle on HTTP state, so a copy here reported the model
+    /// the process started with long after the model had changed - which is how
+    /// the memory panel told the user to rebuild an index that already matched.
+    pub(crate) fn live_embed_dim(&self) -> u64 {
+        self.agent_core
+            .read()
+            .ok()
+            .and_then(|guard| {
+                guard
+                    .as_ref()
+                    .and_then(|core| core.live_embedding_provider())
+            })
+            .map(|p| p.dimension() as u64)
+            .unwrap_or(0)
+    }
+
     pub(crate) fn instance_matches(&self, id: &str) -> bool {
         id == self.instance_id
     }
@@ -452,8 +471,7 @@ impl RuntimeHttpServer {
         session_snapshots: SharedSessionSnapshots,
         latest_session: SharedLatestSession,
         dispatch_tx: SharedDispatchSender,
-        embed_provider_dim: SharedEmbedDimension,
-        degraded_reasons: SharedDegradation,
+            degraded_reasons: SharedDegradation,
         mqtt_client: SharedMqttClientSlot,
         session_metadata: Arc<
             tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionMetadataService>>>,
@@ -490,7 +508,6 @@ impl RuntimeHttpServer {
             session_snapshots,
             latest_session,
             dispatch_tx,
-            embed_provider_dim,
             degraded_reasons,
             mqtt_client,
             session_metadata,
@@ -534,8 +551,7 @@ impl RuntimeHttpServer {
         session_snapshots: SharedSessionSnapshots,
         latest_session: SharedLatestSession,
         dispatch_tx: SharedDispatchSender,
-        embed_provider_dim: SharedEmbedDimension,
-        degraded_reasons: SharedDegradation,
+            degraded_reasons: SharedDegradation,
         mqtt_client: SharedMqttClientSlot,
         session_metadata: Arc<
             tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionMetadataService>>>,
@@ -590,7 +606,6 @@ impl RuntimeHttpServer {
             session_snapshots,
             latest_session,
             dispatch_tx,
-            embed_provider_dim,
             degraded_reasons,
             mqtt_client,
             session_metadata,
@@ -3780,7 +3795,7 @@ async fn get_agent_status(
     // Pull the active session + model/embedding dim from the shared
     // state so the panel can show "what is the agent doing right now?".
     let latest_session = state.latest_session.read().ok().and_then(|g| g.clone());
-    let embed_dim = state.embed_provider_dim.read().map(|d| *d).unwrap_or(0);
+    let embed_dim = state.live_embed_dim();
 
     Json(serde_json::json!({
         "agent_id": state.agent_id,
@@ -3788,7 +3803,7 @@ async fn get_agent_status(
         "work_dir": state.work_dir,
         "pid": std::process::id(),
         "latest_session": latest_session,
-        "embed_dim": embed_dim.clone(),
+        "embed_dim": embed_dim,
     }))
 }
 
@@ -4253,10 +4268,43 @@ mod tests {
         ))
     }
 
+    /// A provider cell reporting a fixed dimension, for tests that assert the
+    /// `model_dim` the memory endpoints report. `0` means "no provider bound",
+    /// matching a runtime whose embed sidecar never came up.
+    fn embed_cell_with_dim(
+        dim: usize,
+    ) -> crate::embedding::SharedEmbedProvider {
+        struct FixedDim(usize);
+        #[async_trait::async_trait]
+        impl crate::embedding::EmbeddingProvider for FixedDim {
+            fn name(&self) -> &str {
+                "fixed-dim-test-stub"
+            }
+            async fn embed(&self, _text: &str) -> Result<Vec<f32>, crate::embedding::EmbeddingError> {
+                Ok(vec![0.0; self.0])
+            }
+            async fn embed_batch(
+                &self,
+                texts: &[&str],
+            ) -> Result<Vec<Vec<f32>>, crate::embedding::EmbeddingError> {
+                Ok(texts.iter().map(|_| vec![0.0; self.0]).collect())
+            }
+            fn dimension(&self) -> usize {
+                self.0
+            }
+            async fn is_available(&self) -> bool {
+                true
+            }
+        }
+        let provider: Option<Arc<dyn crate::embedding::EmbeddingProvider>> = (dim > 0)
+            .then(|| Arc::new(FixedDim(dim)) as Arc<dyn crate::embedding::EmbeddingProvider>);
+        Arc::new(std::sync::RwLock::new(provider))
+    }
+
     /// Build a memory-query service backed by a (possibly None) Grafeo store.
     fn new_test_memory_query(
         memory_store: SharedMemoryStore,
-        embed_dim: SharedEmbedDimension,
+        embed_dim: crate::embedding::SharedEmbedProvider,
     ) -> Arc<dyn crate::usecases::MemoryQueryService> {
         Arc::new(crate::usecases::MemoryAdminAdapter::new(
             memory_store,
@@ -4352,7 +4400,7 @@ mod tests {
 
         let dispatch_tx: SharedDispatchSender = std::sync::Arc::new(tokio::sync::Mutex::new(None));
 
-        let embed_dim: SharedEmbedDimension = std::sync::Arc::new(std::sync::RwLock::new(0));
+        let embed_dim = embed_cell_with_dim(0);
         let degraded_reasons: SharedDegradation =
             std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
         let mqtt_client: SharedMqttClientSlot = std::sync::Arc::new(tokio::sync::Mutex::new(None));
@@ -4372,7 +4420,6 @@ mod tests {
             snapshots,
             latest,
             dispatch_tx,
-            embed_dim.clone(),
             degraded_reasons,
             mqtt_client,
             Arc::new(tokio::sync::Mutex::new(Some(session_metadata))),
@@ -4491,7 +4538,7 @@ mod tests {
 
         let dispatch_tx: SharedDispatchSender = std::sync::Arc::new(tokio::sync::Mutex::new(None));
 
-        let embed_dim: SharedEmbedDimension = std::sync::Arc::new(std::sync::RwLock::new(0));
+        let embed_dim = embed_cell_with_dim(0);
         let degraded_reasons: SharedDegradation =
             std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
         let mqtt_client: SharedMqttClientSlot = std::sync::Arc::new(tokio::sync::Mutex::new(None));
@@ -4511,7 +4558,6 @@ mod tests {
             snapshots,
             latest,
             dispatch_tx,
-            embed_dim.clone(),
             degraded_reasons,
             mqtt_client,
             Arc::new(tokio::sync::Mutex::new(Some(session_metadata))),
@@ -4601,7 +4647,7 @@ mod tests {
         let latest: SharedLatestSession = std::sync::Arc::new(std::sync::RwLock::new(None));
         let dispatch_tx: SharedDispatchSender = std::sync::Arc::new(tokio::sync::Mutex::new(None));
         let memory_store: SharedMemoryStore = std::sync::Arc::new(std::sync::RwLock::new(None));
-        let embed_dim: SharedEmbedDimension = std::sync::Arc::new(std::sync::RwLock::new(512));
+        let embed_dim = embed_cell_with_dim(512);
         let degraded_reasons: SharedDegradation =
             std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
         let mqtt_client: SharedMqttClientSlot = std::sync::Arc::new(tokio::sync::Mutex::new(None));
@@ -4617,7 +4663,6 @@ mod tests {
             snapshots,
             latest,
             dispatch_tx,
-            embed_dim.clone(),
             degraded_reasons,
             mqtt_client,
             Arc::new(tokio::sync::Mutex::new(None)),
@@ -4747,7 +4792,6 @@ mod tests {
             std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
         let latest: SharedLatestSession = std::sync::Arc::new(std::sync::RwLock::new(None));
         let dispatch_tx: SharedDispatchSender = std::sync::Arc::new(tokio::sync::Mutex::new(None));
-        let embed_dim: SharedEmbedDimension = std::sync::Arc::new(std::sync::RwLock::new(0));
         let degraded_reasons: SharedDegradation =
             std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
         let mqtt_client: SharedMqttClientSlot = std::sync::Arc::new(tokio::sync::Mutex::new(None));
@@ -4763,7 +4807,6 @@ mod tests {
             snapshots,
             latest,
             dispatch_tx,
-            embed_dim.clone(),
             degraded_reasons,
             mqtt_client,
             Arc::new(tokio::sync::Mutex::new(None)),
@@ -4900,7 +4943,6 @@ mod tests {
             std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
         let latest: SharedLatestSession = std::sync::Arc::new(std::sync::RwLock::new(None));
         let dispatch_tx: SharedDispatchSender = std::sync::Arc::new(tokio::sync::Mutex::new(None));
-        let embed_dim: SharedEmbedDimension = std::sync::Arc::new(std::sync::RwLock::new(0));
         let degraded_reasons: SharedDegradation =
             std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
         let mqtt_client: SharedMqttClientSlot = std::sync::Arc::new(tokio::sync::Mutex::new(None));
@@ -4915,7 +4957,6 @@ mod tests {
             snapshots,
             latest,
             dispatch_tx,
-            embed_dim.clone(),
             degraded_reasons,
             mqtt_client,
             Arc::new(tokio::sync::Mutex::new(None)),
@@ -5122,7 +5163,6 @@ mod tests {
             std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
         let latest: SharedLatestSession = std::sync::Arc::new(std::sync::RwLock::new(None));
         let dispatch_tx: SharedDispatchSender = std::sync::Arc::new(tokio::sync::Mutex::new(None));
-        let embed_dim: SharedEmbedDimension = std::sync::Arc::new(std::sync::RwLock::new(0));
         let degraded_reasons: SharedDegradation =
             std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
         let session_manager_slot: SharedSessionManagerSlot =
@@ -5139,7 +5179,6 @@ mod tests {
             snapshots,
             latest,
             dispatch_tx,
-            embed_dim,
             degraded_reasons,
             runtime_slot,
             Arc::new(tokio::sync::Mutex::new(Some(new_test_session_metadata(
@@ -5311,7 +5350,6 @@ mod tests {
             std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
         let latest: SharedLatestSession = std::sync::Arc::new(std::sync::RwLock::new(None));
         let dispatch_tx: SharedDispatchSender = std::sync::Arc::new(tokio::sync::Mutex::new(None));
-        let embed_dim: SharedEmbedDimension = std::sync::Arc::new(std::sync::RwLock::new(0));
         let degraded_reasons: SharedDegradation =
             std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
         let mqtt_client: SharedMqttClientSlot = std::sync::Arc::new(tokio::sync::Mutex::new(None));
@@ -5355,7 +5393,6 @@ mod tests {
             snapshots,
             latest,
             dispatch_tx,
-            embed_dim.clone(),
             degraded_reasons,
             mqtt_client,
             Arc::new(tokio::sync::Mutex::new(None)),
@@ -5508,7 +5545,6 @@ mod tests {
             std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
         let latest: SharedLatestSession = std::sync::Arc::new(std::sync::RwLock::new(None));
         let dispatch_tx: SharedDispatchSender = std::sync::Arc::new(tokio::sync::Mutex::new(None));
-        let embed_dim: SharedEmbedDimension = std::sync::Arc::new(std::sync::RwLock::new(0));
         let degraded_reasons: SharedDegradation =
             std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
         let mqtt_client: SharedMqttClientSlot = std::sync::Arc::new(tokio::sync::Mutex::new(None));
@@ -5532,7 +5568,6 @@ mod tests {
             snapshots,
             latest,
             dispatch_tx,
-            embed_dim,
             degraded_reasons,
             mqtt_client,
             Arc::new(tokio::sync::Mutex::new(None)),
@@ -5621,7 +5656,6 @@ mod tests {
             std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
         let latest: SharedLatestSession = std::sync::Arc::new(std::sync::RwLock::new(None));
         let dispatch_tx: SharedDispatchSender = std::sync::Arc::new(tokio::sync::Mutex::new(None));
-        let embed_dim: SharedEmbedDimension = std::sync::Arc::new(std::sync::RwLock::new(0));
         let degraded_reasons: SharedDegradation =
             std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
         let mqtt_client: SharedMqttClientSlot = std::sync::Arc::new(tokio::sync::Mutex::new(None));
@@ -5654,7 +5688,6 @@ mod tests {
             snapshots,
             latest,
             dispatch_tx,
-            embed_dim.clone(),
             degraded_reasons,
             mqtt_client,
             Arc::new(tokio::sync::Mutex::new(None)),
@@ -5760,7 +5793,6 @@ mod tests {
             Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
             Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
-            Arc::new(std::sync::RwLock::new(0)),
             Arc::new(std::sync::RwLock::new(Vec::new())),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
@@ -5857,7 +5889,6 @@ mod tests {
             Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
             Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
-            Arc::new(std::sync::RwLock::new(0)),
             Arc::new(std::sync::RwLock::new(Vec::new())),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
@@ -6017,7 +6048,7 @@ mod tests {
             std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
         let latest: SharedLatestSession = std::sync::Arc::new(std::sync::RwLock::new(None));
         let dispatch_tx: SharedDispatchSender = std::sync::Arc::new(tokio::sync::Mutex::new(None));
-        let embed_dim: SharedEmbedDimension = std::sync::Arc::new(std::sync::RwLock::new(0));
+        let embed_dim = embed_cell_with_dim(0);
         let degraded_reasons: SharedDegradation =
             std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
         let mqtt_client: SharedMqttClientSlot = std::sync::Arc::new(tokio::sync::Mutex::new(None));
@@ -6036,7 +6067,6 @@ mod tests {
             snapshots,
             latest,
             dispatch_tx,
-            embed_dim.clone(),
             degraded_reasons,
             mqtt_client,
             Arc::new(tokio::sync::Mutex::new(Some(session_metadata))),
@@ -6527,7 +6557,7 @@ mod tests {
             std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
         let latest: SharedLatestSession = std::sync::Arc::new(std::sync::RwLock::new(None));
         let dispatch_tx: SharedDispatchSender = std::sync::Arc::new(tokio::sync::Mutex::new(None));
-        let embed_dim: SharedEmbedDimension = std::sync::Arc::new(std::sync::RwLock::new(0));
+        let embed_dim = embed_cell_with_dim(0);
         let degraded_reasons: SharedDegradation =
             std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
         let mqtt_client: SharedMqttClientSlot = std::sync::Arc::new(tokio::sync::Mutex::new(None));
@@ -6545,7 +6575,6 @@ mod tests {
             snapshots,
             latest,
             dispatch_tx,
-            embed_dim.clone(),
             degraded_reasons,
             mqtt_client,
             Arc::new(tokio::sync::Mutex::new(Some(session_metadata))),
@@ -6673,7 +6702,7 @@ mod tests {
             std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
         let latest: SharedLatestSession = std::sync::Arc::new(std::sync::RwLock::new(None));
         let dispatch_tx: SharedDispatchSender = std::sync::Arc::new(tokio::sync::Mutex::new(None));
-        let embed_dim: SharedEmbedDimension = std::sync::Arc::new(std::sync::RwLock::new(0));
+        let embed_dim = embed_cell_with_dim(0);
         let degraded_reasons: SharedDegradation =
             std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
         let mqtt_client: SharedMqttClientSlot = std::sync::Arc::new(tokio::sync::Mutex::new(None));
@@ -6691,7 +6720,6 @@ mod tests {
             snapshots,
             latest,
             dispatch_tx,
-            embed_dim.clone(),
             degraded_reasons,
             mqtt_client,
             Arc::new(tokio::sync::Mutex::new(Some(session_metadata))),
@@ -6860,7 +6888,7 @@ mod tests {
             Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
         let latest: SharedLatestSession = Arc::new(std::sync::RwLock::new(None));
         let dispatch_tx: SharedDispatchSender = Arc::new(tokio::sync::Mutex::new(None));
-        let embed_dim: SharedEmbedDimension = Arc::new(std::sync::RwLock::new(0));
+        let embed_dim = embed_cell_with_dim(0);
         let degraded_reasons: SharedDegradation = Arc::new(std::sync::RwLock::new(Vec::new()));
         let mqtt_client: SharedMqttClientSlot = Arc::new(tokio::sync::Mutex::new(None));
         let session_metadata =
@@ -6877,7 +6905,6 @@ mod tests {
             snapshots,
             latest,
             dispatch_tx,
-            embed_dim.clone(),
             degraded_reasons,
             mqtt_client,
             Arc::new(tokio::sync::Mutex::new(Some(session_metadata))),
@@ -6949,7 +6976,7 @@ mod tests {
             Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
         let latest: SharedLatestSession = Arc::new(std::sync::RwLock::new(None));
         let dispatch_tx: SharedDispatchSender = Arc::new(tokio::sync::Mutex::new(None));
-        let embed_dim: SharedEmbedDimension = Arc::new(std::sync::RwLock::new(0));
+        let embed_dim = embed_cell_with_dim(0);
         let degraded_reasons: SharedDegradation = Arc::new(std::sync::RwLock::new(Vec::new()));
         let mqtt_client: SharedMqttClientSlot = Arc::new(tokio::sync::Mutex::new(None));
         let session_metadata =
@@ -6966,7 +6993,6 @@ mod tests {
             snapshots,
             latest,
             dispatch_tx,
-            embed_dim.clone(),
             degraded_reasons,
             mqtt_client,
             Arc::new(tokio::sync::Mutex::new(Some(session_metadata))),
@@ -7033,7 +7059,7 @@ mod tests {
             Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
         let latest: SharedLatestSession = Arc::new(std::sync::RwLock::new(None));
         let dispatch_tx: SharedDispatchSender = Arc::new(tokio::sync::Mutex::new(None));
-        let embed_dim: SharedEmbedDimension = Arc::new(std::sync::RwLock::new(0));
+        let embed_dim = embed_cell_with_dim(0);
         let degraded_reasons: SharedDegradation = Arc::new(std::sync::RwLock::new(Vec::new()));
         let mqtt_client: SharedMqttClientSlot = Arc::new(tokio::sync::Mutex::new(None));
         let session_metadata =
@@ -7050,7 +7076,6 @@ mod tests {
             snapshots,
             latest,
             dispatch_tx,
-            embed_dim.clone(),
             degraded_reasons,
             mqtt_client,
             Arc::new(tokio::sync::Mutex::new(Some(session_metadata))),
@@ -7136,7 +7161,7 @@ mod tests {
             Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
         let latest: SharedLatestSession = Arc::new(std::sync::RwLock::new(None));
         let dispatch_tx: SharedDispatchSender = Arc::new(tokio::sync::Mutex::new(None));
-        let embed_dim: SharedEmbedDimension = Arc::new(std::sync::RwLock::new(0));
+        let embed_dim = embed_cell_with_dim(0);
         let degraded_reasons: SharedDegradation = Arc::new(std::sync::RwLock::new(Vec::new()));
         let mqtt_client: SharedMqttClientSlot = Arc::new(tokio::sync::Mutex::new(None));
         let session_metadata =
@@ -7153,7 +7178,6 @@ mod tests {
             snapshots,
             latest,
             dispatch_tx,
-            embed_dim.clone(),
             degraded_reasons,
             mqtt_client,
             Arc::new(tokio::sync::Mutex::new(Some(session_metadata))),
@@ -7218,7 +7242,7 @@ mod tests {
             Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
         let latest: SharedLatestSession = Arc::new(std::sync::RwLock::new(None));
         let dispatch_tx: SharedDispatchSender = Arc::new(tokio::sync::Mutex::new(None));
-        let embed_dim: SharedEmbedDimension = Arc::new(std::sync::RwLock::new(0));
+        let embed_dim = embed_cell_with_dim(0);
         let degraded_reasons: SharedDegradation = Arc::new(std::sync::RwLock::new(Vec::new()));
         let mqtt_client: SharedMqttClientSlot = Arc::new(tokio::sync::Mutex::new(None));
         let session_metadata =
@@ -7235,7 +7259,6 @@ mod tests {
             snapshots,
             latest,
             dispatch_tx,
-            embed_dim.clone(),
             degraded_reasons,
             mqtt_client,
             Arc::new(tokio::sync::Mutex::new(Some(session_metadata))),
@@ -7333,7 +7356,7 @@ mod tests {
             Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
         let latest: SharedLatestSession = Arc::new(std::sync::RwLock::new(None));
         let dispatch_tx: SharedDispatchSender = Arc::new(tokio::sync::Mutex::new(None));
-        let embed_dim: SharedEmbedDimension = Arc::new(std::sync::RwLock::new(0));
+        let embed_dim = embed_cell_with_dim(0);
         let degraded_reasons: SharedDegradation = Arc::new(std::sync::RwLock::new(Vec::new()));
         let mqtt_client: SharedMqttClientSlot = Arc::new(tokio::sync::Mutex::new(None));
         let session_metadata =
@@ -7350,7 +7373,6 @@ mod tests {
             snapshots,
             latest,
             dispatch_tx,
-            embed_dim.clone(),
             degraded_reasons,
             mqtt_client,
             Arc::new(tokio::sync::Mutex::new(Some(session_metadata))),
@@ -7434,7 +7456,7 @@ mod tests {
             Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
         let latest: SharedLatestSession = Arc::new(std::sync::RwLock::new(None));
         let dispatch_tx: SharedDispatchSender = Arc::new(tokio::sync::Mutex::new(None));
-        let embed_dim: SharedEmbedDimension = Arc::new(std::sync::RwLock::new(0));
+        let embed_dim = embed_cell_with_dim(0);
         let degraded_reasons: SharedDegradation = Arc::new(std::sync::RwLock::new(Vec::new()));
         let mqtt_client: SharedMqttClientSlot = Arc::new(tokio::sync::Mutex::new(None));
         let session_metadata =
@@ -7451,7 +7473,6 @@ mod tests {
             snapshots,
             latest,
             dispatch_tx,
-            embed_dim.clone(),
             degraded_reasons,
             mqtt_client,
             Arc::new(tokio::sync::Mutex::new(Some(session_metadata))),
@@ -7526,7 +7547,6 @@ mod tests {
             std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
         let latest: SharedLatestSession = std::sync::Arc::new(std::sync::RwLock::new(None));
         let dispatch_tx: SharedDispatchSender = std::sync::Arc::new(tokio::sync::Mutex::new(None));
-        let embed_dim: SharedEmbedDimension = std::sync::Arc::new(std::sync::RwLock::new(0));
         let degraded_reasons: SharedDegradation =
             std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
         let mqtt_client: SharedMqttClientSlot = std::sync::Arc::new(tokio::sync::Mutex::new(None));
@@ -7551,7 +7571,6 @@ mod tests {
             snapshots,
             latest,
             dispatch_tx,
-            embed_dim.clone(),
             degraded_reasons,
             mqtt_client,
             std::sync::Arc::new(tokio::sync::Mutex::new(None)),
@@ -7770,7 +7789,6 @@ mod tests {
             Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
             Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
-            Arc::new(std::sync::RwLock::new(0)),
             Arc::new(std::sync::RwLock::new(Vec::new())),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
@@ -7907,7 +7925,6 @@ mod tests {
             Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
             Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
-            Arc::new(std::sync::RwLock::new(0)),
             Arc::new(std::sync::RwLock::new(Vec::new())),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
@@ -8051,7 +8068,6 @@ mod tests {
             Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
             Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(Some(dispatch_tx))),
-            Arc::new(std::sync::RwLock::new(0)),
             Arc::new(std::sync::RwLock::new(Vec::new())),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
@@ -8252,7 +8268,6 @@ mod tests {
             Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
             Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
-            Arc::new(std::sync::RwLock::new(0)),
             Arc::new(std::sync::RwLock::new(Vec::new())),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
@@ -8362,7 +8377,6 @@ mod tests {
             Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
             Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
-            Arc::new(std::sync::RwLock::new(0)),
             Arc::new(std::sync::RwLock::new(Vec::new())),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(Some(session_metadata))),
@@ -8469,7 +8483,7 @@ mod tests {
             std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
         let latest: SharedLatestSession = std::sync::Arc::new(std::sync::RwLock::new(None));
         let dispatch_tx: SharedDispatchSender = std::sync::Arc::new(tokio::sync::Mutex::new(None));
-        let embed_dim: SharedEmbedDimension = std::sync::Arc::new(std::sync::RwLock::new(0));
+        let embed_dim = embed_cell_with_dim(0);
         let degraded_reasons: SharedDegradation =
             std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
         let mqtt_client: SharedMqttClientSlot = std::sync::Arc::new(tokio::sync::Mutex::new(None));
@@ -8491,7 +8505,6 @@ mod tests {
             snapshots,
             latest,
             dispatch_tx,
-            embed_dim.clone(),
             degraded_reasons,
             mqtt_client,
             Arc::new(tokio::sync::Mutex::new(Some(session_metadata))),
@@ -8606,7 +8619,7 @@ mod tests {
             std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
         let latest: SharedLatestSession = std::sync::Arc::new(std::sync::RwLock::new(None));
         let dispatch_tx: SharedDispatchSender = std::sync::Arc::new(tokio::sync::Mutex::new(None));
-        let embed_dim: SharedEmbedDimension = std::sync::Arc::new(std::sync::RwLock::new(0));
+        let embed_dim = embed_cell_with_dim(0);
         let degraded_reasons: SharedDegradation =
             std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
         let mqtt_client: SharedMqttClientSlot = std::sync::Arc::new(tokio::sync::Mutex::new(None));
@@ -8626,7 +8639,6 @@ mod tests {
             snapshots,
             latest,
             dispatch_tx,
-            embed_dim.clone(),
             degraded_reasons,
             mqtt_client,
             Arc::new(tokio::sync::Mutex::new(Some(session_metadata))),

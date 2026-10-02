@@ -12,7 +12,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::error::Result;
-use crate::http::{SharedEmbedDimension, SharedMemoryStore, memory_query};
+use crate::embedding::SharedEmbedProvider;
+use crate::http::{SharedMemoryStore, memory_query};
 use crate::usecases::memory_query::{
     CreateMemoryNodeInput, MemoryNode, MemoryNodeListResponse, MemoryNodeQuery, MemoryQueryService,
     MemoryStats, RebuildReport, SemanticMemoryQuery,
@@ -20,15 +21,30 @@ use crate::usecases::memory_query::{
 
 pub struct MemoryAdminAdapter {
     memory_store: SharedMemoryStore,
-    embed_dim: SharedEmbedDimension,
+    embed_provider: SharedEmbedProvider,
 }
 
 impl MemoryAdminAdapter {
-    pub fn new(memory_store: SharedMemoryStore, embed_dim: SharedEmbedDimension) -> Self {
+    pub fn new(memory_store: SharedMemoryStore, embed_provider: SharedEmbedProvider) -> Self {
         Self {
             memory_store,
-            embed_dim,
+            embed_provider,
         }
+    }
+
+    /// The width the live embedding provider produces; 0 when none is bound.
+    ///
+    /// Read from the provider rather than stored alongside it: the panel's
+    /// "does the index match the model" banner is only meaningful against the
+    /// model actually in use, and a copy here went stale on every model switch
+    /// because the session that adopts a new provider has no handle on this
+    /// adapter.
+    fn live_dim(&self) -> u64 {
+        self.embed_provider
+            .read()
+            .ok()
+            .and_then(|cell| cell.as_ref().map(|p| p.dimension() as u64))
+            .unwrap_or(0)
     }
 }
 
@@ -45,7 +61,7 @@ impl MemoryQueryService for MemoryAdminAdapter {
             time_range: query.time_range.clone(),
         };
         let out = memory_query::list_nodes(store.as_ref(), params);
-        let dim = self.embed_dim.read().map(|d| *d).unwrap_or(0);
+        let dim = self.live_dim();
 
         let nodes: Vec<MemoryNode> = out
             .nodes
@@ -86,7 +102,7 @@ impl MemoryQueryService for MemoryAdminAdapter {
             &query.mode,
             query.limit,
         );
-        let dim = self.embed_dim.read().map(|d| *d).unwrap_or(0);
+        let dim = self.live_dim();
 
         let nodes: Vec<MemoryNode> = out
             .nodes
@@ -123,7 +139,7 @@ impl MemoryQueryService for MemoryAdminAdapter {
 
     async fn get_stats(&self) -> Result<MemoryStats> {
         let store = self.memory_store.read().ok().and_then(|g| g.clone());
-        let dim = self.embed_dim.read().map(|d| *d).unwrap_or(0);
+        let dim = self.live_dim();
         Ok(memory_query::get_stats(store.as_ref(), dim))
     }
 
@@ -296,8 +312,8 @@ mod tests {
 
         let admin: Arc<dyn MemoryAdminService> = store;
         let memory_store: SharedMemoryStore = Arc::new(RwLock::new(Some(admin)));
-        let embed_dim: SharedEmbedDimension = Arc::new(RwLock::new(0));
-        MemoryAdminAdapter::new(memory_store, embed_dim)
+        let embed_provider: crate::embedding::SharedEmbedProvider = Arc::new(RwLock::new(None));
+        MemoryAdminAdapter::new(memory_store, embed_provider)
     }
 
     #[tokio::test]

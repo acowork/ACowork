@@ -216,14 +216,6 @@ pub(crate) struct AgentBootContext {
     /// dimension-mismatch detection.
     ///
     /// The HTTP server already holds a clone of the same `Arc` passed
-    /// to [`crate::http::RuntimeHttpServer::start`]; this slot in
-    /// `AgentBootContext` exists for symmetry with
-    /// [`Self::memory_store_shared`] and is reserved for any future
-    /// post-Phase-A consumer (e.g. memory diagnostics in the gateway
-    /// loop). Phase B does not currently read it.
-    #[allow(dead_code)]
-    pub embed_dim_shared: crate::http::SharedEmbedDimension,
-
     /// Late-bind slot for the Runtime's MQTT client. Same lifecycle as
     /// `mqtt_client: Option<RuntimeMqttClient>` above, but the slot is
     /// the handle the HTTP server holds and that Phase C's DevMode

@@ -206,7 +206,6 @@ async fn spawn_server(e2e: &Adr071E2e) -> u16 {
     let snapshots = Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
     let latest = Arc::new(std::sync::RwLock::new(None));
     let dispatch_tx = Arc::new(tokio::sync::Mutex::new(None));
-    let embed_dim = Arc::new(std::sync::RwLock::new(0));
     let degraded_reasons = Arc::new(std::sync::RwLock::new(Vec::new()));
     let mqtt_client = Arc::new(tokio::sync::Mutex::new(None));
     let session_metadata = Arc::new(tokio::sync::Mutex::new(None));
@@ -241,7 +240,6 @@ async fn spawn_server(e2e: &Adr071E2e) -> u16 {
         snapshots,
         latest,
         dispatch_tx,
-        embed_dim,
         degraded_reasons,
         mqtt_client,
         session_metadata,

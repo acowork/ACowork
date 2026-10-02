@@ -25,6 +25,23 @@ pub mod remote;
 // ADR-051 P2: EmbeddingProvider trait + EmbeddingError moved to acowork-core.
 pub use acowork_core::{EmbeddingError, EmbeddingProvider};
 
+/// The live embedding provider, behind one shared mutable cell.
+///
+/// `AgentCore` owns the cell and its `Clone` shares it (`Arc::clone`), so the
+/// copy a session runs and the `Arc<AgentCore>` snapshot published for the
+/// conversation indexer and the HTTP layer read the same cell. Setting
+/// `AgentCore::embedding_provider` cannot do that: it mutates one copy, and
+/// every other copy keeps whatever the model was when it was cloned. That is
+/// how a model switch left the indexer embedding with the previous model
+/// against a store that had already been re-embedded - its dimension guard
+/// deferred the sweep forever, silently, and the memory panel reported a
+/// dimension the process no longer used.
+///
+/// One cell, one writer (`update_embedding_provider` / `clear_embedding_provider`),
+/// many readers: there is no second copy to invalidate and nothing to re-publish.
+pub type SharedEmbedProvider =
+    Arc<std::sync::RwLock<Option<Arc<dyn EmbeddingProvider>>>>;
+
 use async_trait::async_trait;
 use std::sync::Arc;
 

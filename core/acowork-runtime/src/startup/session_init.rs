@@ -456,7 +456,13 @@ pub(crate) async fn phase_b_init_session(
         }
 
         c.memory_session = Some(ctx.memory_session.clone());
-        c.embedding_provider = ctx.emb_provider.clone();
+        // Through the setter, not by assignment: assignment updates this clone
+        // only, and the cell is what the conversation indexer and the HTTP
+        // layer read. A provider bound here but not there leaves the two halves
+        // of the runtime embedding with different models.
+        if let Some(provider) = ctx.emb_provider.clone() {
+            c.update_embedding_provider(provider);
+        }
         c.rag_provider = ctx.rag_provider.take();
         // Per-turn skill command injection: carry the Phase A SkillRegistry
         // (skills/*/SKILL.md) on AgentCore so `dispatch_inbound` can resolve
@@ -510,7 +516,7 @@ pub(crate) async fn phase_b_init_session(
             let adapter: Arc<dyn crate::usecases::MemoryQueryService> = Arc::new(
                 crate::usecases::memory_query_impl::MemoryAdminAdapter::new(
                     ctx.memory_store_shared.clone(),
-                    ctx.embed_dim_shared.clone(),
+                    c.embedding_provider_shared.clone(),
                 ),
             );
             let mut slot = ctx.memory_query_slot.lock().await;
