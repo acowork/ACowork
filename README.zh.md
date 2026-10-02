@@ -251,6 +251,9 @@ sudo systemctl enable --now acowork-relay
 [dev/deploy/relay/certbot-wildcard.sh](./dev/deploy/relay/certbot-wildcard.sh) 的可复制示例；中继重启后即加载
 轮换后的证书，Gateway 隧道会自动重连。
 
+**端到端实操**（Cloudflare 泛解析 + Aliyun ECS 部署，含通配符证书与「必须灰云」约束）：
+[docs/runbooks/relay-ecs-cloudflare-deploy.md](./docs/runbooks/relay-ecs-cloudflare-deploy.md)。
+
 ### ✍️ 30 秒写出第一个 Agent
 
 ```toml

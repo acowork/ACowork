@@ -262,6 +262,9 @@ Wildcard TLS (`*.relay.example.com`) requires a DNS-01 challenge — see
 [dev/deploy/relay/certbot-wildcard.sh](./dev/deploy/relay/certbot-wildcard.sh) for a copy-paste example; the relay
 picks up rotated certs on restart, and Gateway tunnels reconnect automatically.
 
+**End-to-end walkthrough** (Cloudflare DNS + Aliyun ECS, including the wildcard certificate and the
+grey-cloud requirement): [docs/runbooks/relay-ecs-cloudflare-deploy.md](./docs/runbooks/relay-ecs-cloudflare-deploy.md).
+
 ### ✍️ Try it: write a manifest in 30 seconds
 
 ```toml

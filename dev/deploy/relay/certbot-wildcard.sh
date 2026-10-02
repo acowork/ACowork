@@ -26,10 +26,17 @@ sudo certbot certonly --dns-cloudflare \
 sudo systemctl restart acowork-relay
 
 # Auto-renewal: certbot's own systemd timer handles renew, but the relay
-# does NOT hot-swap certificates — add a deploy hook so a restart happens
-# on every successful renewal. Put this into /etc/letsencrypt/cli.ini
-# (or pass --deploy-hook on renewal):
+# does NOT hot-swap certificates — a restart must happen on every
+# successful renewal. Do NOT use `--deploy-hook`: certbot's timer is a
+# separate process that does not carry your CLI flags, so the hook would
+# silently never run. Drop an executable into the hooks directory
+# instead (picked up by both the timer and a manual `certbot renew`):
 #
-#   deploy-hook = systemctl restart acowork-relay
+#   sudo install -d /etc/letsencrypt/renewal-hooks/deploy
+#   echo 'systemctl restart acowork-relay' | \
+#     sudo tee /etc/letsencrypt/renewal-hooks/deploy/reload-relay.sh
+#   sudo chmod +x /etc/letsencrypt/renewal-hooks/deploy/reload-relay.sh
 #
-# Verify the timer: systemctl list-timers | grep certbot
+# Then verify the whole chain: sudo certbot renew --dry-run
+# (the dry run fires deploy hooks), and check the timer is armed:
+#   systemctl list-timers | grep certbot
