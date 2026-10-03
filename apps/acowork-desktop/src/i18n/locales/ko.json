@@ -698,7 +698,13 @@
     "installFirstRunHint": "첫 실행은 시간이 걸릴 수 있습니다 (의존성 / ML 모델 다운로드).",
     "installSuccess": "설치 완료 — {{count}}개 도구 사용 가능",
     "installFailed": "설치 실패",
-    "installMissingRuntime": "런타임 {{runtime}}이(가) 없습니다. {{hint}} — 먼저 설치한 후 다시 시도하세요."
+    "installMissingRuntime": "런타임 {{runtime}}이(가) 없습니다. {{hint}} — 먼저 설치한 후 다시 시도하세요.",
+    "installRetry": "다시 시도",
+    "installDismiss": "닫기",
+    "installStage_checking_runtime": "런타임 확인 중",
+    "installStage_installing": "설치 중",
+    "installStage_verifying": "검증 중",
+    "installElapsed": "{{seconds}}초"
   },
   "rightPanel": {
     "debug": "디버그",

@@ -748,7 +748,13 @@
     "installFirstRunHint": "首次运行可能需要较长时间（下载依赖 / ML 模型）。",
     "installSuccess": "安装成功 — {{count}} 个工具可用",
     "installFailed": "安装失败",
-    "installMissingRuntime": "缺少运行时 {{runtime}}。{{hint}} — 请先安装再重试。"
+    "installMissingRuntime": "缺少运行时 {{runtime}}。{{hint}} — 请先安装再重试。",
+    "installRetry": "重试",
+    "installDismiss": "关闭",
+    "installStage_checking_runtime": "检查运行时",
+    "installStage_installing": "安装中",
+    "installStage_verifying": "校验中",
+    "installElapsed": "{{seconds}} 秒"
   },
   "rightPanel": {
     "debug": "调试",

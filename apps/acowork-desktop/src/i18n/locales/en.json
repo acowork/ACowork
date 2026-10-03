@@ -977,7 +977,13 @@
     "installFirstRunHint": "First run may take a while (dependency download / ML models).",
     "installSuccess": "Installed — {{count}} tools available",
     "installFailed": "Install failed",
-    "installMissingRuntime": "Missing runtime {{runtime}}. {{hint}} — install it first, then retry."
+    "installMissingRuntime": "Missing runtime {{runtime}}. {{hint}} — install it first, then retry.",
+    "installRetry": "Retry",
+    "installDismiss": "Dismiss",
+    "installStage_checking_runtime": "Checking runtime",
+    "installStage_installing": "Installing",
+    "installStage_verifying": "Verifying",
+    "installElapsed": "{{seconds}}s"
   },
   "rightPanel": {
     "debug": "Debug",

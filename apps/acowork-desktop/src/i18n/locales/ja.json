@@ -697,7 +697,13 @@
     "installFirstRunHint": "初回実行には時間がかかる場合があります（依存関係 / ML モデルのダウンロード）。",
     "installSuccess": "インストール完了 — {{count}} 個のツールを利用可能",
     "installFailed": "インストールに失敗しました",
-    "installMissingRuntime": "ランタイム {{runtime}} が見つかりません。{{hint}} — 先にインストールしてから再試行してください。"
+    "installMissingRuntime": "ランタイム {{runtime}} が見つかりません。{{hint}} — 先にインストールしてから再試行してください。",
+    "installRetry": "再試行",
+    "installDismiss": "閉じる",
+    "installStage_checking_runtime": "ランタイムを確認中",
+    "installStage_installing": "インストール中",
+    "installStage_verifying": "確認中",
+    "installElapsed": "{{seconds}}秒"
   },
   "rightPanel": {
     "debug": "デバッグ",

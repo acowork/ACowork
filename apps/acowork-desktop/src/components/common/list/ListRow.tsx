@@ -46,6 +46,10 @@ export interface ListRowProps {
   ariaLabel?: string;
   /** Extra classes appended to the row. */
   className?: string;
+  /** `data-testid` for the row root — lets a test scope to one row
+   *  (e.g. assert on a single MCP preset's action slot) without having to
+   *  walk the DOM looking for a button that may not be there. */
+  testId?: string;
 }
 
 export function ListRow({
@@ -59,6 +63,7 @@ export function ListRow({
   onClick,
   ariaLabel,
   className,
+  testId,
 }: ListRowProps) {
   const base = cn(
     "flex w-full items-center gap-2 py-1.5 text-left transition-colors",
@@ -90,5 +95,5 @@ export function ListRow({
       </button>
     );
   }
-  return <div className={base}>{content}</div>;
+  return <div className={base} data-testid={testId}>{content}</div>;
 }

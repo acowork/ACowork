@@ -696,7 +696,13 @@
     "installFirstRunHint": "首次執行可能需要較長時間（下載依賴 / ML 模型）。",
     "installSuccess": "安裝成功 — {{count}} 個工具可用",
     "installFailed": "安裝失敗",
-    "installMissingRuntime": "缺少執行環境 {{runtime}}。{{hint}} — 請先安裝再重試。"
+    "installMissingRuntime": "缺少執行環境 {{runtime}}。{{hint}} — 請先安裝再重試。",
+    "installRetry": "重試",
+    "installDismiss": "關閉",
+    "installStage_checking_runtime": "檢查執行環境",
+    "installStage_installing": "安裝中",
+    "installStage_verifying": "驗證中",
+    "installElapsed": "{{seconds}} 秒"
   },
   "rightPanel": {
     "debug": "除錯",

@@ -10,7 +10,7 @@ import { isLocalProvider } from "../../lib/providers";
 import { fetchProviderModels } from "../../lib/gateway-api";
 import { getGatewayUrl } from "../../lib/config";
 import { Monitor, MousePointer, Package, Search, Globe, BookOpen, FileText, PenTool, Star, Plus, CheckCircle2, Download, XCircle, Loader2, Minus, Pencil } from "lucide-react";
-import { useMcpStore, type McpInstallRunResponse } from "../../stores/mcpStore";
+import { useMcpStore } from "../../stores/mcpStore";
 import { MCP_PRESETS, presetToServerConfig } from "../../lib/mcp-presets";
 import { EmbeddingModelTab } from "./EmbeddingModelTab";
 import { LspTab } from "./LspTab";
@@ -683,16 +683,17 @@ function ProvidersTab() {
   );
 }
 
-/** MCP tab — placeholder, content TBD */
+/** MCP catalog tab. Exported for tests. */
 const MCP_ICON_MAP: Record<string, React.ComponentType<{ className?: string }>> = {
   Monitor, MousePointer, Search, Globe, BookOpen, FileText, PenTool,
 };
 const MCP_FALLBACK_ICON = Package;
 
-function McpTab() {
+export function McpTab() {
   const { t } = useTranslation();
   const { catalog, loading, error, loadCatalog, addServer, removeServer, probeServer, probeByName,
-    installMcp,
+    installMcp, installing, installStages, installElapsed, installOutcomes,
+    clearInstallOutcome, pollInstallStatus,
     healthStatus, healthErrors, healthToolCounts } = useMcpStore();
   const [showAddForm, setShowAddForm] = useState(false);
   // Tools-tab style level-1 collapsible groups (default open)
@@ -703,9 +704,8 @@ function McpTab() {
   const [pendingConfig, setPendingConfig] = useState<McpServerConfigDef | null>(null);
   const [probeResult, setProbeResult] = useState<{ success: boolean; tool_count: number; tools: string[]; error: string | null; duration_ms: number } | null>(null);
 
-  // ADR-072 install dialog state
-  const [installRunning, setInstallRunning] = useState(false);
-  const [installResult, setInstallResult] = useState<McpInstallRunResponse | null>(null);
+  /** Preset ids whose installer stdout is expanded on the row. */
+  const [showInstallOutput, setShowInstallOutput] = useState<Set<string>>(new Set());
 
   const presetIconMap = useMemo(() => {
     const map: Record<string, string> = {};
@@ -733,14 +733,27 @@ function McpTab() {
 
   const catalogNames = useMemo(() => new Set(catalog.map((s) => s.name)), [catalog]);
 
-  /** ADR-072: run the install pipeline for a preset (install-then-add). */
+  const installingSet = useMemo(() => new Set(installing), [installing]);
+
+  // Poll stage + elapsed for every in-flight install. The install is one
+  // long HTTP request, so without this the row can only say "installing…"
+  // for minutes with no idea whether it is pulling deps or handshaking.
+  useEffect(() => {
+    if (installing.length === 0) return;
+    const ids = [...installing];
+    const poll = () => ids.forEach((id) => pollInstallStatus(id));
+    poll();
+    const timer = setInterval(poll, 2000);
+    return () => clearInterval(timer);
+  }, [installing, pollInstallStatus]);
+
+  /**
+   * ADR-072: run the install pipeline for a preset (install-then-add).
+   * Progress + outcome live in the store so the row owns them — no dialog.
+   */
   const runPresetInstall = async (preset: McpPresetDef, env: Record<string, string>) => {
     if (!preset.install) return;
-    setInstallRunning(true);
-    setInstallResult(null);
-    const result = await installMcp(preset.id, preset.install, env);
-    setInstallRunning(false);
-    setInstallResult(result);
+    await installMcp(preset.id, preset.install, env);
   };
 
   const handleAddFromPreset = async (preset: McpPresetDef) => {
@@ -963,9 +976,12 @@ function McpTab() {
           <ListBox variant="plain">
             {MCP_PRESETS.map((preset) => {
               const isInstalled = catalogNames.has(preset.id);
+              const isInstalling = installingSet.has(preset.id);
+              const outcome = installOutcomes[preset.id];
               return (
                 <ListRow
                   key={preset.id}
+                  testId={`mcp-preset-${preset.id}`}
                   surface="inset"
                   leading={
                     (() => {
@@ -981,6 +997,14 @@ function McpTab() {
                         <CheckCircle2 className="h-3 w-3" />
                         {t("harnessMcp.installed")}
                       </span>
+                    ) : isInstalling ? (
+                      /* Busy state lives on the row, not in a modal: the
+                         install request stays open for minutes and a dialog
+                         could be dismissed while it kept running. */
+                      <span className="inline-flex shrink-0 items-center gap-1 rounded bg-zinc-100 px-2 py-1 text-[11px] font-medium text-text-secondary dark:bg-zinc-700">
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                        {t("harnessMcp.installing")}
+                      </span>
                     ) : (
                       <button
                         type="button"
@@ -990,7 +1014,9 @@ function McpTab() {
                         {preset.install ? (
                           <>
                             <Download className="h-3 w-3" />
-                            {t("harnessMcp.install")}
+                            {outcome && !outcome.success
+                              ? t("harnessMcp.installRetry")
+                              : t("harnessMcp.install")}
                           </>
                         ) : (
                           <>
@@ -1007,12 +1033,76 @@ function McpTab() {
                     <span className="shrink-0 rounded bg-zinc-100 px-1 py-0.5 text-[10px] text-text-tertiary dark:bg-zinc-700">
                       {preset.category}
                     </span>
+                    {/* Stage + elapsed while installing — the stage comes from
+                        the Gateway pipeline, the elapsed from the same poll. */}
+                    {isInstalling && (() => {
+                      const seconds = Math.round((installElapsed[preset.id] ?? 0) / 1000);
+                      const stage = installStages[preset.id];
+                      // One string, not three sibling nodes: keeps the row
+                      // text queryable and the label unbreakable.
+                      const label = stage
+                        ? `${t(`harnessMcp.installStage_${stage}`)} · ${t("harnessMcp.installElapsed", { seconds })}`
+                        : t("harnessMcp.installElapsed", { seconds });
+                      return (
+                        <span
+                          data-testid={`mcp-install-stage-${preset.id}`}
+                          className="inline-flex shrink-0 items-center gap-1 text-[10px] text-text-tertiary"
+                        >
+                          {label}
+                        </span>
+                      );
+                    })()}
                   </div>
                   <p className="mt-0.5 line-clamp-1 text-[10px] text-text-tertiary">{preset.description}</p>
-                  {preset.requiredEnv.length > 0 && !isInstalled && (
+                  {preset.requiredEnv.length > 0 && !isInstalled && !isInstalling && (
                     <p className="mt-0.5 text-[10px] text-amber-500">
                       {t("harnessMcp.requires")}{preset.requiredEnv.join(", ")}
                     </p>
+                  )}
+                  {/* Terminal install result, inline (mirrors LspTab). The
+                      button above already turned into "Retry". */}
+                  {outcome && !outcome.success && !isInstalling && (
+                    <div className="mt-1">
+                      <div className="flex items-center gap-2">
+                        <span className="inline-flex items-center gap-1 text-[10px] text-red-600 dark:text-red-400">
+                          <XCircle className="h-2.5 w-2.5" />
+                          {t("harnessMcp.installFailed")}
+                        </span>
+                        {outcome.stdout && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setShowInstallOutput((prev) => {
+                                const next = new Set(prev);
+                                if (next.has(preset.id)) next.delete(preset.id);
+                                else next.add(preset.id);
+                                return next;
+                              })
+                            }
+                            className="text-[10px] text-text-tertiary hover:text-zinc-600 dark:hover:text-zinc-300"
+                          >
+                            {showInstallOutput.has(preset.id)
+                              ? t("common.hideDetails")
+                              : t("common.showDetails")}
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => clearInstallOutcome(preset.id)}
+                          className="text-[10px] text-text-tertiary hover:text-zinc-600 dark:hover:text-zinc-300"
+                        >
+                          {t("harnessMcp.installDismiss")}
+                        </button>
+                      </div>
+                      {outcome.error && (
+                        <p className="mt-0.5 break-all text-[10px] text-red-500">{outcome.error}</p>
+                      )}
+                      {outcome.stdout && showInstallOutput.has(preset.id) && (
+                        <pre className="mt-1 max-h-32 overflow-auto rounded bg-zinc-50 p-2 text-[10px] leading-relaxed dark:bg-zinc-900/50">
+                          <code>{outcome.stdout}</code>
+                        </pre>
+                      )}
+                    </div>
                   )}
                 </ListRow>
               );
@@ -1222,66 +1312,6 @@ function McpTab() {
         </div>
       )}
 
-      {/* ADR-072 install dialog (running / result / guidance) */}
-      {(installRunning || installResult) && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-modal-overlay">
-          <div className="w-[520px] max-h-[85vh] overflow-y-auto rounded-md bg-modal-surface p-6 shadow-xl">
-            {installRunning ? (
-              <>
-                <div className="flex items-center gap-2 mb-3">
-                  <Loader2 className="h-4 w-4 animate-spin text-[var(--color-accent)]" />
-                  <h3 className="text-sm font-semibold">{t("harnessMcp.installing")}</h3>
-                </div>
-                <p className="text-xs text-text-tertiary">
-                  {t("harnessMcp.installFirstRunHint")}
-                </p>
-              </>
-            ) : installResult?.success ? (
-              <>
-                <div className="flex items-center gap-2 mb-3">
-                  <CheckCircle2 className="h-4 w-4 text-green-500" />
-                  <h3 className="text-sm font-semibold text-green-600 dark:text-green-400">
-                    {t("harnessMcp.installSuccess", { count: installResult.tool_count ?? 0 })}
-                  </h3>
-                </div>
-                {installResult.stdout && (
-                  <pre className="mb-3 max-h-48 overflow-y-auto rounded bg-zinc-50 p-2 text-[10px] text-text-secondary dark:bg-zinc-700/50 ">
-                    {installResult.stdout}
-                  </pre>
-                )}
-              </>
-            ) : (
-              <>
-                <div className="flex items-center gap-2 mb-3">
-                  <XCircle className="h-4 w-4 text-red-500" />
-                  <h3 className="text-sm font-semibold text-red-600 dark:text-red-400">
-                    {t("harnessMcp.installFailed")}
-                  </h3>
-                </div>
-                <ErrorBox
-                  message={t("harnessMcp.installFailed")}
-                  details={installResult?.stderr || installResult?.health_error || undefined}
-                />
-                {(installResult?.stderr || installResult?.health_error) && (
-                  <pre className="mt-3 max-h-48 overflow-y-auto rounded bg-zinc-50 p-2 text-[10px] text-red-500 dark:bg-zinc-700/50 dark:text-red-400">
-                    {installResult?.health_error
-                      ? `${installResult.stderr}\n\n[health check] ${installResult.health_error}`
-                      : installResult?.stderr}
-                  </pre>
-                )}
-              </>
-            )}
-            <div className="mt-4 flex justify-end">
-              <button
-                onClick={() => { setInstallResult(null); setInstallRunning(false); }}
-                className="inline-flex items-center gap-1 rounded btn-accent px-3 py-1.5 text-xs font-medium"
-              >
-                OK
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

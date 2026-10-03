@@ -10,22 +10,25 @@
 //! - DELETE /api/mcp-catalog/{name}   — remove a server entry
 //! - POST   /api/mcp-catalog/probe   — probe a server config (health check)
 //! - POST   /api/mcp-catalog/{name}/probe — probe an existing catalog entry
+//! - POST   /api/mcp-catalog/install — install a preset, write it to the catalog
+//! - GET    /api/mcp-catalog/install/{name}         — pre-flight install check
+//! - GET    /api/mcp-catalog/install/{name}/status — in-flight install progress
 
 use axum::{
-    Json, Router,
     extract::{Path, State},
     http::StatusCode,
     routing::{delete, get, post},
+    Json, Router,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::time::Instant;
 
 use crate::http::routes::{ApiError, AppState, OperationAck};
 use crate::resource_cache;
 use acowork_core::operation::{OperationRecord, OperationState};
-use acowork_core::protocol::{
-    InstallState, McpInstallSpec, McpServerConfigDef, McpTransportDef,
-};
+use acowork_core::protocol::{InstallState, McpInstallSpec, McpServerConfigDef, McpTransportDef};
 
 /// Build the MCP catalog router
 pub fn mcp_catalog_routes() -> Router<AppState> {
@@ -36,26 +39,23 @@ pub fn mcp_catalog_routes() -> Router<AppState> {
                 .put(replace_catalog)
                 .post(add_catalog_entry),
         )
-        .route(
-            "/api/mcp-catalog/probe",
-            post(probe_server_config),
-        )
-        .route(
-            "/api/mcp-catalog/install",
-            post(install_server),
-        )
+        .route("/api/mcp-catalog/probe", post(probe_server_config))
+        .route("/api/mcp-catalog/install", post(install_server))
         .route(
             "/api/mcp-catalog/install/{name}",
             get(install_check).post(install_catalog_entry),
+        )
+        // Registered after the `{name}` route: axum's matchit is static-first,
+        // so `/install/{name}/status` resolves here regardless of order.
+        .route(
+            "/api/mcp-catalog/install/{name}/status",
+            get(install_status),
         )
         .route(
             "/api/mcp-catalog/{name}",
             delete(remove_catalog_entry).put(update_catalog_entry),
         )
-        .route(
-            "/api/mcp-catalog/{name}/probe",
-            post(probe_catalog_entry),
-        )
+        .route("/api/mcp-catalog/{name}/probe", post(probe_catalog_entry))
 }
 
 // ── Persistence helpers ──────────────────────────────────────────────
@@ -185,6 +185,128 @@ pub struct McpProbeResponse {
     pub duration_ms: u64,
 }
 
+// ── In-flight install registry ───────────────────────────────────────
+
+/// Coarse stage of an install run, surfaced to the Desktop so a row can
+/// show *what* is happening instead of a spinner with no context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InstallStage {
+    /// Probing that the package runtime (node / uv / cargo / docker) exists.
+    CheckingRuntime,
+    /// Running the derived install command (npm / pip / cargo / docker).
+    Installing,
+    /// Spawning the server + MCP initialize + tools/list handshake.
+    Verifying,
+}
+
+impl InstallStage {
+    fn as_str(self) -> &'static str {
+        match self {
+            InstallStage::CheckingRuntime => "checking_runtime",
+            InstallStage::Installing => "installing",
+            InstallStage::Verifying => "verifying",
+        }
+    }
+}
+
+/// One in-flight install: the stage it last reached + when it started.
+#[derive(Debug, Clone, Copy)]
+struct InstallProgress {
+    stage: InstallStage,
+    started_at: Instant,
+}
+
+/// `server name → progress` for installs currently running in this process.
+///
+/// The install pipeline (runtime probe → install command → MCP handshake)
+/// is multi-minute on a first run, and the HTTP request blocks for the
+/// whole of it. Without this registry the only signal a caller has is
+/// "the request has not returned yet", which says nothing about *where*
+/// the install is — and, worse, lets a second click start a duplicate
+/// install of the same server. The registry does both jobs: it is the
+/// source for `GET .../status` and the guard that rejects a concurrent
+/// install of the same name with 409.
+///
+/// ponytail: in-memory and per-Gateway-process. A Gateway restart drops a
+/// running install (the client sees the request fail and clears its
+/// spinner); installs are short-lived and never survive a restart anyway,
+/// so persisting them would buy nothing. Upgrade path if we ever fan an
+/// install out to a Node (ADR-055): move this map into a shared store the
+/// Node-reply path can write to, keyed by operation id.
+static INSTALLS: std::sync::LazyLock<parking_lot::Mutex<HashMap<String, InstallProgress>>> =
+    std::sync::LazyLock::new(|| parking_lot::Mutex::new(HashMap::new()));
+
+/// Guard returned when an install of `name` is already running. Holds the
+/// stage lock for the whole pipeline: dropping it removes the entry, so
+/// every exit path (including `?`) cleans up.
+struct InstallGuard {
+    name: String,
+}
+
+impl InstallGuard {
+    /// Register a new install for `name`, or return the current stage when
+    /// one is already in flight.
+    fn acquire(name: &str) -> Result<Self, InstallStage> {
+        let mut map = INSTALLS.lock();
+        if let Some(p) = map.get(name) {
+            return Err(p.stage);
+        }
+        map.insert(
+            name.to_string(),
+            InstallProgress {
+                stage: InstallStage::CheckingRuntime,
+                started_at: Instant::now(),
+            },
+        );
+        Ok(Self {
+            name: name.to_string(),
+        })
+    }
+
+    /// Advance the stage. No-op once the guard is gone (best effort).
+    fn stage(&self, stage: InstallStage) {
+        if let Some(p) = INSTALLS.lock().get_mut(&self.name) {
+            p.stage = stage;
+        }
+    }
+
+    /// Snapshot of a running install: `(stage, elapsed_ms)`.
+    fn status(name: &str) -> Option<(InstallStage, u64)> {
+        let map = INSTALLS.lock();
+        map.get(name)
+            .map(|p| (p.stage, p.started_at.elapsed().as_millis() as u64))
+    }
+}
+
+impl Drop for InstallGuard {
+    fn drop(&mut self) {
+        INSTALLS.lock().remove(&self.name);
+    }
+}
+
+/// `GET /api/mcp-catalog/install/{name}/status` — in-flight install progress.
+///
+/// Returns `running: false` for every server that is not currently being
+/// installed (including unknown names) so the caller can poll this
+/// unconditionally.
+pub async fn install_status(Path(name): Path<String>) -> Json<McpInstallStatusResponse> {
+    match InstallGuard::status(&name) {
+        Some((stage, elapsed_ms)) => Json(McpInstallStatusResponse {
+            name,
+            running: true,
+            stage: Some(stage.as_str().to_string()),
+            elapsed_ms,
+        }),
+        None => Json(McpInstallStatusResponse {
+            name,
+            running: false,
+            stage: None,
+            elapsed_ms: 0,
+        }),
+    }
+}
+
 // ── Install DTOs (ADR-072) ─────────────────────────────────────────────
 
 /// Request to install a preset MCP server (ADR-072). Install runs, then on
@@ -219,6 +341,18 @@ pub struct McpInstallCheckResponse {
     pub install_hint: Option<String>,
     pub install_command: Option<Vec<String>>,
     pub spawn: McpServerConfigDef,
+}
+
+/// In-flight install progress (`GET /api/mcp-catalog/install/{name}/status`).
+#[derive(Serialize)]
+pub struct McpInstallStatusResponse {
+    pub name: String,
+    /// An install of this server is running in this Gateway right now.
+    pub running: bool,
+    /// Last stage reached — `None` when `running` is false.
+    pub stage: Option<String>,
+    /// Wall-clock time since the install started.
+    pub elapsed_ms: u64,
 }
 
 /// Install run response (ADR-072).
@@ -382,13 +516,12 @@ pub async fn update_catalog_entry(
     let mut catalog = load_mcp_catalog(&data_dir).map_err(|e| ApiError::internal(&e))?;
 
     // If the name is being changed, check for conflicts first
-    if body.config.name != name
-        && catalog.iter().any(|c| c.name == body.config.name) {
-            return Err(ApiError::bad_request(&format!(
-                "MCP server '{}' already exists in catalog",
-                body.config.name
-            )));
-        }
+    if body.config.name != name && catalog.iter().any(|c| c.name == body.config.name) {
+        return Err(ApiError::bad_request(&format!(
+            "MCP server '{}' already exists in catalog",
+            body.config.name
+        )));
+    }
 
     // Find the existing entry index
     let idx = catalog.iter().position(|c| c.name == name).ok_or_else(|| {
@@ -644,18 +777,34 @@ pub async fn probe_catalog_entry(
 /// 2. Run the derived install command (if any).
 /// 3. Derive spawn config & health check (single handshake, one retry for
 ///    slow first-run downloads).
+///
+/// Registers the run in [`INSTALLS`] first: a concurrent install of the
+/// same server is rejected with 409 instead of running a second copy, and
+/// `GET .../status` can report the stage. The returned guard is held for
+/// the whole pipeline so every exit path unregisters.
 async fn run_install_pipeline(
     name: &str,
     install: &McpInstallSpec,
     spawn_override: Option<McpServerConfigDef>,
     env: &std::collections::HashMap<String, String>,
 ) -> Result<(McpInstallRunResponse, McpServerConfigDef), ApiError> {
+    let guard = InstallGuard::acquire(name).map_err(|stage| {
+        tracing::warn!(server = %name, stage = stage.as_str(), "Rejected duplicate MCP install");
+        ApiError::conflict(&format!(
+            "MCP server '{name}' is already being installed ({}).",
+            stage.as_str()
+        ))
+    })?;
+
     let pkg = install.package.clone();
 
     // 1. Runtime dependency check.
     match acowork_mcp::ensure_runtime(&pkg) {
         Ok(()) => {}
-        Err(acowork_mcp::DependencyStatus::Missing { runtime, install_hint }) => {
+        Err(acowork_mcp::DependencyStatus::Missing {
+            runtime,
+            install_hint,
+        }) => {
             return Err(ApiError::conflict(&format!(
                 "Missing runtime '{}'. {} — install it first, then retry.",
                 runtime, install_hint
@@ -665,6 +814,7 @@ async fn run_install_pipeline(
     }
 
     // 2. Run the install command (if any).
+    guard.stage(InstallStage::Installing);
     let output = acowork_mcp::run_install(&pkg)
         .await
         .map_err(|e| ApiError::internal(&e))?;
@@ -695,6 +845,7 @@ async fn run_install_pipeline(
     // in spawn_args resolve during the health check.
     spawn.env = acowork_mcp::build_spawn_env(env);
 
+    guard.stage(InstallStage::Verifying);
     let mut health = acowork_mcp::health_check(&spawn).await;
     if health.is_err() {
         // First-run downloads (e.g. uvx pulling deps) can exceed MCP_RECV;
@@ -828,16 +979,17 @@ pub async fn install_check(
             install_command,
             spawn,
         })),
-        acowork_mcp::DependencyStatus::Missing { runtime, install_hint } => {
-            Ok(Json(McpInstallCheckResponse {
-                name,
-                runtime_ready: false,
-                missing_runtime: Some(runtime),
-                install_hint: Some(install_hint),
-                install_command,
-                spawn,
-            }))
-        }
+        acowork_mcp::DependencyStatus::Missing {
+            runtime,
+            install_hint,
+        } => Ok(Json(McpInstallCheckResponse {
+            name,
+            runtime_ready: false,
+            missing_runtime: Some(runtime),
+            install_hint: Some(install_hint),
+            install_command,
+            spawn,
+        })),
     }
 }
 
@@ -976,5 +1128,53 @@ mod tests {
         assert!(loaded.is_empty());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Regression guard for the duplicate-install report: clicking Install
+    /// twice used to fire two `POST /api/mcp-catalog/install` calls, and both
+    /// ran the full pipeline. The guard makes the second one a 409.
+    #[test]
+    fn test_install_guard_rejects_duplicate_and_reports_stage() {
+        // Unique name — the registry is process-global and `cargo test` runs
+        // tests in parallel threads.
+        let name = format!("test-guard-{}", std::process::id());
+
+        let guard = InstallGuard::acquire(&name).expect("first install must be admitted");
+        assert_eq!(
+            InstallGuard::status(&name).map(|(s, _)| s),
+            Some(InstallStage::CheckingRuntime),
+            "guard registers at the runtime-check stage"
+        );
+
+        // Second install of the same server is rejected with the live stage.
+        assert_eq!(
+            InstallGuard::acquire(&name).err(),
+            Some(InstallStage::CheckingRuntime)
+        );
+        guard.stage(InstallStage::Installing);
+        assert_eq!(
+            InstallGuard::acquire(&name).err(),
+            Some(InstallStage::Installing)
+        );
+
+        // A different server is unaffected — installs don't block each other.
+        let other = format!("{name}-other");
+        let other_guard = InstallGuard::acquire(&other);
+        assert!(other_guard.is_ok());
+        drop(other_guard);
+
+        // Elapsed time is reported and grows monotonically.
+        let (_, first) = InstallGuard::status(&name).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let (_, second) = InstallGuard::status(&name).unwrap();
+        assert!(
+            second >= first,
+            "elapsed {second}ms must not go backwards from {first}ms"
+        );
+
+        // Dropping the guard frees the name for the next install.
+        drop(guard);
+        assert!(InstallGuard::status(&name).is_none());
+        assert!(InstallGuard::acquire(&name).is_ok());
     }
 }
