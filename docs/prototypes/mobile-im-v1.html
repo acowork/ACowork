@@ -145,7 +145,6 @@ html[data-theme="dark"] body { background: #0B0B0D; }
   display: grid; grid-template-columns: 56px 1fr 56px; align-items: center;
   min-height: calc(44px + var(--safe-top));
 }
-.navbar.transparent { background: transparent; }
 /* 右侧承载两个动作时（聊天页：新建会话 + 更多），列宽改为自适应。
    固定 56px 只放得下 36px 的单图标按钮，第二个按钮会被挤出屏幕外。 */
 .navbar.right-wide { grid-template-columns: 56px 1fr auto; }
@@ -262,13 +261,9 @@ html[data-theme="dark"] .tabbar { background: #1C1C1E; }
 }
 
 /* ---------- 页面容器 ---------- */
-.screen {
-  position: absolute; inset: 0; display: flex; flex-direction: column;
-  background: var(--bg);
-  padding-top: var(--safe-top);
-  will-change: transform;
-}
-.screen.plain-nav { padding-top: 0; }
+/* 注意：安全区由 .navbar 自己 padding-top 顶开，不再有 .screen 包裹层。
+   （旧的 .screen / .screen.plain-nav 规则已删 —— 那个 class 从未被写进
+   markup，正是导航栏压住状态栏的根因，留着会误导后来人。） */
 .screen-scroll { flex: 1 1 auto; overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; min-width: 0; }
 /* 栈深 = 1（一级页）时，列表底部要让开 TabBar + 安全区 */
 .stack.root .screen-scroll { padding-bottom: calc(var(--tabbar-h) + var(--safe-bottom) + 8px); }
@@ -424,6 +419,8 @@ html[data-theme="dark"] .pill.teal { color: var(--teal); }
   flex: 0 0 auto; width: 5px; height: 5px; border-radius: 50%; background: var(--green);
 }
 .conv-row .ntag .ndot.off { background: var(--label-3); }
+/* Node 离线：整块 chip 一起降调，避免"绿点 + 灰底"读起来仍像正常态 */
+.conv-row .ntag.off { color: var(--label-3); }
 .section-label {
   padding: 14px 16px 6px; font-size: 13px; color: var(--label-2);
   display: flex; align-items: center; gap: 6px;
@@ -798,19 +795,36 @@ const ICON = {
    ============================================================ */
 const ME = { id: "me", name: "Nicholas", color: "#3B82F6", role: "admin" };
 
+/* 节点实体（对齐 Desktop NodeInfo）。
+   Agent 只持有 node_id，显示名与在线状态都由 Node 侧决定 ——
+   Node 可以掉线而 Runtime 进程还挂着，这时 Agent 的「在线」仍是绿的，
+   只有 node.online 能暴露。所以圆点必须读 Node，不能拿 Agent 存活代理。 */
+const NODES = [
+  { node_id: "n-mac-studio", node_name: "Mac-Studio", hostname: "mac-studio.local", online: true,  os: "macOS 15", arch: "aarch64" },
+  { node_id: "n-ipad",       node_name: "Node-iPad",   hostname: "node-ipad.local",  online: false, os: "iPadOS 18", arch: "aarch64" },
+];
+
+/** 显示名兜底顺序，对齐 Desktop nodeDisplayName（ADR-075 D8）。 */
+function nodeById(nid) { return NODES.find(n => n.node_id === nid) || null; }
+function nodeLabel(n) {
+  const x = nodeById(n);
+  return x ? (x.node_name || x.hostname || x.node_id) : (n || "");
+}
+
 const AGENTS = [
-  { id: "com.acowork.software-architect", name: "架构师", pkg: "software-architect", color: "#3B82F6", alive: true,  busy: true,  node: "Mac-Studio", ver: "0.4.2", model: "gpt-5", sessions: 12, preview: "已完成 ADR-085 状态机评审，剩下生命周期回滚路径", time: "14:32", unread: 2 },
-  { id: "com.acowork.senior-engineer",  name: "高级工程师", pkg: "senior-engineer", color: "#34C759", alive: true,  busy: false, node: "Mac-Studio", ver: "1.2.0", model: "claude-sonnet-4", sessions: 34, preview: "cargo test 全绿，19 个新测试覆盖 crate 重命名", time: "13:05", unread: 0 },
-  { id: "com.acowork.product-manager", name: "产品经理", pkg: "product-manager", color: "#FF9500", alive: true,  busy: false, node: "Mac-Studio", ver: "0.9.1", model: "gpt-5-mini", sessions: 7, preview: "Mobile v1 PRD 已生成草稿", time: "昨天", unread: 0 },
-  { id: "com.acowork.project-manager", name: "项目经理", pkg: "project-manager", color: "#AF52DE", alive: true,  busy: false, node: "Mac-Studio", ver: "0.7.3", model: "gpt-5-mini", sessions: 5, preview: "T-42 已提交待审核", time: "昨天", unread: 1 },
-  { id: "com.acowork.quality-assurance", name: "测试工程师", pkg: "quality-assurance", color: "#5AC8FA", alive: true,  busy: false, node: "Mac-Studio", ver: "0.6.0", model: "gpt-5-mini", sessions: 3, preview: "Gateway 代理回归通过", time: "周一", unread: 0 },
-  { id: "com.acowork.document-manager", name: "文档管理员", pkg: "document-manager", color: "#FF2D55", alive: false, busy: false, node: "Mac-Studio", ver: "0.3.0", model: "—", sessions: 0, preview: "", time: "", unread: 0 },
-  { id: "com.acowork.system", name: "系统助手", pkg: "system", color: "#8E8E93", alive: true,  busy: false, node: "Mac-Studio", ver: "1.0.0", model: "gpt-5-mini", sessions: 2, preview: "已为 Node-iPad 恢复远程隧道", time: "周一", unread: 0 },
+  { id: "com.acowork.software-architect", name: "架构师", pkg: "software-architect", color: "#3B82F6", alive: true,  busy: true,  node_id: "n-mac-studio", ver: "0.4.2", model: "gpt-5", sessions: 12, preview: "已完成 ADR-085 状态机评审，剩下生命周期回滚路径", time: "14:32", unread: 2 },
+  { id: "com.acowork.senior-engineer",  name: "高级工程师", pkg: "senior-engineer", color: "#34C759", alive: true,  busy: false, node_id: "n-mac-studio", ver: "1.2.0", model: "claude-sonnet-4", sessions: 34, preview: "cargo test 全绿，19 个新测试覆盖 crate 重命名", time: "13:05", unread: 0 },
+  { id: "com.acowork.product-manager", name: "产品经理", pkg: "product-manager", color: "#FF9500", alive: true,  busy: false, node_id: "n-mac-studio", ver: "0.9.1", model: "gpt-5-mini", sessions: 7, preview: "Mobile v1 PRD 已生成草稿", time: "昨天", unread: 0 },
+  { id: "com.acowork.project-manager", name: "项目经理", pkg: "project-manager", color: "#AF52DE", alive: true,  busy: false, node_id: "n-mac-studio", ver: "0.7.3", model: "gpt-5-mini", sessions: 5, preview: "T-42 已提交待审核", time: "昨天", unread: 1 },
+  { id: "com.acowork.quality-assurance", name: "测试工程师", pkg: "quality-assurance", color: "#5AC8FA", alive: true,  busy: false, node_id: "n-mac-studio", ver: "0.6.0", model: "gpt-5-mini", sessions: 3, preview: "Gateway 代理回归通过", time: "周一", unread: 0 },
+  { id: "com.acowork.document-manager", name: "文档管理员", pkg: "document-manager", color: "#FF2D55", alive: false, busy: false, node_id: "n-mac-studio", ver: "0.3.0", model: "—", sessions: 0, preview: "", time: "", unread: 0 },
+  { id: "com.acowork.system", name: "系统助手", pkg: "system", color: "#8E8E93", alive: true,  busy: false, node_id: "n-mac-studio", ver: "1.0.0", model: "gpt-5-mini", sessions: 2, preview: "已为 Node-iPad 恢复远程隧道", time: "周一", unread: 0 },
   /* 以下三个部署在第二台机器上：多 node 场景下会话行才需要显示 node 标识。
-     单 node 时该标识自动隐藏（见 nodeTagHTML），避免给用户无意义的噪音。 */
-  { id: "com.acowork.rust-engineer", name: "Rust 工程师", pkg: "rust-engineer", color: "#FF9F0A", alive: true,  busy: false, node: "Node-iPad", ver: "0.2.1", model: "claude-sonnet-4", sessions: 5, preview: "跨 crate 重命名完成，19 处 import 已修", time: "12:20", unread: 0 },
-  { id: "com.acowork.data-analyst", name: "数据分析师", pkg: "data-analyst", color: "#5E5CE6", alive: true,  busy: false, node: "Node-iPad", ver: "0.1.3", model: "gpt-5-mini", sessions: 3, preview: "embedding 维度对比结果已出表", time: "10:05", unread: 0 },
-  { id: "com.acowork.devops", name: "运维助手", pkg: "devops", color: "#64D2FF", alive: false, busy: false, node: "Node-iPad", ver: "0.4.0", model: "gpt-5", sessions: 8, preview: "", time: "", unread: 0 },
+     单 node 时该标识自动隐藏（见 nodeTagHTML），避免给用户无意义的噪音。
+     注意 Rust 工程师 alive=true 但它的 Node-iPad 离线 —— 圆点必须是灰的。 */
+  { id: "com.acowork.rust-engineer", name: "Rust 工程师", pkg: "rust-engineer", color: "#FF9F0A", alive: true,  busy: false, node_id: "n-ipad", ver: "0.2.1", model: "claude-sonnet-4", sessions: 5, preview: "跨 crate 重命名完成，19 处 import 已修", time: "12:20", unread: 0 },
+  { id: "com.acowork.data-analyst", name: "数据分析师", pkg: "data-analyst", color: "#5E5CE6", alive: true,  busy: false, node_id: "n-ipad", ver: "0.1.3", model: "gpt-5-mini", sessions: 3, preview: "embedding 维度对比结果已出表", time: "10:05", unread: 0 },
+  { id: "com.acowork.devops", name: "运维助手", pkg: "devops", color: "#64D2FF", alive: false, busy: false, node_id: "n-ipad", ver: "0.4.0", model: "gpt-5", sessions: 8, preview: "", time: "", unread: 0 },
 ];
 
 const USERS = [
@@ -1606,15 +1620,23 @@ function avatarHTML(o, size = "") {
 }
 
 /* 会话行的 node 标识。只在 >1 个 node 时渲染 —— 单节点部署时"这台机器叫
-   Mac-Studio"是噪音，没有决策价值。圆点表示节点在线状态（Agent 活着不代表
-   它所在机器健康：Node 可能掉线而 Runtime 还挂着）。 */
+   Mac-Studio"是噪音，没有决策价值。圆点读 Node 的 online（Node 心跳），
+   不是 Agent 的 alive：Node 掉线而 Runtime 还挂着是真实存在的中间态，
+   那种情况下 Agent 的「在线」pill 仍是绿的，只有这个圆点能暴露。 */
 function nodeTagHTML(c) {
-  if (c.kind !== "agent") return "";
-  const nodes = [...new Set(AGENTS.map(a => a.node).filter(Boolean))];
-  if (nodes.length < 2 || !c.node) return "";
-  const online = c.alive;   // 真实实现读 node.online（Node 心跳），与 Agent 存活是两回事
-  return `<span class="ntag" title="运行节点：${esc(c.node)}">
-    <span class="ndot${online ? "" : " off"}"></span>${esc(c.node)}</span>`;
+  if (c.kind !== "agent" || !c.node_id) return "";
+  if (NODES.length < 2) return "";
+  const n = nodeById(c.node_id);
+  const label = n ? nodeLabel(c.node_id) : c.node_id;
+  /* ?? false 与 Desktop 一致（AgentList.tsx `group.node?.online ?? false`）：
+     Gateway 从没上报过这个 node，就当它不可达，而不是乐观地显示在线。 */
+  const online = n ? n.online : false;
+  if (!online) {
+    return `<span class="ntag off" title="${esc(label)} 已离线">
+      <span class="ndot off"></span>${esc(label)}</span>`;
+  }
+  return `<span class="ntag" title="运行节点：${esc(label)}">
+    <span class="ndot"></span>${esc(label)}</span>`;
 }
 
 function navHTML({ title, sub, left, right, large, titleNode, rightWide }) {
@@ -1761,7 +1783,7 @@ function pageChat(p) {
   return `
     ${navHTML({
       title: c.name,
-      sub: isAgent ? (stopped ? "已停止" : `${c.model} · ${c.node}`) : (c.online ? "在线" : "离线"),
+      sub: isAgent ? (stopped ? "已停止" : `${c.model} · ${nodeLabel(c.node_id)}`) : (c.online ? "在线" : "离线"),
       left: `<button class="nav-btn icon" data-act="back" aria-label="返回">${ICON.back}</button>`,
       right: newSessBtn + `<button class="nav-btn icon" data-act="sheet" data-sheet="profile" data-arg="${c.id}" aria-label="更多">${ICON.list}</button>`,
       titleNode: titleBtn,
@@ -2381,7 +2403,7 @@ function dStatus(a) {
   const rows = [
     { icon: "gauge", t: "状态", v: a.alive ? "运行中" : "已停止", pill: a.alive ? "green" : "" },
     { icon: "user",  t: "模型", v: a.model },
-    { icon: "briefcase", t: "所属节点", v: a.node },
+    { icon: "briefcase", t: "所属节点", v: nodeLabel(a.node_id), pill: (nodeById(a.node_id) || {}).online === false ? "orange" : "" },
     { icon: "history", t: "会话数", v: String(a.sessions) },
   ];
   return `
