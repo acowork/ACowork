@@ -73,8 +73,8 @@ ECS 上**不需要 Rust 工具链**——二进制在本地交叉编译（§4）
 
 ```bash
 # 以 root 登录 ECS。系统自带 openssl / tar 即可，仅 certbot 缺失时需要装：
-#   dnf install -y certbot python3-pip        # Alibaba Cloud Linux 3 / CentOS Stream 9
-#   apt install -y certbot                    # Debian / Ubuntu（§3.1）
+#   dnf list --available 'certbot*'        # 有包走路线 A，无包走 §3.1 路线 B
+#   apt install -y python3-venv            # Debian / Ubuntu（§3.1 路线 B）
 #   certbot-dns-cloudflare 插件见 §3.1
 
 # 专用系统用户
@@ -103,37 +103,97 @@ SAN: [relay.acowork.ai, *.relay.acowork.ai]
 
 ### 3.1 安装 certbot + Cloudflare DNS 插件
 
-```bash
-# Alpine/Debian 系
-sudo apt install -y certbot
-sudo python3 -m venv /opt/certbot && sudo /opt/certbot/bin/pip install -U certbot certbot-dns-cloudflare
-sudo ln -sf /opt/certbot/bin/certbot /usr/bin/certbot
+**两条路二选一，跑完哪条就用哪条的 certbot**（判断依据：源里有没有打包好的 certbot）：
 
-# Alibaba Cloud Linux 3
-sudo dnf install -y certbot python3-pip
-sudo pip3 install certbot-dns-cloudflare
+```bash
+sudo dnf list --available 'certbot*' 'python3-certbot-dns-cloudflare'
 ```
+
+**路线 A：发行版包（推荐，若上面列出了包）**——RPM 依赖由发行版解决，**全程不调 pip**，
+因此不受旧 pip 的 wheel tag 缺陷影响，也不需要 Rust 工具链：
+
+```bash
+sudo dnf install -y certbot python3-certbot-dns-cloudflare
+certbot --version        # 之后所有命令直接用 certbot，不要再碰 venv
+```
+
+> **不要**用 `sudo pip3 install certbot-dns-cloudflare` 补插件——系统 pip 同样是 9.0.3，会原样重演
+> §3.1 那条 `cryptography` 编译失败。插件只要**有 RPM 就装 RPM**。
+
+**路线 B：venv（源里没有包时用）**——注意第 3 步的 pip 升级不能省：
+
+```bash
+sudo apt install -y python3-venv          # Debian/Ubuntu 缺 venv 模块时会报 ensurepip 缺失
+sudo python3 -m venv /opt/certbot
+sudo /opt/certbot/bin/pip install -U pip setuptools wheel   # ← 必须先升 pip，否则编译 cryptography 失败
+sudo /opt/certbot/bin/pip install -U certbot certbot-dns-cloudflare
+sudo ln -sf /opt/certbot/bin/certbot /usr/bin/certbot
+```
+
+> ⚠️ **路线 A 和 B 不能混装。** 若已走 A，再执行 B 的 `ln -sf` 会把 `/usr/bin/certbot` 换成 venv 的解释器，
+> 而插件 RPM 装在 `/usr/lib/python3.6/site-packages`——venv 隔离后 import 不到，签发时报
+> `Could not choose appropriate plugin: Parsing the file ...`
+
+> **ponytail:** `venv` 自带的 pip 是 `ensurepip` 塞进去的老版本，**`pip install -U certbot` 不会升级 pip 自己**。pip 9（Alibaba Cloud Linux 3 / Anolis 系 py3.6 自带）
+> 只认 `manylinux1` wheel tag，不认 PEP 513 的 `manylinux_2_17`；`cryptography>=35` 只发后者 → pip 9 判定无可用 wheel → 回退 sdist 源码编译
+> → 又因为 pip 9 不支持 PEP 517 build isolation（不会自动装 build backend）→ `ModuleNotFoundError: No module named 'setuptools_rust'`。
+> 升级 pip 后直接选到预编译 wheel，全程不碰 Rust 工具链。**不要**改走去补装 `setuptools_rust`——那要拖一套 Rust ≥1.56 编译器，更慢更脆。
+
+> **已知的系统天花板（不是配错了）**：Alibaba Cloud Linux 3 / Anolis 系默认 **py3.6.8**（pip 最高 21.3.1，certbot 最高 **1.23.0**）。
+> 1.23.0 的签发、`renew`、deploy hook 全部正常，够本 runbook 用；要更新的 certbot 需装 py3.7+（如 `dnf install python3.11`）重建 venv。
 
 ### 3.2 Cloudflare API Token（最小权限）
 
 Cloudflare → My Profile → **API Tokens** → Create Token → **Edit zone DNS** 模板（或 Custom）：
 
-- **Permissions**：`Zone / DNS / Edit`（仅 DNS 写入，签证书需要改 TXT）
+- **Permissions**：`Zone / DNS / Edit`（仅 DNS 写入，签证书需要改 TXT）**＋ `Zone / Zone / Read`**（certbot 要读 zone 找 zone id，缺了它签发必失败）
 - **Zone Resources**：Include → Specific zone → `acowork.ai`
-- **Zone Zone / Read**（certbot 需要读 zone 找 zone id）
 
-生成后 token 形如 `abc123...`。
+**TTL 三个字段怎么填**（填错的表现都是「一切正常，就是 9109」，最难查）：
+
+| 字段 | 填法 | 填错的后果 |
+|------|------|-----------|
+| **Start Date / 开始时间** | **留空**（= 立即生效） | ⚠️ Cloudflare 按 **UTC 零点**解释，不是本地时区。北京时间填「今天」要等到**当天 08:00** 才生效，期间所有调用返回笼统的 `9109 Invalid access token` |
+| **Expiration / TTL（结束时间）** | **1 年**（上限） | 设成 90 天会静默炸：LE 证书 90 天、第 60 天续第一次、**第 120 天续第二次**——token 若 90 天过期，第二次续期 403，证书在过期后不再续，relay 裸奔 |
+| **Client IP Filtering** | **留空**，除非 ECS 有固定 **EIP** | 非 EIP 的公网 IP 在实例迁移/换可用区后会变，一旦变了 `renew` 直接 403 |
+
+> 留空 IP 过滤不算裸奔：`Zone Resources` 已把爆炸半径锁在 `acowork.ai` 单个 zone 上。
+
+生成后 token 形如 `cfut_xxxx...`（**只显示一次**，Global API Key 才是 32 位十六进制无前缀）。
+
+> ⚠️ **token 只在 ECS 本地粘贴，绝不贴进对话 / 工单 / 截图。** 一旦出现在聊天记录或 `bash_history` 里就该 Revoke 重建。
+> §3.3 的写入命令用 `read -rs` 静默读入，既不留 history 也会吃掉粘贴自带的尾部换行。
+
+**建完立刻自测**（别直接撞 certbot）：
+
+```bash
+# 把 token 写入文件后执行；只看 success，不回显 token
+TOKEN=$(sudo sed -n 's/^dns_cloudflare_api_token[[:space:]]*=[[:space:]]*//p' /etc/letsencrypt/api-credentials/cloudflare.ini)
+curl -s -H "Authorization: Bearer $TOKEN" "https://api.cloudflare.com/client/v4/zones?name=acowork.ai" | head -c 300
+unset TOKEN
+```
+
+`"success":true` + 你的 zone → 再跑 §3.3。
+
+> **必须用 `/zones` 端点自测，不要用 `/user/tokens/verify`。** 后者**不校验时间窗**，token 未到 `not_before` 时它照样返回 `status:active` + `success:true`，只有带作用域的 `/zones` 才如实拒绝——这是上面那个 UTC 坑最难定位的原因。
 
 ### 3.3 签发
 
 ```bash
 # 凭据文件（权限必须 600，certbot 会拒绝更宽的权限）
 sudo install -d -m 0750 /etc/letsencrypt/api-credentials
-sudo tee /etc/letsencrypt/api-credentials/cloudflare.ini >/dev/null <<'INI'
-dns_cloudflare_api_token = <上一步的 token>
-INI
-sudo chmod 600 /etc/letsencrypt/api-credentials/cloudflare.ini
+sudo sh -c 'read -rs T && printf "dns_cloudflare_api_token = %s\n" "$T" > /etc/letsencrypt/api-credentials/cloudflare.ini'; sudo chmod 600 /etc/letsencrypt/api-credentials/cloudflare.ini
+# 执行后终端无回显，粘贴 token 后直接回车即可
+```
 
+> 用 `read -rs` 而不是把 token 打进命令行：**不进 `bash_history`**，且会吃掉粘贴自带的尾部换行/空格
+> （尾部空格进了 `Bearer` header 同样报 9109）。写完用 `sudo cat -A` 验行尾——正确形态是 token 后**紧跟** `$`，中间无空格、无 `^M`。
+
+> 上面刻意**不用 `<<'INI'` heredoc**：从渲染后的页面复制到终端时，heredoc 的结束符必须独立成行，
+> 一旦和内容塌成一行 shell 会一直等输入，看起来像卡死。单行写法粘贴不会坏。
+> 同理，下面 certbot 命令里的 `\` 续行符**必须紧贴行尾**（后面不能有空格）；不放心就删掉 `\` 写成一行。
+
+```bash
 # 签发（DNS-01，不需要开放 80 端口！）
 sudo certbot certonly --dns-cloudflare \
   --dns-cloudflare-credentials /etc/letsencrypt/api-credentials/cloudflare.ini \
@@ -152,16 +212,31 @@ certbot 已有 `certbot.timer` 自动续期，但中继**不热加载**证书—
 sudo mkdir -p /etc/letsencrypt/renewal-hooks/deploy
 sudo tee /etc/letsencrypt/renewal-hooks/deploy/reload-relay.sh >/dev/null <<'SH'
 #!/bin/sh
+logger -t acowork-relay-renew "cert renewed, restarting acowork-relay"
 systemctl restart acowork-relay
 SH
 sudo chmod +x /etc/letsencrypt/renewal-hooks/deploy/reload-relay.sh
 
 # 确认定时器在跑
 sudo systemctl list-timers | grep certbot
-sudo certbot renew --dry-run     # 演练：验证整个续期链路（含 hook）真的能跑
+
+# 演练：只验证 ACME 握手 + DNS-01 挑战链路（打 LE staging，不占生产限流）
+sudo certbot renew --dry-run
 ```
 
 > **ponytail:** 这里必须用部署 hook 而非 `--deploy-hook` CLI 参数——`--deploy-hook` 只在执行 `certbot renew` 时生效，certbot 的 systemd timer 是独立进程不带该参数。放 `renewal-hooks/deploy/` 目录是唯一对 timer 和手动 renew 都生效的写法。
+
+> ⚠️ **`--dry-run` 不执行 deploy hook**（certbot 官方行为：dry run 时跳过 deploy hook，因为它不产生新证书，走不到 deploy 阶段）。
+> 所以 **dry-run 全绿 ≠ hook 能用**——hook 坏了要等到 60 天后证书真过期、relay 还在用旧证书才发现。
+> hook 本体单独验（§5 服务装完之后做，注意**会真重启中继**）：
+>
+> ```bash
+> sudo /etc/letsencrypt/renewal-hooks/deploy/reload-relay.sh
+> journalctl -t acowork-relay-renew --since "-5 min"   # 上面的 logger 行应出现在这里
+> ```
+>
+> **不要**用 `--force-renewal` 去"真验一次 hook"——Let's Encrypt 对**完全相同域名集合**限流 **5 张/周**，
+> 通配符证书一次占一格，试错三次锁一周。`--dry-run` 打 staging 不占额度，可以多跑。
 
 ---
 
@@ -331,7 +406,8 @@ curl -sS https://relay.acowork.ai/api/admin/tunnels \
 | `/health` 正常但设备域 502 | Gateway 隧道未建立 | 看 Gateway 日志；relay `/api/admin/tunnels` 为空 |
 | Desktop TLS 报错 | 证书缺通配符 SAN | 重新签发（§3.3），确认 Desktop 直连 ECS 而非 Cloudflare 边缘 |
 | Desktop 能连但功能缺失 | 远程 ACL 按设计拦截 | debug/fs-browse 远程 404 属预期，见 §6.3 |
-| certbot 续期失败 | API token 权限不足 | `sudo certbot renew --dry-run` 看具体报错 |
+| certbot 报 `9109 Invalid access token` | token 未到 **Start Date**（Cloudflare 按 UTC 零点解释，见 §3.2）／权限缺 `Zone/Zone/Read`／字符串有尾部空格 | 用 `curl /zones?name=acowork.ai` 自测（**别用** `/user/tokens/verify`，它不校验时间窗）；`cat -A` 查隐藏字符 |
+| certbot 续期失败 | API token 过期或权限不足 | `sudo certbot renew --dry-run` 看具体报错；token TTL 见 §3.2 |
 | 设备域 DNS 解析失败 | 缺泛解析 `*` 记录 | `dig +short x.relay.acowork.ai` 确认 |
 
 ---
@@ -355,7 +431,7 @@ curl -sS https://relay.acowork.ai/api/admin/tunnels \
 - [ ] **证书私钥已授权 `acowork-relay` 可读**（`setfacl`，否则 relay 起不来）
 - [ ] `systemd` 服务 running + `enabled`
 - [ ] `curl https://relay.acowork.ai/health` → `ok`
-- [ ] `certbot renew --dry-run` 通过（含 deploy hook）
+- [ ] `certbot renew --dry-run` 通过（注意：它**不**验证 deploy hook，hook 需按 §3.4 单独验）
 - [ ] Gateway `[relay] enabled=true` + 隧道 `state=connected`
 - [ ] relay `/api/admin/tunnels` 能看到该 gw-id
 - [ ] Desktop relay 模式用 `https://<gw-id>.relay.acowork.ai` 登录成功
