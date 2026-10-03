@@ -25,7 +25,8 @@ use tokio::sync::mpsc;
 
 use acowork_core::relay::driver::spawn_driver;
 use acowork_core::relay::proto::{
-    self, ControlFrame, generate_nonce, is_valid_gw_id, verify_key_rotation, verify_nonce_sig,
+    self, ControlFrame, MIN_SUPPORTED_PROTO, PROTO_VERSION, REASON_UNSUPPORTED_PROTO,
+    generate_nonce, is_valid_gw_id, proto_is_supported, verify_key_rotation, verify_nonce_sig,
 };
 use acowork_core::relay::ws_stream::WsByteStream;
 use acowork_core::relay::TEARDOWN_GRACE;
@@ -60,11 +61,16 @@ impl TunnelContext {
 }
 
 /// Thin anyhow wrappers over the shared ndjson frame IO (§5.4).
+///
+/// Unrecognised frame types are skipped rather than fatal, so a peer running
+/// a newer protocol revision cannot tear down the tunnel.
 async fn read_frame<S>(control: &mut S) -> anyhow::Result<ControlFrame>
 where
     S: futures_util::io::AsyncRead + Unpin,
 {
-    proto::read_control_frame(control).await.map_err(|e| anyhow!(e))
+    proto::read_control_frame_known(control)
+        .await
+        .map_err(|e| anyhow!(e))
 }
 
 async fn write_frame<W>(control: &mut W, frame: &ControlFrame) -> anyhow::Result<()>
@@ -200,14 +206,32 @@ async fn handshake(
     ctx: &TunnelContext,
 ) -> anyhow::Result<(String, String, BufReader<yamux::Stream>)> {
     // REGISTER
-    let (gw_id, pubkey) = match read_frame(&mut control).await? {
-        ControlFrame::Register { gw_id, pubkey, .. } => (gw_id, pubkey),
+    let (gw_id, pubkey, gw_proto, gw_caps) = match read_frame(&mut control).await? {
+        ControlFrame::Register {
+            gw_id,
+            pubkey,
+            proto,
+            caps,
+            ..
+        } => (gw_id, pubkey, proto, caps),
         other => {
             let reason = format!("expected REGISTER, got {other:?}");
             reject_handshake(control, &reason).await;
             anyhow::bail!(reason);
         }
     };
+
+    // Refuse an out-of-window protocol version explicitly. `proto` is
+    // validated before anything is enrolled, so an incompatible peer never
+    // reaches the device store.
+    if !proto_is_supported(gw_proto) {
+        let reason = format!(
+            "{REASON_UNSUPPORTED_PROTO}: gateway speaks proto {gw_proto}, \
+             this relay supports {MIN_SUPPORTED_PROTO}..={PROTO_VERSION}"
+        );
+        reject_handshake(control, &reason).await;
+        anyhow::bail!(reason);
+    }
 
     macro_rules! reject {
         ($reason:expr) => {{
@@ -261,12 +285,18 @@ async fn handshake(
         &ControlFrame::Registered {
             session_id: session_id.clone(),
             keepalive_s: ctx.config.keepalive_s,
+            // Echo the version actually spoken, plus this relay's own
+            // capabilities (empty for the reference server).
+            proto: gw_proto,
+            relay_caps: Vec::new(),
         },
     )
     .await
     {
         anyhow::bail!("writing REGISTERED: {e}");
     }
+
+    tracing::debug!(gw_id, proto = gw_proto, caps = ?gw_caps, "tunnel registered");
 
     Ok((gw_id, session_id, control))
 }

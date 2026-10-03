@@ -1,7 +1,8 @@
 //! acowork-relay — cloud relay server (design doc 24 v0.2).
 //!
-//! A thin multi-tenant relay that lets Desktop/Mobile clients on the public
-//! internet reach a Gateway behind NAT:
+//! A thin relay that lets Desktop/Mobile clients on the public internet
+//! reach a Gateway behind NAT, by carrying outbound WSS tunnels that
+//! Gateways open to it:
 //!
 //! - **Service domain** (`relay.example.com`): axum HTTP server — the
 //!   Gateway tunnel endpoint (`GET /tunnel`, WS upgrade), health, and the

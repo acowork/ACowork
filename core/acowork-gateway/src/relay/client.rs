@@ -29,7 +29,8 @@ use tokio_util::compat::TokioAsyncReadCompatExt as _;
 
 use acowork_core::relay::driver::{copy_bidirectional, spawn_driver};
 use acowork_core::relay::proto::{
-    read_control_frame, write_control_frame, ControlFrame, encode_pubkey, sign_nonce,
+    read_control_frame_known, write_control_frame, ControlFrame, PROTO_VERSION, encode_pubkey,
+    sign_nonce,
 };
 use acowork_core::relay::ws_stream::WsByteStream;
 use acowork_core::relay::{STREAM_TAG_HTTP, STREAM_TAG_MQTT, TEARDOWN_GRACE};
@@ -375,7 +376,9 @@ async fn run_tunnel_once(
     let (frames_tx, mut frames_rx) = mpsc::channel::<ControlFrame>(16);
     let reader_task = tokio::spawn(async move {
         let mut reader = BufReader::new(reader);
-        while let Ok(frame) = read_control_frame(&mut reader).await {
+        // Unknown frame types are skipped, not fatal — a newer relay must not
+        // be able to kill the session by using a feature we lack.
+        while let Ok(frame) = read_control_frame_known(&mut reader).await {
             if frames_tx.send(frame).await.is_err() {
                 break; // handler gone
             }
@@ -479,6 +482,8 @@ async fn handshake(
             gw_id: identity.gw_id.clone(),
             pubkey: encode_pubkey(&identity.signing_key().verifying_key()),
             ts,
+            proto: PROTO_VERSION,
+            caps: Vec::new(),
         },
     )
     .await
@@ -486,7 +491,7 @@ async fn handshake(
 
     // CHALLENGE (or an immediate rejection — TOFU disabled, rate limit,
     // key mismatch from a previous life of this gw_id).
-    let nonce = match read_control_frame(&mut control)
+    let nonce = match read_control_frame_known(&mut control)
         .await
         .map_err(|e| format!("reading relay reply: {e}"))?
     {
@@ -508,14 +513,28 @@ async fn handshake(
     .map_err(|e| format!("writing PROOF: {e}"))?;
 
     // REGISTERED
-    match read_control_frame(&mut control)
+    match read_control_frame_known(&mut control)
         .await
         .map_err(|e| format!("reading REGISTERED: {e}"))?
     {
         ControlFrame::Registered {
             session_id,
             keepalive_s,
+            proto,
+            ..
         } => {
+            // The relay pins a version at registration. A mismatch means the
+            // two ends are not actually speaking the same protocol — surface
+            // it rather than running a tunnel that misbehaves in ways neither
+            // side can explain. (Both currently speak a single version, so
+            // this is a guard, not a live path.)
+            if proto != PROTO_VERSION {
+                return Err(format!(
+                    "relay registered tunnel at protocol version {proto}, \
+                     this Gateway speaks {PROTO_VERSION} — versions are \
+                     incompatible, upgrade the relay"
+                ));
+            }
             let (reader, writer) = control.into_inner().split();
             Ok((writer, reader, keepalive_s, session_id))
         }

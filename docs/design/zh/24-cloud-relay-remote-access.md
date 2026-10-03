@@ -1,6 +1,6 @@
 # 24-cloud-relay-remote-access — 云端瘦中继：Desktop / Mobile 外网访问内网 Gateway
 
-> **版本**: v0.2.1（实施中，随实现修订）
+> **版本**: v0.2.2（实施中，随实现修订）
 > **状态**: 🚧 实施中（M0–M6 里程碑推进，见 §10.1）
 > **创建日期**: 2026-03 · **v0.2 修订**: 2026-10
 > **作者**: 软件架构师（ACowork.AI）
@@ -23,6 +23,9 @@
 > 5. **（v0.2.1，实施修订）设备私钥不进密码保险库**（§7.3）：存 Gateway 配置目录明文 `0600`
 >    `relay_identity.json`（同 Node Agent `identity.json` 先例，ADR-075）。原因：隧道必须在任何远程
 >    用户登录之前可用（登录请求本身走隧道），而 vault 解锁只有本地用户能做——鸡生蛋死锁。
+> 6. **（v0.2.2，实施修订）控制协议自带版本与能力协商**（§5.4.1）：`Register` / `Registered`
+>    增 `proto`（缺省 = 1，即原始格式）与 `caps`。原因：控制协议是公开契约、本仓仅为参考实现，
+>    协议演进不能依赖本仓发版节奏。配套：未知帧跳过而非致命、版本区间外显式拒绝。
 
 ---
 
@@ -229,6 +232,34 @@ sequenceDiagram
   私钥彻底丢失时由 admin API 删除设备记录后重新 TOFU。
 - **重连风暴防护**：REGISTER 按 gw-id 限频（如 5 次/分钟），指数退避由 relay-client 执行
   （1s→60s 上限，GOAWAY 后短暂停顿即重试）。
+
+#### 5.4.1 协议版本与兼容规则（v0.2.2 实施，控制协议对外契约）
+
+控制协议是**公开契约**：本仓的 `acowork-relay` 只是参考实现，仓外可以存在其他实现。协议演进
+因此必须在 wire format 层面自带协商能力，否则本仓发版会成为所有实现方的瓶颈。
+
+- **`proto` 版本字段**：`Register` / `Registered` 携带 `proto: u16`。**`proto = 1` 即本节
+  原始设计（引入 `proto` 之前的格式）**——该字段缺省即视为 1，故所有既有对端零改动互通。
+  常量：`acowork_core::relay::proto::{PROTO_VERSION, MIN_SUPPORTED_PROTO}`。
+- **版本协商**：Gateway 在 `Register` 声明自身版本，中继在 `Registered` 回显**实际选中**的版本。
+  区间外（`MIN_SUPPORTED_PROTO..=PROTO_VERSION`）立即以
+  `Rejected { reason: "unsupported protocol version" }` 拒绝并断开；校验发生在**设备登记之前**，
+  版本不符的对端不会进入 device store。Gateway 侧对 `Registered.proto != PROTO_VERSION`
+  同样报错退出，而不是带着语义不一致的隧道继续跑。
+- **`caps` 能力协商**：`Register.caps` / `Registered.relay_caps` 为扩展名字符串列表（如
+  `["tenant.v1"]`）。**纯建议性**：接收方忽略不认识的条目；**接收方不得依据自己未实现的
+  能力改变行为**。空列表在编码时省略（`skip_serializing_if`），不产生 `"caps":[]` 噪声字段。
+- **未知帧不得致命**：`ControlFrame` 是 internally-tagged enum，serde 遇未知 `type` 会解析失败。
+  控制流因此走 `read_control_frame_known`（底层 `read_control_frame`）——**未知帧被跳过而非报错**，
+  对端用更新的协议特性不会把我们的隧道打掉。缺 `type` 判别键或非 JSON 仍是真错误。
+- **新增特性的规约**（评审规则，非本版实施）：
+  1. **不新增 `ControlFrame` variant**，特性走现有帧的可选字段扩展；
+  2. 破坏性变更走 `proto` 升版，且保留至少两个发布周期的弃用窗口（`MIN_SUPPORTED_PROTO` 滞后）；
+  3. 新字段一律 `#[serde(default)]`，保证旧实现读得懂、新实现不强制旧实现理解。
+
+  > `acowork-relay` 参考实现本身不消费任何 `caps`（始终回空）——它只消费版本区间。
+  > 仓外实现可自由使用 `caps` 承载私有扩展而不影响本仓互通。
+
 
 ### 5.5 中继侧限流与配额
 
@@ -441,7 +472,7 @@ Phase 1 → Phase 2 对 App 侧协议不变（同为 HTTPS + MQTT-over-WS，域�
 | OQ-2 | relay-client 是 Gateway 进程内模块还是 sidecar？ | **进程内模块**，避免多一个进程管理面；若隧道流量影响 Gateway 主循环再拆 |
 | OQ-3 | 是否需要「中继零知识」（TLS 透传模式 B）？ | Phase 2 不做。v0.2 的 Ed25519 方案下中继已不持有任何秘密（仅公钥），模式 B 的边际收益进一步降低 |
 | OQ-4 | gw-id 命名与隐私：`<gw-id>.relay.example.com` 会出现在证书 SNI 中（明文） | **gw-id 用随机 UUID v4**（同时是 TOFU 防抢注的熵来源），不含用户语义 |
-| OQ-5 | 国内合规：中继服务是否需要备案域名 / 选择境内云？ | 产品侧决策；技术上域名与部署区域均为配置项 |
+| OQ-5 | 自托管部署的网络前提：证书签发、通配 SNI 覆盖、监听端口占用如何校验？ | 启动时校验 `tls_cert` / `tls_key` 成对存在（`RelayConfig::tls_enabled`）；SNI 覆盖依赖部署方正确签发 `service_domain` + `*.<device_domain_suffix>` 双 SAN 证书，签发失败属部署配置错误而非运行时可恢复错误；端口冲突直接 bind 失败退出（fail-fast），不静默降级到明文 |
 | OQ-6 | （v0.2 新增）rumqttd 0.20 无 topic 级 ACL hook，如何拒绝控制面主题订阅？ | 初版接受 client_id 形状限制 + 现有 token 门禁（§7.2 差距标注）；patch rumqttd / 换 broker 为独立后续评审项 |
 | OQ-7 | （v0.2 新增）中继是否验证用户 token？ | **不验证**。所有用户身份裁决在 Gateway 侧（§7.3）；中继侧 pre-auth 作为演进可选项 |
 

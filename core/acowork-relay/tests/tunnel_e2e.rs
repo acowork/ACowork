@@ -113,6 +113,8 @@ impl FakeGateway {
                 gw_id: self.gw_id.clone(),
                 pubkey: encode_pubkey(&self.key.verifying_key()),
                 ts: 0,
+                proto: acowork_core::relay::proto::PROTO_VERSION,
+                caps: Vec::new(),
             },
         )
         .await?;
@@ -178,7 +180,7 @@ async fn read_frame<S>(stream: &mut S) -> anyhow::Result<ControlFrame>
 where
     S: futures_util::io::AsyncRead + Unpin,
 {
-    acowork_core::relay::proto::read_control_frame(stream)
+    acowork_core::relay::proto::read_control_frame_known(stream)
         .await
         .map_err(|e| anyhow::anyhow!(e))
 }
@@ -211,6 +213,100 @@ async fn offline_device_returns_502() {
     let response = http_get(addr, &format!("{gw_id}.relay.test"), "/api/agents").await;
     assert!(response.starts_with("HTTP/1.1 502"), "{response}");
     assert!(response.contains("DEVICE_OFFLINE"), "{response}");
+    server.shutdown();
+    server.stopped().await;
+}
+
+// ── Protocol-version negotiation ───────────────────────────────────
+//
+// The control protocol is a published contract: the open-source relay and
+// out-of-tree implementations must interoperate across revisions. These
+// tests pin the two properties that make that possible — old peers keep
+// working, and mismatched versions fail loudly instead of silently.
+
+/// A Gateway predating the `proto` field must still be able to register.
+/// This is the compatibility guarantee that lets the protocol ship frozen.
+#[tokio::test]
+async fn a_legacy_gateway_without_proto_still_registers() {
+    let (server, addr) = spawn_relay(false).await;
+    let gw_id = uuid::Uuid::new_v4().to_string();
+    let key = SigningKey::from_bytes(&generate_device_seed());
+    let gateway = connect_gateway(addr, gw_id.clone(), key).await;
+
+    // Hand-written REGISTER: exactly the pre-versioning wire format, with no
+    // `proto` and no `caps` key at all.
+    let mut control = gateway.open_stream().await.unwrap();
+    let line = format!(
+        r#"{{"type":"register","gw_id":"{gw_id}","pubkey":"{}","ts":0}}"#,
+        encode_pubkey(&gateway.key.verifying_key())
+    );
+    control.write_all(line.as_bytes()).await.unwrap();
+    control.write_all(b"\n").await.unwrap();
+    control.flush().await.unwrap();
+
+    let nonce = match read_frame(&mut control).await.unwrap() {
+        ControlFrame::Challenge { nonce } => nonce,
+        other => panic!("legacy Gateway must reach CHALLENGE, got {other:?}"),
+    };
+    write_frame(
+        &mut control,
+        &ControlFrame::Proof {
+            sig: sign_nonce(&gateway.key, &nonce),
+        },
+    )
+    .await
+    .unwrap();
+    match read_frame(&mut control).await.unwrap() {
+        // The relay pins the version it actually spoke.
+        ControlFrame::Registered { proto, .. } => assert_eq!(proto, 1),
+        other => panic!("legacy Gateway must reach REGISTERED, got {other:?}"),
+    }
+
+    server.shutdown();
+    server.stopped().await;
+}
+
+/// A Gateway announcing a revision this relay does not implement must be
+/// refused *before* it can enroll — not silently half-connected.
+#[tokio::test]
+async fn a_future_proto_version_is_rejected() {
+    let (server, addr) = spawn_relay(false).await;
+    let gw_id = uuid::Uuid::new_v4().to_string();
+    let key = SigningKey::from_bytes(&generate_device_seed());
+    let gateway = connect_gateway(addr, gw_id.clone(), key).await;
+
+    let mut control = gateway.open_stream().await.unwrap();
+    write_frame(
+        &mut control,
+        &ControlFrame::Register {
+            gw_id: gw_id.clone(),
+            pubkey: encode_pubkey(&gateway.key.verifying_key()),
+            ts: 0,
+            proto: acowork_core::relay::proto::PROTO_VERSION + 1,
+            caps: vec!["from.the.future".into()],
+        },
+    )
+    .await
+    .unwrap();
+
+    match read_frame(&mut control).await.unwrap() {
+        ControlFrame::Rejected { reason } => {
+            assert!(
+                reason.contains("protocol version"),
+                "rejection should name the cause, got: {reason}"
+            );
+        }
+        other => panic!("expected Rejected, got {other:?}"),
+    }
+
+    // And the device must not have been enrolled by the failed attempt.
+    assert!(
+        !http_get(addr, &format!("{gw_id}.relay.test"), "/api/agents")
+            .await
+            .contains("HTTP/1.1 200"),
+        "a version-mismatched Gateway must not end up routable"
+    );
+
     server.shutdown();
     server.stopped().await;
 }

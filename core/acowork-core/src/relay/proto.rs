@@ -27,6 +27,27 @@ const PROOF_PREFIX: &[u8] = b"acowork-relay-proof:";
 /// gateway tunnel is not registered or is down (§5.3 "离线显式化").
 pub const DEVICE_OFFLINE_BODY: &str = "{\"code\":\"DEVICE_OFFLINE\"}";
 
+/// The control-protocol version this build speaks (`proto` field on
+/// [`ControlFrame::Register`] / [`ControlFrame::Registered`]).
+///
+/// The wire format as originally specified — before any `proto` field
+/// existed — is version **1**. Implementations predating this constant
+/// never send `proto`, which decodes as 1 via `#[serde(default)]`.
+pub const PROTO_VERSION: u16 = 1;
+
+/// Oldest control-protocol version this build still accepts.
+pub const MIN_SUPPORTED_PROTO: u16 = 1;
+
+/// Whether a peer speaking `version` can be served. A relay that sees an
+/// out-of-range `proto` replies [`ControlFrame::Rejected`] with
+/// [`REASON_UNSUPPORTED_PROTO`] and drops the tunnel.
+pub fn proto_is_supported(version: u16) -> bool {
+    (MIN_SUPPORTED_PROTO..=PROTO_VERSION).contains(&version)
+}
+
+/// Rejection reason used when a peer announces an unsupported `proto`.
+pub const REASON_UNSUPPORTED_PROTO: &str = "unsupported protocol version";
+
 /// One control frame on the tunnel control stream.
 ///
 /// Wire format: `{"type":"snake_case_variant", ...}` — one JSON document per
@@ -43,6 +64,16 @@ pub enum ControlFrame {
         /// Unix seconds; audited for clock skew, not relied on for replay
         /// protection (the challenge nonce is).
         ts: u64,
+        /// Control-protocol version. Absent on the wire means [`PROTO_VERSION`]
+        /// (1) — the original format, so pre-versioning peers still parse.
+        #[serde(default = "default_proto")]
+        proto: u16,
+        /// Optional extension names this peer supports, e.g. `["tenant.v1"]`.
+        /// Purely advisory: unknown entries are ignored by the receiver, so
+        /// adding one never breaks an older peer. A receiver must not infer
+        /// behaviour from a capability it does not itself implement.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        caps: Vec<String>,
     },
     /// Relay → gateway: single-use challenge (URL-safe base64, 32 bytes).
     Challenge { nonce: String },
@@ -52,6 +83,15 @@ pub enum ControlFrame {
     Registered {
         session_id: String,
         keepalive_s: u64,
+        /// The protocol version the relay actually selected for this tunnel.
+        /// Echoed so the Gateway can detect a relay that pinned an older
+        /// version than the one it offered. Absent means 1.
+        #[serde(default = "default_proto")]
+        proto: u16,
+        /// Extensions the relay supports, same advisory semantics as
+        /// [`ControlFrame::Register::caps`].
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        relay_caps: Vec<String>,
     },
     /// Relay → gateway (existing tunnel): superseded by a newer registration,
     /// kicked by admin revocation, or shutting down.
@@ -73,6 +113,12 @@ pub enum ControlFrame {
     Pong { ts_ms: u64 },
 }
 
+/// serde default for the `proto` field: a frame that omits it predates
+/// versioning and is, by definition, [`PROTO_VERSION`].
+fn default_proto() -> u16 {
+    PROTO_VERSION
+}
+
 /// Encode one frame as an ndjson line (with trailing `\n`).
 pub fn encode_frame(frame: &ControlFrame) -> Result<String, serde_json::Error> {
     let mut line = serde_json::to_string(frame)?;
@@ -82,6 +128,10 @@ pub fn encode_frame(frame: &ControlFrame) -> Result<String, serde_json::Error> {
 
 /// Decode one frame from a single ndjson line (leading/trailing whitespace
 /// including the `\n` is ignored).
+///
+/// Strict: an unknown `type` is an error. For the control stream prefer
+/// [`read_control_frame`], which tolerates frames a peer added and this
+/// build does not know.
 pub fn decode_frame(line: &str) -> Result<ControlFrame, serde_json::Error> {
     serde_json::from_str(line.trim())
 }
@@ -89,10 +139,58 @@ pub fn decode_frame(line: &str) -> Result<ControlFrame, serde_json::Error> {
 /// Max accepted length of one ndjson control line (bytes).
 pub const MAX_CONTROL_LINE: usize = 8 * 1024;
 
+/// Outcome of reading one line off the control stream.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Frame {
+    /// A frame this build understands.
+    Known(ControlFrame),
+    /// Well-formed JSON carrying a `type` we do not know. Callers **skip**
+    /// these; the tunnel keeps running. See [`decode_frame_lenient`].
+    UnknownFrame,
+}
+
 /// Read one ndjson control frame from a stream (up to and including the
 /// terminating `\n`). Shared by the relay server, the Gateway
 /// relay-client, and tests — one wire-reading implementation.
-pub async fn read_control_frame<S>(stream: &mut S) -> Result<ControlFrame, String>
+///
+/// This is the **lenient** reader: an unrecognised frame type yields
+/// [`Frame::UnknownFrame`] instead of an error, so a peer running a newer
+/// protocol revision cannot tear down the tunnel by using a feature this
+/// build lacks. Malformed input (bad JSON, missing `type`) still errors.
+pub async fn read_control_frame<S>(stream: &mut S) -> Result<Frame, String>
+where
+    S: futures_util::io::AsyncRead + Unpin,
+{
+    let line = read_control_line(stream).await?;
+    match decode_frame(&line) {
+        Ok(frame) => Ok(Frame::Known(frame)),
+        Err(e) => match serde_json::from_str::<serde_json::Value>(&line) {
+            // Valid JSON that is not a frame we know: skip it. A `type` key
+            // is what distinguishes "newer peer" from "garbage".
+            Ok(value) if value.get("type").is_some() => Ok(Frame::UnknownFrame),
+            // Either not JSON, or JSON without a discriminator: a real error.
+            _ => Err(format!("invalid control frame: {e}")),
+        },
+    }
+}
+
+/// Read one ndjson control frame, expecting a known frame type.
+pub async fn read_control_frame_known<S>(stream: &mut S) -> Result<ControlFrame, String>
+where
+    S: futures_util::io::AsyncRead + Unpin,
+{
+    loop {
+        match read_control_frame(stream).await? {
+            Frame::Known(frame) => return Ok(frame),
+            // Skip and keep waiting — see `read_control_frame`.
+            Frame::UnknownFrame => continue,
+        }
+    }
+}
+
+/// Read one raw ndjson line (up to and including the terminating `\n`),
+/// validating length but not JSON.
+async fn read_control_line<S>(stream: &mut S) -> Result<String, String>
 where
     S: futures_util::io::AsyncRead + Unpin,
 {
@@ -112,8 +210,9 @@ where
             return Err(format!("control line exceeds {MAX_CONTROL_LINE} bytes"));
         }
     }
-    decode_frame(std::str::from_utf8(&line).map_err(|e| e.to_string())?)
-        .map_err(|e| format!("invalid control frame: {e}"))
+    std::str::from_utf8(&line)
+        .map(str::to_owned)
+        .map_err(|e| e.to_string())
 }
 
 /// Write one ndjson control frame to a stream and flush it.
@@ -242,12 +341,16 @@ mod tests {
             gw_id: "0f1e2d3c-4b5a-4678-9abc-def012345678".into(),
             pubkey: "pub".into(),
             ts: 1_761_000_000,
+            proto: PROTO_VERSION,
+            caps: vec![],
         });
         roundtrip(ControlFrame::Challenge { nonce: "n".into() });
         roundtrip(ControlFrame::Proof { sig: "s".into() });
         roundtrip(ControlFrame::Registered {
             session_id: "sess".into(),
             keepalive_s: 30,
+            proto: PROTO_VERSION,
+            relay_caps: vec![],
         });
         roundtrip(ControlFrame::Goaway { reason: "superseded".into() });
         roundtrip(ControlFrame::Rejected { reason: "bad proof".into() });
@@ -258,6 +361,106 @@ mod tests {
         roundtrip(ControlFrame::Deregister);
         roundtrip(ControlFrame::Ping { ts_ms: 42 });
         roundtrip(ControlFrame::Pong { ts_ms: 42 });
+    }
+
+    /// The versioned fields must not change the meaning of the original
+    /// format: a pre-versioning peer omits them, and must still interoperate.
+    #[test]
+    fn a_frame_without_proto_decodes_as_version_1() {
+        // Exactly what a build predating `proto` put on the wire.
+        let legacy = r#"{"type":"register","gw_id":"0f1e2d3c-4b5a-4678-9abc-def012345678","pubkey":"pub","ts":1761000000}"#;
+        let frame = decode_frame(legacy).expect("legacy REGISTER must still parse");
+        let ControlFrame::Register {
+            gw_id, proto, caps, ..
+        } = frame
+        else {
+            panic!("expected REGISTER, got {frame:?}");
+        };
+        assert_eq!(gw_id, "0f1e2d3c-4b5a-4678-9abc-def012345678");
+        assert_eq!(proto, PROTO_VERSION);
+        assert_eq!(proto, 1, "the original wire format is version 1");
+        assert!(caps.is_empty(), "an omitted caps list means no extensions");
+
+        let legacy = r#"{"type":"registered","session_id":"sess","keepalive_s":30}"#;
+        let frame = decode_frame(legacy).expect("legacy REGISTERED must still parse");
+        let ControlFrame::Registered { proto, .. } = frame else {
+            panic!("expected REGISTERED, got {frame:?}");
+        };
+        assert_eq!(proto, 1);
+    }
+
+    /// Encoding the current version must be recognisable as-is: this is the
+    /// contract other implementations (including out-of-tree ones) code
+    /// against.
+    #[test]
+    fn current_frames_carry_their_version() {
+        let line = encode_frame(&ControlFrame::Register {
+            gw_id: "0f1e2d3c-4b5a-4678-9abc-def012345678".into(),
+            pubkey: "pub".into(),
+            ts: 1_761_000_000,
+            proto: PROTO_VERSION,
+            caps: vec!["tenant.v1".into()],
+        })
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(value["proto"], PROTO_VERSION);
+        assert_eq!(value["caps"][0], "tenant.v1");
+
+        // An empty capability list is omitted rather than sent as `[]`.
+        let line = encode_frame(&ControlFrame::Register {
+            gw_id: "0f1e2d3c-4b5a-4678-9abc-def012345678".into(),
+            pubkey: "pub".into(),
+            ts: 1_761_000_000,
+            proto: PROTO_VERSION,
+            caps: vec![],
+        })
+        .unwrap();
+        assert!(!line.contains("caps"), "empty caps should be omitted: {line}");
+
+        let line = encode_frame(&ControlFrame::Registered {
+            session_id: "sess".into(),
+            keepalive_s: 30,
+            proto: PROTO_VERSION,
+            relay_caps: vec![],
+        })
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(value["proto"], PROTO_VERSION);
+    }
+
+    #[test]
+    fn proto_support_window() {
+        assert!(proto_is_supported(PROTO_VERSION));
+        assert!(proto_is_supported(MIN_SUPPORTED_PROTO));
+        // A peer announcing a future revision must be refused, not guessed at.
+        assert!(!proto_is_supported(PROTO_VERSION + 1));
+        // And so must one from before the floor.
+        assert!(!proto_is_supported(MIN_SUPPORTED_PROTO - 1));
+    }
+
+    /// Unknown frame types are the peer's business, not a protocol
+    /// violation — see `read_control_frame`.
+    #[tokio::test]
+    async fn unknown_frame_types_are_skipped_not_fatal() {
+        let mut stream = futures_util::io::Cursor::new(
+            b"{\"type\":\"billing\",\"charge_id\":\"x\"}\n{\"type\":\"ping\",\"ts_ms\":7}\n"
+                .to_vec()
+                .into_boxed_slice(),
+        );
+        let frame = read_control_frame_known(&mut stream).await.unwrap();
+        assert_eq!(frame, ControlFrame::Ping { ts_ms: 7 });
+    }
+
+    #[tokio::test]
+    async fn malformed_frames_are_still_rejected() {
+        // No `type` discriminator: garbage, not a future extension.
+        let mut stream =
+            futures_util::io::Cursor::new(b"{\"gw_id\":\"x\"}\n".to_vec().into_boxed_slice());
+        assert!(read_control_frame(&mut stream).await.is_err());
+
+        // Not JSON at all.
+        let mut stream = futures_util::io::Cursor::new(b"not json\n".to_vec().into_boxed_slice());
+        assert!(read_control_frame(&mut stream).await.is_err());
     }
 
     #[test]
