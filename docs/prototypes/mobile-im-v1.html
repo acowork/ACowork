@@ -36,6 +36,11 @@
   --safe-top: 44px;
   --safe-bottom: 34px;
   --tabbar-h: 56px;
+  /* 滚动条 —— 与 Desktop globals.css 的 --ui-scrollbar-* 同名同值，
+     保证原型预览与真机 App 的滚动条观感一致（zinc 色阶 / 6px / r3）。 */
+  --ui-scrollbar-thumb: #d4d4d8;          /* zinc-300 */
+  --ui-scrollbar-thumb-hover: #a1a1aa;    /* zinc-400 */
+  --ui-scrollbar-size: 6px;
 }
 html[data-theme="dark"] {
   --bg: #000000;
@@ -51,10 +56,23 @@ html[data-theme="dark"] {
   --chat-bubble-you: #26262A;
   --chat-bubble-you-label: #FFFFFF;
   --shadow: 0 1px 2px rgba(0,0,0,.5), 0 8px 24px rgba(0,0,0,.4);
+  --ui-scrollbar-thumb: #3f3f46;          /* zinc-700 */
+  --ui-scrollbar-thumb-hover: #52525b;    /* zinc-600 */
 }
 
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 html, body { margin: 0; padding: 0; }
+
+/* ---------- 滚动条 ----------
+   对齐 Desktop src/styles/globals.css 的同名规则：不写裸色、不写裸宽度，
+   全部走 --ui-scrollbar-*，否则暗色模式下会渲染出一条白底滑块。 */
+::-webkit-scrollbar { width: var(--ui-scrollbar-size); height: var(--ui-scrollbar-size); }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--ui-scrollbar-thumb); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--ui-scrollbar-thumb-hover); }
+::-webkit-scrollbar-corner { background: transparent; }
+/* Firefox */
+* { scrollbar-width: thin; scrollbar-color: var(--ui-scrollbar-thumb) transparent; }
 body {
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC",
     "Noto Sans SC", "Helvetica Neue", Arial, sans-serif;
@@ -86,6 +104,9 @@ html[data-theme="dark"] body { background: #0B0B0D; }
   display: flex; align-items: flex-end; justify-content: space-between;
   padding: 0 26px 6px; font-size: 13px; font-weight: 600; z-index: 150;
   position: relative;
+  /* 纯装饰（预览用的假状态栏）。z-index 高于 #screenHost，若不关掉指针事件
+     会把顶部 44px 全吃掉 —— 导航栏按钮点不动就是这么来的。 */
+  pointer-events: none;
 }
 .statusbar .sb-r { display: flex; gap: 5px; align-items: center; }
 .sb-bat { width: 22px; height: 11px; border: 1.2px solid currentColor; border-radius: 3px; position: relative; }
@@ -115,13 +136,20 @@ html[data-theme="dark"] body { background: #0B0B0D; }
    ============================================================ */
 
 /* ---------- 导航栏（顶部） ---------- */
+/* padding-top 让开系统状态栏（--safe-top）。#screenHost 是 absolute inset:0，
+   直接铺满 .phone 整个内框（含状态栏区域），所以每层 .layer 的内容都要自己
+   顶开 --safe-top，否则导航栏会压在状态栏下面。 */
 .navbar {
   flex: 0 0 auto; position: relative; z-index: 100;
-  padding: 4px 8px 8px;
+  padding: var(--safe-top) 8px 8px;
   display: grid; grid-template-columns: 56px 1fr 56px; align-items: center;
-  min-height: 44px;
+  min-height: calc(44px + var(--safe-top));
 }
 .navbar.transparent { background: transparent; }
+/* 右侧承载两个动作时（聊天页：新建会话 + 更多），列宽改为自适应。
+   固定 56px 只放得下 36px 的单图标按钮，第二个按钮会被挤出屏幕外。 */
+.navbar.right-wide { grid-template-columns: 56px 1fr auto; }
+.navbar.right-wide .nav-btn.right { gap: 4px; }
 .nav-title {
   text-align: center; font-size: 17px; font-weight: 600; letter-spacing: -0.2px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -381,10 +409,28 @@ html[data-theme="dark"] .pill.teal { color: var(--teal); }
   display: flex; align-items: center; justify-content: center;
 }
 .conv-row .unread.dot-only { min-width: 10px; width: 10px; height: 10px; padding: 0; }
+
+/* ---- node 标识（多节点部署时才有意义）----
+   不做分组：Desktop 的按 node 分组承载的是「空节点里装第一个 Agent」这类
+   运维入口（ADR-073 §4），移动端 v1 不做安装，跳过。改成在行内挂一个
+   轻量 chip，只在 >1 个 node 时出现。 */
+.conv-row .ntag {
+  flex: 0 0 auto; max-width: 88px; display: inline-flex; align-items: center; gap: 3px;
+  padding: 1px 6px; border-radius: 5px; background: var(--fill);
+  font-size: 11px; line-height: 1.5; color: var(--label-2);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.conv-row .ntag .ndot {
+  flex: 0 0 auto; width: 5px; height: 5px; border-radius: 50%; background: var(--green);
+}
+.conv-row .ntag .ndot.off { background: var(--label-3); }
 .section-label {
   padding: 14px 16px 6px; font-size: 13px; color: var(--label-2);
   display: flex; align-items: center; gap: 6px;
 }
+/* ICON.* 生成的 svg 只有 viewBox、没有 width/height，默认占 300x150。
+   每个放置图标的位置都必须显式定尺寸，否则图标会撑爆容器。 */
+.section-label svg { width: 15px; height: 15px; flex: 0 0 auto; }
 </style>
 
 <style>
@@ -430,6 +476,7 @@ html[data-theme="dark"] .toolcall .tc-body.fade::after { background: linear-grad
   border: 1px solid rgba(255,149,0,.4);
 }
 .approval .a-title { display: flex; align-items: center; gap: 6px; font-size: 14px; font-weight: 600; color: #B26A00; margin-bottom: 8px; }
+.approval .a-title svg { width: 17px; height: 17px; flex: 0 0 auto; }
 html[data-theme="dark"] .approval .a-title { color: var(--orange); }
 .approval .a-cmd { font-family: ui-monospace, Menlo, monospace; font-size: 12.5px; background: var(--inset); border-radius: 8px; padding: 8px 10px; word-break: break-all; margin-bottom: 10px; }
 .approval .a-acts { display: flex; gap: 8px; }
@@ -481,8 +528,6 @@ html[data-theme="dark"] .approval .a-title { color: var(--orange); }
 }
 .icon-btn:active { background: var(--fill); }
 .icon-btn svg { width: 24px; height: 24px; }
-/* 窄屏（< 380px 可用宽度）收起次要按钮，保证输入框不被挤扁 */
-@media (max-width: 372px) { .composer .icon-btn.extra { display: none; } }
 /* 输入行整体不允许溢出 */
 .input-row { min-width: 0; }
 .send-btn { width: 34px; height: 34px; border-radius: 50%; border: 0; background: var(--accent); color: #fff; display: flex; align-items: center; justify-content: center; cursor: pointer; padding: 0; flex: 0 0 auto; }
@@ -697,7 +742,6 @@ const ICON = {
   send: F('<path d="M3.4 20.4l17.45-7.48a1 1 0 000-1.84L3.4 3.6a.99.99 0 00-1.39.91L2 9.12c0 .5.37.93.87.99L17 12 2.87 13.88c-.5.07-.87.5-.87 1l.01 4.61c0 .71.73 1.2 1.39.91z"/>'),
   mic: I('<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0014 0M12 18v3"/>'),
   attach: I('<path d="M21 11.5l-8.9 8.9a5 5 0 01-7.07-7.07l9.2-9.2a3.3 3.3 0 014.67 4.67l-9.2 9.2a1.65 1.65 0 01-2.33-2.33l8.5-8.5"/>'),
-  emoji: I('<circle cx="12" cy="12" r="9"/><path d="M8.5 14.5a4.5 4.5 0 007 0M9 9.5h.01M15 9.5h.01"/>'),
   gear: I('<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.6 1.6 0 00.32 1.77l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.6 1.6 0 00-1.77-.32 1.6 1.6 0 00-1 1.47V21a2 2 0 11-4 0v-.11a1.6 1.6 0 00-1.05-1.47 1.6 1.6 0 00-1.77.32l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.6 1.6 0 00.32-1.77 1.6 1.6 0 00-1.47-1H3a2 2 0 110-4h.11a1.6 1.6 0 001.47-1.05 1.6 1.6 0 00-.32-1.77l-.06-.06a2 2 0 112.83-2.83l.06.06a1.6 1.6 0 001.77.32H9a1.6 1.6 0 001-1.47V3a2 2 0 114 0v.11a1.6 1.6 0 001 1.47 1.6 1.6 0 001.77-.32l.06-.06a2 2 0 112.83 2.83l-.06.06a1.6 1.6 0 00-.32 1.77V9a1.6 1.6 0 001.47 1H21a2 2 0 110 4h-.11a1.6 1.6 0 00-1.47 1z"/>'),
   folder: I('<path d="M3 7.5A2.5 2.5 0 015.5 5h3.2a2 2 0 011.5.7l1 1.1a2 2 0 001.5.7h5.8A2.5 2.5 0 0121 10v6.5A2.5 2.5 0 0118.5 19h-13A2.5 2.5 0 013 16.5z"/>'),
   file: I('<path d="M14 3H7a2 2 0 00-2 2v14a2 2 0 002 2h10a2 2 0 002-2V8z"/><path d="M14 3v5h5"/>'),
@@ -742,6 +786,8 @@ const ICON = {
   bell: I('<path d="M18 9a6 6 0 10-12 0c0 5-2 6.5-2 6.5h16S18 14 18 9z"/><path d="M10.3 19a2 2 0 003.4 0"/>'),
   flag: I('<path d="M5 21V4.5M5 5h9.5l-1.2 3.5 1.2 3.5H5"/>'),
   inbox: I('<path d="M3 13.5h4l1.5 2.5h7l1.5-2.5h4M3 13.5L6 5.5h12l3 8v5a2 2 0 01-2 2H5a2 2 0 01-2-2z"/>'),
+  /* 与底部 Tab「聊天」同形，保持主导航与设置项图标语言一致 */
+  chat: F('<path d="M12 3c-4.97 0-9 3.36-9 7.5 0 2.3 1.25 4.4 3.2 5.75l-.86 3.1a.5.5 0 00.73.55l3.62-2.06c.4.05.85.08 1.31.08 4.97 0 9-3.36 9-7.42S16.97 3 12 3z"/>'),
 };
 </script>
 
@@ -760,6 +806,11 @@ const AGENTS = [
   { id: "com.acowork.quality-assurance", name: "测试工程师", pkg: "quality-assurance", color: "#5AC8FA", alive: true,  busy: false, node: "Mac-Studio", ver: "0.6.0", model: "gpt-5-mini", sessions: 3, preview: "Gateway 代理回归通过", time: "周一", unread: 0 },
   { id: "com.acowork.document-manager", name: "文档管理员", pkg: "document-manager", color: "#FF2D55", alive: false, busy: false, node: "Mac-Studio", ver: "0.3.0", model: "—", sessions: 0, preview: "", time: "", unread: 0 },
   { id: "com.acowork.system", name: "系统助手", pkg: "system", color: "#8E8E93", alive: true,  busy: false, node: "Mac-Studio", ver: "1.0.0", model: "gpt-5-mini", sessions: 2, preview: "已为 Node-iPad 恢复远程隧道", time: "周一", unread: 0 },
+  /* 以下三个部署在第二台机器上：多 node 场景下会话行才需要显示 node 标识。
+     单 node 时该标识自动隐藏（见 nodeTagHTML），避免给用户无意义的噪音。 */
+  { id: "com.acowork.rust-engineer", name: "Rust 工程师", pkg: "rust-engineer", color: "#FF9F0A", alive: true,  busy: false, node: "Node-iPad", ver: "0.2.1", model: "claude-sonnet-4", sessions: 5, preview: "跨 crate 重命名完成，19 处 import 已修", time: "12:20", unread: 0 },
+  { id: "com.acowork.data-analyst", name: "数据分析师", pkg: "data-analyst", color: "#5E5CE6", alive: true,  busy: false, node: "Node-iPad", ver: "0.1.3", model: "gpt-5-mini", sessions: 3, preview: "embedding 维度对比结果已出表", time: "10:05", unread: 0 },
+  { id: "com.acowork.devops", name: "运维助手", pkg: "devops", color: "#64D2FF", alive: false, busy: false, node: "Node-iPad", ver: "0.4.0", model: "gpt-5", sessions: 8, preview: "", time: "", unread: 0 },
 ];
 
 const USERS = [
@@ -1202,6 +1253,19 @@ const SHEETS = {
   },
   "profile": (arg) => {
     const a = allConvs().find(x => x.id === arg);
+    /* 聊天页「更多」。Agent 与联系人是两套能力：Agent 有生命周期/设置抽屉/
+       多会话，真人没有这些概念，不能共用一份菜单（否则会出现「启动 Agent」
+       指向一个联系人）。conv-actions（长按）已按 kind 分流，这里保持一致。 */
+    if (a.kind === "user") {
+      return {
+        title: a.name,
+        items: [
+          { label: a.unread ? "标记为已读" : "无未读消息", disabled: !a.unread, fn: () => {} },
+          { label: "查看资料", fn: () => toast("移动端 v1 不提供用户资料页") },
+        ],
+        cancel: "取消",
+      };
+    }
     return {
       title: a.name,
       items: [
@@ -1259,13 +1323,14 @@ function argName(id) { const c = convById(id); return c ? c.name : id; }
 
 /* 会话切换的原子迁移（对齐 chatStore.openSession：切 Tab + 打开 session + 载历史）。
    移动端没有 Session Tab，所以「打开」= 改当前页的 sid + 重载气泡。 */
-function switchSession(agentId, sid) {
+function switchSession(agentId, sid, opts = {}) {
   const p = curPage();
   if (!p || p.type !== "chat") return;
   if (p.sid === sid) return;
   p.sid = sid;
   p.ctx = [];
   render({ dir: "reload" });
+  if (opts.silent) return;   // 调用方自己给反馈，避免叠两条 toast
   const s = sessionById(sid);
   toast(s ? (sessionWritable(s) ? "已切换会话" : "已进入只读会话") : "已切换会话");
 }
@@ -1275,7 +1340,7 @@ function newSession(agentId) {
   const id = "s-new-" + Math.random().toString(36).slice(2, 7);
   SESSIONS[agentId] = [{ id, title: "新会话", preview: "尚未发送消息", time: "刚刚", msgs: 0, can_write: true, visibility: "private", owner: VIEWER.name, state: "active", mine: true }, ...(SESSIONS[agentId] || [])];
   SESSION_TOTAL[agentId] = (SESSION_TOTAL[agentId] || 0) + 1;
-  switchSession(agentId, id);
+  switchSession(agentId, id, { silent: true });
   toast("已新建会话（默认私有）");
 }
 function delSession(agentId, sid) {
@@ -1540,9 +1605,21 @@ function avatarHTML(o, size = "") {
   return `<div class="avatar ${size}" style="background:${o.color}">${esc(o.name.slice(0, o.kind === "agent" ? 2 : 1))}${dot}</div>`;
 }
 
-function navHTML({ title, sub, left, right, large, titleNode }) {
+/* 会话行的 node 标识。只在 >1 个 node 时渲染 —— 单节点部署时"这台机器叫
+   Mac-Studio"是噪音，没有决策价值。圆点表示节点在线状态（Agent 活着不代表
+   它所在机器健康：Node 可能掉线而 Runtime 还挂着）。 */
+function nodeTagHTML(c) {
+  if (c.kind !== "agent") return "";
+  const nodes = [...new Set(AGENTS.map(a => a.node).filter(Boolean))];
+  if (nodes.length < 2 || !c.node) return "";
+  const online = c.alive;   // 真实实现读 node.online（Node 心跳），与 Agent 存活是两回事
+  return `<span class="ntag" title="运行节点：${esc(c.node)}">
+    <span class="ndot${online ? "" : " off"}"></span>${esc(c.node)}</span>`;
+}
+
+function navHTML({ title, sub, left, right, large, titleNode, rightWide }) {
   const t = titleNode || `<div class="nav-title">${esc(title)}${sub ? `<span class="sub">${esc(sub)}</span>` : ""}</div>`;
-  return `<div class="navbar${large ? " large" : ""}">
+  return `<div class="navbar${large ? " large" : ""}${rightWide ? " right-wide" : ""}">
     <div>${left || ""}</div>
     ${t}
     <div class="nav-btn right">${right || ""}</div>
@@ -1559,10 +1636,13 @@ function initStacks() {
 }
 
 /* ---------- 数据辅助 ---------- */
+/* 返回原始对象引用（不是展开副本），否则 SHEETS 里的动作就地改写
+   （清未读 a.unread = 0、启停 Agent）会写进临时副本、静默丢失。
+   kind 直接打在源对象上，避免每次调用都产生新对象。 */
 function allConvs() {
   return [
-    ...AGENTS.map(a => ({ ...a, kind: "agent" })),
-    ...USERS.map(u => ({ ...u, kind: "user" })),
+    ...AGENTS.map(a => (a.kind = "agent", a)),
+    ...USERS.map(u => (u.kind = "user", u)),
   ];
 }
 function convById(id) { return allConvs().find(c => c.id === id); }
@@ -1617,6 +1697,7 @@ function pageConvList() {
         <div class="line1">
           <span class="nm">${esc(c.name)}</span>
           ${c.kind === "agent" ? `<span class="pill ${c.alive ? "blue" : ""}">${c.alive ? "在线" : "离线"}</span>` : ""}
+          ${nodeTagHTML(c)}
           <span class="tm">${esc(tm)}</span>
         </div>
         <div class="line2">
@@ -1670,13 +1751,21 @@ function pageChat(p) {
        </button>`
     : `<div class="nav-title">${esc(c.name)}<span class="sub">${esc(c.online ? "在线" : "离线")}</span></div>`;
 
+  /* 「新建会话」是 Agent 会话的高频操作（一次任务一个会话），原先只藏在
+     标题 Action Sheet 和抽屉里，等于要两步才能创建。提到导航栏右上当一级入口。
+     只读会话不能创建；联系人会话没有 session 概念，都不给。 */
+  const newSessBtn = isAgent && !ro
+    ? `<button class="nav-btn icon" data-act="newsess" data-agent="${c.id}" aria-label="新建会话" title="新建会话">${ICON.plus}</button>`
+    : "";
+
   return `
     ${navHTML({
       title: c.name,
       sub: isAgent ? (stopped ? "已停止" : `${c.model} · ${c.node}`) : (c.online ? "在线" : "离线"),
       left: `<button class="nav-btn icon" data-act="back" aria-label="返回">${ICON.back}</button>`,
-      right: `<button class="nav-btn icon" data-act="sheet" data-sheet="profile" data-arg="${c.id}" aria-label="更多">${ICON.list}</button>`,
+      right: newSessBtn + `<button class="nav-btn icon" data-act="sheet" data-sheet="profile" data-arg="${c.id}" aria-label="更多">${ICON.list}</button>`,
       titleNode: titleBtn,
+      rightWide: !!newSessBtn,
     })}
     ${ro ? `
       <div class="banner info ro-banner">${ICON.lock}<span>只读 · 来自 ${esc(s.owner)} 的共享会话，你不能发送消息</span></div>` : ""}
@@ -1787,7 +1876,6 @@ function composerHTML(p, ro) {
       <button class="icon-btn" data-act="drawer" data-agent="${composerAgent()}" aria-label="打开设置">${ICON.gear}</button>
       <textarea class="ta" rows="1" placeholder="${placeholder}"></textarea>
       ${visBtn}
-      <button class="icon-btn extra" data-act="toast" data-toast="移动端 v1 不含 Harness / Extensions" aria-label="更多">${ICON.emoji}</button>
       <button class="send-btn" data-act="toast" data-toast="已发送（原型示意）" aria-label="发送">${ICON.send}</button>
     </div>
   </div>`;
@@ -2567,6 +2655,8 @@ Object.assign(ACTIONS, {
   /* 多会话相关动作 */
   "dsess":   (el) => openSheet("session-actions", `${el.dataset.agent}::${el.dataset.sid}`),
   "dnewsess": (el) => { closeDrawer(); setTimeout(() => { newSession(el.dataset.agent); }, 200); },
+  /* 聊天页导航栏「新建会话」：一级入口，留在当前页不跳走 */
+  "newsess": (el) => newSession(el.dataset.agent),
   "dmore":   (el) => {
     /* 分页：真实实现调 agentStore.fetchSessions(agentId, page) 追加，
        这里直接放开页大小来演示「加载更多」。 */
