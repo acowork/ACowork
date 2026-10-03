@@ -87,6 +87,7 @@ Desktop App 以同机进程身份直连。产品需要支持：
 | D. Tailscale / WireGuard mesh | ⚠️ 仅内部验证 | E2E 加密、免中继开发，技术上极佳；但要求终端用户安装第三方 App 并注册第三方账号，**不能作为产品形态交付**；适合 Phase 0 验证移动端协议兼容性 |
 | E. Cloudflare Tunnel | ❌ 否决 | 国内可达性差；每 Gateway 需运行 cloudflared；TCP 隧道对 MQTT 支持一般；平台定位要求可控的自有基础设施 |
 | F. WebRTC + TURN | ❌ 否决 | P2P 延迟最优，但信令 / ICE / NAT 打洞 / TURN 回落的复杂度远超收益；未来若中继带宽成为瓶颈可再评估 |
+| G. 中继以 Docker 镜像交付 | ❌ 否决 | 镜像化确实能免疫宿主机环境缺陷（构建期 glibc / musl 工具链、`acl` 包与 `setfacl` 权限、跨架构 `scp`），但 **certbot 无法进镜像**（见下方 3.3），收益只覆盖部署链的一小段；且中继**一年可能不部署一次**，Docker 的运维复利摊不到这么薄的场景上 |
 
 ### 3.2 为什么否决「公网 MQTT Broker + Bridge」（方案 B）
 
@@ -102,6 +103,33 @@ Desktop App 以同机进程身份直连。产品需要支持：
 4. **多租户无解**：每个 Gateway 需在公网 Broker 上做命名空间隔离 + ACL，Bridge 模型对此几乎没有支持。
 5. **论据不适用**：「离线消息、万级并发」是 IoT 场景论据；ACowork 单 Gateway `max_connections = 100`，
    且 Broker 状态本来就必须跟随 Gateway（会话数据、记忆索引均在 Gateway 侧）。
+
+### 3.3 为什么不做「中继 Docker 镜像交付」（方案 G）
+
+中继是**无状态字节管道**，从交付角度看「做成镜像、docker run 一步到位」很自然。但按实际部署链逐段核对，
+收益只覆盖一小段，其余部分要么无解、要么反而更麻烦：
+
+**镜像能解决的**（确实存在，但都可绕过）：
+
+| 宿主机环境缺陷 | 绕过方式（不 Docker 也能做） |
+|---------------|----------------------------|
+| 构建期 glibc 与运行期不匹配（Anolis 8 = 2.28） | 静态链接 musl 目标即可，与容器无关 |
+| 跨架构 `scp`（x86_64 / aarch64） | 编译时确认 `uname -m`，一步到位 |
+| `acl` 包与 `setfacl` 权限配置 | 两条 `setfacl` 命令，或 `chmod 640` 兜底 |
+| 300MB Rust 工具链（仅当在 ECS 兜底编译时） | 本地编译后 `scp`，本就不需要 |
+
+**镜像解决不了的**——这些才是真正卡住部署的地方，且与容器化无关：
+
+1. **Cloudflare API Token 的 Start Date 按 UTC 零点解释**（§5.4.1 runbook 记录）：填「今天」要等到
+   当天 08:00 才生效，期间返回笼统的 `9109 Invalid access token`。这是控制台配置问题。
+2. **certbot 不能进镜像**：其工作目录 `/etc/letsencrypt` 生命周期与容器不一致（镜像删重建即丢续期配置），
+   且续期 deploy hook 天然要 `systemctl restart acowork-relay`——容器内无 systemd。若强做，
+   需改 hook 为信号重载并让 relay 支持热加载证书，那是**改架构**而非「配置好依赖」。
+3. **新增一层抽象**：`systemctl status` 看不到的故障要先懂 Docker 网络/挂载/日志，排查成本上升。
+
+**决定**：维持 systemd 交付（runbook `docs/runbooks/relay-ecs-cloudflare-deploy.md`）。中继**一年可能
+不部署一次**，Docker 的运维复利摊不到这么薄的场景。若将来中继需要多副本 / 自动扩缩 / 蓝绿发布，
+再评估镜像化——那时 certbot 应彻底移出（改用外部 ACME 客户端或云厂商证书服务），单独作为一项改造。
 
 ---
 
