@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, type ReactNode } from "react";
 import { useGatewayStore } from "../../stores/gatewayStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useChatStore } from "../../stores/chatStore";
@@ -12,14 +12,15 @@ import { ExpandableRow, ListBox, ListRow } from "../common/list";
 import { RadioGroup } from "../common/RadioGroup";
 import { DEFAULT_GATEWAY_URL, getGatewayUrl, DEFAULT_THEME, DEFAULT_FONT_SIZE, DEFAULT_CONTENT_WIDTH, DEFAULT_OPACITY, DEFAULT_ACCENT_COLOR } from "../../lib/config";
 import { ACCENT_PRESETS } from "../../lib/accentPresets";
-import { Bug, HelpCircle, Monitor } from "lucide-react";
+import { Bug, HelpCircle, Monitor, User, SlidersHorizontal, Palette, Globe } from "lucide-react";
 import { inputReadonly } from "../../lib/ui-styles";
 import { StyledInput } from "../common/StyledInput";
 import { Dropdown } from "../common/Dropdown";
 import { UrlComboBox } from "./UrlComboBox";
 import { ProfileTab } from "./ProfileTab";
 import { ServicesPanel } from "./ServicesPanel";
-import { TabButton } from "../common/tab";
+import { SectionPane } from "../common/SectionPane";
+import { OutlineSettingsIcon as SettingsIcon } from "../common/SettingsIcon";
 import { Tooltip } from "../common/Tooltip";
 import { log } from "../../lib/logger";
 
@@ -29,38 +30,28 @@ export function SettingsPage({ initialTab = "profile" }: { initialTab?: Settings
   const { t } = useTranslation();
   const [activeTab, setActiveTab] = useState<SettingsTab>(initialTab);
 
-  const tabs: { id: SettingsTab; label: string }[] = [
-    { id: "profile", label: t("settings.tabProfile") },
-    { id: "general", label: t("settings.tabGeneral") },
-    { id: "appearance", label: t("settings.tabAppearance") },
-    { id: "gateway", label: t("settings.tabGateway") },
+  const tabs: { id: SettingsTab; label: string; icon: ReactNode }[] = [
+    { id: "profile", label: t("settings.tabProfile"), icon: <User className="h-3.5 w-3.5" /> },
+    { id: "general", label: t("settings.tabGeneral"), icon: <SlidersHorizontal className="h-3.5 w-3.5" /> },
+    { id: "appearance", label: t("settings.tabAppearance"), icon: <Palette className="h-3.5 w-3.5" /> },
+    { id: "gateway", label: t("settings.tabGateway"), icon: <Globe className="h-3.5 w-3.5" /> },
   ];
 
   return (
-    <div
-      className="flex flex-1 flex-col bg-nav-surface"
+    <SectionPane
+      title={t("navBar.settings")}
+      icon={<SettingsIcon className="h-3.5 w-3.5" />}
+      items={tabs}
+      selected={activeTab}
+      onSelect={(id) => setActiveTab(id as SettingsTab)}
+      storageKey="acowork-settings-list-width"
     >
-      {/* Tabs */}
-      <div className="flex gap-1 border-b border-border-divider px-6 pt-2">
-        {tabs.map((tab) => (
-          <TabButton
-            key={tab.id}
-            onClick={() => setActiveTab(tab.id)}
-            active={activeTab === tab.id}
-          >
-            {tab.label}
-          </TabButton>
-        ))}
-      </div>
-
       {/* Tab content — CSS visibility preserves component state across tab switches */}
-      <div className="flex-1 overflow-y-auto p-6">
-        <div style={{ display: activeTab === "gateway" ? "block" : "none" }}><GatewayTab /></div>
-        <div style={{ display: activeTab === "appearance" ? "block" : "none" }}><AppearanceTab /></div>
-        <div style={{ display: activeTab === "general" ? "block" : "none" }}><GeneralTab /></div>
-        <div style={{ display: activeTab === "profile" ? "block" : "none" }}><ProfileTab /></div>
-      </div>
-    </div>
+      <div style={{ display: activeTab === "gateway" ? "block" : "none" }}><GatewayTab /></div>
+      <div style={{ display: activeTab === "appearance" ? "block" : "none" }}><AppearanceTab /></div>
+      <div style={{ display: activeTab === "general" ? "block" : "none" }}><GeneralTab /></div>
+      <div style={{ display: activeTab === "profile" ? "block" : "none" }}><ProfileTab /></div>
+    </SectionPane>
   );
 }
 

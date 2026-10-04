@@ -99,8 +99,10 @@ export function DocTreeSidebar({ width }: { width?: number }) {
       style={{ width: width ?? 240 }}
       aria-label={t("doc.sidebarLabel")}
     >
-      {/* ── 头部：标题 + 新建按钮 ───────────────────────────── */}
-      <div className="flex items-center gap-1 border-b border-border-divider px-2 py-1.5">
+      {/* ── 头部：标题 + 新建按钮 ─────────────────────────────
+          高度绑 --ui-list-header-h，与 pm 搜索栏 / harness、settings
+          标题栏同一高度，四个列表胶囊顶边才能横向对齐。 */}
+      <div className="flex min-h-[var(--ui-list-header-h)] items-center gap-1 border-b border-border-divider px-3">
         <BookOpen className="mr-1 h-3.5 w-3.5 text-text-tertiary" aria-hidden />
         <span className="flex-1 truncate font-medium text-text-secondary ">
           {t("doc.title")}

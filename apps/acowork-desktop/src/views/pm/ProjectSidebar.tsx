@@ -80,11 +80,13 @@ export function ProjectSidebar({ width }: { width?: number }) {
 
   return (
     <aside
-      className={cn(CAPSULE_PANE_CN, "shrink-0 bg-nav-surface")}
+      className={cn(CAPSULE_PANE_CN, "h-full shrink-0 bg-nav-surface text-xs")}
       style={{ width: width ?? 240 }}
     >
-      {/* Header — search input (与 AgentList 同款) */}
-      <div className="px-3 py-2">
+      {/* Header — search input (与 AgentList 同款)。高度绑定
+          --ui-list-header-h，与 harness / settings 的标题栏同高，
+          三个列表胶囊的分割线才能横向对齐。 */}
+      <div className="flex min-h-[var(--ui-list-header-h)] items-center px-3">
         <div className="relative min-w-0 flex-1">
           <Search className="absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-text-tertiary " />
           <StyledInput

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { VaultKeyEntry, ModelInfo, ModelCapabilitiesInfo, ProviderListEntry, McpServerConfigDef, McpTransportDef, McpPresetDef } from "../../lib/types";
 import { cn } from "../../lib/utils";
@@ -9,7 +9,7 @@ import { ProviderLogo } from "../common/ProviderLogo";
 import { isLocalProvider } from "../../lib/providers";
 import { fetchProviderModels } from "../../lib/gateway-api";
 import { getGatewayUrl } from "../../lib/config";
-import { Monitor, MousePointer, Package, Search, Globe, BookOpen, FileText, PenTool, Star, Plus, CheckCircle2, Download, XCircle, Loader2, Minus, Pencil } from "lucide-react";
+import { Monitor, MousePointer, Package, Search, Globe, BookOpen, FileText, PenTool, Star, Plus, CheckCircle2, Download, XCircle, Loader2, Minus, Pencil, Cpu, Plug, Database, Braces, Puzzle } from "lucide-react";
 import { useMcpStore } from "../../stores/mcpStore";
 import { MCP_PRESETS, presetToServerConfig } from "../../lib/mcp-presets";
 import { EmbeddingModelTab } from "./EmbeddingModelTab";
@@ -22,7 +22,7 @@ import { useTranslation } from "../../i18n/useTranslation";
 import { Tooltip } from "../common/Tooltip";
 import { ErrorBox } from "../common/ErrorBox";
 import { ExpandableRow, ListBox, ListRow } from "../common/list";
-import { TabButton } from "../common/tab";
+import { SectionPane } from "../common/SectionPane";
 
 type HarnessTab = "providers" | "mcp" | "embedding" | "lsp";
 
@@ -30,36 +30,28 @@ export function HarnessPage() {
   const { t } = useTranslation();
   const [activeTab, setActiveTab] = useState<HarnessTab>("providers");
 
-  const tabs: { id: HarnessTab; label: string }[] = [
-    { id: "providers", label: t("harness.tabProviders") },
-    { id: "mcp", label: t("harness.tabMcp") },
-    { id: "embedding", label: t("harness.tabEmbedding") },
-    { id: "lsp", label: t("harnessLsp.tabLsp") },
+  const tabs: { id: HarnessTab; label: string; icon: ReactNode }[] = [
+    { id: "providers", label: t("harness.tabProviders"), icon: <Cpu className="h-3.5 w-3.5" /> },
+    { id: "mcp", label: t("harness.tabMcp"), icon: <Plug className="h-3.5 w-3.5" /> },
+    { id: "embedding", label: t("harness.tabEmbedding"), icon: <Database className="h-3.5 w-3.5" /> },
+    { id: "lsp", label: t("harnessLsp.tabLsp"), icon: <Braces className="h-3.5 w-3.5" /> },
   ];
 
   return (
-    <div className="flex flex-1 flex-col bg-nav-surface">
-      {/* Tabs */}
-      <div className="flex gap-1 border-b border-border-divider px-6 pt-2">
-        {tabs.map((tab) => (
-          <TabButton
-            key={tab.id}
-            onClick={() => setActiveTab(tab.id)}
-            active={activeTab === tab.id}
-          >
-            {tab.label}
-          </TabButton>
-        ))}
-      </div>
-
+    <SectionPane
+      title={t("navBar.harness")}
+      icon={<Puzzle className="h-3.5 w-3.5" />}
+      items={tabs}
+      selected={activeTab}
+      onSelect={(id) => setActiveTab(id as HarnessTab)}
+      storageKey="acowork-harness-list-width"
+    >
       {/* Tab content — CSS visibility preserves component state across tab switches */}
-      <div className="flex-1 overflow-y-auto p-6">
-        <div style={{ display: activeTab === "providers" ? "block" : "none" }}><ProvidersTab /></div>
-        <div style={{ display: activeTab === "mcp" ? "block" : "none" }}><McpTab /></div>
-        <div style={{ display: activeTab === "embedding" ? "block" : "none" }}><EmbeddingModelTab /></div>
-        <div style={{ display: activeTab === "lsp" ? "block" : "none" }}><LspTab /></div>
-      </div>
-    </div>
+      <div style={{ display: activeTab === "providers" ? "block" : "none" }}><ProvidersTab /></div>
+      <div style={{ display: activeTab === "mcp" ? "block" : "none" }}><McpTab /></div>
+      <div style={{ display: activeTab === "embedding" ? "block" : "none" }}><EmbeddingModelTab /></div>
+      <div style={{ display: activeTab === "lsp" ? "block" : "none" }}><LspTab /></div>
+    </SectionPane>
   );
 }
 

@@ -984,8 +984,8 @@ export function AppLayout() {
           // The four capsule panels (AgentList / ChatPanel / FileEditorPanel
           // / RightPanel) carry their own borders, which is what now
           // outlines them as floating surfaces. The non-chat view branches
-          // below (settings/harness/pm/docs/extensions) keep their
-          // solid `bg-page-bg` deliberately.
+          // below (settings/harness/pm/docs/extensions) keep their wrappers
+          // transparent for the same reason.
           <div className="flex flex-1 overflow-hidden rounded-xl">
             {/* Agent list — resizable */}
             <AgentList width={sidebarWidth} />
@@ -1128,25 +1128,26 @@ export function AppLayout() {
         ) : null}
 
         {currentView === "settings" && (
-          <div className="flex flex-1 overflow-hidden rounded-xl bg-page-bg">
+          <div className="flex flex-1 overflow-hidden rounded-xl">
             <SettingsPage initialTab={settingsInitialTab} />
           </div>
         )}
 
         {currentView === "harness" && (
-          <div className="flex flex-1 overflow-hidden rounded-xl bg-page-bg">
+          <div className="flex flex-1 overflow-hidden rounded-xl">
             <HarnessPage />
           </div>
         )}
 
-        {/* pm / docs / extensions share the chat view's capsule layout
+        {/* Every non-chat view shares the chat view's capsule layout
             (rounded panes on the window's vibrancy, see the chat branch
             above), so the wrapper is transparent — each view paints its own
             panes via CAPSULE_PANE_CN. They used to carry `bg-page-bg` here,
             which walled the whole view off from the desktop and read as a
-            different app. settings / harness keep their solid page: they are
-            modal-surface card flows, deliberately a separate visual
-            language. */}
+            different app. settings / harness now join the same two-column
+            master-detail shape (SectionPane: list capsule + detail capsule)
+            as pm / docs / extensions, instead of a row of inline tabs on a
+            solid page. */}
         {currentView === "projects" && (
           <div className="flex flex-1 overflow-hidden rounded-xl">
             <ProjectsView />
