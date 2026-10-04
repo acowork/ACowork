@@ -539,7 +539,53 @@ html[data-theme="dark"] .approval .a-title { color: var(--orange); }
 .banner svg { width: 16px; height: 16px; flex: 0 0 auto; }
 .banner.warn { background: rgba(255,149,0,.14); color: #8A5000; }
 html[data-theme="dark"] .banner.warn { color: var(--orange); }
-.banner.info { background: rgba(59,130,246,.12); color: #1B4FA0; }
+.banner.info { background: rgba(59,130,246,.12); color: #1B4FA0;
+/* ---- onboarding (v1.1: 启动/连接/登录/断连) ---- */
+.ob-wrap { flex: 1; display: flex; flex-direction: column; padding: 0 28px; overflow-y: auto; }
+.ob-hero { padding: 56px 0 28px; display: flex; flex-direction: column; align-items: center; gap: 12px; text-align: center; }
+.ob-logo { width: 72px; height: 72px; border-radius: 20px; background: var(--accent); color: #fff;
+  display: flex; align-items: center; justify-content: center; font-size: 30px; font-weight: 700; }
+.ob-title { font-size: 24px; font-weight: 700; }
+.ob-sub { font-size: 14px; color: var(--label-2); line-height: 1.5; max-width: 280px; }
+.ob-field { margin-top: 18px; }
+.ob-field label { display: block; font-size: 13px; color: var(--label-2); margin-bottom: 6px; }
+.ob-input { width: 100%; height: 48px; border-radius: 12px; border: 1px solid var(--separator);
+  background: var(--card); color: var(--label); font-size: 16px; padding: 0 14px; font-family: inherit; outline: none; }
+.ob-input:focus { border-color: var(--accent); }
+.ob-input.err { border-color: var(--red); }
+.ob-err { display: flex; align-items: center; gap: 6px; color: var(--red); font-size: 13px; margin-top: 8px; }
+.ob-err svg { width: 15px; height: 15px; }
+.ob-btn { margin-top: 22px; width: 100%; height: 50px; border-radius: 14px; border: 0; background: var(--accent);
+  color: #fff; font-size: 16px; font-weight: 600; font-family: inherit; cursor: pointer; }
+.ob-btn:disabled { opacity: .5; }
+.ob-btn.secondary { background: var(--card); color: var(--accent); border: 1px solid var(--separator); margin-top: 12px; }
+.ob-hint { margin-top: 14px; font-size: 12.5px; color: var(--label-3); text-align: center; line-height: 1.5; }
+.ob-saved { margin-top: 16px; }
+.ob-saved-title { font-size: 12px; color: var(--label-3); margin-bottom: 6px; }
+.ob-saved-item { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-radius: 10px;
+  background: var(--card); border: 1px solid var(--separator); margin-bottom: 8px; font-size: 14px; cursor: pointer; }
+.ob-saved-item .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); flex: 0 0 auto; }
+.ob-saved-item .dot.off { background: var(--label-3); }
+.ob-spin { display: inline-block; width: 16px; height: 16px; border: 2px solid rgba(255,255,255,.35);
+  border-top-color: #fff; border-radius: 50%; animation: obspin .8s linear infinite; vertical-align: -3px; margin-right: 6px; }
+@keyframes obspin { to { transform: rotate(360deg); } }
+.ob-disconnected { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; padding: 0 32px; text-align: center; }
+.ob-dis-icon { width: 64px; height: 64px; border-radius: 50%; background: rgba(255,59,48,.12); color: var(--red);
+  display: flex; align-items: center; justify-content: center; }
+.ob-dis-icon svg { width: 30px; height: 30px; }
+/* 断连 banner（全局，覆盖在内容上方） */
+.offline-banner { display: flex; align-items: center; gap: 8px; padding: 8px 16px; font-size: 13px;
+  background: rgba(255,149,0,.16); color: #8A5000; border-bottom: 0.5px solid var(--separator); }
+html[data-theme="dark"] .offline-banner { color: var(--orange); }
+.offline-banner svg { width: 15px; height: 15px; flex: 0 0 auto; }
+.offline-banner .retry { margin-left: auto; border: 0; background: none; color: var(--accent); font-size: 13px; font-family: inherit; cursor: pointer; padding: 2px 6px; }
+/* 发送失败气泡 */
+.msg.me .bubble.fail { background: rgba(255,59,48,.14); color: var(--red); border: 1px solid rgba(255,59,48,.4); }
+.msg.me .meta .fail-link { color: var(--red); font-weight: 600; cursor: pointer; }
+/* 会话状态指示（v1 轮询替代流式） */
+.status-line { display: flex; align-items: center; gap: 8px; padding: 6px 4px 10px; font-size: 13px; color: var(--label-2); }
+.status-line .pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); animation: obpulse 1.2s ease-in-out infinite; }
+@keyframes obpulse { 0%,100% { opacity: .35; } 50% { opacity: 1; } } }
 html[data-theme="dark"] .banner.info { color: var(--accent); }
 .banner.err { background: rgba(255,59,48,.12); color: #B3241B; }
 html[data-theme="dark"] .banner.err { color: var(--red); }
@@ -1789,6 +1835,7 @@ function pageChat(p) {
       titleNode: titleBtn,
       rightWide: !!newSessBtn,
     })}
+    ${offlineBannerHTML()}
     ${ro ? `
       <div class="banner info ro-banner">${ICON.lock}<span>只读 · 来自 ${esc(s.owner)} 的共享会话，你不能发送消息</span></div>` : ""}
     <div class="chat-scroll" id="chatScroll">
@@ -1837,7 +1884,9 @@ function chatBubbles(c, isAgent) {
           <div class="bubble">已把 ADR-085 的状态转移图补进 §3，你直接看 1.1 节。</div>
           <div class="meta">14:31</div>
         </div>
-      </div>`
+      </div>
+      ${window.__demoStatus ? statusLineHTML(window.__demoStatus) : ""}
+      ${window.__demoFail ? failedMsgHTML() : ""}`
     : `
       <div class="msg">
         <div class="avatar sm" style="background:${c.color}">${esc(c.name.slice(0, 1))}</div>
@@ -1901,6 +1950,133 @@ function composerHTML(p, ro) {
       <button class="send-btn" data-act="toast" data-toast="已发送（原型示意）" aria-label="发送">${ICON.send}</button>
     </div>
   </div>`;
+}
+
+/* ============================================================
+   1b. 启动与连接（v1.1 设计 §7）：连接 → 登录 → 进入主界面
+   原型演示入口：设置页「启动流程演示」
+   ============================================================ */
+const OB = {
+  saved: [
+    { url: "http://192.168.1.23:19876", name: "Studio · 局域网", ok: true },
+    { url: "http://10.20.30.4:19876", name: "办公室中转", ok: false },
+  ],
+  probe: "idle",           // idle | probing | ok | fail
+  probeResult: null,       // { mode, registration_open, requires_setup }
+  loginErr: "",
+  loginBusy: false,
+  offline: false,          // 断连 banner 演示开关
+};
+
+function pageConnect() {
+  const probing = OB.probe === "probing";
+  const fail = OB.probe === "fail";
+  return `
+  <div class="page" data-page="connect"><div class="page-body">
+    <div class="ob-wrap">
+      <div class="ob-hero">
+        <div class="ob-logo">A</div>
+        <div class="ob-title">连接 ACowork</div>
+        <div class="ob-sub">输入桌面端共享的网关地址。<br>移动端不运行本地网关。</div>
+      </div>
+      <div class="ob-field">
+        <label>网关地址</label>
+        <input class="ob-input${fail ? " err" : ""}" id="gwUrl" value="${esc(probing || OB.probe === "ok" ? "http://192.168.1.23:19876" : "")}"
+          placeholder="http://192.168.1.23:19876" ${probing ? "disabled" : ""}>
+        ${fail ? `<div class="ob-err">${ICON.alert}<span>无法连接：请确认桌面端已开启「允许局域网连接」，且两台设备在同一 Wi-Fi。</span></div>` : ""}
+        ${OB.probe === "ok" ? `<div class="ob-err" style="color:var(--green)">${ICON.check}<span>连接成功 · 多用户模式 · 需要登录</span></div>` : ""}
+      </div>
+      <button class="ob-btn" data-act="ob-probe" ${probing ? "disabled" : ""}>${probing ? `<span class="ob-spin"></span>检测中…` : "连接"}</button>
+      <div class="ob-saved">
+        <div class="ob-saved-title">已保存的地址</div>
+        ${OB.saved.map(sv => `
+          <div class="ob-saved-item" data-act="ob-saved" data-url="${esc(sv.url)}">
+            <span class="dot${sv.ok ? "" : " off"}"></span>
+            <span style="flex:1">${esc(sv.name)}<br><span style="font-size:12px;color:var(--label-3)">${esc(sv.url)}</span></span>
+          </div>`).join("")}
+      </div>
+      <div class="ob-hint">v1 不支持扫码配对与注册：没有账号请在桌面端创建。</div>
+    </div>
+  </div></div>`;
+}
+
+function pageLogin() {
+  return `
+  <div class="page" data-page="login"><div class="page-body">
+    <div class="ob-wrap">
+      <div class="ob-hero" style="padding-top:40px">
+        <div class="ob-title">登录</div>
+        <div class="ob-sub">http://192.168.1.23:19876<br>多用户模式 · 账号由桌面端管理</div>
+      </div>
+      <div class="ob-field">
+        <label>用户名</label>
+        <input class="ob-input" placeholder="用户名" value="nicholas">
+      </div>
+      <div class="ob-field">
+        <label>密码</label>
+        <input class="ob-input${OB.loginErr ? " err" : ""}" type="password" placeholder="密码">
+      </div>
+      ${OB.loginErr ? `<div class="ob-err">${ICON.alert}<span>${esc(OB.loginErr)}</span></div>` : ""}
+      <button class="ob-btn" data-act="ob-login" ${OB.loginBusy ? "disabled" : ""}>${OB.loginBusy ? `<span class="ob-spin"></span>登录中…` : "登录"}</button>
+      <button class="ob-btn secondary" data-act="ob-login-fail">演示：密码错误</button>
+      <div class="ob-hint">连续失败 5 次将临时锁定登录。<br>忘记密码请在桌面端重置。</div>
+    </div>
+  </div></div>`;
+}
+
+function pageDisconnected() {
+  return `
+  <div class="page" data-page="disconnected"><div class="page-body">
+    <div class="ob-wrap">
+      <div class="ob-disconnected">
+        <div class="ob-dis-icon">${ICON.wifiOff || ICON.alert}</div>
+        <div class="ob-title" style="font-size:20px">连接已断开</div>
+        <div class="ob-sub">无法访问 http://192.168.1.23:19876。<br>请检查桌面端是否在线、两台设备是否在同一网络。</div>
+        <button class="ob-btn" data-act="ob-reconnect" style="max-width:280px">重试</button>
+        <button class="ob-btn secondary" data-act="ob-change" style="max-width:280px">更换地址</button>
+      </div>
+    </div>
+  </div></div>`;
+}
+
+function pageRestricted() {
+  return `
+  <div class="page" data-page="restricted"><div class="page-body">
+    <div class="ob-wrap">
+      <div class="ob-disconnected">
+        <div class="ob-dis-icon" style="background:rgba(255,149,0,.14);color:var(--orange)">${ICON.info}</div>
+        <div class="ob-title" style="font-size:20px">受限模式</div>
+        <div class="ob-sub">网关尚未完成初始化设置（或注册未开放）。<br>请在桌面端完成设置后再使用移动端。</div>
+        <button class="ob-btn" data-act="ob-reconnect" style="max-width:280px">重新检测</button>
+      </div>
+    </div>
+  </div></div>`;
+}
+
+/* 断连 banner：挂在主导航页顶部（演示开关在设置页） */
+function offlineBannerHTML() {
+  return OB.offline ? `<div class="offline-banner">${ICON.refresh}<span>连接已断开，正在重试…</span><button class="retry" data-act="ob-banner-retry">立即重试</button></div>` : "";
+}
+
+/* 会话状态指示行（替代流式；v1 轮询 live_state.status） */
+function statusLineHTML(kind) {
+  const map = {
+    thinking: "正在思考…",
+    tool: "正在执行工具：file_read",
+    approval: "等待你在桌面端确认审批",
+    streaming: "正在生成回复…",
+  };
+  return `<div class="status-line"><span class="pulse"></span><span>${map[kind] || kind}</span></div>`;
+}
+
+/* 发送失败气泡（演示） */
+function failedMsgHTML() {
+  return `
+    <div class="msg me">
+      <div class="avatar sm" style="background:${ME.color}">N</div>
+      <div><div class="bubble fail">这条消息发送失败（网络中断）</div>
+        <div class="meta"><span class="fail-link" data-act="ob-resend">重试</span> · 已保留草稿</div></div>
+    </div>`;
 }
 </script>
 
@@ -2159,6 +2335,12 @@ function pageSettingsList() {
       ${rowDef("gear", "#8E8E93", "通用", "语言、通知、日志", "settingsGeneral")}
       ${rowDef("palette", "#AF52DE", "外观", "主题、字体、透明度", "settingsAppearance")}
       ${rowDef("cloud", "#34C759", "网关", "relay · 已连接", "settingsGateway")}
+      ${rowDef("refresh", "#FF9500", "启动流程演示（v1.1）", "连接 → 登录 → 断连 → 受限模式", "connect")}
+      <button class="row" data-act="ob-demo-offline" style="border-radius:var(--r-card);background:var(--card);margin:0 16px 10px;width:calc(100% - 32px)">
+        <span class="lead" style="color:#FF9500">${ICON.wifi || ICON.alert}</span>
+        <span class="grow"><span class="t">模拟断连 banner</span><span class="d">聊天页顶部横幅 + 自动重连</span></span>
+        <span class="pill">${OB.offline ? "开" : "关"}</span>
+      </button>
       <div class="group" style="margin-top:6px">
         <div class="group-card">
           <button class="row" data-act="toast" data-toast="移动端 v1 不含 Harness（Provider / MCP / Embedding）">
@@ -2628,6 +2810,10 @@ const wOpen = new Set(["src"]);
    PAGE REGISTRY + 额外动作 + 启动
    ============================================================ */
 const PAGES = {
+  connect:         pageConnect,
+  login:           pageLogin,
+  disconnected:    pageDisconnected,
+  restricted:      pageRestricted,
   convList:        pageConvList,
   chat:            (p) => pageChat(Object.assign({ id: p.id || "com.acowork.software-architect", ctx: [] }, p)),
   projectList:     pageProjectList,
@@ -2646,6 +2832,7 @@ const PAGES = {
 
 /* push 时按 data-page + data-id 构造页面对象（带每页独立的 UI 状态） */
 const PAGE_DEFAULTS = {
+  connect: {}, login: {}, disconnected: {}, restricted: {},
   chat:        { id: "com.acowork.software-architect", ctx: [] },
   board:       { col: "all" },
   doc:         {},
@@ -2667,6 +2854,41 @@ function newPage(type, id) {
 
 /* 补充的交互动作 */
 Object.assign(ACTIONS, {
+  /* ---- 启动流程演示 ---- */
+  "ob-probe": () => {
+    OB.probe = "probing"; render({ dir: "reload" });
+    setTimeout(() => { OB.probe = "ok"; render({ dir: "reload" }); }, 900);
+    setTimeout(() => { push(newPage("login")); }, 1500);
+  },
+  "ob-saved": (el) => {
+    const hit = OB.saved.find(x => x.url === el.dataset.url);
+    if (!hit || !hit.ok) { OB.probe = "fail"; render({ dir: "reload" }); return; }
+    OB.probe = "probing"; render({ dir: "reload" });
+    setTimeout(() => { OB.probe = "ok"; render({ dir: "reload" }); }, 700);
+    setTimeout(() => { push(newPage("login")); }, 1200);
+  },
+  "ob-login": () => {
+    OB.loginBusy = true; OB.loginErr = ""; render({ dir: "reload" });
+    setTimeout(() => {
+      OB.loginBusy = false;
+      toast("登录成功（原型：进入主界面）");
+      // 演示：直接回到主界面栈
+      NAV.tab = "chat"; NAV.stacks.chat = [{ type: "convList" }]; render({ dir: "pop" });
+    }, 900);
+  },
+  "ob-login-fail": () => { OB.loginErr = "用户名或密码错误"; render({ dir: "reload" }); },
+  "ob-reconnect": () => {
+    const b = document.querySelector("[data-act=ob-reconnect]");
+    if (b) { b.disabled = true; b.innerHTML = '<span class="ob-spin"></span>重试中…'; }
+    setTimeout(() => { toast("重试失败：网关不可达"); const bb = document.querySelector("[data-act=ob-reconnect]"); if (bb) { bb.disabled = false; bb.textContent = "重试"; } }, 1200);
+  },
+  "ob-change": () => { OB.probe = "idle"; pop(); push(newPage("connect")); },
+  "ob-banner-retry": () => { OB.offline = false; render({ dir: "reload" }); toast("已重连"); },
+  "ob-resend": () => { toast("重新发送（原型示意）"); },
+  "ob-demo-offline": () => { OB.offline = !OB.offline; render({ dir: "reload" }); toast(OB.offline ? "模拟断连：banner 已显示" : "模拟重连"); },
+  "ob-demo-fail": () => { window.__demoFail = !window.__demoFail; render({ dir: "reload" }); toast(window.__demoFail ? "演示：上一条消息发送失败" : "演示已关闭"); },
+  "ob-demo-status": (el) => { window.__demoStatus = el.dataset.kind; render({ dir: "reload" }); },
+  /* ---- 启动流程演示 ---- */
   "dtab": (el) => { drawerTab = el.dataset.tab; rerenderDrawer(); },
   "wtoggle": (el) => { const n = el.dataset.name; wOpen.has(n) ? wOpen.delete(n) : wOpen.add(n); rerenderDrawer(); },
   "doc-toggle": (el) => { const n = el.dataset.id; p_state.docsOpen.has(n) ? p_state.docsOpen.delete(n) : p_state.docsOpen.add(n); render(); },

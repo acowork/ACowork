@@ -15,6 +15,10 @@ function fakeTransport(over: Partial<ChatTransport> = {}): ChatTransport {
     fetchSessions: vi.fn(async () => ({ items: [], hasMore: false })),
     createSession: vi.fn(async () => session({ session_id: 'new' })),
     deleteSession: vi.fn(async () => {}),
+    fetchSnapshot: vi.fn(async () => ({ status: null, messageCount: null })),
+    send: vi.fn(async () => 'm1'),
+    approval: vi.fn(async () => {}),
+    answer: vi.fn(async () => {}),
     ...over,
   }
 }

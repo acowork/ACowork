@@ -20,7 +20,6 @@
     "noUncheckedIndexedAccess": true,
     "verbatimModuleSyntax": true,
 
-    "baseUrl": ".",
     "paths": {
       "@/*": ["./src/*"]
     }

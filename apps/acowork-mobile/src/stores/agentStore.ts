@@ -11,12 +11,32 @@
  */
 
 import { create } from 'zustand'
+import { fetchSessions } from '../lib/api'
 import type { AgentSummary, SessionInfo, UserSummary } from '../lib/types'
+
+/** Injected by `lib/api.ts` wiring at boot; keeps the store HTTP-free. */
+export interface DirectorySource {
+  loadAgents(): Promise<AgentSummary[]>
+  loadUsers(): Promise<UserSummary[]>
+}
+
+let directory: DirectorySource | null = null
+
+export function setDirectorySource(d: DirectorySource): void {
+  directory = d
+}
 
 interface AgentStore {
   agents: Record<string, { info: AgentSummary; sessions: SessionInfo[] }>
   agentList: AgentSummary[]
   users: UserSummary[]
+  /** True while the first directory load is in flight (list skeleton). */
+  directoryLoading: boolean
+
+  /** Pull agents + contacts; failure is reported, never swallowed silently. */
+  refreshDirectory(): Promise<boolean>
+  /** Page 1 of one agent's sessions — the IM preview needs them. */
+  refreshSessions(agentId: string): Promise<void>
 
   setAgents: (list: AgentSummary[]) => void
   setUsers: (list: UserSummary[]) => void
@@ -32,6 +52,32 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   agents: {},
   agentList: [],
   users: [],
+  directoryLoading: false,
+
+  refreshDirectory: async () => {
+    if (!directory) return false
+    set({ directoryLoading: true })
+    try {
+      const [agents, users] = await Promise.all([directory.loadAgents(), directory.loadUsers()])
+      get().setAgents(agents)
+      get().setUsers(users)
+      return true
+    } catch {
+      return false
+    } finally {
+      set({ directoryLoading: false })
+    }
+  },
+
+  refreshSessions: async (agentId) => {
+    if (!directory) return
+    try {
+      const { items } = await fetchSessions(agentId, 1)
+      get().mergeSessions(agentId, items)
+    } catch {
+      /* a stale list beats an error screen for a preview fetch */
+    }
+  },
 
   setAgents: (list) =>
     set((s) => {

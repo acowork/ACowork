@@ -485,3 +485,183 @@
   text-align: center;
   font-size: 15px;
 }
+
+/* --- Onboarding (v1.1 §7) --- */
+
+.boot-screen {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-4);
+  padding: var(--space-6);
+  text-align: center;
+}
+.boot-logo {
+  width: 72px;
+  height: 72px;
+  border-radius: 20px;
+  background: var(--color-tint);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 30px;
+  font-weight: 700;
+}
+.boot-title {
+  font-size: 22px;
+  font-weight: 600;
+}
+.boot-sub {
+  font-size: 14px;
+  color: var(--color-label-secondary);
+  line-height: 1.5;
+  max-width: 300px;
+}
+.boot-form {
+  width: 100%;
+  max-width: 320px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+.boot-input {
+  height: 46px;
+  border-radius: var(--radius-sm);
+  border: 0.5px solid var(--color-separator);
+  background: var(--color-bg-elevated);
+  color: var(--color-label);
+  font-size: 16px;
+  padding: 0 var(--space-3);
+  outline: none;
+  width: 100%;
+}
+.boot-input:focus {
+  border-color: var(--color-tint);
+}
+.boot-input.is-error {
+  border-color: var(--color-destructive);
+}
+.boot-error {
+  font-size: 13px;
+  color: var(--color-destructive);
+}
+.boot-primary {
+  height: 48px;
+  border-radius: var(--radius-sm);
+  border: 0;
+  background: var(--color-tint);
+  color: #fff;
+  font-size: 16px;
+  font-weight: 600;
+}
+.boot-primary:disabled {
+  opacity: 0.5;
+}
+.boot-secondary {
+  height: 44px;
+  border-radius: var(--radius-sm);
+  border: 0.5px solid var(--color-separator);
+  background: var(--color-bg-elevated);
+  color: var(--color-tint);
+  font-size: 15px;
+}
+.boot-hint {
+  font-size: 12.5px;
+  color: var(--color-label-secondary);
+  line-height: 1.5;
+}
+
+/* Status line (v1.1 §8: polling indicator, replaces streaming output) */
+.status-line {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-3);
+  font-size: 13px;
+  color: var(--color-label-secondary);
+}
+.status-pulse {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--color-tint);
+  animation: pulse 1.2s ease-in-out infinite;
+}
+@keyframes pulse {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 1; }
+}
+
+/* Offline banner */
+.banner-offline {
+  background: rgba(255, 149, 0, 0.16);
+  color: var(--color-warning);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+}
+.banner-offline button {
+  border: 0;
+  background: none;
+  color: var(--color-tint);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+/* Failed draft bubble */
+.bubble-failed {
+  background: rgba(255, 59, 48, 0.14) !important;
+  color: var(--color-destructive) !important;
+  border: 1px solid rgba(255, 59, 48, 0.4);
+}
+.retry-link {
+  color: var(--color-destructive);
+  font-weight: 600;
+  border: 0;
+  background: none;
+  font-size: 13px;
+  padding: 0;
+}
+
+/* AskQuestion card (v1.2 §8.3 — WS channel only) */
+.question-card {
+  padding: var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.question-text {
+  font-size: 14px;
+  line-height: 1.5;
+}
+.question-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+.question-option {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill, 999px);
+  background: none;
+  font-size: 13px;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+.question-answer {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+.question-answer .input-field {
+  flex: 1;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm, 8px);
+  font-size: 13px;
+  padding: 6px 10px;
+  background: none;
+  color: inherit;
+}
