@@ -86,6 +86,18 @@ export function pollNetworkState(): { online: boolean; fails: number } {
   return { online: consecutiveFails === 0, fails: consecutiveFails }
 }
 
+/* ---------------- idle stop (§8.3 "空闲不轮询") ----------------
+ * Idle status + an unmoved authoritative count for two consecutive ticks
+ * means nothing is in flight and nothing arrived, so the timer is torn down
+ * rather than hammering the Gateway from a phone that is just sitting on a
+ * finished conversation. `startWatching` restarts it (session switch, return
+ * to foreground, or a local send), which is the only path by which this
+ * session can gain content while we are in the foreground.
+ */
+const QUIET_TICKS = 2
+let quietTicks = 0
+let lastCount: number | null = null
+
 export function channelState(): 'ws' | 'polling' | 'off' {
   if (wsAlive) return 'ws'
   if (pollTimer !== null) return 'polling'
@@ -116,6 +128,8 @@ export function stopWatching(): void {
   active = null
   closeWs()
   stopPoll()
+  quietTicks = 0
+  lastCount = null
   if (retryTimer !== null) { clearTimeout(retryTimer); retryTimer = null }
   consecutiveFails = 0
 }
@@ -124,6 +138,10 @@ export function stopWatching(): void {
 
 function startPollOnly(): void {
   if (pollTimer !== null) return
+  // Re-baseline: a loop restarted after a WS loss (or an idle stop) must not
+  // inherit the previous cycle's count, or it could stop again immediately.
+  quietTicks = 0
+  lastCount = null
   void pollTick()
   pollTimer = setInterval(() => void pollTick(), POLL_INTERVAL_MS)
 }
@@ -141,8 +159,17 @@ async function pollTick(): Promise<void> {
     const snap = await deps.snapshot(active.agentId, active.sessionId)
     consecutiveFails = 0
     active.h.onSnapshot(snap)
+    // A 404 arrives here as {null, null} (api.ts): unknown to the Runtime =
+    // idle, and two such ticks stop the loop without ever tripping the
+    // offline banner (§8.3 "404 是业务态不是连通性故障").
+    const idle = snap.status === null || snap.status.status === 'idle'
+    const quiet = idle && snap.messageCount === lastCount
+    lastCount = snap.messageCount
+    quietTicks = quiet ? quietTicks + 1 : 0
+    if (quietTicks >= QUIET_TICKS) stopPoll()
   } catch {
     consecutiveFails += 1
+    quietTicks = 0
   }
 }
 

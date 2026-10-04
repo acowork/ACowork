@@ -10,8 +10,8 @@ import {
 } from '../lib/mqtt-wire'
 import { decodeEnvelope, wStr, wVarint, wBytes } from '../lib/proto-wire'
 import {
-  setRealtimeDeps, startWatching, stopWatching, channelState,
-  type WebSocketLike,
+  setRealtimeDeps, startWatching, stopWatching, channelState, pollNetworkState,
+  POLL_INTERVAL_MS, type WebSocketLike,
 } from '../lib/realtime'
 import type { SessionSnapshot } from '../lib/types'
 
@@ -252,5 +252,71 @@ describe('realtime channel', () => {
     sockets[0]!.close()
     await vi.waitFor(() => expect(sockets.length).toBeGreaterThanOrEqual(2), { timeout: 3000 })
     expect(connectOpts).toHaveBeenCalledTimes(2)
+  })
+})
+
+/* ---------------- idle stop (§8.3 "空闲不轮询") ----------------
+ * A phone sitting on a finished conversation must not keep hitting the
+ * Gateway every 2s. These use fake timers: the rule is about how MANY ticks
+ * happen, not about wall-clock latency.
+ */
+describe('idle stop', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+    snapshot.mockResolvedValue({ status: { status: 'idle' }, messageCount: 4 })
+  })
+  const ticks = (n: number) => vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS * n)
+
+  it('tears the timer down after two quiet ticks', async () => {
+    vi.useFakeTimers()
+    wireDeps({ wsUrl: () => null })
+    startWatching('a1', 's1', handlers)
+    await ticks(0) // the immediate first tick establishes the count baseline
+    expect(channelState()).toBe('polling')
+    await ticks(2)
+    expect(channelState()).toBe('off')
+    const seen = handlers.onSnapshot.mock.calls.length
+    await ticks(10)
+    expect(handlers.onSnapshot).toHaveBeenCalledTimes(seen)
+  })
+
+  it('keeps polling while the agent is working', async () => {
+    vi.useFakeTimers()
+    snapshot.mockResolvedValue({ status: { status: 'thinking' }, messageCount: 4 })
+    wireDeps({ wsUrl: () => null })
+    startWatching('a1', 's1', handlers)
+    await ticks(6)
+    expect(channelState()).toBe('polling')
+  })
+
+  it('keeps polling while the authoritative count moves', async () => {
+    vi.useFakeTimers()
+    let n = 4
+    snapshot.mockImplementation(async () => ({ status: { status: 'idle' }, messageCount: (n += 1) }))
+    wireDeps({ wsUrl: () => null })
+    startWatching('a1', 's1', handlers)
+    await ticks(6)
+    expect(channelState()).toBe('polling')
+  })
+
+  it('a session unknown to the Runtime (404 → null/null) goes quiet without an offline verdict', async () => {
+    vi.useFakeTimers()
+    snapshot.mockResolvedValue({ status: null, messageCount: null })
+    wireDeps({ wsUrl: () => null })
+    startWatching('a1', 's1', handlers)
+    await ticks(3)
+    expect(channelState()).toBe('off')
+    expect(pollNetworkState()).toEqual({ online: true, fails: 0 })
+  })
+
+  it('a local send restarts the loop after an idle stop', async () => {
+    vi.useFakeTimers()
+    wireDeps({ wsUrl: () => null })
+    startWatching('a1', 's1', handlers)
+    await ticks(4)
+    expect(channelState()).toBe('off')
+    startWatching('a1', 's1', handlers) // what chatStore.sendMessage does
+    await ticks(1)
+    expect(channelState()).toBe('polling')
   })
 })

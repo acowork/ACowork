@@ -1,0 +1,57 @@
+/**
+ * Projects tab root: the project list (§9).
+ *
+ * Progress is `open/total` because that is the one number a glance at a
+ * phone is worth — the board itself is one tap away. Creating and archiving
+ * projects stay on Desktop.
+ */
+
+import { useEffect } from 'react'
+import { useNavStore } from '../../stores/navStore'
+import { usePmStore } from '../../stores/pmStore'
+import { ListRow, Banner } from '../../components/ui'
+
+export function ProjectListScreen() {
+  const projects = usePmStore((s) => s.projects)
+  const loaded = usePmStore((s) => s.projectsLoaded)
+  const error = usePmStore((s) => s.error)
+  const refresh = usePmStore((s) => s.refreshProjects)
+  const openProject = usePmStore((s) => s.openProject)
+  const push = useNavStore((s) => s.push)
+
+  useEffect(() => {
+    void refresh()
+  }, [refresh])
+
+  const open = (pid: string) => {
+    void openProject(pid)
+    push('projects/board')
+  }
+
+  return (
+    <div className="screen">
+      <header className="navbar navbar-large">
+        <h1 className="navbar-title">项目</h1>
+      </header>
+      {error ? (
+        <div style={{ padding: '0 var(--space-4)' }}>
+          <Banner tone="error">{error}</Banner>
+        </div>
+      ) : null}
+      <div className="scroll">
+        {projects.map((p) => (
+          <ListRow
+            key={p.id}
+            arrow
+            onClick={() => open(p.id)}
+            label={<span className="row-title">{p.title}</span>}
+            hint={p.description || undefined}
+            value={p.status === 'active' ? '进行中' : p.status === 'archived' ? '已归档' : '已完成'}
+          />
+        ))}
+        {!loaded && !error ? <ListRow label="载入中…" /> : null}
+        {loaded && projects.length === 0 ? <ListRow label="没有项目" hint="在桌面端创建" /> : null}
+      </div>
+    </div>
+  )
+}

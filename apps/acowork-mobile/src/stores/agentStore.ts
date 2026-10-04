@@ -11,7 +11,7 @@
  */
 
 import { create } from 'zustand'
-import { fetchSessions } from '../lib/api'
+import { fetchLastMessage, fetchSessions } from '../lib/api'
 import type { AgentSummary, SessionInfo, UserSummary } from '../lib/types'
 
 /** Injected by `lib/api.ts` wiring at boot; keeps the store HTTP-free. */
@@ -32,16 +32,37 @@ interface AgentStore {
   users: UserSummary[]
   /** True while the first directory load is in flight (list skeleton). */
   directoryLoading: boolean
+  /**
+   * Pagination cursor, owned HERE rather than in `chatStore` because the
+   * session list lives here: a cursor that outlives the list it indexes, or
+   * a page-1 load that forgets to reset it, shows "加载更多" on a one-page
+   * agent forever.
+   */
+  sessionPage: Record<string, number>
+  sessionsHasMore: Record<string, boolean>
 
   /** Pull agents + contacts; failure is reported, never swallowed silently. */
   refreshDirectory(): Promise<boolean>
-  /** Page 1 of one agent's sessions — the IM preview needs them. */
+  /** Page 1 of one agent's sessions, REPLACING the cached page, plus the
+   *  IM preview of its most recent session. */
   refreshSessions(agentId: string): Promise<void>
+  /** The next page, appended. No-op once the server says there is none. */
+  loadMoreSessions(agentId: string): Promise<void>
+  /**
+   * The inbox load (§2.3): directory, then one session page per agent, then
+   * a preview for each. Bounded fan-out — a 30-agent gateway on a phone
+   * connection must not open 30 sockets at once.
+   */
+  refreshInbox(): Promise<boolean>
 
   setAgents: (list: AgentSummary[]) => void
   setUsers: (list: UserSummary[]) => void
   /** Prepend/merge a page of session history into the owning agent's slot. */
   mergeSessions: (agentId: string, items: SessionInfo[]) => void
+  /** Replace an agent's session list with a freshly loaded page 1. */
+  setSessions: (agentId: string, items: SessionInfo[]) => void
+  /** Fill the preview text of one session (the server has no such field). */
+  setPreview: (agentId: string, sessionId: string, preview: string) => void
   /** Remove a session and return the remaining list, for `chatStore`. */
   removeSession: (agentId: string, sessionId: string) => SessionInfo[]
   /** Read a single session row, the one place callers should get `can_write`. */
@@ -53,6 +74,8 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   agentList: [],
   users: [],
   directoryLoading: false,
+  sessionPage: {},
+  sessionsHasMore: {},
 
   refreshDirectory: async () => {
     if (!directory) return false
@@ -70,14 +93,81 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   },
 
   refreshSessions: async (agentId) => {
-    if (!directory) return
     try {
-      const { items } = await fetchSessions(agentId, 1)
-      get().mergeSessions(agentId, items)
+      const { items, hasMore } = await fetchSessions(agentId, 1)
+      get().setSessions(agentId, items)
+      set((s) => ({ sessionPage: { ...s.sessionPage, [agentId]: 1 }, sessionsHasMore: { ...s.sessionsHasMore, [agentId]: hasMore } }))
+      // The preview is the last message of the newest session. The backend's
+      // SessionSummary has no such field, so it costs one extra tail=1 call —
+      // only for the top row, which is the only one the inbox shows.
+      const top = items[0]
+      if (top && (top.message_count ?? 0) > 0) {
+        fetchLastMessage(agentId, top.session_id)
+          .then((p) => {
+            if (p) get().setPreview(agentId, top.session_id, p)
+          })
+          .catch(() => undefined)
+      }
     } catch {
       /* a stale list beats an error screen for a preview fetch */
     }
   },
+
+  loadMoreSessions: async (agentId) => {
+    if ((get().sessionsHasMore[agentId] ?? true) === false) return
+    const page = (get().sessionPage[agentId] ?? 1) + 1
+    try {
+      const { items, hasMore } = await fetchSessions(agentId, page)
+      get().mergeSessions(agentId, items)
+      set((s) => ({ sessionPage: { ...s.sessionPage, [agentId]: page }, sessionsHasMore: { ...s.sessionsHasMore, [agentId]: hasMore } }))
+    } catch {
+      /* leave the cursor alone so the row can be tapped again */
+    }
+  },
+
+  refreshInbox: async () => {
+    const ok = await get().refreshDirectory()
+    const ids = get().agentList.map((a) => a.id)
+    // 4 at a time: enough to feel instant on LTE, polite enough that a
+    // large gateway cannot starve the phone's socket budget.
+    const BATCH = 4
+    for (let i = 0; i < ids.length; i += BATCH) {
+      await Promise.all(ids.slice(i, i + BATCH).map((id) => get().refreshSessions(id)))
+    }
+    return ok
+  },
+
+  setSessions: (agentId, items) =>
+    set((s) => {
+      const slot = s.agents[agentId] ?? { info: { id: agentId, name: agentId }, sessions: [] }
+      // Keep a preview already fetched this session: the server cannot give
+      // it back, and dropping it would blank the inbox row on every refresh.
+      const previews = new Map(slot.sessions.map((x) => [x.session_id, x.last_message]))
+      return {
+        agents: {
+          ...s.agents,
+          [agentId]: {
+            ...slot,
+            sessions: items.map((x) => ({ ...x, last_message: x.last_message ?? previews.get(x.session_id) ?? null })),
+          },
+        },
+      }
+    }),
+
+  setPreview: (agentId, sessionId, preview) =>
+    set((s) => {
+      const slot = s.agents[agentId]
+      if (!slot) return s
+      return {
+        agents: {
+          ...s.agents,
+          [agentId]: {
+            ...slot,
+            sessions: slot.sessions.map((x) => (x.session_id === sessionId ? { ...x, last_message: preview } : x)),
+          },
+        },
+      }
+    }),
 
   setAgents: (list) =>
     set((s) => {

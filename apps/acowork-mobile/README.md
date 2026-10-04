@@ -28,11 +28,44 @@ npm run tauri:dev    # 原生壳内运行
 npm run tauri:build  # 打包
 ```
 
+## Android 打包
+
+壳是 Tauri v2（[设计 §11.2](../../docs/design/zh/25-mobile-app.md)）。前端产物被
+`generate_context!` 编进 `libacowork_mobile_lib.so`，所以 APK 里没有 assets 目录，
+只有 `lib/arm64-v8a/`。
+
+```bash
+npx tauri android init                 # 生成 src-tauri/gen/android（已 gitignore）
+npx tauri android build --apk --debug --target aarch64
+```
+
+产物：`src-tauri/gen/android/app/build/outputs/apk/arm64/debug/app-arm64-debug.apk`
+（debug 包 ~124 MB，未做 strip/LTO；release 需要先配签名）。
+
+本机踩过的三个坑，换机器时按同样顺序检查：
+
+| 坑 | 现象 | 处置 |
+|---|---|---|
+| Windows 不允许创建符号链接 | `Creation symbolic link is not allowed for this system`（CLI 把 `.so` 软链进 jniLibs） | 开"开发者模式"（设置 → 隐私与安全 → For developers，需管理员）。绕法：手动把 `.so` **复制**到 `app/src/main/jniLibs/arm64-v8a/`，再直接 `./gradlew :app:assembleArm64Debug -x :app:rustBuildArm64Debug -x :app:rustBuildUniversalDebug` 跳过 CLI |
+| `@tauri-apps/api` 与 Rust `tauri` crate 主次版本不一致 | CLI 直接拒绝构建 | 两边对齐（当前 2.12.x） |
+| 国内网络下 `services.gradle.org` / `repo.maven.apache.org` / `static.rust-lang.org` 被限速 | Gradle 发行包 0 B/s、crate 下载 20 KB/s | 换镜像：wrapper 用腾讯 Gradle 镜像、`~/.gradle/init.gradle` 改写 mavenCentral 到阿里云、`RUSTUP_DIST_SERVER` 与 `~/.cargo/config.toml` 指向 rsproxy.cn |
+
+### 手机连不上网关时先查这两件事
+
+1. **明文 HTTP 是允许的**：debug 构建把 `usesCleartextTraffic=true` 写进 manifest；
+   WebView 的 origin 是 `http://tauri.localhost`（Tauri 在 Android 上默认 http），
+   所以访问 `http://<局域网IP>:19876` 不属于混合内容。
+2. **Windows 防火墙默认拦公网入站**：`Get-NetConnectionProfile` 显示 WLAN 是
+   Public 时，手机访问会超时。要么以管理员放行
+   `New-NetFirewallRule -Direction Inbound -Protocol TCP -LocalPort 19876 -Action Allow`，
+   要么用 USB 免改配置：`adb reverse tcp:19876 tcp:19876`，然后在连接屏填
+   `http://127.0.0.1:19876`。
+
 ## 质量门禁
 
 ```bash
 npm run typecheck
-npm test             # 16 项：导航栈 + 会话/权限不变量
+npm test             # 104 项：导航栈、会话/权限不变量、实时通道、路由挂载冒烟
 npm run build
 ```
 

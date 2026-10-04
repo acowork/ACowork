@@ -8,3 +8,6 @@ dist-ssr
 # Rust / Tauri
 src-tauri/target
 src-tauri/gen
+
+# local build output (124 MB debug APK; never commit)
+build-artifacts/

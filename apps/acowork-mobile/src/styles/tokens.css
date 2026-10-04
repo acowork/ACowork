@@ -39,19 +39,60 @@
     'Helvetica Neue', 'Segoe UI', Roboto, sans-serif;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --color-bg: #000000;
-    --color-bg-elevated: #1c1c1e;
-    --color-bg-grouped: #000000;
-    --color-separator: #38383a;
-    --color-label: #ffffff;
-    --color-label-secondary: #98989d;
-    --color-tint: #0a84ff;
-    --color-destructive: #ff453a;
-    --color-bubble-peer: #26262a;
-    --color-bubble-self: #0a84ff;
-  }
+/* Semantic aliases. The base tokens above are named after the iOS system
+ * colour roles; the screens refer to what a thing *means* (a border, a dim
+ * label, a danger action). Aliasing in one place keeps both vocabularies
+ * honest — and because these resolve through `var()` on the element, they
+ * follow `data-theme` without a second declaration per theme. */
+:root {
+  --color-text: var(--color-label);
+  --color-text-dim: var(--color-label-secondary);
+  --color-border: var(--color-separator);
+  --color-surface: var(--color-bg-elevated);
+  --color-accent: var(--color-tint);
+  --color-danger: var(--color-destructive);
+  /* Text on a filled accent/tint surface. White in both themes: the tints
+     are dark enough that a black label would fail contrast. */
+  --color-on-accent: #ffffff;
+  --color-on-tint: #ffffff;
+
+  --font-xs: 12px;
+  --font-sm: 13px;
+  --font-md: 15px;
+  --font-lg: 17px;
+
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+
+  --radius-control: 10px;
+  --radius-pill: 999px;
+
+  --space-7: 28px;
+  --space-8: 32px;
+}
+
+/* Dark values are selected by `data-theme` on <html>, which the shell sets
+ * before first paint (inline script in index.html) from either the user's
+ * explicit choice or the OS preference. Resolving "跟随系统" in JS rather
+ * than with a media query is what lets an explicit light choice override a
+ * dark OS — with a media query that combination cannot be expressed without
+ * duplicating this whole block. */
+:root[data-theme='dark'] {
+  --color-bg: #000000;
+  --color-bg-elevated: #1c1c1e;
+  --color-bg-grouped: #000000;
+  --color-separator: #38383a;
+  --color-label: #ffffff;
+  --color-label-secondary: #98989d;
+  --color-tint: #0a84ff;
+  --color-destructive: #ff453a;
+  --color-bubble-peer: #26262a;
+  --color-bubble-self: #0a84ff;
+  color-scheme: dark;
+}
+:root[data-theme='light'] {
+  color-scheme: light;
 }
 
 * {

@@ -26,7 +26,12 @@ import { useAgentStore } from '../../stores/agentStore'
 import { isActiveStatus, useChatStore } from '../../stores/chatStore'
 import { useNavStore } from '../../stores/navStore'
 import { useSessionReadOnly } from '../../lib/session-write-access'
+import { setSessionVisibility } from '../../lib/api'
+import { useForegroundRefresh } from '../../lib/foreground'
 import { Banner, ListRow, Sheet } from '../../components/ui'
+import { Bubble } from '../../components/Bubble'
+import { daySeparator } from '../../lib/time'
+import { AgentDrawer } from './AgentDrawer'
 import { EdgeSwipe } from '../../components/EdgeSwipe'
 import type { LiveStatus } from '../../lib/types'
 
@@ -63,6 +68,9 @@ export function ChatDetailScreen() {
   const decideApproval = useChatStore((s) => s.decideApproval)
   const answerQuestion = useChatStore((s) => s.answerQuestion)
   const pop = useNavStore((s) => s.pop)
+  const deleteSession = useChatStore((s) => s.deleteSession)
+  const loadMoreSessions = useAgentStore((s) => s.loadMoreSessions)
+  const sessionsHasMore = useAgentStore((s) => (agentId ? s.sessionsHasMore[agentId] ?? true : true))
 
   const agent = useAgentStore((s) => (agentId ? s.agents[agentId]?.info : undefined))
   const sessions = useAgentStore((s) => (agentId ? s.agents[agentId]?.sessions : undefined)) ?? []
@@ -70,6 +78,10 @@ export function ChatDetailScreen() {
   const readOnly = useSessionReadOnly(agentId, activeId)
 
   const [switcherOpen, setSwitcherOpen] = useState(false)
+  const [drawerOpen, setDrawerOpen] = useState(false)
+  /** The session whose manage sheet is open — actions bind to it, not to the
+   *  active one, so deleting row A never silently deletes the open row B. */
+  const [manageId, setManageId] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
   const active = sessions.find((s) => s.session_id === activeId)
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -79,6 +91,19 @@ export function ChatDetailScreen() {
     if (agentId && activeId) startWatching(agentId, activeId)
     return () => stopWatching()
   }, [agentId, activeId, startWatching, stopWatching])
+
+  // §11.3: iOS freezes timers in the background, so the data on screen is
+  // simply old on return. Reload rather than waiting for the next tick — and
+  // go through `openSession`, the one path that re-points the Runtime and
+  // re-reads history atomically, instead of a partial refresh that could
+  // leave the two halves out of step.
+  useForegroundRefresh(
+    useCallback(() => {
+      if (!agentId) return
+      void useAgentStore.getState().refreshSessions(agentId)
+      if (activeId) void openSession(agentId, activeId)
+    }, [agentId, activeId, openSession]),
+  )
 
   useEffect(() => {
     const el = scrollRef.current
@@ -116,7 +141,7 @@ export function ChatDetailScreen() {
   }
 
   return (
-    <EdgeSwipe onBack={onBack}>
+    <EdgeSwipe onBack={onBack} onDrawer={() => setDrawerOpen(true)}>
       <div className="screen">
         {/* The title IS the session switcher. */}
         <header className="navbar">
@@ -146,15 +171,21 @@ export function ChatDetailScreen() {
           {state?.loaded && state.messages.length === 0 && !isActiveStatus(state.status) ? (
             <div className="empty-state">还没有消息</div>
           ) : null}
-          {state?.messages.map((m) => (
-            <div key={m.id} className={`bubble bubble-${m.role === 'user' ? 'self' : 'peer'}`}>
-              {m.content}
-            </div>
-          ))}
+          {state?.messages.map((m, i) => {
+            const sep = daySeparator(i > 0 ? state.messages[i - 1]!.created_at : null, m.created_at)
+            return (
+              <div key={m.id} className="msg-wrap">
+                {sep ? <div className="day-sep">{sep}</div> : null}
+                <Bubble msg={m} />
+              </div>
+            )
+          })}
           {/* Failed draft: kept visible with an explicit retry (edge states). */}
           {state?.pendingSend ? (
-            <div>
-              <div className={`bubble bubble-self bubble-failed${state.pendingSend.state === 'sending' ? ' is-sending' : ''}`}>
+            <div className="msg-wrap">
+              <div
+                className={`bubble bubble-self bubble-raw bubble-failed${state.pendingSend.state === 'sending' ? ' is-sending' : ''}`}
+              >
                 {state.pendingSend.content}
               </div>
               {state.pendingSend.state === 'failed' ? (
@@ -277,23 +308,38 @@ export function ChatDetailScreen() {
           {sessions.map((s) => {
             const isReadOnly = s.can_write === false
             return (
-              <ListRow
-                key={s.session_id}
-                onClick={() => {
-                  setSwitcherOpen(false)
-                  if (s.session_id !== activeId) void openSession(agentId!, s.session_id)
-                }}
-                label={
-                  <span className="row-title">
-                    {s.visibility === 'public' ? <span aria-label="公开">🌐</span> : null}
-                    {s.visibility === 'private' ? <span aria-label="私有">🔒</span> : null}
-                    {s.title}
-                    {isReadOnly ? <span className="badge">只读</span> : null}
-                  </span>
-                }
-                value={s.session_id === activeId ? '✓' : undefined}
-                hint={s.last_message ?? undefined}
-              />
+              <div key={s.session_id} className="sheet-row">
+                <ListRow
+                  onClick={() => {
+                    setSwitcherOpen(false)
+                    if (s.session_id !== activeId) void openSession(agentId!, s.session_id)
+                  }}
+                  label={
+                    <span className="row-title">
+                      {s.visibility === 'public' ? <span aria-label="公开">🌐</span> : null}
+                      {s.visibility === 'private' ? <span aria-label="私有">🔒</span> : null}
+                      {s.title}
+                      {isReadOnly ? <span className="badge">只读</span> : null}
+                    </span>
+                  }
+                  value={s.session_id === activeId ? '✓' : undefined}
+                  hint={s.last_message ?? undefined}
+                />
+                {/* §5.4: delete and visibility live behind a per-row menu,
+                    not on the row itself — a mis-tap on a chat list must
+                    never destroy a conversation. */}
+                <button
+                  type="button"
+                  className="sheet-row-more"
+                  aria-label={`管理 ${s.title}`}
+                  onClick={() => {
+                    setSwitcherOpen(false)
+                    setManageId(s.session_id)
+                  }}
+                >
+                  ⋯
+                </button>
+              </div>
             )
           })}
           <ListRow
@@ -303,7 +349,49 @@ export function ChatDetailScreen() {
               void createSession(agentId!)
             }}
           />
+          {sessionsHasMore ? (
+            <ListRow label="加载更多" onClick={() => void loadMoreSessions(agentId!)} />
+          ) : null}
         </Sheet>
+
+        {/* Per-session action sheet (§5.4). */}
+        <Sheet open={!!manageId} onClose={() => setManageId(null)} title="会话操作">
+          {(() => {
+            const target = sessions.find((s) => s.session_id === manageId)
+            if (!target) return null
+            const writable = target.can_write !== false
+            const isPublic = target.visibility !== 'private'
+            return (
+              <>
+                <ListRow
+                  disabled={!writable}
+                  hint={writable ? undefined : '只读会话无法修改'}
+                  label={isPublic ? '🔒 设为私有' : '🌐 设为公开'}
+                  onClick={() => {
+                    setManageId(null)
+                    void setSessionVisibility(agentId!, target.session_id, isPublic ? 'private' : 'public').then(() =>
+                      useAgentStore.getState().refreshSessions(agentId!),
+                    )
+                  }}
+                />
+                <ListRow
+                  destructive
+                  disabled={!writable}
+                  hint={writable ? undefined : '只读会话无法删除'}
+                  label="删除会话"
+                  onClick={() => {
+                    setManageId(null)
+                    void deleteSession(agentId!, target.session_id)
+                  }}
+                />
+              </>
+            )
+          })()}
+        </Sheet>
+
+        {agentId ? (
+          <AgentDrawer open={drawerOpen} agentId={agentId} onClose={() => setDrawerOpen(false)} />
+        ) : null}
       </div>
     </EdgeSwipe>
   )

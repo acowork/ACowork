@@ -16,6 +16,7 @@
 
 import { create } from 'zustand'
 import { useAgentStore } from './agentStore'
+import { markSeen } from '../lib/unread'
 import type { ChatMessage, LiveStatus, SessionInfo, SessionSnapshot } from '../lib/types'
 import {
   startWatching, stopWatching, setRealtimeDeps, pollNetworkState, POLL_INTERVAL_MS,
@@ -69,9 +70,6 @@ interface ChatStore {
   agentStates: Record<string, AgentViewState>
   /** The agent whose conversation detail is on screen; null = the IM list. */
   selectedAgentId: string | null
-  /** Pagination cursor for the session history list (ADR-086 §分页). */
-  historyPage: Record<string, number>
-  historyHasMore: Record<string, boolean>
 
   selectAgent: (agentId: string | null) => void
 
@@ -85,8 +83,6 @@ interface ChatStore {
   createSession: (agentId: string, title?: string) => Promise<string | null>
 
   deleteSession: (agentId: string, sessionId: string) => Promise<boolean>
-
-  loadMoreSessions: (agentId: string) => Promise<void>
 
   /** v1.2 §8: foreground watch — start when a session is on screen. */
   startWatching: (agentId: string, sessionId: string) => void
@@ -150,8 +146,6 @@ export function setChatTransport(t: ChatTransport): void {
 export const useChatStore = create<ChatStore>((set, get) => ({
   agentStates: {},
   selectedAgentId: null,
-  historyPage: {},
-  historyHasMore: {},
 
   selectAgent: (agentId) => set({ selectedAgentId: agentId }),
 
@@ -183,6 +177,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       if (!readOnly) await transport.openSession(agentId, sessionId)
       // Step 3: reload history.
       const messages = await transport.fetchMessages(agentId, sessionId)
+      // Looking at it is reading it: the dot for THIS session goes away, and
+      // the baseline is the count the list carried, not the count now.
+      markSeen(agentId, sessionId, target?.message_count)
       set((s) => ({
         agentStates: {
           ...s.agentStates,
@@ -236,16 +233,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       }
     })
     return true
-  },
-
-  loadMoreSessions: async (agentId) => {
-    if (!transport) return
-    const hasMore = get().historyHasMore[agentId] ?? true
-    if (!hasMore) return
-    const page = (get().historyPage[agentId] ?? 0) + 1
-    const { items, hasMore: more } = await transport.fetchSessions(agentId, page)
-    useAgentStore.getState().mergeSessions(agentId, items)
-    set((s) => ({ historyPage: { ...s.historyPage, [agentId]: page }, historyHasMore: { ...s.historyHasMore, [agentId]: more } }))
   },
 
   /* ---------------- v1.2 §8: foreground watch ----------------

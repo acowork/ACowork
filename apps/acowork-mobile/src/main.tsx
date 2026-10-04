@@ -1,3 +1,4 @@
+import { newId } from './lib/id'
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { App } from './App'
@@ -6,6 +7,7 @@ import { setDirectorySource, useAgentStore } from './stores/agentStore'
 import { httpChatTransport, fetchAgents, fetchDirectory, tokenClaims } from './lib/api'
 import { setRealtimeDeps } from './lib/realtime'
 import { useAuthStore } from './stores/authStore'
+import { useSettingsStore } from './stores/settingsStore'
 import type { AgentSummary, UserSummary } from './lib/types'
 import './styles/tokens.css'
 import './styles/app.css'
@@ -46,12 +48,12 @@ function deviceId(): string {
   try {
     let id = localStorage.getItem(KEY)
     if (!id) {
-      id = crypto.randomUUID()
+      id = newId()
       localStorage.setItem(KEY, id)
     }
     return id
   } catch {
-    return crypto.randomUUID()
+    return newId()
   }
 }
 
@@ -73,11 +75,17 @@ setDirectorySource({
   },
 })
 
+// Appearance is applied before the shell renders: a light flash on a
+// dark-theme phone reads as a broken app, and the CSS cannot resolve
+// 跟随系统 + an explicit override by itself (see lib/theme.ts).
+const stopThemeWatch = useSettingsStore.getState().start()
+if (import.meta.hot) import.meta.hot.dispose(() => stopThemeWatch())
+
 // Cold start: decide the boot phase from persisted state (§7.1).
 void useAuthStore.getState().boot()
 // Directory + previews refresh whenever we reach `ready`.
 useAuthStore.subscribe((s, prev) => {
-  if (s.phase === 'ready' && prev.phase !== 'ready') void useAgentStore.getState().refreshDirectory()
+  if (s.phase === "ready" && prev.phase !== "ready") void useAgentStore.getState().refreshInbox()
 })
 
 const el = document.getElementById('root')

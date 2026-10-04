@@ -26,6 +26,7 @@ export function ListRow({
   disabled,
   destructive,
   hint,
+  badge,
 }: {
   label: ReactNode
   value?: ReactNode
@@ -34,6 +35,8 @@ export function ListRow({
   disabled?: boolean
   destructive?: boolean
   hint?: string
+  /** Count bubble. Only ever a NUMBER the server actually reported. */
+  badge?: number
 }) {
   const Tag = onClick ? 'button' : 'div'
   return (
@@ -43,6 +46,9 @@ export function ListRow({
       type={onClick ? 'button' : undefined}
       role={onClick ? 'button' : undefined}
     >
+      <div className="list-row-trail">
+        {badge && badge > 0 ? <span className="badge-count">{badge > 99 ? '99+' : badge}</span> : null}
+      </div>
       <div className="list-row-main">
         <div className="list-row-label">{label}</div>
         {hint ? <div className="list-row-hint">{hint}</div> : null}

@@ -233,8 +233,14 @@
   padding: var(--space-2) var(--space-3);
   border-radius: var(--radius-lg);
   font-size: 17px;
-  white-space: pre-wrap;
+  /* NOT pre-wrap: the Markdown renderer turns newlines into <br> itself, so
+   * pre-wrap here would double every line break in a rendered reply. Raw
+   * text bubbles (a failed draft) opt back in with `.bubble-raw`. */
+  white-space: normal;
   word-break: break-word;
+}
+.bubble-raw {
+  white-space: pre-wrap;
 }
 .bubble-self {
   align-self: flex-end;
@@ -664,4 +670,366 @@
   padding: 6px 10px;
   background: none;
   color: inherit;
+}
+
+/* ================================================================== */
+/* Inbox search, badges, message rendering (§2.3 / §4.3)              */
+/* ================================================================== */
+
+.searchbar {
+  padding: var(--space-2) var(--space-4);
+  flex: none;
+}
+.searchbar-input {
+  width: 100%;
+  border: none;
+  outline: none;
+  border-radius: var(--radius-sm);
+  background: var(--color-bubble-peer);
+  color: var(--color-label);
+  font: inherit;
+  font-size: 15px;
+  padding: 8px 12px;
+  -webkit-appearance: none;
+  appearance: none;
+}
+.searchbar-input::-webkit-search-cancel-button {
+  -webkit-appearance: none;
+}
+
+/* Unread: a server-reported count gets a number; a client-inferred "there is
+ * something new" gets only a dot (§8.5 — never invent a number). */
+.badge-count {
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--color-destructive);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 18px;
+  text-align: center;
+  flex: none;
+}
+.dot-unread {
+  background: var(--color-destructive);
+}
+
+.day-sep {
+  align-self: center;
+  margin: var(--space-3) 0;
+  font-size: 12px;
+  color: var(--color-label-secondary);
+}
+
+/* --- bubbles -------------------------------------------------------- */
+
+.bubble-row {
+  display: flex;
+  margin: 2px var(--space-4);
+}
+.bubble-row-self {
+  justify-content: flex-end;
+}
+.bubble-text {
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+.bubble-time {
+  margin-top: 2px;
+  font-size: 11px;
+  opacity: 0.6;
+  text-align: right;
+}
+
+/* Markdown inside a bubble: the bubble already sets the font and colour, so
+ * these only carry rhythm and the code/link affordances. */
+.md-p {
+  margin: 0;
+}
+.md-p + .md-p {
+  margin-top: var(--space-2);
+}
+.md-h {
+  margin: var(--space-2) 0 var(--space-1);
+  font-size: 15px;
+  font-weight: 600;
+}
+.md-list {
+  margin: var(--space-1) 0;
+  padding-left: 20px;
+}
+.md-quote {
+  margin: var(--space-1) 0;
+  padding-left: var(--space-3);
+  border-left: 3px solid var(--color-separator);
+  color: var(--color-label-secondary);
+}
+.md-icode {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.92em;
+  background: rgba(120, 120, 128, 0.18);
+  border-radius: 4px;
+  padding: 1px 4px;
+}
+.md-link {
+  color: inherit;
+  text-decoration: underline;
+}
+/* Code blocks scroll sideways inside the bubble; the bubble must not grow
+ * past the screen, hence the explicit max-width and the overflow. */
+.md-code {
+  margin: var(--space-2) 0;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  background: rgba(120, 120, 128, 0.14);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-x: auto;
+  max-width: 100%;
+  -webkit-overflow-scrolling: touch;
+}
+.md-code code {
+  white-space: pre;
+}
+.bubble-self .md-icode,
+.bubble-self .md-code {
+  background: rgba(255, 255, 255, 0.22);
+}
+
+/* --- tool call row --------------------------------------------------- */
+
+.tool-row {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: var(--space-2);
+  width: calc(100% - 2 * var(--space-4));
+  margin: var(--space-1) var(--space-4);
+  padding: 8px var(--space-3);
+  border: none;
+  border-radius: var(--radius-sm);
+  background: rgba(120, 120, 128, 0.12);
+  color: var(--color-label-secondary);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.tool-row-icon {
+  font-size: 12px;
+}
+.tool-row-caret {
+  font-size: 11px;
+  color: var(--color-tint);
+}
+.tool-row-body {
+  grid-column: 1 / -1;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+/* --- agent settings drawer (§4.2) ----------------------------------- */
+
+.drawer-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.35);
+  z-index: 20;
+}
+.drawer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(320px, 86%);
+  background: var(--color-bg);
+  z-index: 21;
+  display: flex;
+  flex-direction: column;
+  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.18);
+}
+.drawer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: calc(var(--safe-top) + var(--space-4)) var(--space-4) var(--space-3);
+  border-bottom: 1px solid var(--color-separator);
+  flex: none;
+}
+.drawer-title {
+  font-size: 17px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.drawer-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.drawer-close {
+  border: none;
+  background: none;
+  color: var(--color-tint);
+  font: inherit;
+  font-size: 15px;
+  padding: var(--space-2);
+  cursor: pointer;
+}
+.drawer-stat {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-3);
+  font-size: 13px;
+  padding: 6px 0;
+}
+.drawer-stat b {
+  font-variant-numeric: tabular-nums;
+}
+
+/* A message group (separator + bubble) must not become a flex item itself —
+ * `display: contents` lets the bubble keep aligning against `.scroll-chat`. */
+.msg-wrap {
+  display: contents;
+}
+
+/* Drawer section tabs: a scrollable segmented row, not iOS's fixed-width
+ * one — six labels cannot share 320pt at equal width and stay legible. */
+.drawer-tabs {
+  display: flex;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-3);
+  overflow-x: auto;
+  scrollbar-width: none;
+  border-bottom: 0.5px solid var(--color-separator);
+  flex: none;
+}
+.drawer-tabs::-webkit-scrollbar {
+  display: none;
+}
+.drawer-tab {
+  flex: 0 0 auto;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--color-label-secondary);
+  font: inherit;
+  font-size: 13px;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+.drawer-tab.is-active {
+  background: var(--color-bubble-peer);
+  color: var(--color-label);
+  font-weight: 600;
+}
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+
+/* A session row with a trailing menu button. The row itself is a <button>,
+ * so the menu must be a SIBLING — nesting one button in another is invalid
+ * HTML and Safari renders it unpredictably. */
+.sheet-row {
+  display: flex;
+  align-items: stretch;
+}
+.sheet-row > .list-row {
+  flex: 1;
+  min-width: 0;
+}
+.sheet-row-more {
+  flex: none;
+  width: 44px;
+  border: none;
+  border-left: 0.5px solid var(--color-separator);
+  background: none;
+  color: var(--color-tint);
+  font-size: 18px;
+  cursor: pointer;
+}
+
+/* ── Additions for the Projects / Docs tabs ─────────────────────────── */
+
+/* Action rows a human can take (claim, submit) read as tappable text, not
+   as a destructive row — iOS uses tint for exactly this. */
+.row-title.tint { color: var(--color-accent); }
+
+.searchbar-clear {
+  flex: none;
+  font-size: var(--font-sm);
+  color: var(--color-label-secondary);
+  padding: 0 var(--space-2);
+  min-height: var(--touch-min);
+}
+
+/* The expand caret is decoration; the whole row is the tap target. */
+.tree-caret {
+  display: inline-block;
+  width: 14px;
+  color: var(--color-label-secondary);
+}
+
+.doc-body {
+  padding: var(--space-4) var(--space-5) var(--space-8);
+  font-size: 15.5px;
+  line-height: 1.72;
+}
+.doc-meta {
+  padding: var(--space-2) var(--space-5) var(--space-4);
+  font-size: var(--font-sm);
+  color: var(--color-label-secondary);
+}
+.req-diff {
+  padding: var(--space-3) var(--space-4);
+  font-size: var(--font-sm);
+  background: var(--color-bg-grouped);
+  overflow-wrap: anywhere;
+  max-height: 45vh;
+  overflow-y: auto;
+}
+
+.accent-row {
+  display: flex;
+  gap: var(--space-3);
+  padding: 0 var(--space-4) var(--space-4);
+}
+.accent-swatch {
+  /* The tap target is the full 44pt; the visible dot is smaller and
+     centred inside it. */
+  width: var(--touch-min);
+  height: var(--touch-min);
+  display: grid;
+  place-items: center;
+}
+.accent-dot {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.12);
+}
+.accent-swatch.is-active .accent-dot {
+  outline: 2px solid var(--color-label);
+  outline-offset: 2px;
+}
+
+.logout-btn {
+  width: 100%;
+  min-height: var(--touch-min);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-elevated);
+  color: var(--color-destructive);
+  font-size: var(--font-md);
+  text-align: center;
 }

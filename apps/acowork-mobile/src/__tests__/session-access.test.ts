@@ -28,7 +28,7 @@ function fakeTransport(over: Partial<ChatTransport> = {}): ChatTransport {
 // test's sessions leak into the next.
 beforeEach(() => {
   useAgentStore.setState({ agents: {}, agentList: [], users: [] })
-  useChatStore.setState({ agentStates: {}, selectedAgentId: null, historyPage: {}, historyHasMore: {} })
+  useChatStore.setState({ agentStates: {}, selectedAgentId: null})
 })
 
 describe('isReadOnlySession — ADR-076 §决策 4', () => {

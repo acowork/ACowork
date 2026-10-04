@@ -31,7 +31,8 @@ import {
   setAuthBridge,
   fetchMe,
 } from '../lib/api'
-import type { GatewayStatus, TokenPair } from '../lib/types'
+import type { AccountMe, GatewayStatus, TokenPair } from '../lib/types'
+import { clearUnread } from '../lib/unread'
 
 export type BootPhase =
   | 'boot'
@@ -70,6 +71,12 @@ interface AuthStore {
   status: GatewayStatus | null
   accessToken: string | null
   refreshToken: string | null
+  /**
+   * The resolved account, or null until `/auth/me` succeeds. User-to-user
+   * chat addresses every route as `/api/users/{me.user_id}/…`, so this is
+   * not a convenience: without it a 联系人 thread cannot be named or opened.
+   */
+  me: AccountMe | null
   /** Username/password error text for the login screen. */
   loginError: string
   busy: boolean
@@ -99,6 +106,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
   status: null,
   accessToken: null,
   refreshToken: null,
+  me: null,
   loginError: '',
   busy: false,
 
@@ -127,8 +135,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
       }
       if (access && refresh) {
         try {
-          await fetchMe()
-          set({ phase: 'ready' })
+          set({ me: await fetchMe(), phase: 'ready' })
           return
         } catch (e) {
           if (!(e instanceof GatewayError) || e.status !== 401) {
@@ -171,7 +178,11 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
     try {
       const pair = await loginRequest(get().baseUrl, username, password)
       get()._setTokens(pair)
-      set({ busy: false, phase: 'ready' })
+      // Best-effort: reaching `ready` must not hinge on the profile call. A
+      // failure leaves `me` null and the screens that need it say so, rather
+      // than rendering a thread that silently appears to have no messages.
+      const me = await fetchMe().catch(() => null)
+      set({ busy: false, phase: 'ready', me })
       return true
     } catch (e) {
       const msg =
@@ -191,7 +202,10 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
     lsSet(LS.access, null)
     lsSet(LS.refresh, null)
     lsSet(LS.me, null)
-    set({ accessToken: null, refreshToken: null, phase: 'login', status: null })
+    // The unread dot is per-device read state; a shared phone must not carry
+    // it to the next account.
+    clearUnread()
+    set({ accessToken: null, refreshToken: null, me: null, phase: 'login', status: null })
     // Keep the saved URL: re-login should not require retyping it.
     get().boot()
   },

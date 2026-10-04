@@ -19,6 +19,12 @@ export interface SessionInfo {
   updated_at?: number
   /** Ids of the last few messages, used to build the IM-style preview. */
   last_message?: string | null
+  /**
+   * Server-side truth for "has this session moved?" — the unread dot
+   * compares it against the count the user last saw (§8.5). Absent until a
+   * list load fills it; absence means "no dot", never "definitely read".
+   */
+  message_count?: number
 }
 
 /** An installed agent, as shown in the IM conversation list. */
@@ -83,11 +89,27 @@ export interface TokenPair {
 }
 
 /** `GET /api/auth/me` — the subset of `AccountView` the app renders. */
+/**
+ * `AccountView` (core/acowork-core/src/account.rs). Everything past `role`
+ * is `skip_serializing_if = "Option::is_none"` on the server, so it is
+ * optional here — but the live gateway also sends `""` for a profile field
+ * the user never filled, which is present-but-meaningless. Read these
+ * through `profileField()` rather than testing truthiness of the raw value.
+ */
 export interface AccountMe {
   user_id: string
   username: string
   display_name: string
   role: 'user' | 'admin'
+  language: string
+  timezone: string
+  city?: string | null
+  country?: string | null
+  occupation?: string | null
+  avatar?: string | null
+  builtin_avatar?: string | null
+  last_login_at?: string | null
+  created_at?: string
 }
 
 /** `GET /api/users/directory` row. */
@@ -182,4 +204,32 @@ export interface SessionDetail {
 export interface SessionSnapshot {
   status: LiveStatus | null
   messageCount: number | null
+}
+
+/* ------------------------------------------------------------------ */
+/* User-to-user chat (ADR-076 §决策 8)                                 */
+/* ------------------------------------------------------------------ */
+
+/**
+ * `GET /api/users/{me}/chats` row. `unread_count` is server-side truth, so
+ * the contact badge shows a real number — unlike an agent session, where
+ * the mobile app has no read cursor and the badge degrades to a dot (§8.5).
+ */
+export interface UserChatSummary {
+  chat_id: string
+  peer_user_id: string
+  peer_display_name: string
+  /** Unix seconds. */
+  last_active_at: number
+  last_message_preview: string
+  unread_count: number
+}
+
+/** `ChatMessage` from the user service. `from` is server-forced, never client-supplied. */
+export interface UserChatMessage {
+  /** Unix seconds. */
+  ts: number
+  from: string
+  kind: string
+  body: string
 }

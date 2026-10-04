@@ -17,6 +17,7 @@
  * returns to the login screen. Same ladder as Desktop's `authFetch`.
  */
 
+import { newId } from './id'
 import type { ChatTransport } from '../stores/chatStore'
 import type {
   AccountMe,
@@ -32,7 +33,10 @@ import type {
   SessionSnapshot,
   SessionRow,
   SessionsPage,
+  SessionVisibility,
   TokenPair,
+  UserChatMessage,
+  UserChatSummary,
 } from './types'
 
 /** Thrown for any non-2xx Gateway response; `status` drives the auth ladder. */
@@ -176,6 +180,7 @@ export function mapSessionRow(r: SessionRow): SessionInfo {
     can_write: r.can_write,
     visibility: r.visibility ?? 'public',
     updated_at: isoToMs(r.last_active_at),
+    message_count: r.message_count,
   }
 }
 
@@ -277,7 +282,7 @@ export function tokenClaims(jwt: string): { sub?: string; exp?: number } {
 /** Sends a user message; resolves with the client-generated message id so
  *  the store can key the optimistic bubble and its retry. */
 export async function sendMessage(agentId: string, sessionId: string, content: string): Promise<string> {
-  const messageId = crypto.randomUUID()
+  const messageId = newId()
   await req('POST', `/api/agents/${agentId}/sessions/${sessionId}/messages`, {
     content,
     message_id: messageId,
@@ -298,6 +303,70 @@ export async function sendAnswer(agentId: string, sessionId: string, requestId: 
     request_id: requestId,
     answer,
   })
+}
+
+/* ------------------------------------------------------------------ */
+/* User-to-user chat (ADR-076 §决策 8)                                 */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Canonical 1:1 chat id: the two user ids sorted and joined by `__`.
+ * Mirrors `acowork-user::chat::chat_id` — the sort is a bytewise compare on
+ * the server, and ids are ASCII UUIDs, so JS's default sort agrees. A
+ * non-canonical id is a 404 on the server, never a different conversation.
+ */
+export function userChatId(a: string, b: string): string {
+  return [a, b].sort()[0] === a ? `${a}__${b}` : `${b}__${a}`
+}
+
+export async function fetchUserChats(me: string): Promise<UserChatSummary[]> {
+  const r = await req<{ chats: UserChatSummary[] }>('GET', `/api/users/${me}/chats`)
+  return r.chats ?? []
+}
+
+/** One page of a 1:1 chat; `offset` counts BACK from the newest message. */
+export async function fetchUserMessages(me: string, chatId: string, limit = 50): Promise<UserChatMessage[]> {
+  const r = await req<{ messages: UserChatMessage[] }>(
+    'GET',
+    `/api/users/${me}/chats/${chatId}/messages?offset=0&limit=${limit}`,
+  )
+  return r.messages ?? []
+}
+
+/** Returns the stored message so the caller can append it without a refetch. */
+export async function sendUserMessage(me: string, chatId: string, body: string): Promise<UserChatMessage> {
+  return req<UserChatMessage>('POST', `/api/users/${me}/chats/${chatId}/messages`, { body })
+}
+
+export async function markUserChatRead(me: string, chatId: string): Promise<void> {
+  await req<void>('POST', `/api/users/${me}/chats/${chatId}/read`)
+}
+
+/* ------------------------------------------------------------------ */
+/* Session list extras (§2.3 preview, §5.4 visibility)                  */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The IM-style preview: the last message of one session. `tail` is a BOOL on
+ * this endpoint (`?tail=1` is a 400 — serde will not parse an int as bool),
+ * so the window is `tail=true&limit=1`, the cheapest call available — the
+ * inbox fires it
+ * only for each agent's most recent session, fire-and-forget, so a slow
+ * agent never blocks the list (§2.3).
+ */
+export async function fetchLastMessage(agentId: string, sessionId: string): Promise<string> {
+  const r = await req<MessagesPage>(
+    'GET',
+    `/api/agents/${agentId}/sessions/${sessionId}/messages?tail=true&limit=1`,
+  )
+  const entries = r.messages ?? []
+  const last = entries[entries.length - 1]
+  return last?.content ?? ''
+}
+
+/** `PUT /sessions/{id}/visibility` — one-tap 🌐/🔒 (§5.4). */
+export async function setSessionVisibility(agentId: string, sessionId: string, visibility: SessionVisibility): Promise<void> {
+  await req<void>('PUT', `/api/agents/${agentId}/sessions/${sessionId}/visibility`, { visibility })
 }
 
 export const httpChatTransport: ChatTransport = {
@@ -361,3 +430,262 @@ export const httpChatTransport: ChatTransport = {
     await req('DELETE', `/api/agents/${agentId}/sessions/${sessionId}`)
   },
 }
+
+/* ------------------------------------------------------------------ */
+/* Agent settings drawer (§4.2) — all read-through reverse proxies      */
+/* ------------------------------------------------------------------ */
+
+/** `GET /api/agents/{id}/status` — the Runtime's own view of itself. */
+export interface AgentStatus {
+  agent_id: string
+  matches: boolean
+  work_dir: string
+  pid: number
+  latest_session: string | null
+  embed_dim: number | null
+}
+
+export async function fetchAgentStatus(agentId: string): Promise<AgentStatus> {
+  return req<AgentStatus>('GET', `/api/agents/${agentId}/status`)
+}
+
+/** `GET .../memory/stats` — counts only; full browsing is Desktop-only (§4.2). */
+export interface MemoryStats {
+  total_nodes: number
+  by_type: Record<string, number>
+  by_status: Record<string, number>
+  index_health: string
+  stored_dim: number
+}
+
+export async function fetchMemoryStats(agentId: string): Promise<MemoryStats> {
+  return req<MemoryStats>('GET', `/api/agents/${agentId}/memory/stats`)
+}
+
+/** `GET .../builtin-tools` — `{agent_id, tools:[{name, enabled}]}`. */
+export interface BuiltinTool {
+  name: string
+  enabled?: boolean
+}
+
+export async function fetchBuiltinTools(agentId: string): Promise<BuiltinTool[]> {
+  const r = await req<{ tools: BuiltinTool[] }>('GET', `/api/agents/${agentId}/builtin-tools`)
+  return r.tools ?? []
+}
+
+/**
+ * `GET .../workspaces` — the agent's attached directories. Entries are
+ * `serde_json::Value` on the server (verbatim passthrough), so every field
+ * is optional here and the UI must render what exists, not a fixed schema.
+ */
+export interface WorkspaceEntry {
+  id?: string
+  /** The user's own label for this directory; absent until they set one. */
+  alias?: string | null
+  path?: string
+  /** Not `read_only: bool` — the server serialises the mode as a string. */
+  access?: 'read-only' | 'read-write'
+  added_at?: string
+  last_active?: string | null
+  select_count?: number
+}
+
+export async function fetchWorkspaces(agentId: string): Promise<WorkspaceEntry[]> {
+  const r = await req<{ workspaces: WorkspaceEntry[] }>('GET', `/api/agents/${agentId}/workspaces`)
+  return r.workspaces ?? []
+}
+
+/** `PUT .../sessions/{sid}/workspace` — "Add to Chat" (§4.2). */
+export async function attachWorkspace(agentId: string, sessionId: string, workspaceId: string): Promise<void> {
+  await req<void>('PUT', `/api/agents/${agentId}/sessions/${sessionId}/workspace`, {
+    workspace_id: workspaceId,
+  })
+}
+
+/** `GET .../config` — the manifest/config view; keys are not a mobile contract. */
+export async function fetchAgentConfig(agentId: string): Promise<Record<string, unknown>> {
+  return req<Record<string, unknown>>('GET', `/api/agents/${agentId}/config`)
+}
+
+/* ------------------------------------------------------------------ */
+/* PM: projects & tasks (§9) — proxied to acowork-pm under /api/pm     */
+/* ------------------------------------------------------------------ */
+
+/**
+ * `X-Actor` is injected by the Gateway from the bearer token
+ * (`pm_proxy.rs`), and a client-supplied one is DROPPED. So the mobile app
+ * sends nothing but the token and cannot claim to be another principal.
+ */
+
+export type PmTaskStatus = 'pending' | 'in_progress' | 'submitted' | 'done' | 'rejected' | 'cancelled'
+
+/** `GET /api/pm/projects` row. */
+export interface PmProject {
+  id: string
+  title: string
+  description?: string
+  status: 'active' | 'archived' | 'completed'
+  created_at: string
+  updated_at: string
+  members?: { instance_id: string }[]
+}
+
+/** `TaskResponse`: the flattened `Task` plus the derived board fields. */
+export interface PmTask {
+  id: string
+  project_id: string
+  title: string
+  description?: string
+  type: string
+  status: PmTaskStatus
+  review_status: 'not_required' | 'pending' | 'approved' | 'rejected'
+  priority: 'low' | 'normal' | 'high' | 'urgent'
+  assignee?: string | null
+  due_at?: string | null
+  created_by: string
+  created_at: string
+  updated_at: string
+  claimed_at?: string | null
+  submitted_at?: string | null
+  result?: { text: string; attachment_ids?: string[] } | null
+  is_blocked?: boolean
+  blocked_by?: string[]
+  depth: number
+  parent_id?: string | null
+}
+
+export async function fetchProjects(): Promise<PmProject[]> {
+  return req<PmProject[]>('GET', '/api/pm/projects')
+}
+
+/** Returns a bare array — the PM service does not wrap its list envelopes. */
+export async function fetchProjectTasks(projectId: string): Promise<PmTask[]> {
+  return req<PmTask[]>('GET', `/api/pm/projects/${projectId}/tasks`)
+}
+
+export async function fetchTask(taskId: string): Promise<PmTask> {
+  return req<PmTask>('GET', `/api/pm/tasks/${taskId}`)
+}
+
+export async function fetchTaskChildren(taskId: string): Promise<PmTask[]> {
+  return req<PmTask[]>('GET', `/api/pm/tasks/${taskId}/children`)
+}
+
+/** 任务流转 (§2.1: the board is read-only, the transitions are not). */
+export const pmClaimTask = (tid: string) => req<PmTask>('POST', `/api/pm/tasks/${tid}/claim`)
+export const pmSubmitTask = (tid: string, text: string) =>
+  req<PmTask>('POST', `/api/pm/tasks/${tid}/submit`, { text, attachment_ids: [] })
+export const pmReviewTask = (tid: string, approved: boolean) =>
+  req<PmTask>('POST', `/api/pm/tasks/${tid}/review`, { approved })
+
+/* ------------------------------------------------------------------ */
+/* Doc library (acowork-doc, §10)                                      */
+/* ------------------------------------------------------------------ */
+//
+// The Gateway reverse-proxies `/api/doc/*` onto the doc service and STRIPS
+// the `/api/doc` prefix, and the service mounts its routes with no `/api`
+// base of their own — so the mobile path is `/api/doc/tree`, not
+// `/api/doc/api/tree`. (Desktop agrees: `src/lib/doc-api.ts` fetches
+// `${gw}/api/doc${path}` with `path` starting at `/docs`.) A doubled `api`
+// returns 404 with an empty body, which is easy to mistake for "doc service
+// is down".
+
+/** One level of the tree: the service returns children only, never a
+ *  recursive tree, so a directory is a screen rather than an expander. */
+export interface DocTreeNode {
+  dir_id: string
+  name: string
+  path: string
+  files: DocMeta[]
+  dirs: DirMeta[]
+}
+
+export interface DocMeta {
+  doc_id: string
+  name: string
+  version: number
+  created_at: string
+  updated_at: string
+  deleted: boolean
+  import?: { instance_id: string; workspace_path: string } | null
+}
+
+export interface DirMeta {
+  dir_id: string
+  name: string
+  updated_at: string
+  deleted: boolean
+}
+
+export interface DocContent {
+  meta: DocMeta
+  content: string
+  path: string
+}
+
+export type DocRequestStatus = 'pending' | 'approved' | 'rejected' | 'expired'
+
+export interface DocUpdateRequest {
+  request_id: string
+  doc_id: string
+  path: string
+  base_version: number
+  content: string
+  submitted_by: string
+  status: DocRequestStatus
+  created_at: string
+  reviewed_at?: string | null
+  review_note?: string | null
+}
+
+export interface DocSearchHit {
+  doc_id: string
+  name: string
+  path: string
+  snippet: string
+  score: number
+}
+
+const DOC = '/api/doc'
+
+export const fetchDocTree = (dirId?: string): Promise<DocTreeNode> =>
+  req<DocTreeNode>('GET', dirId ? `${DOC}/tree?dir_id=${encodeURIComponent(dirId)}` : `${DOC}/tree`)
+
+export const fetchDoc = (docId: string): Promise<DocContent> =>
+  req<DocContent>('GET', `${DOC}/docs/${encodeURIComponent(docId)}`)
+
+export const fetchDocRequests = (status?: DocRequestStatus): Promise<DocUpdateRequest[]> =>
+  req<DocUpdateRequest[]>('GET', status ? `${DOC}/requests?status=${status}` : `${DOC}/requests`)
+
+export const fetchDocRequest = (id: string): Promise<DocUpdateRequest> =>
+  req<DocUpdateRequest>('GET', `${DOC}/requests/${encodeURIComponent(id)}`)
+
+/**
+ * Approving merges the submitted content into the document, so the reviewer
+ * is part of the body and must be the human's own id. An agent submitting a
+ * change cannot be the one accepting it — which is the entire reason this
+ * queue exists instead of letting the agent write the doc directly.
+ */
+/**
+ * Approve and reject do NOT share an envelope: approve answers
+ * `ApproveDto { request, doc_version }` — the caller needs the version the
+ * merge produced — while reject answers the bare request. Unwrapping is done
+ * by the store, which only ever wants the request.
+ */
+export interface DocApproveResult {
+  request: DocUpdateRequest
+  doc_version: number
+}
+
+export const approveDocRequest = (id: string, reviewedBy: string): Promise<DocApproveResult> =>
+  req<DocApproveResult>('POST', `${DOC}/requests/${encodeURIComponent(id)}/approve`, {
+    reviewed_by: reviewedBy,
+  })
+
+export const rejectDocRequest = (id: string, reviewedBy: string): Promise<DocUpdateRequest> =>
+  req<DocUpdateRequest>('POST', `${DOC}/requests/${encodeURIComponent(id)}/reject`, {
+    reviewed_by: reviewedBy,
+  })
+
+export const searchDocs = (keyword: string, limit = 20): Promise<DocSearchHit[]> =>
+  req<DocSearchHit[]>('GET', `${DOC}/search?keyword=${encodeURIComponent(keyword)}&limit=${limit}`)
