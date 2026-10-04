@@ -347,7 +347,7 @@ async fn route_service_or_device(
     let mut stream = match handle.open_stream(STREAM_TAG_HTTP).await {
         Ok(s) => s,
         Err(e) => {
-            tracing::debug!(gw_id = %gw_id, error = %e, "opening tunnel stream failed");
+            tracing::warn!(gw_id = %gw_id, error = %e, "opening tunnel stream failed");
             write_device_offline(io).await;
             return Ok(());
         }
@@ -356,7 +356,7 @@ async fn route_service_or_device(
     // Splice: client ↔ yamux stream, pure bytes, until either side closes.
     let mut client = io.compat();
     if let Err(e) = copy_bidirectional(&mut client, &mut stream).await {
-        tracing::debug!(gw_id = %gw_id, error = %e, "device pipe ended");
+        tracing::info!(gw_id = %gw_id, error = %e, "device pipe ended");
     }
     let _ = stream.close().await;
     drop(permit);

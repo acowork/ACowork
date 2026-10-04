@@ -8,6 +8,11 @@
 #   - binary at /usr/local/bin/acowork-relay
 #   - wildcard DNS: *.relay.example.com -> server IP
 #   - cert at /etc/letsencrypt/live/relay.example.com/ (see certbot-wildcard.sh)
+#   - logs: rolling files at <data-dir>/logs/ (size/count via
+#     --log-file-size-mb / --log-file-count; level via --log-level or
+#     RUST_LOG). stderr is intentionally NOT used to avoid journald
+#     duplicating the file; journald then only keeps systemd lifecycle
+#     lines (start/stop/exit code), which is cheap.
 #   - optional admin token in /etc/acowork-relay/env (chmod 600):
 #       ACOWORK_RELAY_ADMIN_TOKEN=<random secret>
 #     Only needed if you use the admin API (pre-registration mode etc.).
