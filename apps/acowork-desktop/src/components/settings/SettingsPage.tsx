@@ -292,14 +292,14 @@ export function GatewayTab() {
               local mode, warn that Desktop will probe the remote address
               first (probe-then-spawn in init_local_gateway: ownership=
               foreign if reachable, owned if it has to spawn a child). */}
-          <p className="mt-2.5 flex items-center gap-1.5 text-xs text-text-tertiary">
+          <div className="mt-2.5 flex items-center gap-1.5 text-xs text-text-tertiary">
             <span className="truncate">
               {t("settings.gatewayUrl")}: <span className="font-mono">{gatewayUrl}</span>
             </span>
             {gatewayMode === "local" && !/127\.0\.0\.1|::1|localhost/i.test(gatewayUrl) && (
               <HelpHint content={t("settings.localModeKeepsUrl")} />
             )}
-          </p>
+          </div>
           {/* The relay device id, shown in EVERY mode. It is a property of
               the Gateway, not of the connection mode — and it is the one
               thing a user needs before they can fill in a relay address
@@ -311,13 +311,13 @@ export function GatewayTab() {
               Same shape as the URL line above (label + monospace value, no
               inline prose): the card's two facts read as a tidy pair, and
               the explanation lives in the help toast. */}
-          <p className="mt-1.5 flex items-center gap-1.5 text-xs text-text-tertiary">
+          <div className="mt-1.5 flex items-center gap-1.5 text-xs text-text-tertiary">
             <span className="truncate">
               {t("settings.relayGwId")}:{" "}
               <span className="font-mono">{relayGwId ?? "—"}</span>
             </span>
             <GatewayGwIdHelp gwId={relayGwId} gatewayUrl={gatewayUrl} />
-          </p>
+          </div>
         </ExpandableRow>
       </ListBox>
 

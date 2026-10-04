@@ -47,7 +47,18 @@ beforeEach(() => {
   useGatewayStore.setState({ status: "connected" });
 });
 
-afterEach(() => {
+afterEach(async () => {
+  // `GatewayTab` fires `fetchAll` on mount, whose node-fetch `finally` calls
+  // `setNodesLoading(false)`. Tests that assert synchronously exit before
+  // that promise settles, so it lands *after* the environment is torn down
+  // and surfaces as an unhandled rejection ("window is not defined" from
+  // React trying to update an unmounted tree). Drain the microtask queue
+  // before cleanup so every test — not just the ones that happen to await —
+  // lets the in-flight fetches finish against a live environment.
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+  });
   cleanup();
   vi.restoreAllMocks();
 });
