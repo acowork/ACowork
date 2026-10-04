@@ -202,6 +202,36 @@ impl GatewayAuth {
         self.snapshot().0
     }
 
+    /// Ask the webview to rotate once and wait briefly for the new token.
+    ///
+    /// Exists for consumers that **cannot answer a 401**: the relay-mode
+    /// MQTT CONNECT carries the access token as its password, and the
+    /// strict remote listener drops a bad credential WITHOUT CONNACK
+    /// (rumqttd `InvalidAuth`). The client therefore sees a bare
+    /// "Connection closed by peer abruptly" and would retry the same
+    /// expired password forever (see `MqttCredentials::refresher`).
+    ///
+    /// Same contract as the 401 replay path: Rust only *asks*; the
+    /// webview performs the single-flight rotation (ADR-076 §决策 3) and
+    /// pushes the result back through `set_access_token`.
+    ///
+    /// Returns the freshest token the mirror holds after the wait — the
+    /// renewed one on success, the previous one when the session is not
+    /// armed (local mode / no account) or the webview did not answer
+    /// within [`AUTH_RENEW_TIMEOUT`].
+    pub async fn renew_access_token(&self) -> Option<String> {
+        let (token, epoch, armed) = self.snapshot();
+        if !armed {
+            // `local` deployments never push a token, so there is nobody
+            // to ask — keep whatever we have (usually `None`).
+            return token;
+        }
+        match self.renew(epoch).await {
+            Some(fresh) => Some(fresh),
+            None => self.snapshot().0,
+        }
+    }
+
     /// Wait for a token newer than `stale_epoch`, asking the webview to
     /// rotate once. Returns the renewed token, or `None` when the session is
     /// gone / the webview did not answer within [`AUTH_RENEW_TIMEOUT`].

@@ -32,18 +32,52 @@ use crate::mqtt_client::{DesktopMqttClient, MqttCredentials, MqttEndpoint, MqttM
 use crate::state::{AppState, BootstrapStateView, GatewayMode};
 use acowork_core::defaults;
 
+/// Relay-mode pre-flight: make sure the mirrored access token is usable for
+/// the MQTT CONNECT before we start holding locks.
+///
+/// The CONNECT password IS the account access token (15 min TTL;
+/// `acowork_core::auth::ACCESS_TTL_SECS`), and the strict remote listener
+/// drops a bad credential WITHOUT CONNACK (rumqttd `InvalidAuth`), so from
+/// the client an expired token is indistinguishable from a network drop —
+/// it retries the same dead password forever. Observed live after a hotspot
+/// switch: the relay tunnel came back but MQTT stayed red for minutes, until
+/// an unrelated HTTP 401 happened to rotate the token.
+///
+/// Asking before the CONNECT is the same question the HTTP 401 replay path
+/// asks (`GatewayAuth::renew_access_token`), so the webview stays the single
+/// rotation owner (ADR-076 §决策 3).
+async fn refresh_relay_token_if_stale(state: &tauri::State<'_, AppState>) {
+    let mode = *state.gateway_mode.read().await;
+    let base_url = state.gateway.read().await.base_url().to_string();
+    if mqtt_transport(mode, &base_url) != MqttTransport::TlsBridge {
+        return;
+    }
+    // No session at all: the relay branch reports that with a precise error.
+    let Some(token) = state.gateway_auth.current_access_token() else {
+        return;
+    };
+    if !token_needs_renewal(&token) {
+        return;
+    }
+    tracing::info!(
+        "[MQTT] mirrored access token expired or near expiry — asking the webview \
+         to rotate before the relay CONNECT"
+    );
+    let _ = state.gateway_auth.renew_access_token().await;
+}
+
 /// Connect to the MQTT broker and start receiving events.
 ///
 /// Called by the frontend after the Gateway is confirmed healthy.
 /// Subscribes to agent lifecycle topics and starts forwarding events
 /// to the frontend via `app.emit("mqtt-event", payload)`.
 ///
-/// The broker endpoint is mode-driven (design doc 24 §8.0):
-/// - **Local/Remote** — plain TCP to the host derived from the Gateway
-///   base URL + port from `/api/status` (existing behavior, ADR-058
-///   W4 / ADR-055 D3).
-/// - **Relay** — WSS to `<base_url>/mqtt` through the cloud relay's
-///   TLS byte pipe; CONNECT credentials are the logged-in account's
+/// The broker endpoint follows the Gateway URL, not the mode label
+/// (design doc 24 §8.0, see [`mqtt_transport`]):
+/// - **plain `http`** — TCP to the host derived from the Gateway base URL +
+///   port from `/api/status` (existing behavior, ADR-058 W4 / ADR-055 D3).
+/// - **`https`, or relay mode** — WSS to `<base_url>/mqtt` through the cloud
+///   relay's TLS byte pipe; CONNECT credentials are the logged-in account's
 ///   access token (the strict remote listener's contract, M3), with a
 ///   refresher so post-expiry reconnects re-authenticate.
 ///
@@ -53,18 +87,43 @@ use acowork_core::defaults;
 /// restart or Runtime process recycling.
 #[tauri::command]
 pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    // Relay-mode pre-flight, deliberately BEFORE the client lock: a token
+    // rotation can wait up to `AUTH_RENEW_TIMEOUT` (10 s), and both
+    // `get_mqtt_status` (the full-stack diagnostics probe) and
+    // `force_reconnect_mqtt` share that lock — holding it across the wait
+    // would surface as a probe timeout, i.e. a false red MQTT row.
+    refresh_relay_token_if_stale(&state).await;
+
     let mut guard = state.mqtt_client.lock().await;
 
     let mode = *state.gateway_mode.read().await;
-    let (endpoint, user_id, credentials) = match mode {
-        GatewayMode::Relay => {
-            let base_url = state.gateway.read().await.base_url().to_string();
+    let base_url = state.gateway.read().await.base_url().to_string();
+    let (endpoint, user_id, credentials) = match mqtt_transport(mode, &base_url) {
+        MqttTransport::TlsBridge => {
             let url = relay_mqtt_wss_url(&base_url).ok_or_else(|| {
-                format!("relay mode: cannot derive a WSS broker URL from base URL '{base_url}'")
+                format!(
+                    "an https Gateway URL reaches MQTT through the relay's WSS bridge, which \
+                     needs a valid relay device domain (e.g. \
+                     https://<gw-id>.<relay-domain>); got '{base_url}'. Fix it in \
+                     Settings -> Gateway -> Gateway URL."
+                )
             })?;
             let token = state.gateway_auth.current_access_token().ok_or_else(|| {
                 "relay mode requires a logged-in account — no access token is mirrored".to_string()
             })?;
+            // `refresh_relay_token_if_stale` already asked for a rotation
+            // before we took the client lock. If the token is STILL at/near
+            // expiry the webview did not answer, and the strict remote
+            // listener will drop this CONNECT without CONNACK (so the client
+            // sees only "Connection closed by peer abruptly"). Say so: the
+            // soft-restart refresher below keeps asking.
+            if token_needs_renewal(&token) {
+                tracing::warn!(
+                    "[MQTT] relay CONNECT with a token at or near expiry — the strict \
+                     remote listener will reject it without CONNACK; waiting for the \
+                     webview to mirror a rotated token"
+                );
+            }
             let name = access_token_sub(&token).ok_or_else(|| {
                 "relay mode: cannot read the account name out of the access token".to_string()
             })?;
@@ -76,6 +135,19 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
             let refresher = Arc::new(move || {
                 let token = auth.current_access_token()?;
                 let name = access_token_sub(&token)?;
+                if token_needs_renewal(&token) {
+                    // Soft-restart is the ONLY place a fresh password
+                    // reaches `MqttOptions`, so an expired mirror would
+                    // otherwise be re-sent verbatim. Ask the webview for a
+                    // rotation now; the next soft-restart picks it up.
+                    // Fire-and-forget: this closure is synchronous, and
+                    // Rust may only *ask* — the webview owns the rotation
+                    // (ADR-076 §决策 3).
+                    let auth = auth.clone();
+                    tokio::spawn(async move {
+                        let _ = auth.renew_access_token().await;
+                    });
+                }
                 Some((name, token))
             });
             let credentials = MqttCredentials {
@@ -85,7 +157,7 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
             };
             (MqttEndpoint::Wss { url }, name, Some(credentials))
         }
-        local_or_lan @ (GatewayMode::Local | GatewayMode::Remote) => {
+        MqttTransport::Plain => {
             // ADR-058 W4 + ADR-055 D3: derive both the MQTT broker host
             // AND port from the Gateway so Remote mode (Gateway behind an
             // SSH tunnel / WSL IP) reaches the broker through the same
@@ -94,11 +166,9 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
             // (L3-6 residual gap — ADR-058 W4 fixed the host half,
             // ADR-055 Phase 1.3 closes the port half). Local mode derives
             // "127.0.0.1" — identical to the previous hardcode.
-            let _ = local_or_lan;
             let (mqtt_host, mqtt_port, mqtt_credentials) = {
                 let gw = state.gateway.read().await;
-                let gateway_base_url = gw.base_url().to_string();
-                let mqtt_host = derive_mqtt_broker_host(&gateway_base_url)
+                let mqtt_host = derive_mqtt_broker_host(&base_url)
                     .unwrap_or_else(|| defaults::GATEWAY_MQTT_HOST.to_string());
                 // Fetch broker discovery info dynamically; fall back to
                 // defaults on any error so the connection still attempts
@@ -890,6 +960,37 @@ fn endpoint_matches(recorded: Option<&MqttEndpoint>, desired: &MqttEndpoint) -> 
     recorded == Some(desired)
 }
 
+/// Which MQTT transport the Desktop must use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MqttTransport {
+    /// WSS to `<base_url>/mqtt` through the relay's TLS byte pipe; CONNECT
+    /// password is the logged-in account's access token.
+    TlsBridge,
+    /// Plain TCP to the broker port (local, LAN, or port-forwarded).
+    Plain,
+}
+
+/// Pick the MQTT transport (design doc 24 §8.0).
+///
+/// Relay mode always uses the bridge. Local/Remote do as well whenever the
+/// configured URL is `https`: the mode only decides whether Desktop spawns a
+/// Gateway (single-topology contract, see
+/// `src/stores/settingsStore.modeSwitch.test.ts`), so an `https` address in
+/// any mode is a TLS-terminated Gateway — and plain TCP to the broker port
+/// cannot pass through TLS. Deciding by mode alone made the relay → remote
+/// switch (URL left as the relay device domain, which the contract forbids
+/// resetting) silently aim MQTT at `<gw>.relay.<domain>:19875`, a connection
+/// that can never succeed and never explains itself.
+fn mqtt_transport(mode: GatewayMode, gateway_base_url: &str) -> MqttTransport {
+    if matches!(mode, GatewayMode::Relay) {
+        return MqttTransport::TlsBridge;
+    }
+    match reqwest::Url::parse(gateway_base_url) {
+        Ok(u) if u.scheme() == "https" => MqttTransport::TlsBridge,
+        _ => MqttTransport::Plain,
+    }
+}
+
 /// Derive the WSS broker URL from the relay-mode Gateway base URL
 /// (design doc 24 §8.0): `https://gw-abc.relay.example.com` →
 /// `wss://gw-abc.relay.example.com/mqtt`.
@@ -899,8 +1000,22 @@ fn endpoint_matches(recorded: Option<&MqttEndpoint>, desired: &MqttEndpoint) -> 
 /// through the relay's TLS byte pipe for the device domain. A non-null
 /// port is preserved (dev relays on custom ports); the default port
 /// (443) is omitted so rumqttc derives it from the `wss` scheme.
+///
+/// **Only `https` is accepted.** Relay mode's base URL is always the
+/// relay's TLS device domain (design doc 24 §8.0), so the scheme is the
+/// one honest signal that the user actually configured a relay address.
+/// Force-upgrading a plaintext base URL to `wss://` (the previous
+/// behaviour) pointed the TLS handshake at the Gateway's plain-HTTP
+/// listener and surfaced as the opaque
+/// `Websocket: IO error: received corrupt message of type
+/// InvalidContentType` — with the MQTT row red and no hint about the
+/// real cause. Returning `None` here lets `connect_mqtt` name the
+/// problem and the fix instead.
 fn relay_mqtt_wss_url(gateway_base_url: &str) -> Option<String> {
     let url = reqwest::Url::parse(gateway_base_url).ok()?;
+    if url.scheme() != "https" {
+        return None;
+    }
     let host = url.host_str()?;
     match url.port() {
         Some(p) => Some(format!("wss://{host}:{p}/mqtt")),
@@ -927,6 +1042,45 @@ fn access_token_sub(token: &str) -> Option<String> {
         .ok()?;
     let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
     value.get("sub")?.as_str().map(str::to_string)
+}
+
+/// Expiry (`exp`, unix seconds) out of a JWT-shaped access token.
+///
+/// Deliberately NOT signature-verified, exactly like
+/// [`access_token_sub`]: the BROKER verifies signature and expiry, so a
+/// mis-read `exp` can only make us ask for a rotation that was not
+/// strictly needed — it can never authenticate anyone.
+fn access_token_exp(token: &str) -> Option<i64> {
+    use base64::Engine as _;
+    let mut parts = token.split('.');
+    let _header = parts.next()?;
+    let body = parts.next()?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(body)
+        .ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    value.get("exp")?.as_i64()
+}
+
+/// Clock skew allowance around `exp`. A CONNECT that starts this close to
+/// expiry can be rejected (or die mid-handshake) for a token that looked
+/// valid a moment earlier, so treat the window as already expired.
+const TOKEN_RENEW_MARGIN_SECS: i64 = 30;
+
+/// `true` when a relay CONNECT must not reuse this token: expired,
+/// unreadable, or within [`TOKEN_RENEW_MARGIN_SECS`] of expiry.
+fn token_needs_renewal(token: &str) -> bool {
+    token_needs_renewal_at(token, acowork_core::auth::now_unix())
+}
+
+/// Testable core of [`token_needs_renewal`] (explicit `now`).
+fn token_needs_renewal_at(token: &str, now: i64) -> bool {
+    match access_token_exp(token) {
+        // Payload unreadable: ask for a fresh token rather than betting
+        // the relay CONNECT on it.
+        None => true,
+        Some(exp) => exp - now <= TOKEN_RENEW_MARGIN_SECS,
+    }
 }
 
 #[cfg(test)]
@@ -976,6 +1130,32 @@ mod mqtt_endpoint_tests {
         ));
     }
 
+    /// Transport is decided by the URL, not by the mode label: an `https`
+    /// Gateway address in Local/Remote must take the WSS bridge, because
+    /// switching relay → remote leaves the relay URL in place (mode switch
+    /// may not reset the URL — single-topology contract) and plain TCP to
+    /// the broker port cannot pass through TLS.
+    #[test]
+    fn mqtt_transport_follows_the_url_scheme() {
+        let relay_url = "https://gw-c8cb2bed.relay.example.com";
+        assert_eq!(mqtt_transport(GatewayMode::Relay, relay_url), MqttTransport::TlsBridge);
+        assert_eq!(mqtt_transport(GatewayMode::Remote, relay_url), MqttTransport::TlsBridge);
+        assert_eq!(mqtt_transport(GatewayMode::Local, relay_url), MqttTransport::TlsBridge);
+        assert_eq!(
+            mqtt_transport(GatewayMode::Remote, "http://192.168.3.67:19876"),
+            MqttTransport::Plain
+        );
+        assert_eq!(
+            mqtt_transport(GatewayMode::Local, "http://127.0.0.1:19876"),
+            MqttTransport::Plain
+        );
+        // Unparseable address keeps the historical plain path instead of
+        // inventing a TLS connection; relay mode still forces the bridge so
+        // its own error message is the one the user sees.
+        assert_eq!(mqtt_transport(GatewayMode::Local, "not a url"), MqttTransport::Plain);
+        assert_eq!(mqtt_transport(GatewayMode::Relay, "not a url"), MqttTransport::TlsBridge);
+    }
+
     /// Relay-mode WSS URL derivation from the base URL. The `/mqtt`
     /// path is the Gateway-side WS bridge route (M3 remote listener).
     #[test]
@@ -999,6 +1179,28 @@ mod mqtt_endpoint_tests {
         assert_eq!(relay_mqtt_wss_url(""), None);
     }
 
+    /// Regression (relay MQTT outage): a plain-http base URL in relay
+    /// mode must NOT be silently upgraded to `wss://`. Doing so aimed a
+    /// TLS handshake at the Gateway's plain-HTTP port, which failed with
+    /// `received corrupt message of type InvalidContentType` and left the
+    /// diagnostics panel showing a red MQTT row with no usable cause.
+    #[test]
+    fn relay_mqtt_wss_url_rejects_plaintext_schemes() {
+        // The exact shape that caused the outage: LAN address + relay mode.
+        assert_eq!(relay_mqtt_wss_url("http://192.168.0.101:19876"), None);
+        assert_eq!(relay_mqtt_wss_url("http://127.0.0.1:19876"), None);
+        // A raw ws:// address is equally not a relay device domain.
+        assert_eq!(relay_mqtt_wss_url("ws://relay.example.com"), None);
+        assert_eq!(relay_mqtt_wss_url("wss://relay.example.com"), None);
+        // Scheme case is not aliasing: RFC 3986 schemes are
+        // case-insensitive and `url` normalises them, so an uppercase
+        // HTTPS base is the same legitimate device domain.
+        assert_eq!(
+            relay_mqtt_wss_url("HTTPS://gw-abc.relay.example.com"),
+            Some("wss://gw-abc.relay.example.com/mqtt".to_string())
+        );
+    }
+
     /// Local `sub` extraction from a JWT-shaped access token — without
     /// signature verification (the broker verifies; see the doc on
     /// `access_token_sub`). Hand-crafts a token with the same shape
@@ -1020,6 +1222,69 @@ mod mqtt_endpoint_tests {
         // Payload without a `sub` → None.
         let no_sub = b64.encode(r#"{"kind":"access","iat":0,"exp":1}"#);
         assert_eq!(access_token_sub(&format!("{header}.{no_sub}.{sig}")), None);
+    }
+
+    /// Same hand-crafted shape as above, for the expiry reader.
+    fn jwt_with(payload: &str) -> String {
+        use base64::Engine as _;
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let header = b64.encode(r#"{"alg":"EdDSA","typ":"JWT"}"#);
+        let body = b64.encode(payload);
+        let sig = b64.encode([0u8; 64]);
+        format!("{header}.{body}.{sig}")
+    }
+
+    #[test]
+    fn access_token_exp_reads_the_expiry_claim() {
+        let token = jwt_with(r#"{"sub":"u-1","kind":"access","iat":1000,"exp":1900}"#);
+        assert_eq!(access_token_exp(&token), Some(1900));
+        // Structural garbage / missing claim → None.
+        assert_eq!(access_token_exp("not-a-token"), None);
+        assert_eq!(access_token_exp("a.b"), None);
+        assert_eq!(access_token_exp(&jwt_with(r#"{"sub":"u-1"}"#)), None);
+    }
+
+    /// Regression (post-network-switch relay outage): with an expired
+    /// mirrored token the CONNECT is dropped by rumqttd `InvalidAuth`
+    /// WITHOUT CONNACK, so the client cannot tell it from a network drop
+    /// and retries the same dead password forever. The expiry reader is
+    /// what lets `connect_mqtt` ask for a rotation first.
+    #[test]
+    fn token_needs_renewal_detects_expiry_and_skew() {
+        let token = |exp: i64| jwt_with(&format!(r#"{{"sub":"u-1","exp":{exp}}}"#));
+
+        // Comfortably valid → reuse it.
+        assert!(!token_needs_renewal_at(&token(10_000), 9_000));
+        // Exactly at the margin boundary → treat as expired.
+        assert!(token_needs_renewal_at(
+            &token(9_030),
+            9_000
+        ));
+        // Inside the margin (a CONNECT starting now could still die
+        // mid-handshake) → renew.
+        assert!(token_needs_renewal_at(&token(9_010), 9_000));
+        // Already expired → renew.
+        assert!(token_needs_renewal_at(&token(8_000), 9_000));
+        // Unreadable payload → renew rather than bet the CONNECT on it.
+        assert!(token_needs_renewal_at("not-a-token", 9_000));
+    }
+
+    /// The margin is a real safety window, not a no-op: a token that is
+    /// valid *right now* but dies within it must still trigger renewal.
+    #[test]
+    fn token_renew_margin_is_inside_the_validity_window() {
+        let now = acowork_core::auth::now_unix();
+        let about_to_die = jwt_with(&format!(
+            r#"{{"sub":"u-1","exp":{}}}"#,
+            now + TOKEN_RENEW_MARGIN_SECS - 1
+        ));
+        assert!(token_needs_renewal(&about_to_die));
+
+        let comfortably_valid = jwt_with(&format!(
+            r#"{{"sub":"u-1","exp":{}}}"#,
+            now + TOKEN_RENEW_MARGIN_SECS + 60
+        ));
+        assert!(!token_needs_renewal(&comfortably_valid));
     }
 }
 
@@ -1672,11 +1937,11 @@ fn mqtt_status_to_payload(state: &acowork_mqtt_session::SessionState) -> serde_j
             "connecting": true,
             "reason": null,
         }),
-        SessionState::Reconnecting => serde_json::json!({
+        SessionState::Reconnecting { reason } => serde_json::json!({
             "known": true,
             "connected": false,
             "reconnecting": true,
-            "reason": "reconnecting",
+            "reason": reason,
         }),
         SessionState::Connected => serde_json::json!({
             "known": true,
