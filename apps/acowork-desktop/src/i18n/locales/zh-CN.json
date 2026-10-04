@@ -447,7 +447,7 @@
     "noProfile": "未在 Gateway 上找到用户资料。请完成引导流程以创建，或确保 Gateway 正在运行。",
     "gatewayMode": "网关模式",
     "local": "本地",
-    "remote": "远程",
+    "remote": "远程（内网）",
     "relay": "中继（外网）",
     "relayTunnel": "隧道状态",
     "relayGwId": "设备 ID",

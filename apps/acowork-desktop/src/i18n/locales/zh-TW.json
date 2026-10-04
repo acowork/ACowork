@@ -431,7 +431,7 @@
     "noProfile": "未在閘道上找到使用者資料。請完成引導流程以建立，或確保閘道正在執行。",
     "gatewayMode": "閘道模式",
     "local": "本機",
-    "remote": "遠端",
+    "remote": "遠端（內網）",
     "relay": "中繼（外網）",
     "relayTunnel": "通道狀態",
     "relayGwId": "裝置 ID",
