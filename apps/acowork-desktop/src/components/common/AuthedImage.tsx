@@ -27,6 +27,8 @@
 
 import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
 
+import { log } from "../../lib/logger";
+
 export interface AuthedImageProps {
   /** HTTP URL that needs the caller's bearer token. Falsy renders `fallback`. */
   src: string | null | undefined;
@@ -77,14 +79,28 @@ export function useAuthedImageSrc(url: string | null): string | null {
     let cancelled = false;
     let objectUrl: string | null = null;
     fetch(url)
-      .then((resp) => (resp.ok ? resp.blob() : null))
+      .then((resp) => {
+        // A bare `<img>` failing with 401 is precisely the bug this
+        // component exists to prevent (see module docs). Staying silent
+        // here made that regression indistinguishable from "no custom
+        // avatar configured" — both render `fallback`. Log the status so
+        // the two are told apart in the Desktop log.
+        if (!resp.ok) {
+          log.warn(
+            `[AuthedImage] avatar fetch failed: status=${resp.status} url=${url}`,
+          );
+          return null;
+        }
+        return resp.blob();
+      })
       .then((blob) => {
         if (!blob || cancelled) return;
         objectUrl = URL.createObjectURL(blob);
         setResolved(objectUrl);
       })
-      .catch(() => {
+      .catch((err) => {
         // Offline or unauthorized — the caller's fallback is the answer.
+        log.warn(`[AuthedImage] avatar fetch threw: url=${url}`, err);
       });
 
     return () => {

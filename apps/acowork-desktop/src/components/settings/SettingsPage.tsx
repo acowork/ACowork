@@ -12,7 +12,7 @@ import { ExpandableRow, ListBox, ListRow } from "../common/list";
 import { RadioGroup } from "../common/RadioGroup";
 import { DEFAULT_GATEWAY_URL, getGatewayUrl, DEFAULT_THEME, DEFAULT_FONT_SIZE, DEFAULT_CONTENT_WIDTH, DEFAULT_OPACITY, DEFAULT_ACCENT_COLOR } from "../../lib/config";
 import { ACCENT_PRESETS } from "../../lib/accentPresets";
-import { Bug, Monitor } from "lucide-react";
+import { Bug, HelpCircle, Monitor } from "lucide-react";
 import { inputReadonly } from "../../lib/ui-styles";
 import { StyledInput } from "../common/StyledInput";
 import { Dropdown } from "../common/Dropdown";
@@ -64,8 +64,16 @@ export function SettingsPage({ initialTab = "profile" }: { initialTab?: Settings
   );
 }
 
+/** Relay mode's base URL must be the relay's TLS device domain
+ *  (`https://<gw-id>.<relay-domain>`). Scheme check mirrors
+ *  `relay_mqtt_wss_url` in `src-tauri/src/commands/chat_mqtt.rs`, which
+ *  refuses anything but `https` — keep the two in step. */
+function isHttpsUrl(url: string): boolean {
+  return /^https:\/\//i.test(url.trim());
+}
+
 /** Gateway connection settings */
-function GatewayTab() {
+export function GatewayTab() {
   const { t } = useTranslation();
   const { status, health, localState, localOwnership, checkHealth, checkLocalStatus, startLocalGateway, stopLocalGateway } = useGatewayStore();
   const gatewayUrl = useSettingsStore((s) => s.gatewayUrl);
@@ -81,6 +89,9 @@ function GatewayTab() {
   const [urlDraft, setUrlDraft] = useState(gatewayUrl);
   const [starting, setStarting] = useState(false);
   const [stopping, setStopping] = useState(false);
+  // Gateway's relay device id. A property of the Gateway we are TALKED to,
+  // not of the mode we are in — see the gw-id line in the mode card.
+  const [relayGwId, setRelayGwId] = useState<string | null>(null);
   // Tools-tab style level-1 collapsible cards (default open)
   const [gatewayModeOpen, setGatewayModeOpen] = useState(true);
   const [localGatewayOpen, setLocalGatewayOpen] = useState(true);
@@ -105,9 +116,45 @@ function GatewayTab() {
     checkLocalStatus();
   }, [checkHealth, checkLocalStatus]);
 
+  // The relay device id, read from the Gateway we are pointed at.
+  //
+  // Fetched once per (connection, address) rather than polled: the id never
+  // changes while a Gateway is running, and the mode card is visible in
+  // every mode — polling here would put a 5 s timer on every local-mode user
+  // who has no tunnel at all. `RelayTunnelPanel` keeps the 5 s poll for the
+  // one mode where tunnel liveness actually matters.
+  //
+  // `authFetch`'s global interceptor attaches the bearer token, so a bare
+  // fetch is correct here: `/api/relay/status` is not a public path
+  // (core http/auth_middleware.rs `is_public_path`) and multi_user mode
+  // rejects an anonymous caller.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const resp = await fetch(`${gatewayUrl}/api/relay/status`);
+        if (cancelled) return;
+        setRelayGwId(resp.ok ? ((await resp.json()) as RelayStatus).gw_id : null);
+      } catch {
+        if (!cancelled) setRelayGwId(null);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [gatewayUrl, status]);
+
   const handleModeChange = useCallback((mode: GatewayMode) => {
     setGatewayMode(mode);
   }, [setGatewayMode]);
+
+  // Relay mode's Gateway URL is the relay's TLS device domain (design doc 24
+  // §8.0) — `relay_mqtt_wss_url` accepts only `https` and the strict remote
+  // MQTT listener lives behind the relay's TLS byte pipe, so a plain-http
+  // address can never carry MQTT. It DOES answer the HTTP health probe, which
+  // is why this used to surface as "已连接" + a red MQTT row with no cause.
+  const draftIsPlainHttp =
+    gatewayMode === "relay" && urlDraft.trim() !== "" && !isHttpsUrl(urlDraft);
+  const savedIsPlainHttp =
+    gatewayMode === "relay" && gatewayUrl.trim() !== "" && !isHttpsUrl(gatewayUrl);
 
   const handleUrlSave = useCallback(() => {
     const trimmed = urlDraft.trim();
@@ -245,13 +292,31 @@ function GatewayTab() {
               local mode, warn that Desktop will probe the remote address
               first (probe-then-spawn in init_local_gateway: ownership=
               foreign if reachable, owned if it has to spawn a child). */}
-          <p className="mt-2.5 text-xs text-text-tertiary ">
-            {t("settings.gatewayUrl")}: <span className="font-mono">{gatewayUrl}</span>
+          <p className="mt-2.5 flex items-center gap-1.5 text-xs text-text-tertiary">
+            <span className="truncate">
+              {t("settings.gatewayUrl")}: <span className="font-mono">{gatewayUrl}</span>
+            </span>
             {gatewayMode === "local" && !/127\.0\.0\.1|::1|localhost/i.test(gatewayUrl) && (
-              <span className="ml-2 text-amber-600 dark:text-amber-400">
-                {t("settings.localModeKeepsUrl")}
-              </span>
+              <HelpHint content={t("settings.localModeKeepsUrl")} />
             )}
+          </p>
+          {/* The relay device id, shown in EVERY mode. It is a property of
+              the Gateway, not of the connection mode — and it is the one
+              thing a user needs before they can fill in a relay address
+              (`https://<gw-id>.<relay-domain>`), so gating it behind
+              `gatewayMode === "relay"` made it unreachable exactly when it
+              was most needed: the address you need the id FOR does not
+              resolve until you have the id.
+
+              Same shape as the URL line above (label + monospace value, no
+              inline prose): the card's two facts read as a tidy pair, and
+              the explanation lives in the help toast. */}
+          <p className="mt-1.5 flex items-center gap-1.5 text-xs text-text-tertiary">
+            <span className="truncate">
+              {t("settings.relayGwId")}:{" "}
+              <span className="font-mono">{relayGwId ?? "—"}</span>
+            </span>
+            <GatewayGwIdHelp gwId={relayGwId} gatewayUrl={gatewayUrl} />
           </p>
         </ExpandableRow>
       </ListBox>
@@ -352,10 +417,32 @@ function GatewayTab() {
                   placeholder={gatewayMode === "relay" ? "https://<gw-id>.relay.example.com" : DEFAULT_GATEWAY_URL}
                   ariaLabel={t("settings.gatewayUrl")}
                 />
+                {/* Relay mode's address is the relay's TLS device domain. A
+                    plain-http address still answers the HTTP health probe, so
+                    "测试连接" would report success while MQTT can never
+                    connect (`relay_mqtt_wss_url` refuses to derive a broker
+                    URL from it). Flag it at the field instead of failing
+                    later — as a hint on the field's own row, not as a
+                    paragraph under it: these are two full sentences, and a
+                    red block under the input reflowed the whole card.
+
+                    Sits BEFORE the Apply button so the "?" does not slide when
+                    Apply appears and disappears. */}
+                {(draftIsPlainHttp || savedIsPlainHttp) && (
+                  <HelpHint
+                    content={[
+                      draftIsPlainHttp ? t("settings.relayUrlMustBeHttps") : null,
+                      savedIsPlainHttp ? t("settings.relayUrlSavedPlainHttp") : null,
+                    ]
+                      .filter(Boolean)
+                      .join(" ")}
+                  />
+                )}
                 {urlDraft !== gatewayUrl && (
                   <button
                     onClick={handleUrlSave}
-                    className="btn-accent rounded-md px-3 py-[var(--ui-btn-py)] text-xs font-medium"
+                    disabled={draftIsPlainHttp}
+                    className="btn-accent rounded-md px-3 py-[var(--ui-btn-py)] text-xs font-medium disabled:opacity-50"
                   >
                     {t("settings.apply")}
                   </button>
@@ -389,7 +476,7 @@ function GatewayTab() {
 
             <button
               onClick={handleTest}
-              disabled={testing || !urlDraft.trim()}
+              disabled={testing || !urlDraft.trim() || savedIsPlainHttp}
               className="rounded btn-solid px-3 py-[var(--ui-btn-py)] text-xs font-medium disabled:opacity-50"
             >
               {testing ? t("settings.testing") : t("settings.testConnection")}
@@ -473,6 +560,63 @@ function GatewayTab() {
       </ListBox>
     </div>
   );
+}
+
+/** A "?" affordance that explains the row it sits next to, on hover.
+ *
+ *  Stock [`Tooltip`] on a focusable trigger: hover (or keyboard focus) opens
+ *  it, positioned and styled by the component every other hint in the app
+ *  already uses. Lives here rather than in `common/` because the only two
+ *  callers are the two label/value pairs in the mode card.
+ *
+ *  `label` is the accessible name and defaults to the hint text, which reads
+ *  fine to a screen reader ("? In Local mode, Desktop probes this address
+ *  first...") and saves a second i18n key per call site. Pass a short `label`
+ *  when the content is long or already says something else. */
+function HelpHint({ content, label }: { content: string; label?: string }) {
+  return (
+    <Tooltip content={content} maxWidth="320px">
+      <button
+        type="button"
+        aria-label={label ?? content}
+        className="shrink-0 rounded p-0.5 text-text-tertiary hover:text-text-secondary"
+      >
+        <HelpCircle size={12} />
+      </button>
+    </Tooltip>
+  );
+}
+
+/** "What is this, and how do I get one?" help for the gw-id row.
+ *
+ *  Three hand-rolled predecessors are documented here so nobody rebuilds one:
+ *    - inline expander: reflowed the two label/value lines into a ragged wrap
+ *      and grew the card on every click,
+ *    - bottom-right toast: right content, wrong semantics AND wrong place —
+ *      a toast is a global notification, this is a hint about the row you are
+ *      pointing at,
+ *    - hand-positioned `createPortal` popup: opened at {top:0,left:0} on the
+ *      first frame because the coordinates were only measured in an effect, so
+ *      it flashed in the top-left corner. The stock tooltip measures
+ *      synchronously in the same tick it is asked to show.
+ *
+ *  The `<relay-domain>` placeholder is deliberate: the suffix is a
+ *  relay-SERVER deployment setting (`device_domain_suffix` in
+ *  acowork-relay's config) that the Gateway's status snapshot does not carry,
+ *  so the Desktop has nothing authoritative to substitute. Same placeholder
+ *  the address field shows.
+ *
+ *  `gatewayUrl` is passed rather than re-read from the store so the command
+ *  points at the Gateway this row was fetched from.
+ *
+ *  320px, not the 200px default: the pairing address and the curl command are
+ *  both long, and a 200px box would shred them into an unreadable column. */
+function GatewayGwIdHelp({ gwId, gatewayUrl }: { gwId: string | null; gatewayUrl: string }) {
+  const { t } = useTranslation();
+  const content = gwId
+    ? t("settings.relayGwIdHelp", { gwId })
+    : t("settings.relayGwIdHowTo", { gatewayUrl });
+  return <HelpHint content={content} label={t("settings.relayGwIdHelpLabel")} />;
 }
 
 /** Mirror of the Gateway's `RelayClientStatus`
@@ -594,6 +738,15 @@ function RelayTunnelPanel() {
           <div className="flex items-center gap-2">
             <span className="text-text-tertiary">{t("settings.relayConnectedAt")}</span>
             <span className="font-mono">{connectedAt}</span>
+          </div>
+          {/* Which address this snapshot came from. The panel polls the
+              *configured* Gateway URL, so "在线" only proves THAT address
+              reached the Gateway — with a LAN address configured it reports
+              the local Gateway's own tunnel and says nothing about whether
+              the relay path works. Naming the source stops that misread. */}
+          <div className="flex items-start gap-2">
+            <span className="shrink-0 text-text-tertiary">{t("settings.relayReadFrom")}</span>
+            <span className="break-all font-mono">{getGatewayUrl()}</span>
           </div>
 
           {relayStatus?.last_error && (

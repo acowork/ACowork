@@ -428,7 +428,7 @@ pub async fn system_status(State(state): State<AppState>) -> Json<SystemStatusRe
         version: env!("CARGO_PKG_VERSION").to_string(),
         agents_installed: gw.installed_agents.len(),
         agents_running,
-        uptime_secs: 0, // TODO: track actual uptime
+        uptime_secs: (chrono::Utc::now() - gw.started_at).num_seconds().max(0) as u64,
         mqtt_port: gw
             .config
             .as_ref()

@@ -54,7 +54,7 @@ type ProbeOutcome =
  *                    flight; used by the death-classifier tick so it
  *                    never cancels someone else's probe.
  */
-async function probeHealthOnce(preempt: boolean): Promise<ProbeOutcome> {
+async function probeHealthRoundtrip(preempt: boolean): Promise<ProbeOutcome> {
   if (_inFlightHealth) {
     if (!preempt) return { kind: "aborted" };
     _inFlightHealth.abort("superseded");
@@ -83,6 +83,60 @@ async function probeHealthOnce(preempt: boolean): Promise<ProbeOutcome> {
     clearTimeout(timer);
     if (_inFlightHealth === ctrl) _inFlightHealth = null;
   }
+}
+
+/**
+ * Consecutive inconclusive probes.
+ *
+ * One timeout is never death evidence (invariant 2) and that stays true:
+ * nothing here writes `status` or `gatewayAlive`. But a path that answers
+ * nothing three times in a row is not "slow" — it is a half-dead transport.
+ * Observed live on the relay tunnel: yamux ping/pong kept answering, the
+ * device stream stopped delivering, every request queued behind it, and the
+ * UI spun with no error anywhere. The one client-side action that fixes
+ * that is rebuilding the connection, so that is all this does.
+ */
+const INCONCLUSIVE_STREAK_LIMIT = 3;
+/** Minimum gap between two forced reconnects, whatever the streak does. */
+const FORCE_RECONNECT_COOLDOWN_MS = 60_000;
+let _inconclusiveStreak = 0;
+let _lastForcedReconnectAt = 0;
+
+async function noteInconclusiveProbe(): Promise<void> {
+  _inconclusiveStreak += 1;
+  if (_inconclusiveStreak < INCONCLUSIVE_STREAK_LIMIT) return;
+  _inconclusiveStreak = 0;
+  const now = Date.now();
+  if (now - _lastForcedReconnectAt < FORCE_RECONNECT_COOLDOWN_MS) return;
+  _lastForcedReconnectAt = now;
+  log.warn(
+    `[gateway-health] ${INCONCLUSIVE_STREAK_LIMIT} probes in a row with no answer — ` +
+      "transport is half-dead, forcing a fresh MQTT connection",
+  );
+  try {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("force_reconnect_mqtt");
+  } catch (err) {
+    // No live MQTT client yet (boot, or already torn down) — nothing to rebuild.
+    log.debug("[gateway-health] force_reconnect_mqtt skipped:", err);
+  }
+}
+
+/**
+ * The liveness probe every caller uses. Streak accounting lives here
+ * because this is the single choke point both the manual `checkHealth()`
+ * and the death-classifier tick pass through.
+ */
+async function probeHealthOnce(preempt: boolean): Promise<ProbeOutcome> {
+  const outcome = await probeHealthRoundtrip(preempt);
+  if (outcome.kind === "timeout") {
+    void noteInconclusiveProbe();
+  } else if (outcome.kind !== "aborted") {
+    // Any real verdict — OK, HTTP error, fast refusal — means bytes moved.
+    // An aborted probe asked nothing worth answering (invariant 1).
+    _inconclusiveStreak = 0;
+  }
+  return outcome;
 }
 
 /**

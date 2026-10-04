@@ -268,6 +268,14 @@ pub struct GatewayState {
     /// Set once at startup from `Gateway::run` via
     /// [`Self::set_advertise_host`]. Tests default to "127.0.0.1".
     pub advertise_host: String,
+    /// Process start time — the baseline for `GET /api/status`'s
+    /// `uptime_secs`, which the Desktop's service-diagnostics panel
+    /// renders ("uptime Ns").
+    ///
+    /// Set once in [`GatewayState::new`]. The struct is constructed once
+    /// per Gateway process (the `Default` impl delegates to `new`), so
+    /// this is genuinely process uptime.
+    pub started_at: DateTime<Utc>,
     /// MQTT publisher ready-barrier handle (Fix 1).
     ///
     /// The publisher defers its first retained publish until
@@ -375,6 +383,7 @@ impl GatewayState {
             mqtt_broker_control: Arc::new(tokio::sync::Mutex::new(None)),
             mqtt_broker_auth: None,
             advertise_host: "127.0.0.1".to_string(),
+            started_at: Utc::now(),
             mqtt_publisher_handle: None,
             instance_id: String::new(),
             bootstrap: BootstrapState::default(),
@@ -691,6 +700,31 @@ mod tests {
         assert!(state.installed_agents.is_empty());
         assert!(state.running_agents.is_empty());
         assert!(!state.vault.is_unlocked());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `started_at` backs `GET /api/status`'s `uptime_secs`, which the
+    /// Desktop's service-diagnostics panel renders. It used to be a
+    /// hardcoded `0` ("TODO: track actual uptime"), so pin that
+    /// construction stamps a real time — and that uptime derived from it
+    /// is non-negative and small.
+    #[test]
+    fn test_state_new_stamps_started_at() {
+        let dir = temp_vault_dir("started-at");
+        let before = Utc::now();
+        let state = GatewayState::new(&dir);
+        let after = Utc::now();
+
+        assert!(
+            state.started_at >= before && state.started_at <= after,
+            "started_at must be the construction time, got {}",
+            state.started_at
+        );
+        let uptime = (Utc::now() - state.started_at).num_seconds();
+        assert!(
+            (0..5).contains(&uptime),
+            "a freshly constructed state must report a near-zero uptime, got {uptime}s"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
