@@ -40,6 +40,10 @@ ExecStart=/usr/local/bin/acowork-relay \
   --tls-cert /etc/letsencrypt/live/relay.example.com/fullchain.pem \
   --tls-key /etc/letsencrypt/live/relay.example.com/privkey.pem \
   --data-dir /var/lib/acowork-relay
+# Tunnel forensics (design doc 24 §5.2): yamux logs its stream lifecycle
+# (`eof`, `can no longer write`) and its 30 s ping/pong RTT through the
+# `log` facade, which the relay only surfaces at debug. Add `--log-level debug`
+# when reproducing a wedged device pipe; cost is ~2 lines per tunnel per 30 s.
 # Uncomment only when running in pre-registration (enterprise) mode:
 #  --require-registration \
 #  --admin-token ${ACOWORK_RELAY_ADMIN_TOKEN}

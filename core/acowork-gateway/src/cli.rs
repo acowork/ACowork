@@ -763,8 +763,9 @@ fn init_tracing(level: &str, log_file_size_mb: u64, log_file_count: u64) -> Opti
     use crate::config::GatewayConfig;
 
     let env_filter = acowork_core::logging::build_env_filter(level);
-
-    // Log directory: <root>/data/logs/  (sibling of embed.log)
+    // `log`-only dependencies (yamux) stay silent until the facade gate is
+    // raised; the reload layer below only does that on an actual reload.
+    acowork_core::logging::sync_log_facade(level);
     let log_dir = GatewayConfig::project_data_dir().join("logs");
 
     if let Err(e) = std::fs::create_dir_all(&log_dir) {

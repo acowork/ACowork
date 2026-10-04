@@ -660,8 +660,12 @@ fn init_tracing(config: &NodeConfig) {
         .with_timer(acowork_core::logging::ChronoLocalTimer)
         .compact();
 
+    let base_level = "info";
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(base_level));
+    // `log`-only dependencies (rumqttc) are dropped before tracing sees them
+    // until the facade gate is raised — see `sync_log_facade`.
+    acowork_core::logging::sync_log_facade(base_level);
 
     match file_layer {
         Some(file) => {

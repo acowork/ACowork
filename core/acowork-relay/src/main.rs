@@ -114,6 +114,7 @@ fn init_logging(level: &str, log_dir: std::path::PathBuf, size_mb: u64, count: u
     use tracing_subscriber::util::SubscriberInitExt;
 
     let env_filter = acowork_core::logging::build_env_filter(level);
+    acowork_core::logging::sync_log_facade(level);
 
     let file_appender = match acowork_core::logging::SizeRollingFileAppender::new(
         log_dir,

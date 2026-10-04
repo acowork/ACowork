@@ -33,7 +33,7 @@ use acowork_core::relay::proto::{
     sign_nonce,
 };
 use acowork_core::relay::ws_stream::WsByteStream;
-use acowork_core::relay::{STREAM_TAG_HTTP, STREAM_TAG_MQTT, TEARDOWN_GRACE};
+use acowork_core::relay::{PIPE_IDLE_TIMEOUT, STREAM_TAG_HTTP, STREAM_TAG_MQTT, TEARDOWN_GRACE};
 
 use super::identity::RelayIdentity;
 
@@ -565,8 +565,24 @@ async fn serve_inbound(stream: yamux::Stream, http_target: SocketAddr) {
                 }
             };
             let mut upstream = upstream.compat();
-            if let Err(e) = copy_bidirectional(&mut stream, &mut upstream).await {
-                tracing::debug!(error = %e, "relay stream pipe ended");
+            // Same inactivity ceiling as the relay's device pipe (§5.2), so a
+            // wedged stream is recycled on both ends of the tunnel. Byte
+            // counts are logged because `in_bytes = 0` (request never
+            // delivered) and `out_bytes = 0` (response never came back) are
+            // different failures and looked identical before.
+            let started = tokio::time::Instant::now();
+            match copy_bidirectional(&mut stream, &mut upstream, PIPE_IDLE_TIMEOUT).await {
+                Ok(stats) => tracing::info!(
+                    dur_ms = started.elapsed().as_millis() as u64,
+                    in_bytes = stats.a_to_b,
+                    out_bytes = stats.b_to_a,
+                    "relay stream pipe ended"
+                ),
+                Err(e) => tracing::info!(
+                    dur_ms = started.elapsed().as_millis() as u64,
+                    error = %e,
+                    "relay stream pipe ended"
+                ),
             }
             let _ = stream.close().await;
         }

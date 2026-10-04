@@ -15,6 +15,7 @@
 
 use std::collections::VecDeque;
 use std::task::Poll;
+use std::time::Duration;
 
 use futures_util::io::{AsyncRead, AsyncWrite, AsyncWriteExt as _};
 use tokio::sync::{mpsc, oneshot};
@@ -155,13 +156,34 @@ async fn drive<T>(
     }
 }
 
+/// Bytes moved by [`copy_bidirectional`], per direction.
+///
+/// Logged on every pipe teardown: "opened, then ended after 60 s having
+/// moved 0 bytes in" and "ended after 60 s having moved 4 KiB in / 0 out"
+/// are different failures (stream never delivered vs. response never came
+/// back) and were indistinguishable when the pipe reported nothing.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct CopyStats {
+    /// Bytes read from `a` and written to `b`.
+    pub a_to_b: u64,
+    /// Bytes read from `b` and written to `a`.
+    pub b_to_a: u64,
+}
+
 /// futures-io flavored bidirectional copy: pump bytes both ways until one
-/// side reaches EOF or errors. (futures-util does not ship one for
-/// `AsyncRead + AsyncWrite` pairs.)
+/// side reaches EOF, errors, or the pipe goes quiet for `idle`. (futures-util
+/// does not ship one for `AsyncRead + AsyncWrite` pairs.)
 ///
 /// Shared by the relay's device-domain byte pipe and the Gateway
-/// relay-client's stream → local-listener forwarding.
-pub async fn copy_bidirectional<A, B>(a: &mut A, b: &mut B) -> std::io::Result<()>
+/// relay-client's stream → local-listener forwarding, so both ends of a
+/// tunnel enforce the same inactivity ceiling.
+///
+/// The `idle` branch exists because a wedged tunnel stream is otherwise
+/// invisible: the device keeps writing into a socket nobody is draining,
+/// every request queues behind it, and nothing anywhere reports an error —
+/// the UI just spins. Timing the pipe out closes BOTH ends, so the device
+/// sees a FIN and opens a fresh connection instead of queueing forever.
+pub async fn copy_bidirectional<A, B>(a: &mut A, b: &mut B, idle: Duration) -> std::io::Result<CopyStats>
 where
     A: AsyncRead + AsyncWrite + Unpin,
     B: AsyncRead + AsyncWrite + Unpin,
@@ -169,33 +191,60 @@ where
     use futures_util::io::{AsyncReadExt as _, AsyncWriteExt as _};
     let mut buf_a = [0u8; 16 * 1024];
     let mut buf_b = [0u8; 16 * 1024];
+    let mut stats = CopyStats::default();
     let mut a_open = true;
     let mut b_open = true;
-    while a_open || b_open {
+    let timer = tokio::time::sleep(idle);
+    tokio::pin!(timer);
+    loop {
+        if !a_open && !b_open {
+            break;
+        }
         tokio::select! {
+            _ = &mut timer => {
+                tracing::debug!(
+                    a_to_b = stats.a_to_b,
+                    b_to_a = stats.b_to_a,
+                    "byte pipe idle; closing both ends"
+                );
+                break;
+            }
             read = a.read(&mut buf_a), if a_open => match read {
+                // Forward the EOF, do NOT tear the pipe down: `b`'s peer must
+                // see that `a` stopped sending, while the bytes still coming
+                // back on `b` (the response to a half-closing request) have to
+                // keep flowing to `a`. Closing both ends here — the previous
+                // behaviour — dropped that response and made the relay's own
+                // e2e test wait out every timeout.
                 Ok(0) => {
-                    let _ = a.close().await;
-                    let _ = b.close().await;
                     a_open = false;
-                    if !b_open { break; }
+                    let _ = b.close().await;
                 }
-                Ok(n) => b.write_all(&buf_a[..n]).await?,
+                Ok(n) => {
+                    b.write_all(&buf_a[..n]).await?;
+                    stats.a_to_b += n as u64;
+                }
                 Err(e) => return Err(e),
             },
             read = b.read(&mut buf_b), if b_open => match read {
                 Ok(0) => {
-                    let _ = b.close().await;
-                    let _ = a.close().await;
                     b_open = false;
-                    if !a_open { break; }
+                    let _ = a.close().await;
                 }
-                Ok(n) => a.write_all(&buf_b[..n]).await?,
+                Ok(n) => {
+                    a.write_all(&buf_b[..n]).await?;
+                    stats.b_to_a += n as u64;
+                }
                 Err(e) => return Err(e),
             },
         }
+        timer.as_mut().reset(tokio::time::Instant::now() + idle);
     }
-    Ok(())
+    // Always close both ends: a half-closed pipe is exactly the state that
+    // lets a client keep writing into a socket nobody is reading.
+    let _ = a.close().await;
+    let _ = b.close().await;
+    Ok(stats)
 }
 
 #[cfg(test)]
@@ -252,6 +301,87 @@ mod tests {
         let mut buf = [0u8; 5];
         inbound.read_exact(&mut buf).await.unwrap();
         assert_eq!(&buf, b"reply");
+    }
+
+    /// A silent peer must not hold a byte pipe open forever: the copy
+    /// returns once the idle ceiling passes with nothing moved. This is the
+    /// wedge fix (a device writing into a stream nobody drains used to sit
+    /// on the tunnel until the process restarted).
+    #[tokio::test]
+    async fn idle_pipe_times_out() {
+        let (mut a, mut b) = duplex_pair();
+        let idle = Duration::from_millis(60);
+        let started = tokio::time::Instant::now();
+        let stats = copy_bidirectional(&mut a, &mut b, idle).await.unwrap();
+        assert_eq!(stats.a_to_b, 0);
+        assert_eq!(stats.b_to_a, 0);
+        assert!(
+            started.elapsed() >= idle,
+            "pipe ended after {:?}, before the {idle:?} ceiling",
+            started.elapsed()
+        );
+        drop(b);
+    }
+
+    /// The ceiling RESETS on traffic: a trickle slower than `idle` per byte
+    /// (an MQTT session pinging every few seconds) must survive many times
+    /// the ceiling. Guards against an idle timer that only starts and never
+    /// restarts, which would kill healthy long-lived pipes.
+    #[tokio::test]
+    async fn trickle_keeps_the_pipe_alive() {
+        // Two pairs so the test drives the outer ends while the copy owns the
+        // inner ones. If the ceiling fired early the copy would return, drop
+        // its ends, and the next write/read below would fail.
+        let (mut x1, x2) = duplex_pair();
+        let (mut y1, y2) = duplex_pair();
+        let idle = Duration::from_millis(80);
+        let task =
+            tokio::spawn(async move { copy_bidirectional(&mut { x2 }, &mut { y2 }, idle).await });
+        let mut buf = [0u8; 1];
+        for i in 0..12u8 {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            x1.write_all(&[i]).await.unwrap();
+            y1.read_exact(&mut buf).await.unwrap();
+            assert_eq!(buf[0], i, "byte {i} did not reach the far end");
+        }
+        drop(x1);
+        drop(y1);
+        let stats = task.await.unwrap().unwrap();
+        assert_eq!(stats.a_to_b, 12);
+    }
+
+    /// An EOF on one side is forwarded as a half-close, not a teardown: the
+    /// bytes still arriving on the other side must reach the peer. A client
+    /// that finishes its request with a FIN and waits for the response is the
+    /// normal HTTP shape here — closing BOTH ends on the first EOF (the
+    /// previous behaviour) dropped that response, and the relay's own e2e
+    /// test only finished then because the idle ceiling happened to fire.
+    #[tokio::test]
+    async fn half_close_forwards_eof_but_keeps_pumping() {
+        // Outer ends are driven by the test, inner ones by the copy.
+        let (mut x1, x2) = duplex_pair();
+        let (mut y1, y2) = duplex_pair();
+        let idle = Duration::from_millis(500);
+        let task =
+            tokio::spawn(async move { copy_bidirectional(&mut { x2 }, &mut { y2 }, idle).await });
+
+        let request = b"GET / HTTP/1.1\r\n\r\n";
+        x1.write_all(request).await.unwrap();
+        x1.close().await.unwrap(); // request complete; x1 still readable
+
+        let mut got = [0u8; 18];
+        y1.read_exact(&mut got).await.unwrap();
+        assert_eq!(&got, request);
+
+        y1.write_all(b"reply").await.unwrap();
+        let mut out = [0u8; 5];
+        x1.read_exact(&mut out).await.unwrap();
+        assert_eq!(&out, b"reply", "response must survive the request EOF");
+
+        drop(y1);
+        let stats = task.await.unwrap().unwrap();
+        assert_eq!(stats.a_to_b, request.len() as u64);
+        assert_eq!(stats.b_to_a, 5);
     }
 
     /// Aborting the driver task closes the tunnel: open_stream fails

@@ -56,6 +56,10 @@ thiserror = "2.0"
 
 # Logging
 tracing = "0.1"
+# `log` facade gate (see acowork-core::logging::sync_log_facade): third-party
+# crates that log through `log` (yamux, rumqttc) are silenced unless the
+# process raises `log`'s runtime max level.
+log = "0.4"
 tracing-subscriber = { version = "0.3", features = ["fmt", "ansi", "env-filter"] }
 tracing-appender = "0.2"
 

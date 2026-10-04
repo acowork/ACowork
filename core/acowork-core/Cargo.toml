@@ -20,6 +20,8 @@ toml.workspace = true
 directories.workspace = true
 prost.workspace = true
 tracing.workspace = true
+# Raises the `log` facade gate for `log`-only dependencies (yamux, rumqttc).
+log.workspace = true
 tracing-subscriber.workspace = true
 tokio = { workspace = true, features = ["rt", "macros", "io-util", "sync", "process", "time"] }
 signal-hook.workspace = true

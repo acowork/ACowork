@@ -35,7 +35,16 @@ pub enum SessionState {
 
     /// Was connected, lost the connection, waiting for rumqttc's
     /// automatic reconnect to deliver a new `ConnAck`.
-    Reconnecting,
+    ///
+    /// `reason` carries the transport / event-loop error that caused the
+    /// drop. It lives on the *state* (not only on the `MqttStatus`
+    /// callback) so that snapshot readers — `get_mqtt_status` and the
+    /// Desktop's full-stack diagnostic panel — can report the real cause
+    /// instead of a generic "reconnecting".
+    Reconnecting {
+        /// Human-readable reason for the connection drop.
+        reason: String,
+    },
 
     /// Permanently disconnected (fatal error or explicit shutdown).
     /// No further reconnect attempts will be made.
@@ -57,7 +66,9 @@ impl SessionState {
     pub fn is_transient(&self) -> bool {
         matches!(
             self,
-            SessionState::Idle | SessionState::Connecting | SessionState::Reconnecting
+            SessionState::Idle
+                | SessionState::Connecting
+                | SessionState::Reconnecting { .. }
         )
     }
 
@@ -73,7 +84,9 @@ impl std::fmt::Display for SessionState {
             SessionState::Idle => write!(f, "idle"),
             SessionState::Connecting => write!(f, "connecting"),
             SessionState::Connected => write!(f, "connected"),
-            SessionState::Reconnecting => write!(f, "reconnecting"),
+            SessionState::Reconnecting { reason } => {
+                write!(f, "reconnecting ({reason})")
+            }
             SessionState::Disconnected { reason } => {
                 write!(f, "disconnected ({reason})")
             }
@@ -189,8 +202,18 @@ mod tests {
         assert!(SessionState::Connected.is_connected());
         assert!(!SessionState::Connected.is_transient());
 
-        assert!(SessionState::Reconnecting.is_transient());
-        assert!(!SessionState::Reconnecting.is_connected());
+        assert!(
+            SessionState::Reconnecting {
+                reason: "test".into()
+            }
+            .is_transient()
+        );
+        assert!(
+            !SessionState::Reconnecting {
+                reason: "test".into()
+            }
+            .is_connected()
+        );
 
         let d = SessionState::Disconnected {
             reason: "test".into(),
@@ -210,6 +233,46 @@ mod tests {
             }
             .to_string(),
             "disconnected (boom)"
+        );
+    }
+
+    /// Regression: the drop reason must survive into the snapshot the
+    /// Desktop's diagnostic panel reads. Before this, `Reconnecting`
+    /// carried no reason at all, so `get_mqtt_status` had to hardcode
+    /// "reconnecting" and the panel hid the real cause (e.g. a TLS
+    /// handshake failure) behind a useless label.
+    #[test]
+    fn reconnecting_carries_the_drop_reason() {
+        let state = SessionState::Reconnecting {
+            reason: "eventloop error: Websocket: IO error".into(),
+        };
+        assert_eq!(
+            state.to_string(),
+            "reconnecting (eventloop error: Websocket: IO error)"
+        );
+        assert!(state.is_transient());
+        assert!(!state.is_connected());
+        assert!(!state.is_terminal());
+    }
+
+    /// A *different* reason is a real transition: the `set` path compares
+    /// states to decide whether to log, so a changed cause must never be
+    /// silently dropped as "same state".
+    #[test]
+    fn changed_reason_is_a_distinct_state() {
+        let (tx, _rx) = SessionStateTx::new(SessionState::Connecting);
+        tx.set(SessionState::Reconnecting {
+            reason: "broker sent DISCONNECT".into(),
+        });
+        tx.set(SessionState::Reconnecting {
+            reason: "poll watchdog timeout".into(),
+        });
+        assert_eq!(
+            tx.current(),
+            SessionState::Reconnecting {
+                reason: "poll watchdog timeout".into()
+            },
+            "the latest reason must win"
         );
     }
 
@@ -255,8 +318,15 @@ mod tests {
             "set() must update the value even with no receivers"
         );
 
-        tx.set(SessionState::Reconnecting);
-        assert_eq!(tx.current(), SessionState::Reconnecting);
+        tx.set(SessionState::Reconnecting {
+            reason: "test".into(),
+        });
+        assert_eq!(
+            tx.current(),
+            SessionState::Reconnecting {
+                reason: "test".into()
+            }
+        );
 
         tx.set(SessionState::Disconnected {
             reason: "test".into(),
@@ -278,7 +348,14 @@ mod tests {
         tx_clone.set(SessionState::Connected);
         assert_eq!(tx.current(), SessionState::Connected);
 
-        tx.set(SessionState::Reconnecting);
-        assert_eq!(tx_clone.current(), SessionState::Reconnecting);
+        tx.set(SessionState::Reconnecting {
+            reason: "test".into(),
+        });
+        assert_eq!(
+            tx_clone.current(),
+            SessionState::Reconnecting {
+                reason: "test".into()
+            }
+        );
     }
 }

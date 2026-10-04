@@ -236,6 +236,40 @@ pub fn build_env_filter(base_level: &str) -> tracing_subscriber::EnvFilter {
     filter
 }
 
+/// The level the `log` facade should be opened to for a process whose
+/// tracing filter comes from `base_level` (or from `RUST_LOG`, if given).
+///
+/// Split out from [`sync_log_facade`] so the mapping is testable without
+/// touching `log`'s global state.
+fn log_facade_level(base_level: &str, rust_log: Option<&str>) -> log::LevelFilter {
+    // A target-scoped `RUST_LOG` (`acowork_relay=info,yamux=trace`) has no
+    // single equivalent level, so open the facade fully and let the
+    // `EnvFilter` decide per target.
+    match rust_log {
+        Some(_) => log::LevelFilter::Trace,
+        None => base_level
+            .parse()
+            .unwrap_or(log::LevelFilter::Info),
+    }
+}
+
+/// Raise the `log` crate's runtime max level to match the tracing filter
+/// being installed. Call next to every subscriber init.
+///
+/// `log`'s gate starts at OFF and is only opened by `log` backends
+/// (env_logger) or by `tracing_subscriber::reload` when a filter is
+/// reloaded. A process that installs a plain subscriber therefore loses
+/// every record from `log`-only dependencies before tracing ever sees them:
+/// the relay logged nothing at all from yamux — no stream `eof`, no
+/// `can no longer write`, no ping/pong RTT — which is precisely the
+/// evidence a wedged tunnel stream leaves behind. `rumqttc` is `log`-based
+/// too, so this is not relay-specific.
+pub fn sync_log_facade(base_level: &str) {
+    let rust_log = std::env::var_os("RUST_LOG");
+    let level = log_facade_level(base_level, rust_log.as_deref().and_then(|s| s.to_str()));
+    log::set_max_level(level);
+}
+
 /// Initialize tracing to write to stderr.
 ///
 /// This is intended for subprocesses (embed, lsp-relay) whose stdout is
@@ -248,6 +282,7 @@ pub fn build_env_filter(base_level: &str) -> tracing_subscriber::EnvFilter {
 /// ```
 pub fn init_subprocess_logging(level: &str) {
     let filter = build_env_filter(level);
+    sync_log_facade(level);
 
     tracing_subscriber::fmt()
         .with_env_filter(filter)
@@ -292,4 +327,30 @@ pub fn install_panic_hook() {
         // (useful for terminal visibility and for the OS crash reporter).
         default_hook(info);
     }));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::log_facade_level;
+
+    #[test]
+    fn facade_follows_the_base_level() {
+        assert_eq!(log_facade_level("debug", None), log::LevelFilter::Debug);
+        assert_eq!(log_facade_level("info", None), log::LevelFilter::Info);
+        assert_eq!(log_facade_level("trace", None), log::LevelFilter::Trace);
+        // An unparsable level must never land on OFF — that is the exact
+        // silence this function exists to remove.
+        assert_eq!(log_facade_level("verbose", None), log::LevelFilter::Info);
+        assert_eq!(log_facade_level("", None), log::LevelFilter::Info);
+    }
+
+    #[test]
+    fn rust_log_opens_the_facade_fully() {
+        // A target-scoped filter has no single equivalent level; the
+        // EnvFilter installed next to this call does the per-target work.
+        assert_eq!(
+            log_facade_level("info", Some("acowork_relay=info,yamux=trace")),
+            log::LevelFilter::Trace
+        );
+    }
 }

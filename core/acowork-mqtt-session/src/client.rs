@@ -335,7 +335,9 @@ impl<B: MqttClientHandler> MqttClient<B> {
                                          relying on next poll() to surface the socket error. \
                                          SessionState set to Reconnecting, on_disconnect callback fired."
                                     );
-                                    set_state(SessionState::Reconnecting);
+                                    set_state(SessionState::Reconnecting {
+                                        reason: "broker sent DISCONNECT".to_string(),
+                                    });
                                     let poll_client = task_shared_handle.lock().await.clone();
                                     task_handler_poll.on_disconnect(&poll_client).await;
                                 }
@@ -347,7 +349,9 @@ impl<B: MqttClientHandler> MqttClient<B> {
                                     task_handler_poll
                                         .on_error(&poll_client, class, &e.to_string())
                                         .await;
-                                    set_state(SessionState::Reconnecting);
+                                    set_state(SessionState::Reconnecting {
+                                        reason: format!("eventloop error: {e}"),
+                                    });
 
                                     if class.is_fatal() {
                                         // E2/E3/E4/E6: the EventLoop's
@@ -410,7 +414,12 @@ impl<B: MqttClientHandler> MqttClient<B> {
                                 timeout_s = POLL_WATCHDOG_TIMEOUT.as_secs(),
                                 "MQTT poll() watchdog timeout - forcing soft-restart (possible half-dead socket)"
                             );
-                            set_state(SessionState::Reconnecting);
+                            set_state(SessionState::Reconnecting {
+                                reason: format!(
+                                    "poll watchdog timeout ({}s of silence)",
+                                    POLL_WATCHDOG_TIMEOUT.as_secs()
+                                ),
+                            });
                             break;
                         }
                         // Fix-3 observability (shared, ADR-065 Step 4):

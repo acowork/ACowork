@@ -28,6 +28,23 @@ pub mod ws_stream;
 /// (relay teardown paths, Gateway deregister).
 pub const TEARDOWN_GRACE: std::time::Duration = std::time::Duration::from_millis(150);
 
+/// Inactivity ceiling for one byte pipe (§5.2): a device-domain pipe on the
+/// relay, or a tunnel stream forwarded to the Gateway's remote listener.
+///
+/// The quietest legitimate traffic on such a pipe is the Desktop's MQTT
+/// client, which sends a PINGREQ every 5 s (`acowork-mqtt-session`
+/// `KEEPALIVE_INTERVAL`), and an idle HTTP keep-alive connection is
+/// disposable. 60 s is therefore ~12x margin over anything that must stay
+/// open, while still recycling a wedged connection inside a minute rather
+/// than leaving the client queueing on it indefinitely.
+///
+/// ponytail: inactivity cannot tell "wedged" from "thinking". A request
+/// that stays silent end-to-end for >60 s is cut here — the only known
+/// exposure is a NON-streaming provider call proxied through the Gateway
+/// (streaming is safe: `Sse::keep_alive` comments every 15 s). Raise this
+/// constant if such a call ever shows up over a relay link.
+pub const PIPE_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Stream tag: forward the stream to the Gateway remote HTTP listener
 /// (`127.0.0.1:19877`, includes the `/mqtt` WebSocket bridge).
 pub const STREAM_TAG_HTTP: u8 = 0x01;

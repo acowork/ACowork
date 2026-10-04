@@ -178,6 +178,9 @@ impl Cli {
     /// at runtime (e.g. when Gateway pushes LogLevelUpdate).
     fn init_tracing(&self) -> Option<LogReloadHandle> {
         let env_filter = acowork_core::logging::build_env_filter(&self.log_level);
+        // Raise the `log` gate so `log`-only dependencies (rumqttc) reach the
+        // tracing subscriber; without it their records are dropped.
+        acowork_core::logging::sync_log_facade(&self.log_level);
 
         // Ensure the log directory exists under work_dir
         let log_dir = std::path::Path::new(&self.work_dir).join("logs");

@@ -29,7 +29,7 @@ use tokio_rustls::server::TlsStream;
 use acowork_core::relay::driver::copy_bidirectional;
 use acowork_core::relay::proto::DEVICE_OFFLINE_BODY;
 use acowork_core::relay::ws_stream::WsByteStream;
-use acowork_core::relay::{STREAM_TAG_HTTP, TEARDOWN_GRACE};
+use acowork_core::relay::{PIPE_IDLE_TIMEOUT, STREAM_TAG_HTTP, TEARDOWN_GRACE};
 
 use crate::config::RelayConfig;
 use crate::device_store::DeviceStore;
@@ -209,6 +209,9 @@ async fn handle_conn(
     ctx: &TunnelContext,
     service_tx: tokio::sync::mpsc::Sender<std::io::Result<ServiceIo>>,
 ) -> Result<()> {
+    // Captured before `tcp` is consumed by the TLS acceptor; carried through
+    // the device pipe so teardown lines can be attributed to a client.
+    let peer = tcp.peer_addr().map(|a| a.ip().to_string()).unwrap_or_default();
     match tls {
         Some(server_config) => {
             // Peek the ClientHello for SNI before completing the handshake.
@@ -225,13 +228,13 @@ async fn handle_conn(
                 .into_stream(server_config)
                 .await
                 .context("TLS handshake")?;
-            route_service_or_device(ServiceIo::new(tls_stream), sni, ctx, service_tx).await
+            route_service_or_device(ServiceIo::new(tls_stream), sni, ctx, service_tx, &peer).await
         }
         None => {
             // Plain mode: route by the HTTP Host header via peek (bytes are
             // NOT consumed — both paths read the request from scratch).
             let host = peek_request_host(&tcp).await?;
-            route_service_or_device(ServiceIo::new(tcp), host, ctx, service_tx).await
+            route_service_or_device(ServiceIo::new(tcp), host, ctx, service_tx, &peer).await
         }
     }
 }
@@ -312,6 +315,7 @@ async fn route_service_or_device(
     host_header_or_sni: String,
     ctx: &TunnelContext,
     service_tx: tokio::sync::mpsc::Sender<std::io::Result<ServiceIo>>,
+    peer: &str,
 ) -> Result<()> {
     let name = host_without_port(host_header_or_sni.trim_end_matches('.'))
         .to_ascii_lowercase();
@@ -347,16 +351,34 @@ async fn route_service_or_device(
     let mut stream = match handle.open_stream(STREAM_TAG_HTTP).await {
         Ok(s) => s,
         Err(e) => {
-            tracing::warn!(gw_id = %gw_id, error = %e, "opening tunnel stream failed");
+            tracing::warn!(gw_id = %gw_id, %peer, error = %e, "opening tunnel stream failed");
             write_device_offline(io).await;
             return Ok(());
         }
     };
+    tracing::info!(gw_id = %gw_id, %peer, "device pipe opened");
 
-    // Splice: client ↔ yamux stream, pure bytes, until either side closes.
+    // Splice: client ↔ yamux stream, pure bytes, until either side closes
+    // or the pipe goes quiet (§5.2). The idle branch is what keeps a wedged
+    // stream from sitting on a half-open device connection forever.
+    let started = tokio::time::Instant::now();
     let mut client = io.compat();
-    if let Err(e) = copy_bidirectional(&mut client, &mut stream).await {
-        tracing::info!(gw_id = %gw_id, error = %e, "device pipe ended");
+    match copy_bidirectional(&mut client, &mut stream, PIPE_IDLE_TIMEOUT).await {
+        Ok(stats) => tracing::info!(
+            gw_id = %gw_id,
+            %peer,
+            dur_ms = started.elapsed().as_millis() as u64,
+            in_bytes = stats.a_to_b,
+            out_bytes = stats.b_to_a,
+            "device pipe ended"
+        ),
+        Err(e) => tracing::info!(
+            gw_id = %gw_id,
+            %peer,
+            dur_ms = started.elapsed().as_millis() as u64,
+            error = %e,
+            "device pipe ended"
+        ),
     }
     let _ = stream.close().await;
     drop(permit);
