@@ -124,7 +124,14 @@ export function ProjectSidebar({ width }: { width?: number }) {
               )}
               aria-current={active ? "page" : undefined}
             >
-              <span className={cn("min-w-0 flex-1 truncate", active ? "text-white" : "")}>
+              {/* `font-medium` 与 chat 侧边栏的 agent 名一致，见 SectionPane
+                  同一处的说明：`text-xs` 下 `semibold` 明显过重。 */}
+              <span
+                className={cn(
+                  "min-w-0 flex-1 truncate font-medium",
+                  active ? "text-white" : "",
+                )}
+              >
                 {p.title}
               </span>
               {/* 计数徽章：待审核数字色高亮（active 时用半透明白底以维持对比度） */}

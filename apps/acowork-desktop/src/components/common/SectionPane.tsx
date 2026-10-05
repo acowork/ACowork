@@ -138,7 +138,10 @@ export function SectionPane({
                 >
                   {item.icon}
                 </span>
-                <span className="min-w-0 flex-1 truncate">{item.label}</span>
+                {/* `font-medium` matches the agent name in the chat
+                    sidebar (AgentList) — the list capsules read as one
+                    system. `font-semibold` was too heavy at `text-xs`. */}
+                <span className="min-w-0 flex-1 truncate font-medium">{item.label}</span>
               </button>
             );
           })}

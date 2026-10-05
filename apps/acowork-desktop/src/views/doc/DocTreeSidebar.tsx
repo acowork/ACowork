@@ -432,7 +432,9 @@ function DirRow({
           ) : (
             <Folder className="h-3.5 w-3.5 shrink-0 text-sky-500" aria-hidden />
           )}
-          <span className="truncate">{dir.name}</span>
+          {/* `font-medium` 与 chat 侧边栏的 agent 名一致（见 SectionPane）——
+              行高比 pm/harness/settings 密一档，字重保持同档才不会显轻。 */}
+          <span className="truncate font-medium">{dir.name}</span>
           {isOpen && childCount > 0 && (
             <span className="ml-0.5 text-[10px] text-text-secondary ">{childCount}</span>
           )}
@@ -555,13 +557,13 @@ function DocRow({
           onClick={() => {
             void requestOpen(doc.doc_id);
           }}
-          className={cn(
-            "flex min-w-0 flex-1 items-center gap-1.5 py-0.5 text-left select-none",
-            selected ? "font-medium" : "",
-          )}
+          className="flex min-w-0 flex-1 items-center gap-1.5 py-0.5 text-left select-none"
         >
           <FileText className="h-3.5 w-3.5 shrink-0 text-text-tertiary" aria-hidden />
-          <span className="truncate">{doc.name}</span>
+          {/* 字重恒定，不靠 selected 切换 —— 否则同一棵树里目录恒 medium、
+              文件只在选中时 medium，展开一层就忽粗忽细。选中态由行底色
+              （accent/10 + accent 文字色）承担，见上方容器。 */}
+          <span className="truncate font-medium">{doc.name}</span>
         </button>
         <span className="hidden shrink-0 items-center group-hover:flex group-focus-within:flex">
           <IconBtn
