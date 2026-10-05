@@ -483,7 +483,7 @@ function UserRow({
       data-testid={`user-row-${account.user_id}`}
       title={account.display_name}
       className={cn(
-        "relative flex items-center rounded-md px-3 py-2.5 transition-colors duration-150",
+        "relative flex items-center rounded-md px-3 py-1.5 transition-colors duration-150",
         "gap-3",
         !isSelf && "cursor-pointer hover:bg-nav-item-hover",
         active && "bg-[var(--color-accent)]/90 text-white hover:bg-[var(--color-accent)]",

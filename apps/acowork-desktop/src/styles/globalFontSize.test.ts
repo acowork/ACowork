@@ -71,6 +71,29 @@ describe("global font size scales the whole app", () => {
     }
   });
 
+  // A nested `text-*` token compounds: the status bar root is `text-11`
+  // (11px), so an inner `text-10` resolved to 0.714em × 11px ≈ 7.9px —
+  // the LSP pill rendered at half the size of the language / cursor text
+  // flanking it. A child that wants "the size of this bar" must inherit,
+  // not declare a smaller token. Pinned on the one component that lives
+  // inside another sized row.
+  it("does not nest a second text step inside the status bar", () => {
+    const lsp = readFileSync(
+      resolve(__dirname, "..", "components", "editor", "LspIndicator.tsx"),
+      "utf8",
+    );
+    // Status pill + circle row (the strip `FileStatusCluster` renders).
+    // The install-hint popover below is a separate, self-sized surface.
+    const strip = lsp.slice(
+      lsp.indexOf("const isUnavailable"),
+      lsp.indexOf("/* Install hint popover */"),
+    );
+    expect(
+      strip.match(/className="[^"]*\btext-(9|10|11|xs|sm|base|lg|xl)\b[^"]*"/g),
+      "LspIndicator must inherit the status-bar font size",
+    ).toBeNull();
+  });
+
   // The micro steps must be declared in @theme, not only in :root.
   // Tailwind v4 generates a `text-*` utility from a @theme token; a
   // :root-only custom property resolves in CSS but emits no class, so

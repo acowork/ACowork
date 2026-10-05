@@ -156,21 +156,21 @@ export function LspIndicator({
     let content: React.ReactNode;
     if (status === "disconnected") {
         content = (
-            <span className="flex items-center gap-1 text-10 text-text-tertiary ">
+            <span className="flex items-center gap-1 text-text-tertiary">
                 <Circle className="h-2 w-2" />
                 <span>{t("fileStatus.lsp.unavailable", { language })}</span>
             </span>
         );
     } else if (status === "connecting") {
         content = (
-            <span className="flex items-center gap-1 text-10 text-text-tertiary">
+            <span className="flex items-center gap-1 text-text-tertiary">
                 <Circle className="h-2 w-2 animate-pulse" />
                 <span>{t("fileStatus.lsp.connecting", { language })}</span>
             </span>
         );
     } else if (status === "indexing") {
         content = (
-            <span className="flex items-center gap-1 text-10 text-amber-500 dark:text-amber-400">
+            <span className="flex items-center gap-1 text-amber-500 dark:text-amber-400">
                 <Circle className="h-2 w-2 animate-pulse" />
                 <span>
                     {statusMessage
@@ -183,14 +183,14 @@ export function LspIndicator({
         // Handshake done, but indexing has not started/finished yet —
         // hover/definition results may be incomplete.
         content = (
-            <span className="flex items-center gap-1 text-10 text-emerald-500/70 dark:text-emerald-400/70">
+            <span className="flex items-center gap-1 text-emerald-500/70 dark:text-emerald-400/70">
                 <Circle className="h-2 w-2" />
                 <span>{t("fileStatus.lsp.connected", { language })}</span>
             </span>
         );
     } else if (status === "ready") {
         content = (
-            <span className="flex items-center gap-1 text-10 text-emerald-600 dark:text-emerald-400">
+            <span className="flex items-center gap-1 text-emerald-600 dark:text-emerald-400">
                 <CircleDot className="h-2 w-2" />
                 <span>{t("fileStatus.lsp.ready", { language })}</span>
             </span>
@@ -200,7 +200,7 @@ export function LspIndicator({
         const tooltip = statusMessage || "unknown error";
         content = (
             <Tooltip content={tooltip} variant="plain">
-                <span className="flex items-center gap-1 text-10 text-amber-500">
+                <span className="flex items-center gap-1 text-amber-500">
                     <Circle className="h-2 w-2" />
                     <span>{t("fileStatus.lsp.unavailable", { language })}</span>
                 </span>
