@@ -395,6 +395,11 @@ interface SessionChatState {
   pendingApproval: Record<string, ToolApprovalNeededEvent>;
   pendingQuestions: AskQuestionEvent[];
   isLoadingSession: boolean;
+  /** Owner load-sequence of `isLoadingSession` (0 = no owner). Set when
+   *  a load flips `isLoadingSession: true`; every settle point of
+   *  `loadSessionMessages` checks ownership before clearing, so a
+   *  superseded / aborted load can never orphan the spinner. */
+  loadOwnerSeq: number;
   loadError: string | null;
   /** ADR-014/021: Session lifecycle status from backend (sole source of truth for "sending" state) */
   sessionStatus: SessionStatus | null;
@@ -490,6 +495,7 @@ const DEFAULT_SESSION_STATE: SessionChatState = {
   pendingApproval: {},
   pendingQuestions: [],
   isLoadingSession: false,
+  loadOwnerSeq: 0,
   loadError: null,
   sessionStatus: null,
   lastAccessed: 0,
@@ -558,6 +564,37 @@ const DEFAULT_AGENT_STATE: AgentState = {
 
 const MAX_CACHED_SESSIONS = 32;
 const MAX_OPEN_TABS = 32;
+
+// ── Single-flight "open a session" ─────────────────────────────────────
+// The start orchestrator, the selectAgent resolver, session-tab clicks
+// and the session-switch effect can all target the same session within
+// the same tick. Without coalescing, the second call re-sends
+// `open_session` and restarts `loadSessionMessages`, aborting the first
+// load's in-flight fetch. One open per (agentId, sessionId) is shared
+// by every caller; the map entry lives only while the open runs.
+const inflightOpens = new Map<string, Promise<void>>();
+
+// ── Single-flight "jump to the tail" ───────────────────────────────────
+// Render-loop and open/switch paths can request the same session's tail
+// reload in the same tick. Sharing the promise (instead of returning
+// early on `isLoadingMore`) keeps every caller honest: each one waits
+// for the reload it asked about.
+const inflightLatest = new Map<string, Promise<void>>();
+
+// ── Spinner ownership ────────────────────────────────────────────────
+// `isLoadingSession` is owned by the load that raised it (`loadOwnerSeq`).
+// Every discard path of `loadSessionMessages` funnels through this check,
+// so a superseded or aborted load — including an `abortSessionLoad` that
+// bumps the seq without starting a replacement — can never orphan the
+// "Loading conversation..." overlay: when it is the last recorded owner,
+// nobody newer exists to clear the flag, so it clears itself.
+function clearSpinnerIfOwner(agentId: string, sessionId: string, seq: number): void {
+  const ss = useChatStore.getState().agentStates[agentId]?.sessionStates[sessionId];
+  if (!ss || !ss.isLoadingSession || ss.loadOwnerSeq !== seq) return;
+  useChatStore.setState((state) =>
+    updateSessionState(state, agentId, sessionId, { isLoadingSession: false }),
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Helper functions for state access
@@ -931,11 +968,6 @@ interface ChatStore {
    * `session_not_opened` toast with a reopen affordance).
    */
   openSession: (agentId: string, sessionId: string) => Promise<void>;
-  /** ADR-015: Open a session tab (append to openSessionIds).
-   *  @deprecated since ADR-038 — use `openSession` (which combines UI +
-   *  backend activation). Kept for any caller that only wants the UI half
-   *  of `openSession` without sending an MQTT message. */
-  openTab: (agentId: string, sessionId: string) => void;
   /** ADR-038: Close a session tab AND notify the backend.
    *
    * Three side effects:
@@ -1483,22 +1515,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     });
   },
 
-  // ADR-038 @deprecated: Pure UI tab-open without backend activation.
-  // Most callers should use `openSession` instead, which sends the MQTT
-  // `open_session` ack to the Runtime and hydrates local message cache.
-  openTab: (agentId: string, sessionId: string) => {
-    set((state) => {
-      const agent = getAgentState(state, agentId);
-      if (agent.openSessionIds.includes(sessionId)) {
-        // Already open — just activate it
-        return updateAgentState(state, agentId, { activeSessionId: sessionId });
-      }
-      // Append to end, cap at MAX_OPEN_TABS
-      const newOpenIds = [...agent.openSessionIds, sessionId].slice(-MAX_OPEN_TABS);
-      return updateAgentState(state, agentId, { openSessionIds: newOpenIds, activeSessionId: sessionId });
-    });
-  },
-
   // ADR-038: Close a session tab AND notify the backend.
   //
   // Three side effects (all best-effort — MQTT publish errors are logged
@@ -1662,81 +1678,97 @@ export const useChatStore = create<ChatStore>((set, get) => ({
    * UI transition. If the user just stopped / restarted the agent, MQTT may
    * not be connected yet — the publish fails, but the UI is already correct.
    * The Runtime will publish `session_opened` once the connection is healthy.
+   *
+   * Single-flight: concurrent opens of the same session share one promise
+   * (see `inflightOpens`).
    */
   openSession: async (agentId: string, sessionId: string) => {
-    // ponytail: diagnostic — anchor for when "Loading session..." clears.
-    console.warn(
-      `[chatStore] openSession start ${agentId} ${sessionId} @${performance.now().toFixed(0)}ms`,
-    );
-    // 1. UI: open the tab + activate + ensure session cache slot.
-    set((state) => {
-      const agent = getAgentState(state, agentId);
-      const patches: Partial<AgentState> = { activeSessionId: sessionId };
+    // Single-flight: a second caller targeting the same session while it
+    // is already opening shares that promise instead of re-sending
+    // `open_session` and restarting the message load (which would abort
+    // the first load's in-flight fetch).
+    const key = `${agentId}:${sessionId}`;
+    const existing = inflightOpens.get(key);
+    if (existing) return existing;
+    const promise = (async () => {
+      // ponytail: diagnostic — anchor for when "Loading session..." clears.
+      console.warn(
+        `[chatStore] openSession start ${agentId} ${sessionId} @${performance.now().toFixed(0)}ms`,
+      );
+      // 1. UI: open the tab + activate + ensure session cache slot.
+      set((state) => {
+        const agent = getAgentState(state, agentId);
+        const patches: Partial<AgentState> = { activeSessionId: sessionId };
 
-      if (!agent.openSessionIds.includes(sessionId)) {
-        const newOpenIds = [...agent.openSessionIds, sessionId].slice(-MAX_OPEN_TABS);
-        patches.openSessionIds = newOpenIds;
+        if (!agent.openSessionIds.includes(sessionId)) {
+          const newOpenIds = [...agent.openSessionIds, sessionId].slice(-MAX_OPEN_TABS);
+          patches.openSessionIds = newOpenIds;
+        }
+
+        // Lazy-create the session state entry so downstream consumers
+        // (loadSessionMessages / fetchSessionState / etc.) don't have to
+        // handle a missing entry.
+        const newSessionStates = { ...agent.sessionStates };
+        if (!newSessionStates[sessionId]) {
+          newSessionStates[sessionId] = {
+            ...makeInitialSessionState({ ...agent, ...patches }),
+            lastAccessed: Date.now(),
+          };
+        } else {
+          newSessionStates[sessionId] = {
+            ...newSessionStates[sessionId],
+            lastAccessed: Date.now(),
+          };
+        }
+        patches.sessionStates = newSessionStates;
+
+        return updateAgentState(state, agentId, patches);
+      });
+
+      // 2. Backend: tell Runtime to transition Closed → Active (or Active
+      // no-op). ADR-076 §决策 4: over HTTP so the Gateway can authenticate
+      // the caller. Best-effort — the Runtime treats a re-open as a no-op.
+      //
+      // A session shared *with* us (`can_write === false`) is **not**
+      // activated, and the request is not even sent. `Active` / `Closed` is
+      // per-session global state, so a viewer-activated session would be a
+      // lifecycle change nobody can undo: the viewer may not close it (that
+      // is write-gated on purpose) and the owner cannot see that anyone is
+      // holding it. Read-only viewing does not need activation anyway —
+      // history comes from `GET /messages` and events arrive via the
+      // wildcard MQTT subscription whenever the session is genuinely Active
+      // (i.e. while its owner has it open).
+      const canWrite = useAgentStore
+        .getState()
+        .agents[agentId]?.sessions.find((s) => s.session_id === sessionId)?.can_write;
+      if (canWrite !== false) {
+        try {
+          await sessionControl.openSession(agentId, sessionId);
+        } catch (err) {
+          log.warn("[chatStore] open_session failed:", err);
+        }
       }
 
-      // Lazy-create the session state entry so downstream consumers
-      // (loadSessionMessages / fetchSessionState / etc.) don't have to
-      // handle a missing entry.
-      const newSessionStates = { ...agent.sessionStates };
-      if (!newSessionStates[sessionId]) {
-        newSessionStates[sessionId] = {
-          ...makeInitialSessionState({ ...agent, ...patches }),
-          lastAccessed: Date.now(),
-        };
-      } else {
-        newSessionStates[sessionId] = {
-          ...newSessionStates[sessionId],
-          lastAccessed: Date.now(),
-        };
-      }
-      patches.sessionStates = newSessionStates;
-
-      return updateAgentState(state, agentId, patches);
-    });
-
-    // 2. Backend: tell Runtime to transition Closed → Active (or Active
-    // no-op). ADR-076 §决策 4: over HTTP so the Gateway can authenticate
-    // the caller. Best-effort — the Runtime treats a re-open as a no-op.
-    //
-    // A session shared *with* us (`can_write === false`) is **not**
-    // activated, and the request is not even sent. `Active` / `Closed` is
-    // per-session global state, so a viewer-activated session would be a
-    // lifecycle change nobody can undo: the viewer may not close it (that
-    // is write-gated on purpose) and the owner cannot see that anyone is
-    // holding it. Read-only viewing does not need activation anyway —
-    // history comes from `GET /messages` and events arrive via the
-    // wildcard MQTT subscription whenever the session is genuinely Active
-    // (i.e. while its owner has it open).
-    const canWrite = useAgentStore
-      .getState()
-      .agents[agentId]?.sessions.find((s) => s.session_id === sessionId)?.can_write;
-    if (canWrite !== false) {
+      // 3. Local cache: load conversation history + session config/state.
+      // ADR-047 §3.5.2: openSession MUST fetch config + state alongside
+      // messages so every caller gets a complete session snapshot without
+      // relying on React useEffect to trigger loadSession indirectly.
+      // Failures are non-fatal; the user can retry or wait for MQTT patches.
       try {
-        await sessionControl.openSession(agentId, sessionId);
+        await get().loadSessionMessages(agentId, sessionId);
       } catch (err) {
-        log.warn("[chatStore] open_session failed:", err);
+        log.warn("[chatStore] loadSessionMessages after openSession failed:", err);
       }
-    }
-
-    // 3. Local cache: load conversation history + session config/state.
-    // ADR-047 §3.5.2: openSession MUST fetch config + state alongside
-    // messages so every caller gets a complete session snapshot without
-    // relying on React useEffect to trigger loadSession indirectly.
-    // Failures are non-fatal; the user can retry or wait for MQTT patches.
-    try {
-      await get().loadSessionMessages(agentId, sessionId);
-    } catch (err) {
-      log.warn("[chatStore] loadSessionMessages after openSession failed:", err);
-    }
-    try {
-      await get().loadSession(agentId, sessionId);
-    } catch (err) {
-      log.warn("[chatStore] loadSession after openSession failed:", err);
-    }
+      try {
+        await get().loadSession(agentId, sessionId);
+      } catch (err) {
+        log.warn("[chatStore] loadSession after openSession failed:", err);
+      }
+    })().finally(() => {
+      inflightOpens.delete(key);
+    });
+    inflightOpens.set(key, promise);
+    return promise;
   },
 
   /** Apply session metadata (model/provider/workspace_id) from activate_session response.
@@ -1797,6 +1829,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         hasMoreIncremental: false,
         abortController: null,
         loadSequence: 0,
+        loadOwnerSeq: 0,
         serverError: null,
       }),
     }));
@@ -1838,6 +1871,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         hasMoreIncremental: false,
         abortController: null,
         loadSequence: 0,
+        loadOwnerSeq: 0,
         isReasoning: false,
         isSessionReady: false,
         isLoadingSession: false,
@@ -2288,7 +2322,13 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     const isInitialLoad = offset === undefined && cacheIsEmpty;
     if (isInitialLoad) {
       set((state) => ({
-        ...updateSessionState(state, agentId, sessionId, { isLoadingSession: true, loadError: null }),
+        ...updateSessionState(state, agentId, sessionId, {
+          isLoadingSession: true,
+          loadError: null,
+          // Record this load as the spinner's owner so every settle
+          // point below can decide who may clear it.
+          loadOwnerSeq: seq,
+        }),
       }));
     }
 
@@ -2324,6 +2364,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
       if (getSessionState(get(), agentId, sessionId).loadSequence !== seq) {
         log.debug(`[ChatStore] Discarding stale loadSessionMessages response (seq ${seq})`);
+        clearSpinnerIfOwner(agentId, sessionId, seq);
         return;
       }
 
@@ -2333,6 +2374,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
       if (getSessionState(get(), agentId, sessionId).loadSequence !== seq) {
         log.debug(`[ChatStore] Discarding stale response after json parse (seq ${seq})`);
+        clearSpinnerIfOwner(agentId, sessionId, seq);
         return;
       }
 
@@ -2439,6 +2481,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           ) - finalOffset;
         }
 
+        // Only the recorded spinner owner may clear the flag; a
+        // superseding load still in flight owns it otherwise.
+        const ownsSpinner = ss.loadOwnerSeq === seq;
         return updateSessionState(state, agentId, sessionId, {
           messages: merged.messages,
           messageOffset: finalOffset,
@@ -2448,7 +2493,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           // fetched window again (see the messagesStale doc).  hasOlder /
           // hasNewer drive any further pagination.
           messagesStale: false,
-          isLoadingSession: false,
+          ...(ownsSpinner ? { isLoadingSession: false } : {}),
           loadError: null,
         });
       });
@@ -2457,6 +2502,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     } catch (e: unknown) {
       if (getSessionState(get(), agentId, sessionId).loadSequence !== seq) {
         log.debug(`[ChatStore] Discarding stale error response (seq ${seq})`);
+        clearSpinnerIfOwner(agentId, sessionId, seq);
         return;
       }
       if (e instanceof DOMException && e.name === "AbortError") {
@@ -2468,7 +2514,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         // scheduleRefresh / setPinnedToBottom hook.
         log.debug(`[ChatStore] loadSessionMessages aborted (seq ${seq})`);
         set((state) => updateSessionState(state, agentId, sessionId, {
-          isLoadingSession: false,
+          // The spinner is cleared only when this load still owns it.
+          ...(getSessionState(state, agentId, sessionId).loadOwnerSeq === seq
+            ? { isLoadingSession: false }
+            : {}),
           isLoadingMore: false,
         }));
         return;
@@ -2480,7 +2529,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       // button in VirtualMessageList can fire `ensureLatestInCache`
       // without first losing the cached history.
       set((state) => updateSessionState(state, agentId, sessionId, {
-        isLoadingSession: false,
+        // The spinner is cleared only when this load still owns it.
+        ...(getSessionState(state, agentId, sessionId).loadOwnerSeq === seq
+          ? { isLoadingSession: false }
+          : {}),
         isLoadingMore: false,
         loadError: `${i18n.t("chatPanel.sessionLoadFailed")}: ${e instanceof Error ? e.message : String(e)}`,
       }));
@@ -2563,57 +2615,69 @@ export const useChatStore = create<ChatStore>((set, get) => ({
    *
    * No-op if the cache is already at the tail (the cache window's far edge
    * touches `total`) — the caller is expected to check before invoking.
+   *
+   * Single-flight: concurrent callers for the same session share one
+   * reload (`inflightLatest`) and await it; a second caller no longer
+   * returns empty-handed while the first reload is still in flight.
    */
   ensureLatestInCache: async (agentId: string, sessionId: string) => {
-    const sessionState = getSessionState(get(), agentId, sessionId);
-    if (sessionState.isLoadingMore) return;
-    const { messageOffset, messageLimit, messageTotal, messages, messagesStale } = sessionState;
-    // Already at the tail:
-    //   - The cache window's far edge touches the end of the conversation
-    //     (messageOffset + messageLimit >= messageTotal), AND
-    //   - messageTotal > 0 (we know the conversation has data — guards against
-    //     a freshly-initialized sessionState whose DEFAULT values are all 0 /
-    //     empty, which would otherwise be mistaken for "already at tail"), AND
-    //   - messages.length > 0 (the cache has at least some data at the tail).
-    //   - !messagesStale — a stale cache's cursor (offset/limit/total) is
-    //     NOT trustworthy: after clearSessionMessages, background
-    //     record_complete writes directly append tail records and bump
-    //     messageTotal/messageLimit (chatStore record_complete handler),
-    //     making a PARTIAL slice look like it fully covers the tail
-    //     (offset 0 + limit N == total N) while older history — typically
-    //     the first user message — is still missing.  Short-circuiting on
-    //     such a cache would swallow the reload that restores the missing
-    //     head; we must NOT skip the fetch until a real HTTP window lands.
-    const tailCovered =
-      !messagesStale &&
-      messageTotal > 0 &&
-      messageOffset + messageLimit >= messageTotal &&
-      messages.length > 0;
-    if (tailCovered) return;
-    set((state) => updateSessionState(state, agentId, sessionId, { isLoadingMore: true }));
-    try {
-      // Forward semantics: the latest `limit` entries live at
-      // `offset = max(0, total - limit)`.  When total === 0 (fresh session
-      // that has never been loaded) we delegate to the initial-load path,
-      // which uses `?tail=true` to grab the newest `limit` entries.
-      // A stale cache's messageTotal is likewise untrustworthy (partial
-      // tail write-backs), so treat it the same way and force a fresh
-      // tail fetch instead of deriving an offset from the polluted cursor.
-      const limit = 50;
-      if (messagesStale || messageTotal === 0) {
-        await get().loadSessionMessages(agentId, sessionId, undefined, limit);
-      } else {
-        const tailOffset = Math.max(0, messageTotal - limit);
-        await get().loadSessionMessages(agentId, sessionId, tailOffset, limit);
-      }
+    const key = `${agentId}:${sessionId}`;
+    const existing = inflightLatest.get(key);
+    if (existing) return existing;
+    const promise = (async () => {
+      const sessionState = getSessionState(get(), agentId, sessionId);
+      const { messageOffset, messageLimit, messageTotal, messages, messagesStale } = sessionState;
+      // Already at the tail:
+      //   - The cache window's far edge touches the end of the conversation
+      //     (messageOffset + messageLimit >= messageTotal), AND
+      //   - messageTotal > 0 (we know the conversation has data — guards against
+      //     a freshly-initialized sessionState whose DEFAULT values are all 0 /
+      //     empty, which would otherwise be mistaken for "already at tail"), AND
+      //   - messages.length > 0 (the cache has at least some data at the tail).
+      //   - !messagesStale — a stale cache's cursor (offset/limit/total) is
+      //     NOT trustworthy: after clearSessionMessages, background
+      //     record_complete writes directly append tail records and bump
+      //     messageTotal/messageLimit (chatStore record_complete handler),
+      //     making a PARTIAL slice look like it fully covers the tail
+      //     (offset 0 + limit N == total N) while older history — typically
+      //     the first user message — is still missing.  Short-circuiting on
+      //     such a cache would swallow the reload that restores the missing
+      //     head; we must NOT skip the fetch until a real HTTP window lands.
+      const tailCovered =
+        !messagesStale &&
+        messageTotal > 0 &&
+        messageOffset + messageLimit >= messageTotal &&
+        messages.length > 0;
+      if (tailCovered) return;
+      set((state) => updateSessionState(state, agentId, sessionId, { isLoadingMore: true }));
+      try {
+        // Forward semantics: the latest `limit` entries live at
+        // `offset = max(0, total - limit)`.  When total === 0 (fresh session
+        // that has never been loaded) we delegate to the initial-load path,
+        // which uses `?tail=true` to grab the newest `limit` entries.
+        // A stale cache's messageTotal is likewise untrustworthy (partial
+        // tail write-backs), so treat it the same way and force a fresh
+        // tail fetch instead of deriving an offset from the polluted cursor.
+        const limit = 50;
+        if (messagesStale || messageTotal === 0) {
+          await get().loadSessionMessages(agentId, sessionId, undefined, limit);
+        } else {
+          const tailOffset = Math.max(0, messageTotal - limit);
+          await get().loadSessionMessages(agentId, sessionId, tailOffset, limit);
+        }
 
-      // The bare tail page may fold to a LONE explore block (see
-      // expandWindowToTurnBoundary) — pull older pages until the window
-      // starts on a turn boundary.
-      await expandWindowToTurnBoundary(agentId, sessionId, limit);
-    } finally {
-      set((state) => updateSessionState(state, agentId, sessionId, { isLoadingMore: false }));
-    }
+        // The bare tail page may fold to a LONE explore block (see
+        // expandWindowToTurnBoundary) — pull older pages until the window
+        // starts on a turn boundary.
+        await expandWindowToTurnBoundary(agentId, sessionId, limit);
+      } finally {
+        set((state) => updateSessionState(state, agentId, sessionId, { isLoadingMore: false }));
+      }
+    })().finally(() => {
+      inflightLatest.delete(key);
+    });
+    inflightLatest.set(key, promise);
+    return promise;
   },
 
   /** Release the messages array for a session to free memory. */

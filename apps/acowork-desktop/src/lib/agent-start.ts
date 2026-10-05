@@ -1,212 +1,126 @@
 //! Agent start orchestration utility.
 //!
-//! Provides `startAgentAndSyncUI` — an atomic function that:
-//! 1. Starts the agent process
-//! 2. Waits for the Runtime to become ready
-//! 3. Initializes the session (fetch list, determine active, pull state)
-//! 4. Synchronizes UI (fetch workspaces, refresh config)
+//! Provides `startAgentAndSyncUI` — an atomic follow-up that:
+//! 1. Waits for the Runtime to become ready
+//! 2. Resolves + opens the active session (single resolver:
+//!    `agentStore.resolveActiveSession`), then populates the session list
+//! 3. Synchronizes UI (fetch workspaces, refresh config)
 //!
-//! All callers (AgentList right-click, ChatPanel "Start Agent" button) use
-//! this single entry point so session data is always ready before rendering.
+//! All callers (AgentList right-click, ChatPanel "Start Agent" button)
+//! chain this through `useAgentStore.tryStartAgent`'s `run` option — the
+//! gate there owns the dedup AND the actual `startAgent` call, so session
+//! data is always ready before rendering.
 
-import { useAgentStore } from "../stores/agentStore";
+import { useAgentStore, type ResolveActiveSessionResult } from "../stores/agentStore";
 import { useChatStore } from "../stores/chatStore";
 import { useWorkspaceStore } from "../stores/workspaceStore";
 import { emitAgentConfigRefresh } from "./refresh";
 
 /**
- * Initialize the session for an agent using the lightweight
- * `fetchLatestSession` endpoint (no full disk scan).
+ * Resolve + open the agent's active session, then populate the session
+ * list so the tab bar / sidebar show the right title.
  *
- * The Runtime caches the latest session (by last_active_at desc) during
- * startup, so this is a cheap in-memory read. Falls back to the
- * remembered session if it matches the latest; otherwise uses the latest.
- *
- * Extracted from ChatPanel's useEffect so it can run atomically
- * inside `startAgentAndSyncUI` before any UI rendering.
+ * Resolution (latest-session tri-state → own-list fallback → create)
+ * and opening (UI + backend activation + message/config cache) are owned
+ * by `agentStore.resolveActiveSession`; this orchestrator only adds the
+ * start-window retry budget, because a freshly started Runtime may not
+ * have answered SESSIONS_READY yet.
  */
 async function initSessionForAgent(agentId: string): Promise<void> {
-    // ponytail: diagnostic
-    const __i0 = performance.now();
-    // Retry until the startup scan completes (max 10 attempts, 1s interval).
-    // The scan runs in a background task and may not have finished yet.
-    const maxRetries = 10;
-    let latestSession: { session_id: string; title: string | null } | null = null;
-    // ADR-085 D4/D7: `createSession` may only fire when the Runtime has
-    // CONFIRMED "ready and zero sessions" (404 no_session is answered
-    // exclusively from the SESSIONS_READY state). `unavailable` (503 /
-    // network) never justifies creating a session.
-    let confirmedEmpty = false;
-
-    for (let i = 0; i < maxRetries; i++) {
-        const __t0 = performance.now();
-        const result = await useAgentStore.getState().fetchLatestSession(agentId);
-        latestSession = result.status === "ok"
-            ? { session_id: result.session_id, title: result.title }
-            : null;
-        // ponytail: diagnostic
-        console.warn(
-            `[agent-start] initSessionForAgent retry=${i} ` +
-            `after ${Math.round(performance.now() - __t0)}ms ` +
-            `result=${latestSession ? latestSession.session_id : "null"} ` +
-            `elapsed=${Math.round(performance.now() - __i0)}ms`,
-        );
-        if (latestSession) break;
-
-        if (result.status === "no_session") {
-            // ADR-076 §决策 4: `/latest-session` answers from an agent-wide
-            // cache, so under `multi_user` it can 404 for a session the
-            // caller may not read — and by ADR-085 D4 a 404 is only ever
-            // answered once the Runtime is SESSIONS_READY, so it is
-            // definitive, not early. The caller's own list is
-            // scope-filtered by the Runtime, so if it has rows they are
-            // readable *now* and the newest one is the answer.
-            await useAgentStore.getState().fetchSessions(agentId);
-            const mine = useAgentStore.getState().agents[agentId]?.sessions ?? [];
-            if (mine.length > 0) {
-                // `fetchSessions` sorts by `created_at` desc → [0] is newest.
-                latestSession = {
-                    session_id: mine[0]!.session_id,
-                    title: mine[0]!.title ?? null,
-                };
-            } else {
-                // Ready + zero readable sessions: the only state that
-                // justifies creating one (D7 single-writer).
-                confirmedEmpty = true;
-            }
-            break;
-        }
-
-        // `unavailable` (503 boot window / network) — retry.
-        if (i < maxRetries - 1) {
-            await new Promise((resolve) => setTimeout(resolve, 1000));
-        }
-    }
-
-    if (!latestSession) {
-        if (!confirmedEmpty) {
-            // Never reached SESSIONS_READY within the retry budget. Do
-            // NOT create a session here — that is exactly the duplicate
-            // race ADR-085 D7 removes. Surface the failure; the start
-            // flow's caller shows it and the user can retry.
-            throw new Error(
-                `Agent ${agentId} session state unavailable (still starting or unreachable)`,
-            );
-        }
-        // The Runtime confirmed SESSIONS_READY with no readable session:
-        // normal first-run state. Create one — owned by the caller,
-        // private from birth — instead of leaving the chat panel blank.
-        // Activation rides the same `session_created` MQTT event the
-        // toolbar's "+" relies on, so there is nothing to open here.
-        await useAgentStore.getState().createSession(agentId);
-        return;
-    }
-
-    // Backend /latest-session is the source of truth — no client-side
-    // rememberedSessionId needed.
-    const targetSessionId = latestSession.session_id;
-
-    // Atomically bootstrap the session BEFORE returning.  This must run as a
-    // single serial chain so the ChatPanel sees a fully-rendered chat on its
-    // very first mount — no "blank chat then messages pop in" flicker, no
-    // mount effect that has to re-fire when activeSessionId finally lands:
-    //
-    //   1. fetchSessions         — populate agentStore.sessions (sidebar list).
-    //   2. fetchSessionState     — pulls model/provider/workspace_id and
-    //                              and state (status/ratio/todos/context_usage)
-    //                              via parallel HTTP calls so the header bar
-    //                              and metadata don't pop in piecewise.
-    //   3. ensureLatestInCache   — loads the latest message window into the
-    //                              cache so messages are available when
-    //                              ChatPanel first renders.
-    // ADR-038: opening a freshly-resolved session on first agent start is
-    // a "first-open" scenario, so we use `openSession` (UI + MQTT
-    // open_session + HTTP messages reload) instead of the strict
-    // `setActiveTab`.  `openSession` sets both `openSessionIds` (so the
-    // tab renders without a follow-up remount) and `activeSessionId`
-    // (so ChatPanel mounts with the right key from the very first render
-    // → no flicker).
-    //
-    // We deliberately do NOT use the legacy `switchSession` helper here
-    // (already removed in ADR-038): it aborted in-flight loads and
-    // re-ran fetchSessions — both are either no-ops or double-work on
-    // first launch.
-    //
-    // Retry `fetchSessions` with the same budget as `fetchLatestSession`
-    // above.  On cold start the `/sessions` endpoint races the disk scan
-    // and may 503 / return an empty list while `/latest-session` (which
-    // reads the in-memory cache) already resolved.  Without this retry
-    // the SessionTabBar would mount before `sessions[]` contained the
-    // active session and show "Untitled" until the user manually opened
-    // the session dropdown — same symptom as the `updateSessionTitle`
-    // regression pinned in `agentStore.sessionTitle.test.ts`.
-    for (let i = 0; i < maxRetries; i++) {
-        await useAgentStore.getState().fetchSessions(agentId);
-        const populated = useAgentStore
-            .getState()
-            .agents[agentId]?.sessions.some(
-                (s) => s.session_id === targetSessionId,
-            );
-        if (populated) break;
-        if (i < maxRetries - 1) {
-            await new Promise((resolve) => setTimeout(resolve, 1000));
-        }
-    }
-    // ADR-047: loadSession (config + state) is now called inside
-    // openSession, so we only need ensureLatestInCache before it.
-    await useChatStore
-        .getState()
-        .ensureLatestInCache(agentId, targetSessionId);
+  // ponytail: diagnostic
+  const __i0 = performance.now();
+  // Retry until the Runtime reaches SESSIONS_READY with a readable
+  // session (max 10 attempts, 1s interval). `unavailable` is the only
+  // outcome worth retrying — `noop` / `opened` / `created` are terminal.
+  const maxRetries = 10;
+  let result: ResolveActiveSessionResult = "unavailable";
+  for (let i = 0; i < maxRetries; i++) {
+    const __t0 = performance.now();
+    result = await useAgentStore.getState().resolveActiveSession(agentId);
     // ponytail: diagnostic
     console.warn(
-        `[agent-start] initSessionForAgent pre-openSession done ` +
-        `elapsed=${Math.round(performance.now() - __i0)}ms`,
+      `[agent-start] initSessionForAgent retry=${i} ` +
+      `after ${Math.round(performance.now() - __t0)}ms ` +
+      `result=${result} ` +
+      `elapsed=${Math.round(performance.now() - __i0)}ms`,
     );
-    await useChatStore.getState().openSession(agentId, targetSessionId);
-    // ponytail: diagnostic
-    console.warn(
-        `[agent-start] initSessionForAgent openSession done ` +
-        `elapsed=${Math.round(performance.now() - __i0)}ms`,
+    if (result !== "unavailable") break;
+    if (i < maxRetries - 1) {
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+  }
+  if (result === "unavailable") {
+    // Never reached SESSIONS_READY within the retry budget. Do NOT
+    // create a session here — that is exactly the duplicate race
+    // ADR-085 D7 removes. Surface the failure; the start flow's
+    // caller shows it and the user can retry.
+    throw new Error(
+      `Agent ${agentId} session state unavailable (still starting or unreachable)`,
     );
+  }
+  if (result === "created") {
+    // The fresh session is activated by the `session_created` event
+    // handler (`activateNewlyCreatedSession`) — nothing to open here.
+    return;
+  }
+
+  // Populate `agents[agentId].sessions` (sidebar + session-tab titles).
+  // On cold start the `/sessions` endpoint races the disk scan and may
+  // 503 / return an empty list while `/latest-session` (which reads the
+  // in-memory cache) already resolved. Without this retry the
+  // SessionTabBar would mount before `sessions[]` contained the active
+  // session and show "Untitled" until the user manually opened the
+  // session dropdown — same symptom as the `updateSessionTitle`
+  // regression pinned in `agentStore.sessionTitle.test.ts`.
+  const targetSessionId = useChatStore.getState().getActiveSessionId(agentId);
+  if (!targetSessionId) return;
+  for (let i = 0; i < maxRetries; i++) {
+    await useAgentStore.getState().fetchSessions(agentId);
+    const populated = useAgentStore
+      .getState()
+      .agents[agentId]?.sessions.some(
+        (s) => s.session_id === targetSessionId,
+      );
+    if (populated) break;
+    if (i < maxRetries - 1) {
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+  }
 }
 
 /**
- * Atomic agent start + session init + UI sync.
+ * Atomic agent-start follow-up: wait for readiness, resolve + open the
+ * active session, then sync UI (workspaces, config refresh).
  *
- * Replaces the previous two-step pattern:
- *   `await startAgentAndSyncUI(id);`
+ * `tryStartAgent` owns the dedup gate AND the actual `startAgent` call —
+ * chain this function through its `run` option so the sidebar's
+ * "starting…" badge stays on through session init. Running it directly
+ * assumes the agent has already been started.
  *
  * @param agentId  The agent package ID to start.
- * @param devMode  If true, start in debug mode (DevTools WebSocket enabled).
  */
-export async function startAgentAndSyncUI(
-    agentId: string,
-    devMode = false,
-): Promise<void> {
+export async function startAgentAndSyncUI(agentId: string): Promise<void> {
+  // ponytail: diagnostic
+  const __s0 = performance.now();
+  try {
+    // 1. Wait for the Runtime to become ready
+    await useAgentStore.getState().waitForAgentReady(agentId);
+    console.warn(`[agent-start] waitForAgentReady done @${Math.round(performance.now() - __s0)}ms`);
+
+    // 2. Initialize session — resolve + open the active session,
+    //    then populate the session list
+    await initSessionForAgent(agentId);
+    console.warn(`[agent-start] initSessionForAgent done @${Math.round(performance.now() - __s0)}ms`);
+
+    // 3. Sync UI — workspaces, config refresh (pure render)
+    useWorkspaceStore.getState().fetchWorkspaces(agentId);
+    emitAgentConfigRefresh(agentId);
+  } catch (e) {
     // ponytail: diagnostic
-    const __s0 = performance.now();
-    try {
-        // 1. Start the agent process
-        await useAgentStore.getState().startAgent(agentId, devMode);
-        console.warn(`[agent-start] startAgent done @${Math.round(performance.now() - __s0)}ms`);
-
-        // 2. Wait for the Runtime to become ready
-        await useAgentStore.getState().waitForAgentReady(agentId);
-        console.warn(`[agent-start] waitForAgentReady done @${Math.round(performance.now() - __s0)}ms`);
-
-        // 3. Initialize session — fetch list, determine active, pull state
-        await initSessionForAgent(agentId);
-        console.warn(`[agent-start] initSessionForAgent done @${Math.round(performance.now() - __s0)}ms`);
-
-        // 4. Sync UI — workspaces, config refresh (pure render)
-        useWorkspaceStore.getState().fetchWorkspaces(agentId);
-        emitAgentConfigRefresh(agentId);
-    } catch (e) {
-        // ponytail: diagnostic
-        console.warn(
-            `[agent-start] startAgentAndSyncUI FAILED @${Math.round(performance.now() - __s0)}ms:`,
-            e,
-        );
-        throw e;
-    }
+    console.warn(
+      `[agent-start] startAgentAndSyncUI FAILED @${Math.round(performance.now() - __s0)}ms:`,
+      e,
+    );
+    throw e;
+  }
 }

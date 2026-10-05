@@ -28,6 +28,17 @@ function notifyAgentOnline(agentId: string): void {
   }
 }
 
+// ── Single-flight "resolve the active session" chain ─────────────────────
+// The start orchestrator (lib/agent-start.ts) and the selectAgent /
+// fetchAgents re-bind paths used to run their own copies of
+// resolve → open concurrently, aborting each other's message loads. One
+// in-flight resolution per agent is now shared by every caller; the map
+// entry lives only while the chain runs.
+const inflightResolve = new Map<string, Promise<ResolveActiveSessionResult>>();
+
+/** ADR-085 D4 + ADR-076 §决策 4: terminal outcome of `resolveActiveSession`. */
+export type ResolveActiveSessionResult = "noop" | "opened" | "created" | "unavailable";
+
 // ══════════════════════════════════════════════════════════════════════════
 // AgentProfile types (moved from agentProfileStore.ts)
 // ══════════════════════════════════════════════════════════════════════════
@@ -283,9 +294,9 @@ interface AgentStoreState {
    *  the backend's "already running" branch nor stacks two
    *  `startAgentAndSyncUI` calls. Resolves with `true` on success.
    *  `run` (optional) chains extra work that should be covered by the
-   *  same in-flight gate — AgentList chains the full
-   *  `startAgentAndSyncUI` orchestrator so its "starting…" badge
-   *  stays on through session init, ChatPanel just runs `startAgent`.
+   *  same in-flight gate — both AgentList and ChatPanel chain the full
+   *  `startAgentAndSyncUI` orchestrator so their "starting…" badge /
+   *  spinner stays on through session init.
    *  ponytail: Set membership is O(1); if start-button fan-out grows
    *  past ~hundreds of agents, swap for a per-agent AbortController. */
   tryStartAgent: (
@@ -303,6 +314,16 @@ interface AgentStoreState {
    *  `no_session` (ready, none exist) is NOT the same as `unavailable`
    *  (still booting / unreachable). */
   fetchLatestSession: (agentId: string) => Promise<LatestSessionResult>;
+  /**
+   * Single resolver + opener for an agent's active session (single-flight
+   * per agent). Consolidates the former chain X / chain Y duplicates:
+   * `activeSessionId` present → `noop`; `/latest-session` tri-state
+   * (`unavailable` → return WITHOUT creating); 404/`no_session` → fall
+   * back to the account's own scope-filtered list (ADR-076 §决策 4);
+   * nothing readable → `createSession` (activation rides the
+   * `session_created` event); otherwise → `chatStore.openSession`.
+   */
+  resolveActiveSession: (agentId: string) => Promise<ResolveActiveSessionResult>;
   /**
    * Activate a session that has just been created (Runtime has already
    * confirmed via `session_created` event that the session exists and is
@@ -478,13 +499,17 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
         return { agents: next, selectedAgentId: selId, loading: false };
       });
 
-      // Trigger atomic session activation for the selected agent.
-      // `/latest-session` 404s when the agent-wide newest session belongs
-      // to another account (ADR-076); `selectAgent` handles that with a
-      // fallback to the account's own list.
+      // Re-bind the selected agent's session when it has none yet
+      // (webview reload / post-start window). The resolver is
+      // single-flight, so refresh storms (500ms ready-polls, connection
+      // edges, inventory signals) coalesce into one chain instead of
+      // stacking — and `/latest-session` 404s (ADR-076: the agent-wide
+      // newest session belongs to another account) fall back to the
+      // account's own list inside the resolver.
       const current = get();
-      if (current.selectedAgentId) {
-        current.selectAgent(current.selectedAgentId);
+      const selId = current.selectedAgentId;
+      if (selId && !useChatStore.getState().agentStates[selId]?.activeSessionId) {
+        void current.resolveActiveSession(selId);
       }
     } catch (e) {
       set({ error: String(e), loading: false });
@@ -567,58 +592,69 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
     const meta = get().agents[id]?.meta;
     if (!meta?.alive) return;
 
-    // 原子化：选 agent 时加载 latest session 并激活。
-    // openSession 内部会调后端 open_session (拉起 Closed 状态到 Active)、
-    // 写入 session 元数据、拉取 session 列表。fetchSessionState 补上 context
-    // usage / todos。loadModels 由 ChatPanel 的 useEffect
-    // 在 selectedAgentId 变化 + running && ready 时自动触发。
-    const chat = useChatStore.getState();
-    if (!chat.agentStates[id]?.activeSessionId) {
-      void (async () => {
-        const latest = await get().fetchLatestSession(id);
-        // ADR-085 D4: tri-state. `unavailable` (still booting / proxy
-        // 503 after the retry budget) must NOT fall through to
-        // createSession — that is the duplicate-session race D7 removes.
-        // The retained status envelope or the next select retries.
-        if (latest.status === "unavailable") return;
-        let target = latest.status === "ok" ? latest.session_id : null;
+    // 原子化：选 agent 时解析并激活 latest session。解析（tri-state →
+    // 本账号列表 fallback → createSession）与打开（UI + 后端激活 + 消息/
+    // 配置缓存）都收敛在 `resolveActiveSession` —— 单飞链，与启动编排链
+    // （lib/agent-start.ts）共享同一 in-flight promise，并发刷新不再堆叠。
+    void get().resolveActiveSession(id);
+  },
 
+  resolveActiveSession: async (agentId) => {
+    // Single-flight: callers that arrive while a resolution is in flight
+    // share the same promise instead of stacking a second chain.
+    const existing = inflightResolve.get(agentId);
+    if (existing) return existing;
+    const promise = (async (): Promise<ResolveActiveSessionResult> => {
+      if (useChatStore.getState().agentStates[agentId]?.activeSessionId) {
+        return "noop";
+      }
+
+      const latest = await get().fetchLatestSession(agentId);
+      // ADR-085 D4: tri-state. `unavailable` (still booting / proxy 503
+      // after the retry budget) must NOT fall through to createSession —
+      // that is the duplicate-session race D7 removes. The retained
+      // status envelope or the next call retries.
+      if (latest.status === "unavailable") return "unavailable";
+      let target = latest.status === "ok" ? latest.session_id : null;
+
+      if (!target) {
+        // ADR-076 §决策 4: `/latest-session` answers from an agent-wide
+        // cache, so it 404s as soon as the agent's newest session belongs
+        // to another account — a private session is neither readable nor
+        // writable for a non-owner, so the Runtime refuses to name it
+        // rather than leak the id. Retrying cannot fix that, the call is
+        // wrong (not early).
+        //
+        // Fall back to this account's own scope-filtered list. If the
+        // account has no rows it gets a fresh untitled session; activation
+        // then rides the `session_created` MQTT event, so there is nothing
+        // to open here. Without this fallback the chat panel sits on
+        // "Loading session…" forever whenever the agent-wide latest session
+        // is not ours (multi-user, e.g. right after an account switch).
+        await get().fetchSessions(agentId);
+        // `fetchSessions` sorts by `created_at` desc → [0] is newest.
+        target = get().agents[agentId]?.sessions[0]?.session_id ?? null;
         if (!target) {
-          // ADR-076 §决策 4: `/latest-session` answers from an agent-wide
-          // cache, so it 404s as soon as the agent's newest session belongs
-          // to another account — a private session is neither readable nor
-          // writable for a non-owner, so the Runtime refuses to name it
-          // rather than leak the id. Retrying cannot fix that, the call is
-          // wrong (not early).
-          //
-          // Fall back to this account's own scope-filtered list — the same
-          // rule `initSessionForAgent` (lib/agent-start.ts) already applies.
-          // If the account has no rows it gets a fresh untitled session;
-          // activation then rides the `session_created` MQTT event, so there
-          // is nothing to open here. Without this fallback the chat panel
-          // sits on "Loading session…" forever whenever the agent-wide latest
-          // session is not ours (multi-user, e.g. right after an account
-          // switch).
-          await get().fetchSessions(id);
-          // `fetchSessions` sorts by `created_at` desc → [0] is newest.
-          target = get().agents[id]?.sessions[0]?.session_id ?? null;
-          if (!target) {
-            await get().createSession(id);
-            return;
-          }
+          await get().createSession(agentId);
+          return "created";
         }
+      }
 
-        // ADR-038: opening from the agent sidebar is a "first-open" scenario,
-        // so we use the full openSession (UI + MQTT + load) instead of the
-        // strict setActiveTab.
-        // ADR-047: openSession now internally calls loadSession (config + state).
-        await chat.openSession(id, target);
-        // Populate the sessions array so the session tab bar and panel
-        // display the correct title instead of "Untitled" until the user
-        // manually opens the session list (which triggers fetchSessions).
-        void get().fetchSessions(id);
-      })();
-    }
+      // ADR-038: opening from the sidebar / start flow is a "first-open"
+      // scenario, so we use the full openSession (UI + backend activation
+      // + message/config load) instead of the strict setActiveTab.
+      // ADR-047: openSession internally calls loadSession (config + state).
+      await useChatStore.getState().openSession(agentId, target);
+      // Populate the sessions array so the session tab bar and panel
+      // display the correct title instead of "Untitled" until the user
+      // manually opens the session list (which triggers fetchSessions).
+      void get().fetchSessions(agentId);
+      return "opened";
+    })().finally(() => {
+      inflightResolve.delete(agentId);
+    });
+    inflightResolve.set(agentId, promise);
+    return promise;
   },
 
   installAgent: async (packagePath, nodeId) => {

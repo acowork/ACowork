@@ -314,7 +314,7 @@ export function AgentList({ width }: AgentListProps) {
     try {
       const started = await useAgentStore.getState().tryStartAgent(agentId, {
         devMode: true,
-        run: (id) => startAgentAndSyncUI(id, true),
+        run: (id) => startAgentAndSyncUI(id),
       });
       if (!started) return;
       addToast({ type: "success", message: t("agentList.agentStartedDebug") });

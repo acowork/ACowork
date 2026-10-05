@@ -1189,19 +1189,28 @@ export function ChatPanel() {
     };
   }, [currentScrollKey]);
 
-  // ── Atomized mount effect ──────────────────────────────────────────
-  // Every ChatPanel mount restores session state from the backend.
-  // Reconnect stream (idempotent), load messages if needed, refresh session state.
+  // ── Session load coordinator (mount + session switch) ────────────
+  // Single effect that restores the active session whenever the selected
+  // agent, its lifecycle, or the active session changes. Previously two
+  // effects ("atomized mount" + "session switch") implemented this split
+  // across `isInitialLoad` mutex writes; the mutex existed only to stop
+  // them racing each other. Now one coordinator handles every transition
+  // (mount / agent switch / session switch) exactly once, and StrictMode
+  // double-runs coalesce in the single-flight store paths
+  // (`openSession` / `ensureLatestInCache`).
   const prevAgentIdRef = useRef<string | null>(null);
+  const prevSessionIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (!selectedAgentId) return;
     const agentMeta = useAgentStore.getState().agents[selectedAgentId]?.meta;
     if (agentMeta?.lifecycle !== "sessions_ready") return; // ADR-085: capability gate
 
-    const currentSessId = useChatStore.getState().agentStates[selectedAgentId]?.activeSessionId;
+    // Read the react-tracked session id (same value the coordinator's
+    // deps carry) so a session landing in chatStore re-fires the effect.
+    const currentSessId = currentSessionId;
     if (!currentSessId) {
-      log.debug("[ChatPanel:mount] no active session, deferring...");
+      log.debug("[ChatPanel:session-load] no active session, deferring...");
       return;
     }
 
@@ -1210,6 +1219,29 @@ export function ChatPanel() {
       useAgentStore.getState().reset();
     }
     prevAgentIdRef.current = selectedAgentId;
+
+    // Release the previous session's resources (memory cleanup).
+    // We do this BEFORE loading the new session so the memory is freed
+    // before the new data arrives.
+    //
+    // Two pieces:
+    //   1. `messages[]` - released unconditionally via clearSessionMessages.
+    //   2. `chatAdapterStore.sessions[prevKey]` - released ONLY when the
+    //      previous session is not actively streaming. If the user switched
+    //      away mid-stream, the rolling `assistantStream` / `thinkingStream`
+    //      ChatMessage objects are still in flight; dropping them would lose
+    //      the live preview when the user switches back. Once stream ends,
+    //      `record_complete` lands in `messages[]` and the next switch-away
+    //      will release the (now-stale) adapter entry.
+    const prevId = prevSessionIdRef.current;
+    if (prevId && prevId !== currentSessId) {
+      useChatStore.getState().clearSessionMessages(selectedAgentId, prevId);
+      const prevAdapter = getChatAdapterSession(selectedAgentId, prevId);
+      if (!prevAdapter.isAssistantReplying && !prevAdapter.isThinking) {
+        releaseAdapterSession(selectedAgentId, prevId);
+      }
+    }
+    prevSessionIdRef.current = currentSessId;
 
     const chatStore = useChatStore.getState();
     const ss0 = chatStore.agentStates[selectedAgentId]?.sessionStates[currentSessId];
@@ -1230,7 +1262,7 @@ export function ChatPanel() {
       (existingOptimistic && existingOptimistic.length > 0)
     );
 
-    log.debug("[ChatPanel:mount] atomized restore start", {
+    log.debug("[ChatPanel:session-load] restore start", {
       agentId: selectedAgentId,
       sessionId: currentSessId,
       hasMessages,
@@ -1255,12 +1287,10 @@ export function ChatPanel() {
       const mountLoad = (mountHint != null && mountSnap)
         ? adapter.loadPageForBlockId(mountSnap.firstVisibleBlockId!, mountHint)
         : adapter.loadInitialPage();
-      session.scope.current.isInitialLoad = currentSessId;
       mountLoad
         .then(() => chatStore.loadSession(selectedAgentId, currentSessId))
         .finally(() => {
-          session.scope.current.isInitialLoad = null;
-          log.debug("[ChatPanel:mount] atomized restore done (full)", {
+          log.debug("[ChatPanel:session-load] restore done (full)", {
             agentId: selectedAgentId,
             sessionId: currentSessId,
             messageCount: useChatStore.getState().agentStates[selectedAgentId]?.sessionStates[currentSessId]?.messages?.length ?? 0,
@@ -1270,97 +1300,13 @@ export function ChatPanel() {
       // 2b. Messages already in store (nav-back: same agent, same session).
       //     No reload needed — messages survive in zustand across unmount.
       chatStore.loadSession(selectedAgentId, currentSessId);
-      log.debug("[ChatPanel:mount] atomized restore done (incremental)", {
+      log.debug("[ChatPanel:session-load] restore done (incremental)", {
         agentId: selectedAgentId,
         sessionId: currentSessId,
         messageCount: existingMessages.length,
       });
     }
-  }, [selectedAgentId, selectedAgent?.alive, selectedAgent?.lifecycle]);
-
-  // ── Session switch effect ─────────────────────────────────────────
-  // When the user picks a different session from the session panel,
-  // ChatPanel stays mounted — only activeSessionId changes in chatStore.
-  // Load messages for the newly-active session, and release the old
-  // session's messages to free memory.
-  const prevSessionIdRef = useRef<string | null>(null);
-  useEffect(() => {
-    if (!selectedAgentId || !currentSessionId) return;
-
-    // Release the previous session's resources (memory cleanup).
-    // We do this BEFORE loading the new session so the memory is freed
-    // before the new data arrives.
-    //
-    // Two pieces:
-    //   1. `messages[]` - released unconditionally via clearSessionMessages.
-    //   2. `chatAdapterStore.sessions[prevKey]` - released ONLY when the
-    //      previous session is not actively streaming. If the user switched
-    //      away mid-stream, the rolling `assistantStream` / `thinkingStream`
-    //      ChatMessage objects are still in flight; dropping them would lose
-    //      the live preview when the user switches back. Once stream ends,
-    //      `record_complete` lands in `messages[]` and the next switch-away
-    //      will release the (now-stale) adapter entry.
-    const prevId = prevSessionIdRef.current;
-    if (prevId && prevId !== currentSessionId) {
-      useChatStore.getState().clearSessionMessages(selectedAgentId, prevId);
-      const prevAdapter = getChatAdapterSession(selectedAgentId, prevId);
-      if (!prevAdapter.isAssistantReplying && !prevAdapter.isThinking) {
-        releaseAdapterSession(selectedAgentId, prevId);
-      }
-    }
-    prevSessionIdRef.current = currentSessionId;
-
-    // Guard: mount effect (above) already handles the initial session load.
-    // If it set isInitialLoad, it means a load is in progress for this session.
-    if (session.scope.current.isInitialLoad === currentSessionId) {
-      log.debug("[ChatPanel:session-switch] skipped (mount effect loading this session)");
-      return;
-    }
-
-    const chatStore = useChatStore.getState();
-    const ss1 = chatStore.agentStates[selectedAgentId]?.sessionStates[currentSessionId];
-    const existingMessages = ss1?.messages;
-    // ADR-050 C2: see the same pattern in the mount effect above —
-    // the "has data?" check now reads the optimistic overlay from
-    // chatAdapterStore instead of from chatStore.
-    const adapterSession = getChatAdapterSession(selectedAgentId, currentSessionId);
-    const existingOptimistic = adapterSession.optimisticEntries;
-    // Same union rule as the mount effect: don't treat "only optimistic"
-    // as "empty cache". A session that has an in-flight optimistic
-    // insert must NOT trigger a redundant reload — the optimistic user
-    // is real state and the next `scheduleRefresh` will reconcile.
-    const hasMessages = !!(
-      (existingMessages && existingMessages.length > 0) ||
-      (existingOptimistic && existingOptimistic.length > 0)
-    );
-    if (hasMessages && !ss1?.messagesStale) {
-      // Messages (and/or optimistic overlay) already cached AND the cache
-      // is authoritative (not a partially-repopulated post-clear slice) —
-      // just refresh session state.
-      chatStore.loadSession(selectedAgentId, currentSessionId);
-      return;
-    }
-
-    log.debug("[ChatPanel:session-switch] loading messages", {
-      agentId: selectedAgentId,
-      sessionId: currentSessionId,
-    });
-
-      // The scroll controller handles positioning after blocks arrive.
-      const targetSnap = chatScrollSnapshots.get(`${selectedAgentId}:${currentSessionId}`);
-      const targetHint = (targetSnap && !targetSnap.atBottom && targetSnap.firstVisibleBlockId
-        && targetSnap.messageOffset != null && targetSnap.firstVisibleBlockIndex != null)
-        ? targetSnap.messageOffset + targetSnap.firstVisibleBlockIndex : null;
-      const loadPromise = (targetHint != null && targetSnap)
-        ? adapter.loadPageForBlockId(targetSnap.firstVisibleBlockId!, targetHint)
-        : adapter.loadInitialPage();
-      session.scope.current.isInitialLoad = currentSessionId;
-    loadPromise
-      .then(() => chatStore.loadSession(selectedAgentId, currentSessionId))
-      .finally(() => {
-        session.scope.current.isInitialLoad = null;
-      });
-  }, [currentSessionId, selectedAgentId]);
+  }, [selectedAgentId, currentSessionId, selectedAgent?.lifecycle]);
 
   // ── Scroll restoration ──
 // Handled by ScrollController init-scroll: scrollToBottom() when atBottom
