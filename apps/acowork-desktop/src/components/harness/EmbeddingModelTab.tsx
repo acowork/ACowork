@@ -622,9 +622,8 @@ export function EmbeddingModelTab() {
             )}
 
             {/* Local models — Tools-tab level-1 collapsible card: title
-                only in the header (count is in the title's t() call).
-                Refresh action lives in the body toolbar so the header
-                stays as lean as the other collapsible cards. */}
+                + count in the header, refresh in the trailing slot
+                (same pattern as the LSP card). */}
             <ListBox dividers={false}>
                 <ExpandableRow
                     open={localOpen}
@@ -636,6 +635,27 @@ export function EmbeddingModelTab() {
                         </span>
                     }
                     ariaLabel={t("embedding.localModels", { count: models.length })}
+                    trailing={
+                        <span onClick={(e) => e.stopPropagation()}>
+                            <Tooltip
+                                content={loading ? t("embedding.loading") : t("embedding.refresh")}
+                                variant="plain"
+                            >
+                                <button
+                                    aria-label={loading ? t("embedding.loading") : t("embedding.refresh")}
+                                    onClick={loadModels}
+                                    disabled={loading}
+                                    className="inline-flex items-center justify-center rounded h-6 w-6 text-text-tertiary hover:bg-zinc-200 hover:text-zinc-600 disabled:opacity-60 dark:hover:bg-zinc-700 dark:hover:text-zinc-300 transition-colors"
+                                >
+                                    {loading ? (
+                                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                    ) : (
+                                        <RefreshCw className="h-3.5 w-3.5" />
+                                    )}
+                                </button>
+                            </Tooltip>
+                        </span>
+                    }
                     bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset"
                 >
                     {loading && models.length === 0 ? (
@@ -644,28 +664,7 @@ export function EmbeddingModelTab() {
                         // Plain ListBox — the panel-inset body hands each
                         // model its own row with a hairline divider, and
                         // ModelCard drops its old nested-card chrome.
-                        // The body toolbar (refresh) lives as a hairline-
-                        // separated first row.
                         <ListBox variant="plain">
-                            <div className="flex justify-end border-b border-border-divider px-3 py-2">
-                                <Tooltip
-                                    content={loading ? t("embedding.loading") : t("embedding.refresh")}
-                                    variant="plain"
-                                >
-                                    <button
-                                        aria-label={loading ? t("embedding.loading") : t("embedding.refresh")}
-                                        onClick={loadModels}
-                                        disabled={loading}
-                                        className="inline-flex items-center justify-center rounded h-6 w-6 text-text-tertiary hover:bg-zinc-200 hover:text-zinc-600 disabled:opacity-60 dark:hover:bg-zinc-700 dark:hover:text-zinc-300 transition-colors"
-                                    >
-                                        {loading ? (
-                                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                                        ) : (
-                                            <RefreshCw className="h-3.5 w-3.5" />
-                                        )}
-                                    </button>
-                                </Tooltip>
-                            </div>
                             {models.length === 0 ? (
                                 <EmptyState message={t("embedding.noModels")} />
                             ) : (
@@ -690,8 +689,8 @@ export function EmbeddingModelTab() {
             </ListBox>
 
             {/* Cloud Embedding Providers (S1-7) — Tools-tab level-1
-                collapsible card; add / refresh actions live in the body
-                toolbar (not the header) to keep the header chrome lean. */}
+                collapsible card; add / refresh live in the header
+                trailing slot (same pattern as the LSP / MCP cards). */}
             <ListBox dividers={false}>
                 <ExpandableRow
                     open={cloudOpen}
@@ -703,6 +702,39 @@ export function EmbeddingModelTab() {
                         </span>
                     }
                     ariaLabel={t("embedding.cloudProviders", { count: cloudProviders.length })}
+                    trailing={
+                        <span
+                            onClick={(e) => e.stopPropagation()}
+                            className="flex items-center gap-1"
+                        >
+                            <Tooltip content={t("embedding.addCustomProvider")} variant="plain">
+                                <button
+                                    aria-label={t("embedding.addCustomProvider")}
+                                    onClick={() => setCustomDialogOpen(true)}
+                                    className="inline-flex items-center justify-center rounded h-6 w-6 text-text-tertiary hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300 transition-colors"
+                                >
+                                    <Plus className="h-3.5 w-3.5" />
+                                </button>
+                            </Tooltip>
+                            <Tooltip
+                                content={cloudLoading ? t("embedding.loading") : t("embedding.refresh")}
+                                variant="plain"
+                            >
+                                <button
+                                    aria-label={cloudLoading ? t("embedding.loading") : t("embedding.refresh")}
+                                    onClick={loadCloudProviders}
+                                    disabled={cloudLoading}
+                                    className="inline-flex items-center justify-center rounded h-6 w-6 text-text-tertiary hover:bg-zinc-200 hover:text-zinc-600 disabled:opacity-60 dark:hover:bg-zinc-700 dark:hover:text-zinc-300 transition-colors"
+                                >
+                                    {cloudLoading ? (
+                                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                    ) : (
+                                        <RefreshCw className="h-3.5 w-3.5" />
+                                    )}
+                                </button>
+                            </Tooltip>
+                        </span>
+                    }
                     bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset"
                 >
                     {/* Active cloud selection summary — inline status row
@@ -737,37 +769,8 @@ export function EmbeddingModelTab() {
                         // Plain ListBox — the parent ExpandableRow's
                         // panel-inset body hands each provider a row, and
                         // CloudProviderCard drops its old nested-card
-                        // chrome. The body toolbar (add / refresh) lives
-                        // as a hairline-separated first row.
+                        // chrome.
                         <ListBox variant="plain">
-                            <div className="flex justify-end gap-1 border-b border-border-divider px-3 py-2">
-                                <Tooltip content={t("embedding.addCustomProvider")} variant="plain">
-                                    <button
-                                        aria-label={t("embedding.addCustomProvider")}
-                                        onClick={() => setCustomDialogOpen(true)}
-                                        className="inline-flex items-center justify-center rounded h-6 w-6 text-text-tertiary hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300 transition-colors"
-                                    >
-                                        <Plus className="h-3.5 w-3.5" />
-                                    </button>
-                                </Tooltip>
-                                <Tooltip
-                                    content={cloudLoading ? t("embedding.loading") : t("embedding.refresh")}
-                                    variant="plain"
-                                >
-                                    <button
-                                        aria-label={cloudLoading ? t("embedding.loading") : t("embedding.refresh")}
-                                        onClick={loadCloudProviders}
-                                        disabled={cloudLoading}
-                                        className="inline-flex items-center justify-center rounded h-6 w-6 text-text-tertiary hover:bg-zinc-200 hover:text-zinc-600 disabled:opacity-60 dark:hover:bg-zinc-700 dark:hover:text-zinc-300 transition-colors"
-                                    >
-                                        {cloudLoading ? (
-                                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                                        ) : (
-                                            <RefreshCw className="h-3.5 w-3.5" />
-                                        )}
-                                    </button>
-                                </Tooltip>
-                            </div>
                             {cloudProviders.map((provider) => (
                                 <CloudProviderCard
                                     key={provider.id}
