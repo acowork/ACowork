@@ -204,8 +204,10 @@ export function TaskDetailDrawer({ taskId, onClose, onEdit, onAddSubtask }: Task
         aria-label={detail?.title || t("pm.task.details")}
         className="absolute inset-y-0 right-0 flex w-[480px] flex-col bg-page-bg shadow-xl outline-none dark:bg-zinc-900"
       >
-        {/* 头部：标题 + 徽章 + 关闭 */}
-        <header className="flex shrink-0 items-start justify-between border-b border-border-divider px-4 py-3 min-h-[var(--ui-dialog-zone-h)]">
+        {/* 头部：标题 + 徽章 + 关闭
+            flex-col：header 内是"标题行 + tab 条"两行堆叠。写成 flex 行
+            容器时两者左右并排抢宽度——标题被压到逐字折行、tab 溢出抽屉。*/}
+        <header className="flex shrink-0 flex-col border-b border-border-divider px-4 py-3 min-h-[var(--ui-dialog-zone-h)]">
           <div className="flex items-start justify-between gap-2">
             <div className="min-w-0 flex-1">
               <h2 className="break-words text-sm font-semibold text-text ">
