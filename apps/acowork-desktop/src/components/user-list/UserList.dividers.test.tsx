@@ -13,6 +13,9 @@
  * final row would double up with the group's own bottom border).
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { execSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { render, screen, act } from "@testing-library/react";
 import { UserList } from "./UserList";
 import { useAuthStore } from "../../stores/authStore";
@@ -40,7 +43,36 @@ function account(role: Role, user_id: string, display_name: string): UserAccount
   };
 }
 
-const DIVIDER = "after:border-b";
+const DIVIDER = "row-divider-b";
+
+/**
+ * A `::after` box only exists at all if `content` is set — without it the
+ * pseudo-element is not generated and the hairline silently does not
+ * render, no matter how correct `border-b` / `bottom-0` / the colour are.
+ * Tailwind v4.3 ships NO `after:content-*` utility (verified against the
+ * built bundle), so hand-rolled `after:border-b` rows cannot be fixed in
+ * JSX at all: the divider is the shared `.row-divider-b` class in
+ * globals.css. This guard keeps anyone from reintroducing the dead form.
+ *
+ * Repo-wide rather than per-component because the bug hit five sidebars
+ * at once, and a className assertion cannot catch it (the class is
+ * present either way) — only the stylesheet tells.
+ */
+it("no row draws a divider through a bare after:border-b utility", () => {
+  const root = resolve(__dirname, "..", "..", "..");
+  const files = execSync(`git ls-files "src/**/*.tsx"`, { encoding: "utf8", cwd: root })
+    .split(String.fromCharCode(10))
+    .filter(Boolean)
+    // This file legitimately mentions `after:border-b` in assertions.
+    .filter((f) => !/\.test\.tsx?$/.test(f));
+  const offenders: string[] = [];
+  for (const f of files) {
+    for (const line of readFileSync(resolve(root, f), "utf8").split(String.fromCharCode(10))) {
+      if (/after:border-[bt]/.test(line)) offenders.push(`${f}: ${line.trim()}`);
+    }
+  }
+  expect(offenders).toEqual([]);
+});
 
 describe("UserList rows carry the agent-list hairline", () => {
   beforeEach(() => {

@@ -86,7 +86,12 @@ export function ProjectSidebar({ width }: { width?: number }) {
       {/* Header — search input (与 AgentList 同款)。高度绑定
           --ui-list-header-h，与 harness / settings 的标题栏同高，
           三个列表胶囊的分割线才能横向对齐。 */}
-      <div className="flex min-h-[var(--ui-list-header-h)] items-center px-3">
+      {/* `border-b` matches the other sidebar headers (SectionPane's title
+          row, DocTreeSidebar's title row) so the search band is separated
+          from the project list the same way everywhere. The search box
+          itself already has a border, which is what made the missing rule
+          read as "intentional" here. */}
+      <div className="flex min-h-[var(--ui-list-header-h)] shrink-0 items-center border-b border-border-divider px-3">
         <div className="relative min-w-0 flex-1">
           <Search className="absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-text-tertiary " />
           <StyledInput
@@ -102,7 +107,11 @@ export function ProjectSidebar({ width }: { width?: number }) {
 
       {/* 项目列表 */}
       <nav
-        className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-1.5"
+        // `py-1` matches SectionPane's list container (and harness/settings,
+        // which renders through it) — without it the pm rows sit flush
+        // against the header hairline while every other capsule list has
+        // the same 4px breathing room top and bottom.
+        className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-1.5 py-1"
         aria-label={t("pm.projectListAria")}
       >
         {filteredProjects.map((p, index) => {
@@ -120,7 +129,7 @@ export function ProjectSidebar({ width }: { width?: number }) {
                   ? "bg-[var(--color-accent)]/90 text-white"
                   : "text-text-secondary hover:bg-nav-item-hover ",
                 !isLast &&
-                  "after:absolute after:bottom-0 after:left-1.5 after:right-1.5 after:border-b after:border-nav-divider/40 dark:after:border-zinc-600/40",
+                  "row-divider-b",
               )}
               aria-current={active ? "page" : undefined}
             >

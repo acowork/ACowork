@@ -125,7 +125,7 @@ export function SectionPane({
                     ? "bg-[var(--color-accent)]/90 text-white"
                     : "text-text-secondary hover:bg-nav-item-hover ",
                   !isLast &&
-                    "after:absolute after:bottom-0 after:left-1.5 after:right-1.5 after:border-b after:border-nav-divider/40 dark:after:border-zinc-600/40",
+                    "row-divider-b",
                 )}
               >
                 {/* The icon follows the text colour: a `text-tertiary`

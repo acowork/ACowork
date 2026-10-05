@@ -1,5 +1,25 @@
 import { clsx, type ClassValue } from "clsx";
-import { twMerge } from "tailwind-merge";
+import { extendTailwindMerge } from "tailwind-merge";
+
+/** The `--text-9` / `--text-10` / `--text-11` micro steps (globals.css
+ *  @theme). tailwind-merge only knows Tailwind's own t-shirt scale, so it
+ *  files a bare `text-10` under `text-color` — and any real colour class
+ *  merged in the same call then DELETES the font size:
+ *  `cn("text-10", "text-text-tertiary")` came out as `text-text-tertiary`.
+ *  With no font-size left, the element falls back to the inherited body
+ *  size (14px), which is why the memory-row badges and status read
+ *  *larger* than an 11px card title. Registering the numeric steps as
+ *  font sizes fixes every `cn()` caller at once, including the shared
+ *  Badge (whose `text-9` never survived a tone colour before). */
+const isTextStep = (value: string) => /^\d+$/.test(value);
+
+const twMerge = extendTailwindMerge({
+  extend: {
+    classGroups: {
+      "font-size": [{ text: [isTextStep] }],
+    },
+  },
+});
 
 /** Merge Tailwind CSS classes with clsx */
 export function cn(...inputs: ClassValue[]) {

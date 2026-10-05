@@ -299,7 +299,9 @@ export const UserList = forwardRef<UserListHandle>(function UserList(_props, ref
           data-testid="user-group-header"
           className={cn(
             "flex h-6 min-w-0 flex-1 items-center gap-1.5 px-3 text-left",
-            "text-10 font-medium uppercase tracking-wide text-text-tertiary",
+            // `text-xs` + normal case, matching the user row names below and
+            // the node header in the agent list — same sidebar, same role.
+            "text-xs font-medium text-text-tertiary",
             "transition-colors duration-150 hover:text-zinc-600 dark:hover:text-zinc-300",
           )}
         >
@@ -310,7 +312,7 @@ export const UserList = forwardRef<UserListHandle>(function UserList(_props, ref
             )}
           />
           <span className="truncate">{t("userList.title")}</span>
-          <span className="ml-auto text-10 font-normal opacity-60">{rows.length}</span>
+          <span className="ml-auto text-xs font-normal opacity-60">{rows.length}</span>
         </button>
       </div>
 
@@ -490,7 +492,7 @@ function UserRow({
         // flat (accounts are Gateway-wide, never partitioned by node), so
         // the caller alone knows which row closes the group.
         !isLast &&
-          "after:absolute after:bottom-0 after:left-1.5 after:right-1.5 after:border-b after:border-nav-divider/40 dark:after:border-zinc-600/40",
+          "row-divider-b",
       )}
     >
       <UserAvatar
@@ -502,12 +504,14 @@ function UserRow({
 
       <div className="min-w-0 flex-1 overflow-hidden">
         <div className="flex items-center justify-between gap-2">
+          {/* `text-xs`, not an inline `var(--ui-font-size)`: matches the
+              agent list row name and every other sidebar list, all of which
+              inherit `text-xs` from the pane container. */}
           <span
             className={cn(
-              "truncate font-medium",
+              "truncate font-medium text-xs",
               active ? "text-white" : "text-text-secondary",
             )}
-            style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}
           >
             {account.display_name}
           </span>

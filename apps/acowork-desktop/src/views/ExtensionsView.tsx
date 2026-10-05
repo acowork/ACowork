@@ -84,7 +84,10 @@ export function ExtensionsView() {
                 className={cn(CAPSULE_PANE_CN, "h-full shrink-0 bg-nav-surface text-xs")}
                 style={{ width: sidebar.width }}
             >
-                <div className="flex min-h-[var(--ui-list-header-h)] items-center px-3">
+                {/* `border-b` matches the other sidebar headers (SectionPane,
+                    DocTreeSidebar, ProjectSidebar) so the search band is
+                    separated from the list the same way everywhere. */}
+                <div className="flex min-h-[var(--ui-list-header-h)] shrink-0 items-center border-b border-border-divider px-3">
                     <div className="relative min-w-0 flex-1">
                         <Search
                             className="absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-text-tertiary"
@@ -129,7 +132,7 @@ export function ExtensionsView() {
                                         ? "bg-[var(--color-accent)]/90 text-white"
                                         : "text-text-secondary hover:bg-nav-item-hover",
                                     !isLast &&
-                                        "after:absolute after:bottom-0 after:left-1.5 after:right-1.5 after:border-b after:border-nav-divider/40 dark:after:border-zinc-600/40",
+                                        "row-divider-b",
                                 )}
                             >
                                 <span className={cn("min-w-0 flex-1 truncate", active && "text-white")}>

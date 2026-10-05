@@ -21,7 +21,7 @@ export function SkillDetail({ detail, loading, onBack }: SkillDetailProps) {
               aria-label={t("common.backToList")}
             >
               <ArrowLeft className="h-4 w-4" />
-              Back to List
+              {t("common.back")}
             </button>
           </div>
         )}
@@ -43,7 +43,7 @@ export function SkillDetail({ detail, loading, onBack }: SkillDetailProps) {
               aria-label={t("common.backToList")}
             >
               <ArrowLeft className="h-4 w-4" />
-              Back to List
+              {t("common.back")}
             </button>
           </div>
         )}
@@ -69,7 +69,7 @@ export function SkillDetail({ detail, loading, onBack }: SkillDetailProps) {
             aria-label={t("common.backToList")}
           >
             <ArrowLeft className="h-4 w-4" />
-            Back to List
+            {t("common.back")}
           </button>
         </div>
       )}

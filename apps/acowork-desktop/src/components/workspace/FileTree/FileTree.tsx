@@ -17,6 +17,16 @@ import {
 
 const EMPTY_ARRAY: string[] = [];
 
+/** Row glyph size as a ratio of `--ui-font-size` — the `--ui-text-size` step,
+ * 12px at the default base. MUST stay in sync with `--ui-text-size` in
+ * globals.css (which `.file-tree-row` applies to the row); the virtualizer
+ * cannot read CSS, so the geometry is restated here. */
+export const TREE_ROW_FONT_RATIO = 0.857;
+
+/** Natural row height as a multiple of the row's own font-size:
+ * `line-height 1.5 + 2 × py-[0.2em]` = 1.9. */
+export const TREE_ROW_LINE_MULTIPLIER = 1.9;
+
 /** Flattened tree node for virtualized rendering */
 interface FlatNode {
     entry: TreeEntry;
@@ -381,8 +391,9 @@ export function FileTree({
     // Virtual scrolling setup.
     //
     // Row height is derived from CSS geometry (`line-height × font-size +
-    // vertical padding` = fontSize × 16 × 1.9) and NOT rounded — see the
-    // e29e5196 commit for the multiplier's derivation.
+    // vertical padding` = fontSize × 16 × TREE_ROW_FONT_RATIO ×
+    // TREE_ROW_LINE_MULTIPLIER = 22.78px at the default base) and NOT rounded
+    // — see the e29e5196 commit for the multiplier's derivation.
     //
     // Two constraints that fall out of the row geometry:
     //
@@ -395,9 +406,14 @@ export function FileTree({
     //    With `Math.round(26.6) = 27` the slot extends 0.4px past the
     //    rendered row, leaving a sliver where `elementFromPoint` lands
     //    on the slot's outer edge — same null-`closest` failure mode.
+    //    Changing the row's font-size in globals.css therefore means
+    //    changing TREE_ROW_FONT_RATIO here.
     const scrollRef = useRef<HTMLDivElement | null>(null);
     const fontSize = useSettingsStore((s) => s.fontSize);
-    const rowHeight = useMemo(() => fontSize * 16 * 1.9, [fontSize]);
+    const rowHeight = useMemo(
+        () => fontSize * 16 * TREE_ROW_FONT_RATIO * TREE_ROW_LINE_MULTIPLIER,
+        [fontSize],
+    );
     const virtualizer = useVirtualizer({
         count: flatNodes.length,
         getScrollElement: () => scrollRef.current,
@@ -444,7 +460,7 @@ export function FileTree({
                 return (
                     <div
                         className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 py-8 text-text-tertiary"
-                        style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}
+                        style={{ fontSize: "var(--ui-text-size)" }}
                     >
                         <span>{t("workspace.treeLoadFailed") ?? `Failed to load workspace (${detail})`}</span>
                         <button
@@ -458,14 +474,14 @@ export function FileTree({
                 );
             }
             return (
-                <div className="flex min-h-0 flex-1 items-center justify-center py-8 text-text-tertiary" style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>
+                <div className="flex min-h-0 flex-1 items-center justify-center py-8 text-text-tertiary" style={{ fontSize: "var(--ui-text-size)" }}>
                     Loading...
                 </div>
             );
         }
         if (rootEntries.length === 0) {
             return (
-                <div className="flex min-h-0 flex-1 flex-col items-center justify-center py-8 text-text-tertiary" style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>
+                <div className="flex min-h-0 flex-1 flex-col items-center justify-center py-8 text-text-tertiary" style={{ fontSize: "var(--ui-text-size)" }}>
                     <span>Empty workspace</span>
                 </div>
             );

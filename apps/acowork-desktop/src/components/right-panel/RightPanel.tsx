@@ -436,8 +436,19 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
           -left-1), so it must stay outside this clipping box or it would be
           cut off and resizing would break. */}
       <div className={cn(CAPSULE_PANE_CN, "flex-1 bg-right-panel")}>
-      {/* Tab title header */}
-      <div className="border-b border-border-divider px-3 pt-[10px] pb-[7px] text-xs font-medium text-text-tertiary ">
+      {/* Tab title header.
+          Height MUST come from a fixed line box, not from px padding +
+          the text line box: `pt-[10px] pb-[7px]` + a `text-xs` line meant
+          the band grew with --ui-font-size (the line box scales), so this
+          `border-b` drifted down at font sizes 1/3/4/5 and stopped lining
+          up with the left column's header divider. `--tab-line-height`
+          is the app's existing "tab strip keeps its height, text scales"
+          contract (SessionTabBar / tab.tsx / FileEditorPanel tabs all
+          use it); --ui-list-header-h is the nav-column value the left
+          pane is pinned to. Belt and braces: both are px/rem, so the
+          rule sits on the same baseline as the left column at every
+          font size while the text itself still scales. */}
+      <div className="flex min-h-[var(--ui-list-header-h)] shrink-0 items-center border-b border-border-divider px-[var(--tab-px)] text-[length:var(--tab-font-size)] font-medium leading-[var(--tab-line-height)] text-text-tertiary ">
         {t(`rightPanel.${activeTab}`)}
       </div>
 

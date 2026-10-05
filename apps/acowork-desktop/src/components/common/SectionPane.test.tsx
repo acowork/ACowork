@@ -126,8 +126,8 @@ describe("SectionPane", () => {
     expect(unselected.className).not.toContain("accent");
 
     // 3. Hairline divider between rows, drawn on every row but the last.
-    expect(unselected.className).toContain("after:border-b");
-    expect(selected.className, "last row must not draw a divider").not.toContain("after:border-b");
+    expect(unselected.className).toContain("row-divider-b");
+    expect(selected.className, "last row must not draw a divider").not.toContain("row-divider-b");
     expect(container).toBeTruthy();
   });
 

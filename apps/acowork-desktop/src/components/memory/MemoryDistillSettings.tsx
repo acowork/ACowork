@@ -197,8 +197,11 @@ export function MemoryDistillSettings({
   };
 
   // ── Render ────────────────────────────────────────────────────────────
+  // Tighter padding than StyledInput's default for the 3-column grid, but
+  // deliberately NO font-size override: the field text stays at StyledInput's
+  // `text-xs`, which is also what the model list above is timed to.
   const numInputCls =
-    "rounded-md border border-input-border bg-input-bg px-2 py-1 text-11 outline-none focus:border-[var(--color-accent)] ";
+    "rounded-md border border-input-border bg-input-bg px-2 py-1 outline-none focus:border-[var(--color-accent)] ";
 
   // Backlog / last-run hint lives INSIDE the expanded body — it is
   // status info about the runtime, not metadata about the card itself,
@@ -308,7 +311,7 @@ export function MemoryDistillSettings({
                 providerNameById={providerNames}
                 disabled={!running || !enabled || savingField === "distiller_models"}
                 onChange={handleModelsChange}
-                className="!text-11"
+                className="text-xs"
               />
             </label>
 

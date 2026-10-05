@@ -263,6 +263,23 @@
      `em` ratios of this, so the whole app's text moves together. */
   --ui-font-size: 0.875rem;
 
+  /* The app's list / chrome text step — 12px at the default base, i.e. the
+     same size as `text-xs`. Used by list rows (file tree, git status), panel
+     tab titles, toolbars and form inputs.
+
+     Chat message text deliberately does NOT use this: it stays at
+     `--ui-font-size` (14px). Tried and rolled back — 12px read as too small
+     for paragraphs, and the in-bubble meta (CodeBlock 0.9, CompactionCard
+     0.9, ChatPanel 0.85) is scaled off the 14px base, so moving only the
+     body would have left code blocks larger than the prose around them.
+
+     It exists as an ABSOLUTE value (not the `em`-based `--text-xs`) for the
+     call sites that set `font-size` from an inline style, which nest: an `em`
+     ratio would resolve against an already-shrunk parent and compound.
+     Inline styles cannot read a Tailwind utility, so this var is the shared
+     source of truth; `--ui-font-size` stays the knob that scales it. */
+  --ui-text-size: calc(var(--ui-font-size, 0.875rem) * 0.857);
+
   /* Colors */
   --color-primary: hsl(222.2 47.4% 11.2%);
   --color-primary-foreground: hsl(210 40% 96.1%);
@@ -1935,6 +1952,30 @@ input[type="radio"]:checked {
   /* zinc-700 */
 }
 
+/* ── File tree / git status row typography ───────────────────────────────
+ *
+ * One declaration covers both lists that carry `.file-tree-row` — FileTreeNode's
+ * rows and GitStatusPanel's change rows — because they stack inside the same
+ * panel and must not drift apart (see the note in GitStatusPanel.tsx).
+ *
+ * 0.857 puts the row text on the app's `text-xs` step (12px at the default
+ * 14px base): the size the agent / user sidebars, the right-panel tab titles
+ * (`--tab-font-size`) and the workspace toolbar all already use. The file tree
+ * was the last list in the shell still rendering at the full `--ui-font-size`,
+ * which made it read a step larger than every panel around it.
+ *
+ * `FileTree.tsx` derives the virtualizer's row height from this same ratio
+ * (`fontSize * 16 * 0.857 * 1.9`). The two change together or not at all: a
+ * slot even 0.4px off the row's natural CSS height leaves an edge where
+ * `elementFromPoint(...).closest('[data-rel-path]')` returns null during
+ * drag & drop.
+ *
+ * Unlayered so it wins over row utilities, same as the variants below.
+ */
+.file-tree-row {
+  font-size: var(--ui-text-size);
+}
+
 /* ── File tree drag & drop state ────────────────────────────────────────
  *
  * Applied to `.file-tree-row` (FileTreeNode's row div).
@@ -1981,6 +2022,33 @@ input[type="radio"]:checked {
  * don't want the row to "go neutral" while the user is interacting with
  * it (e.g. drag-and-drop onto a selected row, or holding click).
  */
+/* Row hairline — the divider between list rows.
+ *
+ * Lives here rather than as `after:border-b` utilities because a `::after`
+ * box is only generated when `content` is set, and Tailwind v4.3 emits NO
+ * `after:content-*` utility at all (verified against the shipped build:
+ * `after:bottom-0` / `after:border-b` were emitted, `after:content-['']`
+ * and `after:content-none` were not). So every row divider written as
+ * `after:absolute after:bottom-0 … after:border-b` compiled to CSS that
+ * drew nothing — the hairlines in the pm / settings / harness / user /
+ * extensions sidebars had never rendered.
+ *
+ * Unlayered on purpose, same reasoning as `.file-tree-row-selected`:
+ * it must win over the row's own utilities.
+ */
+.row-divider-b::after {
+  content: "";
+  position: absolute;
+  left: 0.375rem;
+  right: 0.375rem;
+  bottom: 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--color-nav-divider) 40%, transparent);
+}
+
+.dark .row-divider-b::after {
+  border-bottom-color: color-mix(in srgb, #52525b 40%, transparent);
+}
+
 .file-tree-row-selected,
 .file-tree-row-selected:hover {
   background-color: color-mix(in srgb, var(--color-accent) 10%, transparent);

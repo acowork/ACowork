@@ -10,6 +10,7 @@ import {
   type ContextMenuItem,
 } from "../common/ContextMenu";
 import { copySelectionOrFallback, copyText } from "../../lib/clipboard";
+import { Badge } from "../common/list";
 
 interface MemoryNodeDetailProps {
   node: MemoryNodeResponse;
@@ -17,12 +18,7 @@ interface MemoryNodeDetailProps {
   onDelete: (nodeId: number) => void;
 }
 
-const accentBg = "bg-[var(--color-accent)]/10 dark:bg-[var(--color-accent)]/20";
 const accentText = "text-[var(--color-accent)]";
-
-function getTypeColor(_nodeType: string) {
-  return { bg: accentBg, text: accentText, darkBg: "", darkText: "" };
-}
 
 function getDecayColor(_score: number): string {
   return "bg-[var(--color-accent)]";
@@ -44,7 +40,6 @@ export function MemoryNodeDetail({ node, onClose, onDelete }: MemoryNodeDetailPr
   const { t } = useTranslation();
   const labelOf = useNodeTypeLabel();
   const subLabelOf = useSubTypeLabel();
-  const colors = getTypeColor(node.node_type);
   const decayLabel = (() => {
     const tier = getDecayTier(node.decay_score);
     if (tier === "Stable") return t("memoryNodeDetail.statusStable");
@@ -178,27 +173,28 @@ export function MemoryNodeDetail({ node, onClose, onDelete }: MemoryNodeDetailPr
           aria-label={t("memoryNodeDetail.ariaLabelBackToList")}
         >
           <ArrowLeft className="h-3.5 w-3.5" />
-          Back to List
+          {t("common.back")}
         </button>
         <div className="flex items-center gap-1.5">
-          <span
-            className={cn(
-              "rounded px-1.5 py-0.5 text-10 font-medium uppercase tracking-wider",
-              colors.bg,
-              colors.text,
-            )}
+          {/* Shared Badge (kills the hand-rolled pill + the uppercase /
+              tracking-wider), on `text-11` — same step as the list rows,
+              i.e. the card-title size and never above it. */}
+          <Badge
+            tone="accent"
+            className="text-11"
             data-node-type={node.node_type}
           >
             {labelOf(node.node_type)}
-          </span>
+          </Badge>
           {node.sub_type && (
-            <span
-              className="rounded bg-zinc-100 px-1.5 py-0.5 text-10 font-medium uppercase tracking-wider text-text-secondary dark:bg-zinc-800 "
+            <Badge
+              tone="neutral"
+              className="text-11"
               data-sub-type={node.sub_type}
               title={node.sub_type}
             >
               {subLabelOf(node.node_type, node.sub_type)}
-            </span>
+            </Badge>
           )}
           <span className="text-11 text-text-tertiary ">#{node.node_id}</span>
         </div>

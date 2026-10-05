@@ -86,7 +86,12 @@ export function ModelPriorityList({
     "p-0.5 rounded text-text-tertiary hover:text-text hover:bg-panel-inset disabled:opacity-40 disabled:pointer-events-none";
 
   return (
-    <div className={cn("flex flex-col gap-1", className)}>
+    // `text-11` is this component's own size step; every child (rows, the
+    // add-dropdown and its native option list) inherits it, so a caller can
+    // retime the whole editor with one font-size class in `className` — e.g.
+    // the memory-panel distiller card passes `text-xs` to line the model rows
+    // up with the `StyledInput` fields below them.
+    <div className={cn("flex flex-col gap-1 text-11", className)}>
       {items.length === 0 && (
         <span className="text-10 text-text-tertiary">
           {t("common.modelList.empty")}
@@ -95,7 +100,7 @@ export function ModelPriorityList({
       {items.map((ref, i) => (
         <div
           key={refKey(ref)}
-          className="flex items-center gap-1.5 rounded border border-border-divider bg-panel px-2 py-1 text-11"
+          className="flex items-center gap-1.5 rounded border border-border-divider bg-panel px-2 py-1"
         >
           <span className="w-4 shrink-0 text-center text-text-tertiary tabular-nums">
             {i + 1}
@@ -150,6 +155,10 @@ export function ModelPriorityList({
           if (!o) return;
           onChange([...items, { provider_id: o.providerId, model_id: o.modelId }]);
         }}
+        // Follow the container's font-size instead of Dropdown's own
+        // `size="small"` step, so the trigger and the native option list
+        // stay the same size as the rows above them.
+        className="text-[length:inherit]"
         size="small"
       />
     </div>

@@ -133,7 +133,33 @@ describe("GitStatusBar", () => {
       loading: false,
     });
     render(<GitStatusBar agentId="a1" workspaceId="ws1" />);
-    expect(screen.getByText("main · 2 changes")).toBeTruthy();
+    // The ref and its meta suffix are two spans, so assert on the
+    // wrapper's textContent — that is what the user actually reads.
+    expect(screen.getByTestId("git-status-bar").textContent)
+      .toContain("main · 2 changes");
+  });
+
+  // Regression: the bar used to be `uppercase`, which mangled the branch
+  // name (`feature/Foo_Bar` → `FEATURE/FOO_BAR`) and made it impossible
+  // to eyeball-match against `git branch` output. The ref AND its meta
+  // suffix must both stay normal case.
+  it("renders the branch name and meta in original case (no uppercase)", () => {
+    setEntry({
+      data: {
+        isRepo: true,
+        branch: "feature/Foo_Bar",
+        error: null,
+        truncated: false,
+        changes: [{}],
+      },
+      loading: false,
+    });
+    render(<GitStatusBar agentId="a1" workspaceId="ws1" />);
+    const bar = screen.getByTestId("git-status-bar");
+    expect(bar.textContent).toContain("feature/Foo_Bar · 1 changes");
+    expect(bar.textContent).not.toMatch(/FEATURE|CHANGES/);
+    // Nothing in the strip may re-introduce the uppercase transform.
+    expect(bar.className).not.toContain("uppercase");
   });
 
   it("shows `N changes` when the repo has no branch name", () => {
@@ -376,7 +402,8 @@ describe("GitStatusBar", () => {
       loading: false,
     };
     render(<GitStatusBar agentId="a1" workspaceId="ws1" />);
-    expect(screen.getByText("abc1234 add feature · 2 changes")).toBeTruthy();
+    expect(screen.getByTestId("git-status-bar").textContent)
+      .toContain("abc1234 add feature · 2 changes");
   });
 
   // ── History dropdown placement ──────────────────────────────────────
