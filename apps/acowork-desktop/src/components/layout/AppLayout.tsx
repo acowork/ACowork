@@ -62,6 +62,9 @@ import { AlertTriangle, Bot, Check, Cpu, RefreshCw } from "lucide-react";
 import { ChunkLoadBoundary } from "../common/ErrorBoundary";
 import { CAPSULE_PANE_CN } from "../common/capsule";
 import { log } from "../../lib/logger";
+// Pane floors and the overflow ladder live in panelClamp.ts so the drag
+// ceiling, the effect below and the tests all rank the same numbers.
+import { CHROME_WIDTH, MIN_CHAT_WIDTH, MIN_FILE_WIDTH, MIN_RIGHT_WIDTH, fitPanesToViewport } from "./panelClamp";
 
 /** Settings tab type — keep in sync with SettingsPage */
 type SettingsTab = "gateway" | "appearance" | "general" | "profile";
@@ -71,16 +74,13 @@ const MAX_SIDEBAR_WIDTH = 400;
 const DEFAULT_SIDEBAR_WIDTH = 240;
 const SIDEBAR_WIDTH_KEY = "acowork-sidebar-width";
 
-const MIN_RIGHT_WIDTH = 200;
 const MAX_RIGHT_WIDTH = 600;
 const DEFAULT_RIGHT_WIDTH = 340;
 const RIGHT_WIDTH_KEY = "acowork-right-width";
 
-const MIN_FILE_WIDTH = 200;
 const MAX_FILE_WIDTH = 900;
 const DEFAULT_FILE_WIDTH = 450;
 const FILE_WIDTH_KEY = "acowork-file-width";
-const MIN_CHAT_WIDTH = 288;
 
 export function AppLayout() {
   // Editor panel load failures stay local: a failed dynamic import used to
@@ -194,9 +194,7 @@ export function AppLayout() {
   useEffect(() => {
     if (hasOpenFiles && !fileWidthInitialized.current) {
       fileWidthInitialized.current = true;
-      const navWidth = 48;
-      const actualRightWidth = rightPanelCollapsed ? 0 : rightWidth;
-      const available = window.innerWidth - sidebarWidth - actualRightWidth - navWidth;
+      const available = window.innerWidth - CHROME_WIDTH - sidebarWidth - (rightPanelCollapsed ? 0 : rightWidth);
       const halfWidth = Math.min(Math.max(Math.round(available / 2), MIN_FILE_WIDTH), MAX_FILE_WIDTH);
       // Always recalculate on first open to respect current window size,
       // preventing the stored width from obscuring the session panel
@@ -287,6 +285,11 @@ export function AppLayout() {
   const agents = useAgentStore((s) => s.agents);
   const selectedAgent = selectedAgentId ? (agents[selectedAgentId]?.meta ?? null) : null;
   const isDebugMode = selectedAgent?.debug_state === "enabled" && selectedAgent?.alive;
+  // Width the right panel actually occupies in the chat-view row. Mirrors the
+  // render condition on `<RightPanel>` below (`!rightPanelCollapsed &&
+  // selectedAgentId`) — counting it while it is not mounted would clamp the
+  // file pane against ~340px that nothing is using.
+  const rightPaneWidth = !rightPanelCollapsed && selectedAgentId ? rightWidth : 0;
   // Middle-panel routing: agent session wins; otherwise an open inbox thread
   // takes the pane. An explicit empty state at the bottom handles "neither".
   const activePeerId = useUserChatStore((s) => s.activePeerId);
@@ -794,6 +797,25 @@ export function AppLayout() {
     return () => window.removeEventListener("resize", handleWindowResize);
   }, []);
 
+  // Absorb chat-view overflow. ChatPanel (`flex-1`) takes the first wave of
+  // pressure by itself; once it is pinned at MIN_CHAT_WIDTH every pane in the
+  // row is `shrink-0`, so opening the right panel used to add `rightWidth`
+  // pixels that nothing gave back and the row overflowed the window instead of
+  // re-flowing. `fitPanesToViewport` decides who pays: file pane first, then
+  // the right pane, never the agent list (see panelClamp.ts for why width is
+  // the wrong thing to rank by).
+  //
+  // Not written to localStorage on purpose — the stored value stays whatever
+  // the user dragged to, so a restart with the right panel collapsed gets the
+  // maxed file pane back. The clamp is idempotent, so each state write below
+  // converges rather than oscillating.
+  useEffect(() => {
+    if (!hasOpenFiles || !windowWidth) return;
+    const fit = fitPanesToViewport({ windowWidth, sidebarWidth, fileWidth, rightWidth: rightPaneWidth });
+    if (fit.fileWidth !== fileWidth) setFileWidth(fit.fileWidth);
+    if (fit.rightWidth !== rightPaneWidth) setRightWidth(fit.rightWidth);
+  }, [windowWidth, sidebarWidth, fileWidth, rightPaneWidth, hasOpenFiles]);
+
   const toggleRightPanel = useCallback(() => {
     setRightPanelCollapsed((prev) => !prev);
   }, []);
@@ -934,14 +956,15 @@ export function AppLayout() {
     startXFile.current = e.clientX;
     startWidthFile.current = fileWidth;
     currentWidthRefFile.current = fileWidth;
-    // Calculate dynamic max to ensure ChatPanel retains enough width for the collapsed toolbar
-    const navWidth = 48;
-    const actualRightWidth = rightPanelCollapsed ? 0 : rightWidth;
-    const dynamicMax = Math.max(window.innerWidth - sidebarWidth - actualRightWidth - navWidth - MIN_CHAT_WIDTH, MIN_FILE_WIDTH);
+    // Ceiling for the drag: everything left after the rigid panes and the
+    // ChatPanel minimum. Uses the same CHROME_WIDTH as the overflow clamp
+    // below — it used to subtract only the 48px nav bar, which let a drag
+    // grow the file pane past the 40px right rail and overflow the row.
+    const dynamicMax = Math.max(windowWidth - CHROME_WIDTH - sidebarWidth - rightPaneWidth - MIN_CHAT_WIDTH, MIN_FILE_WIDTH);
     maxFileWidthRef.current = Math.min(MAX_FILE_WIDTH, dynamicMax);
     document.addEventListener("mousemove", handleMouseMoveFile);
     document.addEventListener("mouseup", handleMouseUpFile);
-  }, [handleMouseMoveFile, handleMouseUpFile, fileWidth, sidebarWidth, rightWidth, rightPanelCollapsed]);
+  }, [handleMouseMoveFile, handleMouseUpFile, fileWidth, sidebarWidth, rightPaneWidth, windowWidth]);
 
   // ── ADR-081: global search shortcut (Ctrl/Cmd+Shift+F) ──────────────
   // Window-level handler so the dialog opens regardless of focus; while the
