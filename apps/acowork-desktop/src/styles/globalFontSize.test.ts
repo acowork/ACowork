@@ -23,7 +23,7 @@
  *   the declaration text IS the spec — same approach as
  *   capsule.test.tsx.
  */
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -55,14 +55,50 @@ describe("global font size scales the whole app", () => {
   });
 
   it("expresses every --text-* token as an em ratio", () => {
-    const tokens = ["xs", "sm", "base", "lg", "xl"];
+    // `9/10/11` join `xs…xl` here: the dense card-title / list-meta sizes
+    // used to be arbitrary px (`text-[11px]` & co, ~430 call sites),
+    // which is precisely the class of value this knob cannot reach —
+    // the symptom being "card titles don't follow the global font size".
+    // They must stay named tokens or that regression comes straight back.
+    const tokens = ["9", "10", "11", "xs", "sm", "base", "lg", "xl"];
     for (const t of tokens) {
       const m = css.match(new RegExp(`--text-${t}:\\s*([^;]+);`));
       expect(m, `--text-${t} is not declared`).not.toBeNull();
-      // `em` keeps the 12/14/16/18/20 ratio intact under any base size.
+      // `em` keeps the ratio intact under any base size.
       // `rem` would freeze the scale AND drag every rem-based offset
       // with it, so the failure mode is layout drift, not just no-op.
       expect(m![1].trim(), `--text-${t} must be em, not rem`).toMatch(/em$/);
+    }
+  });
+
+  // The micro steps must be declared in @theme, not only in :root.
+  // Tailwind v4 generates a `text-*` utility from a @theme token; a
+  // :root-only custom property resolves in CSS but emits no class, so
+  // every `text-11` in the tree would silently fall back to the
+  // inherited size — the bug, wearing a different hat.
+  it("declares the micro steps in @theme so Tailwind emits the utility", () => {
+    const theme = css.slice(css.indexOf("@theme {"), css.indexOf(":root {"));
+    for (const t of ["9", "10", "11"]) {
+      expect(theme, `--text-${t} is not in @theme`).toContain(`--text-${t}:`);
+    }
+  });
+
+  it("scales the card-column caps with the font size", () => {
+    // `max-w-lg` / `max-w-2xl` (harness, settings, the right-panel
+    // tabs) resolve to `var(--container-lg)` / `var(--container-2xl)`.
+    // Tailwind ships those as frozen `32rem` / `42rem`, so a larger font
+    // left the column at 512px and every card wrapped into a tall stack.
+    for (const t of ["lg", "2xl"]) {
+      const m = css.match(new RegExp(`--container-${t}:\\s*([^;]+);`));
+      expect(m, `--container-${t} is not declared`).not.toBeNull();
+      // Must reference the knob. A bare rem value here is the bug.
+      expect(m![1], `--container-${t} must track --ui-font-size`).toContain(
+        "--ui-font-size",
+      );
+      // And must NOT be `em`: this is a length, not a font step, so it
+      // has to resolve against the global knob rather than whatever
+      // font-size it happens to inherit.
+      expect(m![1].trim(), `--container-${t} must not be em`).not.toMatch(/em$/);
     }
   });
 
@@ -76,6 +112,39 @@ describe("global font size scales the whole app", () => {
       "utf8",
     );
     expect(nav).toContain("h-6 w-6");
-    expect(nav).not.toMatch(/className="[^"]*text-(xs|sm|base|lg|xl)[^"]*"/);
+    expect(nav).not.toMatch(/className="[^"]*text-(9|10|11|xs|sm|base|lg|xl)[^"]*"/);
+  });
+
+  // The regression that produced all three of the original reports: a
+  // `text-[Npx]` class is invisible to this setting. Scanning the tree
+  // is the only way to catch it — nothing fails at build time, the text
+  // just quietly stops following the knob.
+  //
+  // `text-[8px]` is the one sanctioned exception, and it is allow-listed
+  // by value: both of its uses are fixed 16px badge boxes where a
+  // growing glyph would overflow the box. A NEW arbitrary px size fails
+  // this test even though 8px does not, so the exception cannot spread.
+  it("has no arbitrary px font sizes outside the 8px badge allow-list", () => {
+    const offenders: string[] = [];
+    const walk = (dir: string) => {
+      for (const e of readdirSync(dir, { withFileTypes: true })) {
+        const p = resolve(dir, e.name);
+        if (e.isDirectory()) {
+          walk(p);
+        } else if (/\.tsx?$/.test(e.name) && !/\.test\.tsx?$/.test(e.name)) {
+          const src = readFileSync(p, "utf8");
+          for (const m of src.matchAll(/text-\[(\d+(?:\.\d+)?)px\]/g)) {
+            if (m[1] !== "8") {
+              offenders.push(`${p.slice(process.cwd().length + 1)}: text-[${m[1]}px]`);
+            }
+          }
+        }
+      }
+    };
+    walk(resolve(__dirname, "..", "components"));
+    expect(
+      offenders,
+      "arbitrary px font sizes ignore --ui-font-size; use a --text-* token",
+    ).toEqual([]);
   });
 });

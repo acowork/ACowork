@@ -299,7 +299,7 @@ export const UserList = forwardRef<UserListHandle>(function UserList(_props, ref
           data-testid="user-group-header"
           className={cn(
             "flex h-6 min-w-0 flex-1 items-center gap-1.5 px-3 text-left",
-            "text-[10px] font-medium uppercase tracking-wide text-text-tertiary",
+            "text-10 font-medium uppercase tracking-wide text-text-tertiary",
             "transition-colors duration-150 hover:text-zinc-600 dark:hover:text-zinc-300",
           )}
         >
@@ -310,14 +310,14 @@ export const UserList = forwardRef<UserListHandle>(function UserList(_props, ref
             )}
           />
           <span className="truncate">{t("userList.title")}</span>
-          <span className="ml-auto text-[10px] font-normal opacity-60">{rows.length}</span>
+          <span className="ml-auto text-10 font-normal opacity-60">{rows.length}</span>
         </button>
       </div>
 
       {!collapsed && (
         <>
           {viewingName && (
-            <div className="flex items-center gap-1 px-3 py-1 text-[10px] text-text-tertiary">
+            <div className="flex items-center gap-1 px-3 py-1 text-10 text-text-tertiary">
               <span className="truncate">{t("userList.viewingAs", { name: viewingName })}</span>
               <button
                 type="button"
@@ -332,7 +332,7 @@ export const UserList = forwardRef<UserListHandle>(function UserList(_props, ref
           )}
 
           {actionError && (
-            <div role="alert" className="px-3 py-1 text-[10px] text-red-500">
+            <div role="alert" className="px-3 py-1 text-10 text-red-500">
               {actionError}
             </div>
           )}
@@ -350,7 +350,7 @@ export const UserList = forwardRef<UserListHandle>(function UserList(_props, ref
           ))}
 
           {rows.length === 0 && (
-            <div className="px-3 py-2 text-[11px] text-text-tertiary">
+            <div className="px-3 py-2 text-11 text-text-tertiary">
               {loadFailed ? t("userList.loadFailed") : t("userList.empty")}
             </div>
           )}
@@ -514,7 +514,7 @@ function UserRow({
           {unread > 0 && (
             <span
               className={cn(
-                "shrink-0 rounded-full px-1.5 text-[10px] font-medium",
+                "shrink-0 rounded-full px-1.5 text-10 font-medium",
                 active ? "bg-white/20 text-white" : "bg-[var(--color-accent)] text-white",
               )}
             >
@@ -525,7 +525,7 @@ function UserRow({
         <div className="flex items-center gap-1.5">
           <span
             className={cn(
-              "truncate text-[11px]",
+              "truncate text-11",
               active ? "text-white/80" : "text-text-tertiary",
             )}
           >
@@ -534,7 +534,7 @@ function UserRow({
           {isAdmin && account.role === "admin" && (
             <span
               className={cn(
-                "shrink-0 rounded px-1 text-[9px] font-medium uppercase tracking-wide",
+                "shrink-0 rounded px-1 text-9 font-medium uppercase tracking-wide",
                 active ? "bg-white/20 text-white" : "bg-nav-item-hover text-text-tertiary",
               )}
             >

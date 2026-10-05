@@ -372,7 +372,7 @@ export function ProviderPicker({ providers, keys, onConnect, onAddCustom, onCata
                 {/* Status pip — shows success counts, live progress, or error
                     text inline next to the search box. Idle state is silent. */}
                 {refreshStatus.kind === "loading" && (
-                  <span className="flex items-center gap-1.5 text-[10px] text-text-tertiary" data-testid="refresh-catalog-progress">
+                  <span className="flex items-center gap-1.5 text-10 text-text-tertiary" data-testid="refresh-catalog-progress">
                     {refreshStatus.total != null ? (
                       <>
                         <span className="tabular-nums">
@@ -393,12 +393,12 @@ export function ProviderPicker({ providers, keys, onConnect, onAddCustom, onCata
                   </span>
                 )}
                 {refreshStatus.kind === "ok" && (
-                  <span className="text-[10px] text-emerald-600 dark:text-emerald-400">
+                  <span className="text-10 text-emerald-600 dark:text-emerald-400">
                     {t("harness.refreshCatalogSuccess", { providers: refreshStatus.providers, models: refreshStatus.models })}
                   </span>
                 )}
                 {refreshStatus.kind === "error" && (
-                  <span className="max-w-[180px] truncate text-[10px] text-red-600 dark:text-red-400">
+                  <span className="max-w-[180px] truncate text-10 text-red-600 dark:text-red-400">
                     {refreshStatus.message}
                   </span>
                 )}
@@ -446,7 +446,7 @@ export function ProviderPicker({ providers, keys, onConnect, onAddCustom, onCata
                       >
                         <span className="block truncate text-xs font-medium text-text-secondary ">{providerName}</span>
                         {modelCount != null && (
-                          <span className="mt-0.5 block text-[10px] text-text-tertiary">{t("harness.modelsAvailable", { count: modelCount })}</span>
+                          <span className="mt-0.5 block text-10 text-text-tertiary">{t("harness.modelsAvailable", { count: modelCount })}</span>
                         )}
                       </ListRow>
                     );

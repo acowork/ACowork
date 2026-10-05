@@ -118,7 +118,7 @@ const ROLE_BADGE_CLASSES: Record<string, string> = {
 function MessagesView({ content }: { content?: string }) {
   if (!content) {
     return (
-      <div className="flex items-center gap-1.5 text-[10px] text-text-tertiary">
+      <div className="flex items-center gap-1.5 text-10 text-text-tertiary">
         <Loader className="h-2.5 w-2.5 animate-spin" />
         Loading messages...
       </div>
@@ -131,7 +131,7 @@ function MessagesView({ content }: { content?: string }) {
   } catch {
     // Not valid JSON — fall back to plain text (e.g. error payload).
     return (
-      <pre className="max-h-64 overflow-y-auto whitespace-pre-wrap text-[10px] leading-relaxed text-text-secondary ">
+      <pre className="max-h-64 overflow-y-auto whitespace-pre-wrap text-10 leading-relaxed text-text-secondary ">
         {content.slice(0, 4000)}
         {content.length > 4000 && <span className="text-text-tertiary">... (truncated)</span>}
       </pre>
@@ -140,7 +140,7 @@ function MessagesView({ content }: { content?: string }) {
   return (
     <div className="max-h-64 space-y-1 overflow-y-auto pr-1">
       {messages.length === 0 && (
-        <div className="text-[10px] text-text-tertiary">(empty conversation)</div>
+        <div className="text-10 text-text-tertiary">(empty conversation)</div>
       )}
       {messages.map((m, i) => {
         const role = m.role ?? "unknown";
@@ -149,7 +149,7 @@ function MessagesView({ content }: { content?: string }) {
             key={i}
             className="rounded border-[0.5px] border-zinc-300 bg-zinc-50 px-1.5 py-0.5 dark:border-zinc-600 dark:bg-zinc-800/60"
           >
-            <div className="flex flex-wrap items-center gap-1.5 text-[9px]">
+            <div className="flex flex-wrap items-center gap-1.5 text-9">
               <span
                 className={cn(
                   "rounded px-1 py-px font-medium uppercase",
@@ -162,22 +162,22 @@ function MessagesView({ content }: { content?: string }) {
               <span className="ml-auto font-mono text-text-tertiary">#{i}</span>
             </div>
             {m.reasoning_content && (
-              <details className="text-[9px] text-text-tertiary">
+              <details className="text-9 text-text-tertiary">
                 <summary className="cursor-pointer">reasoning_content</summary>
-                <pre className="mt-0.5 whitespace-pre-wrap text-[10px] text-text-tertiary ">
+                <pre className="mt-0.5 whitespace-pre-wrap text-10 text-text-tertiary ">
                   {m.reasoning_content}
                 </pre>
               </details>
             )}
-            <pre className="whitespace-pre-wrap text-[10px] leading-snug text-text-secondary ">
+            <pre className="whitespace-pre-wrap text-10 leading-snug text-text-secondary ">
               {m.content ?? ""}
             </pre>
             {m.tool_calls && m.tool_calls.length > 0 && (
-              <details className="text-[9px] text-text-tertiary">
+              <details className="text-9 text-text-tertiary">
                 <summary className="cursor-pointer">
                   tool_calls ({m.tool_calls.length})
                 </summary>
-                <pre className="mt-0.5 overflow-x-auto whitespace-pre-wrap text-[10px] text-text-tertiary ">
+                <pre className="mt-0.5 overflow-x-auto whitespace-pre-wrap text-10 text-text-tertiary ">
                   {JSON.stringify(m.tool_calls, null, 2).slice(0, 2000)}
                 </pre>
               </details>
@@ -361,7 +361,7 @@ export function SnapshotNode({
           </span>
         }
         meta={
-          <span className="text-[10px] text-text-tertiary ">
+          <span className="text-10 text-text-tertiary ">
             ~{displayTotalTokens.toLocaleString()} tok
           </span>
         }
@@ -394,7 +394,7 @@ export function SnapshotNode({
           if (rp?.thinking_mode) items.push(`thinking: ${rp.thinking_mode}`);
           if (items.length === 0) return null;
           return (
-            <div className="mx-2 mt-1 overflow-x-auto rounded border-[0.5px] border-zinc-200 bg-zinc-100/60 px-2 py-1 font-mono text-[10px] text-text-tertiary dark:border-zinc-700 dark:bg-zinc-800/40 ">
+            <div className="mx-2 mt-1 overflow-x-auto rounded border-[0.5px] border-zinc-200 bg-zinc-100/60 px-2 py-1 font-mono text-10 text-text-tertiary dark:border-zinc-700 dark:bg-zinc-800/40 ">
               {items.map((item) => (
                 <div key={item} className="whitespace-nowrap leading-4">
                   {item}
@@ -434,10 +434,10 @@ export function SnapshotNode({
                     ) : (
                       <ChevronRight className="h-2.5 w-2.5 shrink-0 text-text-tertiary " />
                     )}
-                    <span className="text-[11px] text-text-tertiary ">
+                    <span className="text-11 text-text-tertiary ">
                       {SECTION_LABELS[sectionKey] ?? sectionKey}
                     </span>
-                    <span className="ml-auto text-[10px] text-text-tertiary ">
+                    <span className="ml-auto text-10 text-text-tertiary ">
                       {formatBytes(section.size_bytes)} / ~{(usingRealAnchor ? (realTokenBySection[section.key] ?? section.token_estimate) : section.token_estimate).toLocaleString()} tok
                     </span>
                   </button>
@@ -482,20 +482,20 @@ export function SnapshotNode({
                         <textarea
                           value={editingSection.current}
                           onChange={(e) => onEditChange(e.target.value)}
-                          className="max-h-48 min-h-40 w-full resize-y rounded border-[0.5px] border-[var(--color-accent)]/30 bg-panel-block px-2 py-1 font-mono text-[10px] leading-relaxed text-text-secondary outline-none dark:border-[var(--color-accent)]/50 "
+                          className="max-h-48 min-h-40 w-full resize-y rounded border-[0.5px] border-[var(--color-accent)]/30 bg-panel-block px-2 py-1 font-mono text-10 leading-relaxed text-text-secondary outline-none dark:border-[var(--color-accent)]/50 "
                           autoFocus
                         />
                         <div className="flex items-center gap-1">
                           <button
                             onClick={() => onSaveEdit(sectionKey, editingSection.current)}
-                            className="flex items-center gap-0.5 rounded bg-[var(--color-accent)] px-2 py-0.5 text-[10px] text-white transition-opacity hover:opacity-90"
+                            className="flex items-center gap-0.5 rounded bg-[var(--color-accent)] px-2 py-0.5 text-10 text-white transition-opacity hover:opacity-90"
                           >
                             <Check className="h-2.5 w-2.5" />
                             Apply
                           </button>
                           <button
                             onClick={onCancelEdit}
-                            className="flex items-center gap-0.5 rounded px-2 py-0.5 text-[10px] text-text-tertiary transition-colors hover:bg-zinc-200  dark:hover:bg-zinc-700"
+                            className="flex items-center gap-0.5 rounded px-2 py-0.5 text-10 text-text-tertiary transition-colors hover:bg-zinc-200  dark:hover:bg-zinc-700"
                           >
                             <X className="h-2.5 w-2.5" />
                             Cancel
@@ -503,7 +503,7 @@ export function SnapshotNode({
                           <Tooltip content={t("debugPanel.copyContent")} variant="plain">
                             <button
                               onClick={() => handleCopy(editingSection.current)}
-                              className="ml-auto flex items-center gap-0.5 rounded px-2 py-0.5 text-[10px] text-text-tertiary transition-colors hover:bg-zinc-200  dark:hover:bg-zinc-700"
+                              className="ml-auto flex items-center gap-0.5 rounded px-2 py-0.5 text-10 text-text-tertiary transition-colors hover:bg-zinc-200  dark:hover:bg-zinc-700"
                             >
                             {copied ? (
                               <>
@@ -522,11 +522,11 @@ export function SnapshotNode({
                       </div>
                     ) : cachedContent ? (
                       <>
-                        <div className="mb-1 flex items-center gap-2 text-[10px] text-text-tertiary">
+                        <div className="mb-1 flex items-center gap-2 text-10 text-text-tertiary">
                           <span>{cachedContent.token_count} tokens</span>
                           <span className="font-mono">{cachedContent.hash.slice(0, 8)}</span>
                         </div>
-                        <pre className="max-h-32 overflow-y-auto whitespace-pre-wrap text-[10px] leading-relaxed text-text-secondary ">
+                        <pre className="max-h-32 overflow-y-auto whitespace-pre-wrap text-10 leading-relaxed text-text-secondary ">
                           {cachedContent.content.slice(0, 2000)}
                           {cachedContent.content.length > 2000 && (
                             <span className="text-text-tertiary">... (truncated)</span>
@@ -534,7 +534,7 @@ export function SnapshotNode({
                         </pre>
                       </>
                     ) : (
-                      <div className="flex items-center gap-1.5 text-[10px] text-text-tertiary">
+                      <div className="flex items-center gap-1.5 text-10 text-text-tertiary">
                         <Loader className="h-2.5 w-2.5 animate-spin" />
                         Loading section...
                       </div>

@@ -834,7 +834,7 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
                         )}
                         {tab === "file" && !query.trim() && <RowInfo>{t("globalSearch.fileEmptyHint")}</RowInfo>}
                         {tab === "file" && fileTotal > 0 && !loading && (
-                            <div className="px-3 pt-1 text-[11px] text-text-tertiary">
+                            <div className="px-3 pt-1 text-11 text-text-tertiary">
                                 {t("globalSearch.matchCount", { total: fileTotal, shown: hits.length })}
                             </div>
                         )}
@@ -907,7 +907,7 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
                                         <div className="truncate font-medium">
                                             <Highlight text={h.title} query={query} />
                                         </div>
-                                        <div className="flex items-center gap-2 truncate text-[11px] text-text-tertiary">
+                                        <div className="flex items-center gap-2 truncate text-11 text-text-tertiary">
                                             <span className="truncate">
                                                 <Highlight text={localizeSub(h, t)} query={query} />
                                             </span>
@@ -1024,7 +1024,7 @@ function ToggleBtn({
             title={title}
             onMouseDown={(e) => e.preventDefault()}
             onClick={onClick}
-            className={`flex h-6 min-w-[1.5rem] items-center justify-center rounded px-1.5 text-[11px] font-medium transition-colors ${
+            className={`flex h-6 min-w-[1.5rem] items-center justify-center rounded px-1.5 text-11 font-medium transition-colors ${
                 active
                     ? "bg-[var(--color-accent)]/20 text-[var(--color-accent)]"
                     : "text-text-tertiary hover:bg-zinc-100 dark:hover:bg-zinc-700/50"

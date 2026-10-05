@@ -23,6 +23,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 
 const OLD_URL = "http://192.168.1.10:19876";
 const CANDIDATE_URL = "http://192.168.3.10:19876";
+const RELAY_URL = "https://c8cb2bed-ffd4-4821-a913-718618482157.relay.acowork.ai";
 // Must match CANDIDATE_FALLBACK_MS in SplashScreen.tsx
 const CANDIDATE_FALLBACK_MS = 5_000;
 const MAX_WAIT_MS = 30_000;
@@ -49,6 +50,16 @@ function allPushedGatewayUrls(): string[] {
             const payload = c[1] as { config?: { url?: string } } | undefined;
             return payload?.config?.url ?? "";
         });
+}
+
+/** The full config (mode + url) of the LAST set_gateway_config push. */
+function lastPushedGatewayConfig(): { mode?: string; url?: string } | undefined {
+    const calls = invokeMock.mock.calls.filter((c) => c[0] === "set_gateway_config");
+    if (calls.length === 0) return undefined;
+    const payload = calls[calls.length - 1][1] as
+        | { config?: { mode?: string; url?: string } }
+        | undefined;
+    return payload?.config;
 }
 
 describe("SplashScreen 5s candidate chooser", () => {
@@ -223,5 +234,51 @@ describe("SplashScreen 5s candidate chooser", () => {
         expect(pushedUrls).not.toContain(OLD_URL);
         // And the final config push lands on the picked host.
         expect(lastPushedGatewayUrl()).toBe(CANDIDATE_URL);
+    });
+
+    /**
+     * Regression for the relay+http outage: booting in relay mode, the 5s
+     * fallback probe surfaced a reachable LAN candidate (http). The old
+     * `onPick` persisted the URL but left the mode at `relay` — Rust's
+     * `relay_mqtt_wss_url` only accepts `https://` device domains, so
+     * every `connect_mqtt` was rejected forever while HTTP health probes
+     * still answered (the connection looked "alive" but chat was dead).
+     * Picking must now flip the mode to `remote` in the same step, and
+     * the FINAL `set_gateway_config` push must be the legal (remote,
+     * candidate-url) combo.
+     */
+    it("picking an http candidate while in relay mode flips the mode to remote", async () => {
+        useSettingsStore.setState({
+            gatewayMode: "relay",
+            gatewayUrl: RELAY_URL,
+            gatewayUrlHistory: [RELAY_URL, CANDIDATE_URL],
+        });
+        render(<SplashScreen onReady={vi.fn()} />);
+        await flushMicrotasks();
+
+        // Advance to the 5s fallback so the candidate chooser appears.
+        await act(async () => {
+            vi.advanceTimersByTime(CANDIDATE_FALLBACK_MS + 100);
+        });
+        await flushMicrotasks();
+
+        const candidates = useGatewayStore.getState().candidates;
+        expect(candidates.length).toBeGreaterThan(0);
+        expect(candidates[0].url).toBe(CANDIDATE_URL);
+
+        // Reset the call log so we only inspect what happens from the
+        // click onward.
+        invokeMock.mockClear();
+
+        const pickBtn = screen.getByRole("button", { name: new RegExp(CANDIDATE_URL) });
+        fireEvent.click(pickBtn);
+        await flushMicrotasks();
+
+        // Mode flipped to remote in the same step as the URL pick.
+        expect(useSettingsStore.getState().gatewayMode).toBe("remote");
+        expect(useSettingsStore.getState().gatewayUrl).toBe(CANDIDATE_URL);
+        // The final config push is the legal (remote, http-lan) combo —
+        // never relay+http, which Rust would reject forever.
+        expect(lastPushedGatewayConfig()).toEqual({ mode: "remote", url: CANDIDATE_URL });
     });
 });

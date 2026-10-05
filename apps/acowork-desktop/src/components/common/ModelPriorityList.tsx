@@ -88,14 +88,14 @@ export function ModelPriorityList({
   return (
     <div className={cn("flex flex-col gap-1", className)}>
       {items.length === 0 && (
-        <span className="text-[10px] text-text-tertiary">
+        <span className="text-10 text-text-tertiary">
           {t("common.modelList.empty")}
         </span>
       )}
       {items.map((ref, i) => (
         <div
           key={refKey(ref)}
-          className="flex items-center gap-1.5 rounded border border-border-divider bg-panel px-2 py-1 text-[11px]"
+          className="flex items-center gap-1.5 rounded border border-border-divider bg-panel px-2 py-1 text-11"
         >
           <span className="w-4 shrink-0 text-center text-text-tertiary tabular-nums">
             {i + 1}

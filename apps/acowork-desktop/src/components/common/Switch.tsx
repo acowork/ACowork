@@ -121,7 +121,7 @@ export const Switch = forwardRef<HTMLInputElement, SwitchProps>(function Switch(
       )}
     >
       {labelOnLeft && hasLabel && (
-        <span className="flex-1 text-[10px] font-medium text-text-tertiary ">
+        <span className="flex-1 text-10 font-medium text-text-tertiary ">
           {label}
         </span>
       )}
@@ -171,7 +171,7 @@ export const Switch = forwardRef<HTMLInputElement, SwitchProps>(function Switch(
         />
       </span>
       {!labelOnLeft && hasLabel && (
-        <span className="text-[10px] font-medium text-text-tertiary ">
+        <span className="text-10 font-medium text-text-tertiary ">
           {label}
         </span>
       )}

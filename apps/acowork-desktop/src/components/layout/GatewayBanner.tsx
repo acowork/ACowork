@@ -117,7 +117,7 @@ export function GatewayBanner() {
               `mx-auto` slides the whole cluster (prefix + pills) into
               the middle of the banner. */}
           <div className="mx-auto flex shrink-0 items-center gap-1.5">
-            <span className="shrink-0 text-[11px] text-amber-700/80 dark:text-amber-300/80">
+            <span className="shrink-0 text-11 text-amber-700/80 dark:text-amber-300/80">
               {t("splashScreen.candidateDetected")}
             </span>
             {candidates.map((c) => (
@@ -125,10 +125,10 @@ export function GatewayBanner() {
                 key={c.url}
                 onClick={() => pickCandidate(c.url)}
                 title={c.url}
-                className="group inline-flex shrink-0 items-center gap-1.5 rounded-full border border-amber-300/80 bg-white/70 px-2.5 py-0.5 font-mono text-[11px] text-amber-900 transition-colors hover:border-amber-400 hover:bg-white dark:border-amber-700/80 dark:bg-zinc-900/40 dark:text-amber-100 dark:hover:border-amber-600 dark:hover:bg-zinc-900"
+                className="group inline-flex shrink-0 items-center gap-1.5 rounded-full border border-amber-300/80 bg-white/70 px-2.5 py-0.5 font-mono text-11 text-amber-900 transition-colors hover:border-amber-400 hover:bg-white dark:border-amber-700/80 dark:bg-zinc-900/40 dark:text-amber-100 dark:hover:border-amber-600 dark:hover:bg-zinc-900"
               >
                 <span className="max-w-[14rem] truncate">{c.url}</span>
-                <span className="text-[10px] opacity-60 group-hover:opacity-100">
+                <span className="text-10 opacity-60 group-hover:opacity-100">
                   {Math.round(c.latencyMs)}ms
                 </span>
               </button>

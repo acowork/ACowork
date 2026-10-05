@@ -158,7 +158,7 @@ export function DocTreeSidebar({ width }: { width?: number }) {
       {/* ── 底部：回收站 + 离线提示 ─────────────────────────── */}
       <div className="border-t border-border-divider p-1">
         {healthy === false && (
-          <div className="mb-1 rounded-md bg-amber-50 px-2 py-1 text-[11px] text-amber-700 dark:bg-amber-900/30 dark:text-amber-300">
+          <div className="mb-1 rounded-md bg-amber-50 px-2 py-1 text-11 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300">
             {t("doc.offlineHint")}
           </div>
         )}
@@ -281,7 +281,7 @@ function DirContents({
       return (
         <div className="flex items-center gap-1 px-2 py-1 text-text-tertiary" style={{ paddingLeft: depth * 14 + 8 }}>
           <Loader2 className="h-3 w-3 animate-spin" aria-hidden />
-          <span className="text-[11px]">…</span>
+          <span className="text-11">…</span>
         </div>
       );
     }
@@ -436,7 +436,7 @@ function DirRow({
               行高比 pm/harness/settings 密一档，字重保持同档才不会显轻。 */}
           <span className="truncate font-medium">{dir.name}</span>
           {isOpen && childCount > 0 && (
-            <span className="ml-0.5 text-[10px] text-text-secondary ">{childCount}</span>
+            <span className="ml-0.5 text-10 text-text-secondary ">{childCount}</span>
           )}
         </span>
         <span className="hidden shrink-0 items-center gap-0 group-hover:flex group-focus-within:flex">

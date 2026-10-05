@@ -253,7 +253,7 @@ export function RemoteFolderPicker({ onSelect, onCancel, target }: RemoteFolderP
                     ) : null}
                     <span className="truncate min-w-0 flex-1">{entry.name}</span>
                     {!isDir && entry.size != null && (
-                        <span className="text-[10px] text-text-tertiary shrink-0">
+                        <span className="text-10 text-text-tertiary shrink-0">
                             {entry.size < 1024 ? `${entry.size} B`
                                 : entry.size < 1024 * 1024 ? `${(entry.size / 1024).toFixed(1)} KB`
                                     : `${(entry.size / (1024 * 1024)).toFixed(1)} MB`}
@@ -279,7 +279,7 @@ export function RemoteFolderPicker({ onSelect, onCancel, target }: RemoteFolderP
 
                 {/* Breadcrumb navigation */}
                 {breadcrumbs.length > 0 && (
-                    <div className="flex items-center gap-1 px-4 py-2 border-b border-border-divider overflow-x-auto text-[10px]">
+                    <div className="flex items-center gap-1 px-4 py-2 border-b border-border-divider overflow-x-auto text-10">
                         <button
                             onClick={() => void navigateTo("")}
                             className="flex items-center gap-0.5 text-text-tertiary hover:text-zinc-600 dark:hover:text-zinc-300"

@@ -302,11 +302,11 @@ function FilePreview({ hit, agentId, workspaceId }: { hit: FileHit; agentId: str
                 copyText={copyText}
             />
             {matchedOutOfRange && (
-                <div className="border-b border-border-divider px-4 py-1.5 text-[10px] text-text-tertiary">
+                <div className="border-b border-border-divider px-4 py-1.5 text-10 text-text-tertiary">
                     匹配行 {state.matchedLine} 已超出当前文件范围（{totalLines} 行），显示附近行
                 </div>
             )}
-            <pre className="m-0 min-h-0 flex-1 overflow-auto px-4 py-2 font-mono text-[11px] leading-relaxed">
+            <pre className="m-0 min-h-0 flex-1 overflow-auto px-4 py-2 font-mono text-11 leading-relaxed">
                 {Array.from({ length: end - start + 1 }, (_, i) => {
                     const n = start + i;
                     const isMatch = n === matchedClamped;
@@ -427,7 +427,7 @@ function ProjectPreview({ hit }: { hit: ProjectHit }) {
                     <p className="text-text-tertiary">（无描述）</p>
                 )}
                 {hit.taskId ? (
-                    <div className="mt-3 flex items-center gap-1 text-[11px] text-text-tertiary">
+                    <div className="mt-3 flex items-center gap-1 text-11 text-text-tertiary">
                         <ChevronRight className="h-3 w-3" />
                         <span>关联任务：{hit.taskId}</span>
                     </div>
@@ -510,7 +510,7 @@ function MemoryPreview({ hit, agentId }: { hit: MemoryHit; agentId: string }) {
             />
             <div className="min-h-0 flex-1 overflow-auto px-4 py-3 text-xs">
                 <p className="whitespace-pre-wrap text-text">{node.content}</p>
-                <dl className="mt-3 grid grid-cols-[5rem_1fr] gap-x-3 gap-y-1 text-[11px]">
+                <dl className="mt-3 grid grid-cols-[5rem_1fr] gap-x-3 gap-y-1 text-11">
                     <dt className="text-text-tertiary">status</dt>
                     <dd className="text-text-secondary">{node.status}</dd>
                     <dt className="text-text-tertiary">{confidenceLabel}</dt>
@@ -573,13 +573,13 @@ function PreviewHeader({
         <div className="flex shrink-0 items-center gap-2 border-b border-border-divider px-4 py-2">
             <Icon className="h-4 w-4 shrink-0 text-text-tertiary" />
             <span className="truncate text-xs font-medium text-text">{title}</span>
-            <span className="truncate font-mono text-[10px] text-text-tertiary">{sub}</span>
+            <span className="truncate font-mono text-10 text-text-tertiary">{sub}</span>
             {copyText !== undefined && (
                 <button
                     type="button"
                     onClick={handleCopy}
                     aria-label={t("common.copy")}
-                    className="ml-auto inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-text-tertiary transition-colors hover:bg-zinc-100 dark:hover:bg-zinc-700/50"
+                    className="ml-auto inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-11 text-text-tertiary transition-colors hover:bg-zinc-100 dark:hover:bg-zinc-700/50"
                 >
                     {copied ? (
                         <>
@@ -630,14 +630,14 @@ function PreviewEmpty({
             <PreviewHeader icon={Icon} title={title} sub={sub} copyText={copyText} />
             <div className="min-h-0 flex-1 overflow-auto px-4 py-3">
                 {snippet ? (
-                    <pre className="m-0 whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-text-secondary">
+                    <pre className="m-0 whitespace-pre-wrap font-mono text-11 leading-relaxed text-text-secondary">
                         {snippet}
                     </pre>
                 ) : (
                     <p className="text-xs text-text-tertiary">（无内容）</p>
                 )}
                 {footer ? (
-                    <p className="mt-3 text-[10px] text-text-tertiary">{footer}</p>
+                    <p className="mt-3 text-10 text-text-tertiary">{footer}</p>
                 ) : null}
             </div>
         </div>

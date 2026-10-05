@@ -130,7 +130,7 @@ export function TaskCard({ task, onOpenTask, className, depth = 0 }: TaskCardPro
           </span>
         </div>
 
-        <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[10px] text-text-tertiary ">
+        <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-10 text-text-tertiary ">
           <PriorityBadge priority={task.priority} />
 
           {task.is_blocked && (
@@ -173,7 +173,7 @@ export function TaskCard({ task, onOpenTask, className, depth = 0 }: TaskCardPro
         {needsReview && (
           <div className="mt-2 border-t border-amber-200/70 pt-1.5 dark:border-amber-800/40">
             {creatorName && (
-              <p className="mb-1.5 text-[10px] text-text-tertiary ">
+              <p className="mb-1.5 text-10 text-text-tertiary ">
                 {t("pm.review.createdByLabel")}{" "}
                 <span className="font-medium text-amber-700 dark:text-amber-300">{creatorName}</span>
               </p>
@@ -187,7 +187,7 @@ export function TaskCard({ task, onOpenTask, className, depth = 0 }: TaskCardPro
                   void handleApprove();
                 }}
                 onKeyDown={(e) => e.stopPropagation()}
-                className="rounded bg-green-600 px-2 py-0.5 text-[10px] font-medium text-white hover:bg-green-500 disabled:cursor-not-allowed disabled:opacity-40 dark:bg-green-700 dark:hover:bg-green-600"
+                className="rounded bg-green-600 px-2 py-0.5 text-10 font-medium text-white hover:bg-green-500 disabled:cursor-not-allowed disabled:opacity-40 dark:bg-green-700 dark:hover:bg-green-600"
               >
                 ✓ {t("pm.review.approve")}
               </button>
@@ -199,7 +199,7 @@ export function TaskCard({ task, onOpenTask, className, depth = 0 }: TaskCardPro
                   setRejecting(true);
                 }}
                 onKeyDown={(e) => e.stopPropagation()}
-                className="rounded bg-red-600 px-2 py-0.5 text-[10px] font-medium text-white hover:bg-red-500 dark:bg-red-700 dark:hover:bg-red-600"
+                className="rounded bg-red-600 px-2 py-0.5 text-10 font-medium text-white hover:bg-red-500 dark:bg-red-700 dark:hover:bg-red-600"
               >
                 ✗ {t("pm.review.reject")}
               </button>

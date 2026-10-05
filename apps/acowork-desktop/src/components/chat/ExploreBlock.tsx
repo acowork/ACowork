@@ -658,7 +658,7 @@ function ToolCallItem({ call, result, pendingApproval, currentSessionId, onAppro
             </span>
           )}
           {showProgress && progressEntry && call.toolCallId && (
-            <div className="ml-2 flex items-center gap-2 text-[10px] text-text-tertiary ">
+            <div className="ml-2 flex items-center gap-2 text-10 text-text-tertiary ">
               <div className="relative h-0.5 w-12 overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-700">
                 <div
                   className="absolute inset-y-0 left-0 bg-amber-500 dark:bg-amber-400 transition-[width] duration-500"
@@ -680,7 +680,7 @@ function ToolCallItem({ call, result, pendingApproval, currentSessionId, onAppro
             </div>
           )}
           {isCompressed && (
-            <span className="shrink-0 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-400">
+            <span className="shrink-0 rounded bg-amber-100 px-1.5 py-0.5 text-10 font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-400">
               已压缩
             </span>
           )}
@@ -689,19 +689,19 @@ function ToolCallItem({ call, result, pendingApproval, currentSessionId, onAppro
         {showApproval && onApprove && specificApproval && (
           <div className="flex items-center gap-1 shrink-0" onClick={(e) => e.stopPropagation()}>
             {countdownLabel && countdownLabel !== "expired" && (
-              <span className="text-[10px] font-mono text-amber-600 dark:text-amber-400 shrink-0 min-w-[2.5rem] text-right">
+              <span className="text-10 font-mono text-amber-600 dark:text-amber-400 shrink-0 min-w-[2.5rem] text-right">
                 {countdownLabel}
               </span>
             )}
             <button
               onClick={() => onApprove("deny", specificApproval)}
-              className="rounded-md border border-zinc-300 px-2 py-0.5 text-[11px] font-medium text-text-secondary transition-colors hover:bg-zinc-200 dark:border-zinc-500  dark:hover:bg-zinc-600"
+              className="rounded-md border border-zinc-300 px-2 py-0.5 text-11 font-medium text-text-secondary transition-colors hover:bg-zinc-200 dark:border-zinc-500  dark:hover:bg-zinc-600"
             >
               Deny
             </button>
             <button
               onClick={() => onApprove("allow", specificApproval)}
-              className="rounded-md px-2 py-0.5 text-[11px] font-medium text-white transition-opacity hover:opacity-90"
+              className="rounded-md px-2 py-0.5 text-11 font-medium text-white transition-opacity hover:opacity-90"
               style={{ backgroundColor: "var(--color-accent)" }}
             >
               Allow
@@ -710,7 +710,7 @@ function ToolCallItem({ call, result, pendingApproval, currentSessionId, onAppro
         )}
         {/* Expired indicator */}
         {needsApproval && remainingSecs === 0 && (
-          <span className="text-[10px] text-red-500 dark:text-red-400 shrink-0">
+          <span className="text-10 text-red-500 dark:text-red-400 shrink-0">
             Timed out
           </span>
         )}

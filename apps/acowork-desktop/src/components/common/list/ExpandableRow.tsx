@@ -123,13 +123,13 @@ export function ExpandableRow({
         )}
         <div className="min-w-0 flex-1">
           <div className="flex min-w-0 items-center gap-1.5">
-            <span className="truncate text-[11px] font-medium text-text-secondary ">
+            <span className="truncate text-11 font-medium text-text-secondary ">
               {title}
             </span>
             {meta != null && <span className="flex shrink-0 items-center gap-1">{meta}</span>}
           </div>
           {description != null && (
-            <div className="truncate text-[9px] leading-tight text-text-tertiary ">
+            <div className="truncate text-9 leading-tight text-text-tertiary ">
               {description}
             </div>
           )}

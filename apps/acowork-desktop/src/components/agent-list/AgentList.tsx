@@ -734,7 +734,7 @@ export function AgentList({ width }: AgentListProps) {
           <div className="absolute bottom-full left-1 z-50 mb-1 w-max rounded-md border border-border-outer bg-modal-surface py-1 shadow-lg">
             {installNodes !== null ? (
               <>
-                <div className="px-3 py-1.5 text-[10px] font-medium uppercase tracking-wide text-text-tertiary">
+                <div className="px-3 py-1.5 text-10 font-medium uppercase tracking-wide text-text-tertiary">
                   {t("agentList.selectNode")}
                 </div>
                 {installNodes.map((node) => (
@@ -919,7 +919,7 @@ function NodeGroupHeader({
         // h-6 (24px) — a touch taller than a third of the agent row's
         // ~56px, so the node label has comfortable breathing room.
         "flex h-6 w-full items-center gap-1.5 px-3 text-left",
-        "text-[10px] font-medium uppercase tracking-wide",
+        "text-10 font-medium uppercase tracking-wide",
         "text-text-tertiary ",
         "hover:text-zinc-600 dark:hover:text-zinc-300",
         "transition-colors duration-150",
@@ -942,7 +942,7 @@ function NodeGroupHeader({
         aria-hidden
       />
       <span className="truncate">{nodeName}</span>
-      <span className="ml-auto text-[10px] font-normal opacity-60">
+      <span className="ml-auto text-10 font-normal opacity-60">
         {agentCount}
       </span>
     </button>

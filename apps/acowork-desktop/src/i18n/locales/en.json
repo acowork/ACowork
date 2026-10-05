@@ -174,10 +174,12 @@
       "reconnecting": "Reconnecting",
       "stale": "Connection glitch, recovering",
       "disconnected": "Agent disconnected",
+      "idle": "MQTT not initialized",
       "retryIn": "Auto-reconnect in {{seconds}}s",
       "retryInOneSecond": "Auto-reconnect in 1s",
       "recoveringHint": "System is recovering — no action needed",
-      "reconnectNow": "Reconnect"
+      "reconnectNow": "Reconnect",
+      "connectNow": "Connect"
     },
     "selectModel": "Select model",
     "readOnlySession": "This session is shared and read-only for you",

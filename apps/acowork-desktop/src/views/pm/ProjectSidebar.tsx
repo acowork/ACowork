@@ -140,7 +140,7 @@ export function ProjectSidebar({ width }: { width?: number }) {
                   {c.submitted > 0 && (
                     <span
                       className={cn(
-                        "rounded-full px-1.5 text-[10px] font-medium",
+                        "rounded-full px-1.5 text-10 font-medium",
                         active
                           ? "bg-white/20 text-white"
                           : "bg-amber-100 text-amber-700 dark:bg-amber-900/50 dark:text-amber-300",
@@ -151,7 +151,7 @@ export function ProjectSidebar({ width }: { width?: number }) {
                   )}
                   <span
                     className={cn(
-                      "rounded-full px-1.5 text-[10px]",
+                      "rounded-full px-1.5 text-10",
                       active
                         ? "bg-white/20 text-white"
                         : "bg-zinc-100 text-text-tertiary group-hover:bg-zinc-200 dark:bg-zinc-800 ",
@@ -177,7 +177,7 @@ export function ProjectSidebar({ width }: { width?: number }) {
 
       {/* 离线时禁用写操作 — 紧贴列表底部，但仍在 + 按钮上方 */}
       {healthy === false && (
-        <div className="border-t border-border-divider px-3 py-2 text-[10px] text-text-tertiary">
+        <div className="border-t border-border-divider px-3 py-2 text-10 text-text-tertiary">
           {t("pm.offlineReadonlyHint")}
         </div>
       )}

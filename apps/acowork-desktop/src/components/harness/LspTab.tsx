@@ -414,11 +414,11 @@ export function LspTab() {
               <h3 className="text-sm font-semibold">
                 {t("harnessLsp.scriptContent")} — {LANGUAGE_LABELS[scriptDialog.language] ?? scriptDialog.language}
               </h3>
-              <span className="rounded bg-zinc-100 px-2 py-0.5 text-[10px] font-mono text-text-tertiary dark:bg-zinc-700">
+              <span className="rounded bg-zinc-100 px-2 py-0.5 text-10 font-mono text-text-tertiary dark:bg-zinc-700">
                 {scriptDialog.filename}
               </span>
             </div>
-            <pre className="max-h-96 overflow-auto rounded-md bg-zinc-50 p-4 text-[11px] leading-relaxed dark:bg-zinc-900/50">
+            <pre className="max-h-96 overflow-auto rounded-md bg-zinc-50 p-4 text-11 leading-relaxed dark:bg-zinc-900/50">
               <code>{scriptDialog.script}</code>
             </pre>
             <div className="mt-4 flex justify-end">
@@ -484,7 +484,7 @@ function LspServerCard({
           <button
             onClick={onCheck}
             disabled={isChecking}
-            className="inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-[11px] font-medium disabled:opacity-50"
+            className="inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-11 font-medium disabled:opacity-50"
           >
             {isChecking ? (
               <Loader2 className="h-3 w-3 animate-spin" />
@@ -498,7 +498,7 @@ function LspServerCard({
           {entry.install_script && (
             <button
               onClick={onViewScript}
-              className="inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-[11px] font-medium"
+              className="inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-11 font-medium"
             >
               <Eye className="h-3 w-3" />
               {t("harnessLsp.viewScript")}
@@ -514,7 +514,7 @@ function LspServerCard({
             <button
               onClick={onInstall}
               disabled={isInstalling}
-              className="inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-[11px] font-medium disabled:opacity-50"
+              className="inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-11 font-medium disabled:opacity-50"
             >
               {isInstalling ? (
                 <Loader2 className="h-3 w-3 animate-spin" />
@@ -527,7 +527,7 @@ function LspServerCard({
           {entry.install_script && healthStatus === "installed" && (
             <span
               data-testid="lsp-installed-indicator"
-              className="inline-flex items-center gap-1 rounded bg-green-100 px-2 py-1 text-[11px] font-medium text-green-700 dark:bg-green-900/30 dark:text-green-400"
+              className="inline-flex items-center gap-1 rounded bg-green-100 px-2 py-1 text-11 font-medium text-green-700 dark:bg-green-900/30 dark:text-green-400"
             >
               <CheckCircle2 className="h-3 w-3" />
               {t("harnessLsp.installed")}
@@ -553,7 +553,7 @@ function LspServerCard({
         {healthStatus === "unknown" && (
           <span
             data-testid="lsp-pending-badge"
-            className="inline-flex items-center gap-1 rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] text-text-secondary dark:bg-zinc-700 "
+            className="inline-flex items-center gap-1 rounded bg-zinc-100 px-1.5 py-0.5 text-10 text-text-secondary dark:bg-zinc-700 "
           >
             <Loader2 className="h-2.5 w-2.5 animate-spin" />
             {t("harnessLsp.pendingCheck")}
@@ -562,20 +562,20 @@ function LspServerCard({
         {healthStatus === "checking" && (
           <span
             data-testid="lsp-checking-badge"
-            className="inline-flex items-center gap-1 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
+            className="inline-flex items-center gap-1 rounded bg-amber-100 px-1.5 py-0.5 text-10 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
           >
             <Loader2 className="h-2.5 w-2.5 animate-spin" />
             {t("harnessLsp.checking")}
           </span>
         )}
         {healthStatus === "installed" && (
-          <span className="inline-flex items-center gap-1 rounded bg-green-100 px-1.5 py-0.5 text-[10px] text-green-700 dark:bg-green-900/30 dark:text-green-400">
+          <span className="inline-flex items-center gap-1 rounded bg-green-100 px-1.5 py-0.5 text-10 text-green-700 dark:bg-green-900/30 dark:text-green-400">
             <CheckCircle2 className="h-2.5 w-2.5" />
             {t("harnessLsp.installed")}
           </span>
         )}
         {healthStatus === "not_installed" && (
-          <span className="inline-flex items-center gap-1 rounded bg-red-100 px-1.5 py-0.5 text-[10px] text-red-700 dark:bg-red-900/30 dark:text-red-400">
+          <span className="inline-flex items-center gap-1 rounded bg-red-100 px-1.5 py-0.5 text-10 text-red-700 dark:bg-red-900/30 dark:text-red-400">
             <XCircle className="h-2.5 w-2.5" />
             {t("harnessLsp.notInstalled")}
           </span>
@@ -584,24 +584,24 @@ function LspServerCard({
 
       {/* Description */}
       {entry.description && (
-        <p className="mt-0.5 text-[10px] text-text-tertiary  line-clamp-1">
+        <p className="mt-0.5 text-10 text-text-tertiary  line-clamp-1">
           {entry.description}
         </p>
       )}
 
       {/* Health error */}
       {healthStatus === "not_installed" && healthError && (
-        <p className="mt-1.5 text-[10px] text-red-500 break-all">{healthError}</p>
+        <p className="mt-1.5 text-10 text-red-500 break-all">{healthError}</p>
       )}
 
       {/* Candidates list */}
       {entry.candidates.length > 0 && (
         <div className="mt-1.5 flex flex-wrap items-center gap-1">
-          <span className="text-[10px] text-text-tertiary">{t("harnessLsp.candidates")}:</span>
+          <span className="text-10 text-text-tertiary">{t("harnessLsp.candidates")}:</span>
           {entry.candidates.map((cmd) => (
             <code
               key={cmd}
-              className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] font-mono text-text-secondary dark:bg-zinc-700 "
+              className="rounded bg-zinc-100 px-1.5 py-0.5 text-10 font-mono text-text-secondary dark:bg-zinc-700 "
             >
               {cmd}
             </code>
@@ -612,8 +612,8 @@ function LspServerCard({
       {/* Install hint */}
       {entry.install_hint && (
         <div className="mt-1.5 flex items-center gap-1">
-          <span className="text-[10px] text-text-tertiary">{t("harnessLsp.installHint")}:</span>
-          <code className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] font-mono text-amber-600 dark:bg-zinc-700 dark:text-amber-400">
+          <span className="text-10 text-text-tertiary">{t("harnessLsp.installHint")}:</span>
+          <code className="rounded bg-zinc-100 px-1.5 py-0.5 text-10 font-mono text-amber-600 dark:bg-zinc-700 dark:text-amber-400">
             {entry.install_hint}
           </code>
         </div>
@@ -624,25 +624,25 @@ function LspServerCard({
         <div className="mt-1.5">
           <div className="flex items-center gap-2 mb-1">
             {installResult.success ? (
-              <span className="inline-flex items-center gap-1 text-[10px] text-green-600 dark:text-green-400">
+              <span className="inline-flex items-center gap-1 text-10 text-green-600 dark:text-green-400">
                 <CheckCircle2 className="h-2.5 w-2.5" />
                 {t("harnessLsp.installSuccess")}
               </span>
             ) : (
-              <span className="inline-flex items-center gap-1 text-[10px] text-red-600 dark:text-red-400">
+              <span className="inline-flex items-center gap-1 text-10 text-red-600 dark:text-red-400">
                 <XCircle className="h-2.5 w-2.5" />
                 {t("harnessLsp.installFailed")}
               </span>
             )}
             <button
               onClick={() => setShowOutput(!showOutput)}
-              className="text-[10px] text-text-tertiary hover:text-zinc-600 dark:hover:text-zinc-300"
+              className="text-10 text-text-tertiary hover:text-zinc-600 dark:hover:text-zinc-300"
             >
               {showOutput ? "Hide output" : "Show output"}
             </button>
           </div>
           {showOutput && (
-            <pre className="max-h-40 overflow-auto rounded-md bg-zinc-50 p-2 text-[10px] leading-relaxed dark:bg-zinc-900/50">
+            <pre className="max-h-40 overflow-auto rounded-md bg-zinc-50 p-2 text-10 leading-relaxed dark:bg-zinc-900/50">
               <code>{installResult.stdout || installResult.stderr || "(no output)"}</code>
             </pre>
           )}

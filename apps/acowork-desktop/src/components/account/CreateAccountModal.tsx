@@ -87,7 +87,7 @@ export function CreateAccountModal({ open, onClose, onCreated }: CreateAccountMo
         </h3>
 
         <div className="flex flex-col gap-3 px-5 py-4">
-          <label className="flex flex-col gap-1 text-[11px] text-text-tertiary">
+          <label className="flex flex-col gap-1 text-11 text-text-tertiary">
             {t("account.username")}
             <StyledInput
               value={username}
@@ -97,7 +97,7 @@ export function CreateAccountModal({ open, onClose, onCreated }: CreateAccountMo
               disabled={busy}
             />
           </label>
-          <label className="flex flex-col gap-1 text-[11px] text-text-tertiary">
+          <label className="flex flex-col gap-1 text-11 text-text-tertiary">
             {t("account.displayName")}
             <StyledInput
               value={displayName}
@@ -105,7 +105,7 @@ export function CreateAccountModal({ open, onClose, onCreated }: CreateAccountMo
               disabled={busy}
             />
           </label>
-          <label className="flex flex-col gap-1 text-[11px] text-text-tertiary">
+          <label className="flex flex-col gap-1 text-11 text-text-tertiary">
             {t("account.initialPassword")}
             <StyledInput
               type="password"
@@ -115,9 +115,9 @@ export function CreateAccountModal({ open, onClose, onCreated }: CreateAccountMo
               disabled={busy}
             />
           </label>
-          <p className="text-[10px] text-text-tertiary">{t("account.inviteHint")}</p>
+          <p className="text-10 text-text-tertiary">{t("account.inviteHint")}</p>
           {error && (
-            <p role="alert" className="text-[11px] text-red-500">
+            <p role="alert" className="text-11 text-red-500">
               {error}
             </p>
           )}

@@ -177,7 +177,7 @@ export function UserWithAttachmentsBubble({
               </div>
             </div>
             {userMessage.timestamp && (
-              <span className="mt-1 text-[10px] text-text-tertiary  opacity-0 transition-opacity group-hover:opacity-100">
+              <span className="mt-1 text-10 text-text-tertiary  opacity-0 transition-opacity group-hover:opacity-100">
                 {formatBubbleTime(userMessage.timestamp)}
               </span>
             )}

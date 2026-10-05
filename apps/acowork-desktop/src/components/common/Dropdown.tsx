@@ -67,7 +67,7 @@ const baseBySize: Record<DropdownSize, { className: string; style: React.CSSProp
   },
   small: {
     className:
-      "h-7 appearance-none rounded-md border border-dropdown-border bg-dropdown-bg px-1.5 text-[11px] text-text-secondary outline-none transition-colors focus:border-[var(--color-accent)] ",
+      "h-7 appearance-none rounded-md border border-dropdown-border bg-dropdown-bg px-1.5 text-11 text-text-secondary outline-none transition-colors focus:border-[var(--color-accent)] ",
     style: {
       backgroundImage: ARROW_SVG,
       backgroundPosition: "right 0.25rem center",

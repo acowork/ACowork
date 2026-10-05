@@ -290,10 +290,12 @@
       "reconnecting": "正在重新连接",
       "stale": "连接状态异常，正在恢复",
       "disconnected": "Agent 连接已断开",
+      "idle": "MQTT 尚未初始化",
       "retryIn": "{{seconds}} 秒后将自动重连",
       "retryInOneSecond": "1 秒后将自动重连",
       "recoveringHint": "系统正在尝试恢复，无需任何操作",
-      "reconnectNow": "重新连接"
+      "reconnectNow": "重新连接",
+      "connectNow": "连接"
     },
     "ariaLabelChatMessages": "聊天消息",
     "ariaLabelScrollToBottom": "滚动到底部",

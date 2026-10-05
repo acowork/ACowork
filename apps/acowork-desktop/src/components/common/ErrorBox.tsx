@@ -71,7 +71,7 @@ export function ErrorBox({ message, details, onClose, className }: ErrorBoxProps
                         <button
                             type="button"
                             onClick={() => setShowDetails((v) => !v)}
-                            className="mt-1 inline-flex items-center gap-0.5 text-[11px] font-medium text-red-700 hover:text-red-900 dark:text-red-400 dark:hover:text-red-300"
+                            className="mt-1 inline-flex items-center gap-0.5 text-11 font-medium text-red-700 hover:text-red-900 dark:text-red-400 dark:hover:text-red-300"
                         >
                             {showDetails ? (
                                 <ChevronDown className="h-3 w-3" />
@@ -89,7 +89,7 @@ export function ErrorBox({ message, details, onClose, className }: ErrorBoxProps
                         aria-label={t("common.ariaLabelCopyError")}
                         title={t("common.copy")}
                         className={cn(
-                            "inline-flex h-6 items-center gap-1 rounded px-1.5 text-[11px] font-medium transition-colors",
+                            "inline-flex h-6 items-center gap-1 rounded px-1.5 text-11 font-medium transition-colors",
                             copied
                                 ? "text-green-700 dark:text-green-400"
                                 : "text-red-700 hover:bg-red-100 dark:text-red-400 dark:hover:bg-red-900/40",
@@ -120,7 +120,7 @@ export function ErrorBox({ message, details, onClose, className }: ErrorBoxProps
                 </div>
             </div>
             {hasDetails && showDetails && (
-                <pre className="mt-2 max-h-48 overflow-auto rounded bg-red-100/60 p-2 text-[11px] leading-relaxed text-red-800 break-all whitespace-pre-wrap dark:bg-red-950/40 dark:text-red-300">
+                <pre className="mt-2 max-h-48 overflow-auto rounded bg-red-100/60 p-2 text-11 leading-relaxed text-red-800 break-all whitespace-pre-wrap dark:bg-red-950/40 dark:text-red-300">
                     {details}
                 </pre>
             )}

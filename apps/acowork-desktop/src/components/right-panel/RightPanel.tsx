@@ -694,7 +694,7 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
                               >
                                 <ChevronLeft className="h-3.5 w-3.5" />
                               </button>
-                              <span className="min-w-[3ch] text-center font-mono text-[10px] tabular-nums text-text-tertiary ">
+                              <span className="min-w-[3ch] text-center font-mono text-10 tabular-nums text-text-tertiary ">
                                 {snapshotPage + 1}/{snapshotTotalPages}
                               </span>
                               <button

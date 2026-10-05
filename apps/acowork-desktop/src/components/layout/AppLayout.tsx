@@ -1202,7 +1202,7 @@ export function AppLayout() {
       {/* Per-key:value pill style: opaque backdrop so the text stays readable when window opacity < 1 */}
       {/* `relative` so the file-status cluster can anchor absolutely to */}
       {/* the file editor panel's left/right edges via PR-1's filePanelBounds. */}
-      <div className="relative flex h-6 shrink-0 items-center gap-2 pl-14 pr-3 text-[11px] select-none ">
+      <div className="relative flex h-6 shrink-0 items-center gap-2 pl-14 pr-3 text-11 select-none ">
         {statusVisible && (
           <Tooltip
             content={statusMsg}

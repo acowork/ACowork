@@ -308,7 +308,7 @@ function ImageAttachmentThumbnail({
           }
         />
       ) : (
-        <div className="flex h-full w-full items-center justify-center text-[10px] text-text-tertiary">
+        <div className="flex h-full w-full items-center justify-center text-10 text-text-tertiary">
           {failed ? "!" : "…"}
         </div>
       )}

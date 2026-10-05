@@ -563,7 +563,7 @@ export function EmbeddingModelTab() {
                                 <button
                                     onClick={handleTest}
                                     disabled={testing}
-                                    className="inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-[11px] font-medium disabled:opacity-50"
+                                    className="inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-11 font-medium disabled:opacity-50"
                                 >
                                     {testing ? (
                                         <Loader2 className="h-3 w-3 animate-spin" />
@@ -574,7 +574,7 @@ export function EmbeddingModelTab() {
                                 </button>
                                 {/* Test result inline */}
                                 {testResult && (
-                                    <span className="flex items-center gap-1 text-[11px]">
+                                    <span className="flex items-center gap-1 text-11">
                                         {testResult.success ? (
                                             <>
                                                 <CheckCircle2 className="h-3 w-3 text-green-500" />
@@ -709,7 +709,7 @@ export function EmbeddingModelTab() {
                         (no nested card box; the surrounding ExpandableRow
                         body is the only surface here). */}
                     {cloudActive && (
-                        <div className="mx-3 mt-3 flex items-center gap-2 text-[11px]">
+                        <div className="mx-3 mt-3 flex items-center gap-2 text-11">
                             <Badge tone="accent">{t("embedding.cloudActive")}</Badge>
                             <span className="font-medium">
                                 {cloudActive.provider_id}/{cloudActive.model_id}
@@ -726,7 +726,7 @@ export function EmbeddingModelTab() {
                     {/* Cloud error inline (kept as an emphasised box —
                         errors need to read at a glance). */}
                     {cloudError && (
-                        <div className="mx-3 mt-2 rounded border border-red-200 bg-red-50 px-2 py-1 text-[11px] text-red-700 dark:border-red-800 dark:bg-red-950 dark:text-red-300">
+                        <div className="mx-3 mt-2 rounded border border-red-200 bg-red-50 px-2 py-1 text-11 text-red-700 dark:border-red-800 dark:bg-red-950 dark:text-red-300">
                             {cloudError}
                         </div>
                     )}
@@ -913,7 +913,7 @@ function MigrationPanel({
                 ariaLabel={t("embedding.migrationRequired")}
                 bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset p-3"
             >
-                <p className="mb-3 text-[11px] text-text-secondary">
+                <p className="mb-3 text-11 text-text-secondary">
                     {session.message}
                     {` (Old: ${session.oldDimension ?? "?"}, New: ${session.newDimension})`}
                 </p>
@@ -958,7 +958,7 @@ function MigrationPanel({
                                                         style={{ width: `${pct}%` }}
                                                     />
                                                 </div>
-                                                <span className="text-[10px] tabular-nums text-text-tertiary">
+                                                <span className="text-10 tabular-nums text-text-tertiary">
                                                     {prog?.progress?.rebuilt ?? 0}/{prog?.progress?.total_scanned ?? "?"}
                                                 </span>
                                             </div>
@@ -1087,7 +1087,7 @@ function ModelCard({
                         <span className="text-xs font-semibold">{model.name}</span>
                         {model.recommended && (
                             <span
-                                className="rounded px-1.5 py-0.5 text-[10px] font-medium"
+                                className="rounded px-1.5 py-0.5 text-10 font-medium"
                                 style={{ backgroundColor: "color-mix(in srgb, var(--color-accent) 15%, transparent)", color: "var(--color-accent)" }}
                             >
                                 {t("embedding.recommended")}
@@ -1095,14 +1095,14 @@ function ModelCard({
                         )}
                         {isActive && (
                             <span
-                                className="rounded px-1.5 py-0.5 text-[10px] font-medium"
+                                className="rounded px-1.5 py-0.5 text-10 font-medium"
                                 style={{ backgroundColor: "color-mix(in srgb, var(--color-accent) 15%, transparent)", color: "var(--color-accent)" }}
                             >
                                 {t("embedding.active")}
                             </span>
                         )}
                     </div>
-                    <p className="mt-0.5 text-[10px] text-text-tertiary ">{model.id}</p>
+                    <p className="mt-0.5 text-10 text-text-tertiary ">{model.id}</p>
                 </div>
                 <div className="flex shrink-0 items-center gap-1.5">
                     {/* Variant selector — show when downloading and model has multiple variants */}
@@ -1123,7 +1123,7 @@ function ModelCard({
                         <button
                             onClick={() => onDownload(model.id, hasVariants ? selectedVariant : undefined)}
                             disabled={isBusy || !model.id}
-                            className="inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-[11px] font-medium disabled:opacity-50"
+                            className="inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-11 font-medium disabled:opacity-50"
                         >
                             {isDownloading ? (
                                 <Loader2 className="h-3 w-3 animate-spin" />
@@ -1138,7 +1138,7 @@ function ModelCard({
                         <button
                             onClick={onSelect}
                             disabled={isBusy}
-                            className="inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-[11px] font-medium disabled:opacity-50"
+                            className="inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-11 font-medium disabled:opacity-50"
                         >
                             {isSelecting ? (
                                 <Loader2 className="h-3 w-3 animate-spin" />
@@ -1153,7 +1153,7 @@ function ModelCard({
                         <button
                             onClick={onDelete}
                             disabled={isBusy}
-                            className="group/del inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-[11px] font-medium disabled:opacity-50"
+                            className="group/del inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-11 font-medium disabled:opacity-50"
                         >
                             {isDeleting ? (
                                 <Loader2 className="h-3 w-3 animate-spin" />
@@ -1180,14 +1180,14 @@ function ModelCard({
                             }}
                         />
                     </div>
-                    <p className="text-right text-[10px] text-text-tertiary ">
+                    <p className="text-right text-10 text-text-tertiary ">
                         {progress > 0 ? `${progress}%` : t("embedding.connecting")}
                     </p>
                 </div>
             )}
 
             {/* Meta info */}
-            <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-text-tertiary ">
+            <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-10 text-text-tertiary ">
                 <span className="inline-flex items-center gap-1">
                     <Cpu className="h-3 w-3" />
                     {model.dimension}d
@@ -1264,9 +1264,9 @@ function CloudProviderCard({
                 <div className="min-w-0">
                     <div className="flex items-center gap-2">
                         <h3 className="text-xs font-medium">{provider.name}</h3>
-                        <span className="text-[10px] text-text-tertiary">({provider.id})</span>
+                        <span className="text-10 text-text-tertiary">({provider.id})</span>
                     </div>
-                    <p className="mt-0.5 truncate font-mono text-[10px] text-text-tertiary ">
+                    <p className="mt-0.5 truncate font-mono text-10 text-text-tertiary ">
                         {provider.api}
                     </p>
                 </div>
@@ -1274,14 +1274,14 @@ function CloudProviderCard({
                     {!keyEditing ? (
                         hasKey ? (
                             <>
-                                <span className="inline-flex items-center gap-1 rounded bg-green-50 px-1.5 py-0.5 text-[10px] font-medium text-green-700 dark:bg-green-950 dark:text-green-300">
+                                <span className="inline-flex items-center gap-1 rounded bg-green-50 px-1.5 py-0.5 text-10 font-medium text-green-700 dark:bg-green-950 dark:text-green-300">
                                     <CheckCircle2 className="h-2.5 w-2.5" />
                                     Key
                                 </span>
                                 <button
                                     onClick={onTest}
                                     disabled={testing}
-                                    className="inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-[11px] font-medium disabled:opacity-50"
+                                    className="inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-11 font-medium disabled:opacity-50"
                                 >
                                     {testing ? (
                                         <Loader2 className="h-3 w-3 animate-spin" />
@@ -1292,13 +1292,13 @@ function CloudProviderCard({
                                 </button>
                                 <button
                                     onClick={onStartKeyEdit}
-                                    className="inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-[11px] font-medium"
+                                    className="inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-11 font-medium"
                                 >
                                     {t("embedding.changeKey")}
                                 </button>
                                 <button
                                     onClick={onDeleteKey}
-                                    className="inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-[11px] font-medium"
+                                    className="inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-11 font-medium"
                                 >
                                     {t("embedding.deleteKey")}
                                 </button>
@@ -1306,7 +1306,7 @@ function CloudProviderCard({
                         ) : (
                             <button
                                 onClick={onStartKeyEdit}
-                                className="inline-flex items-center gap-1 rounded btn-accent px-2 py-1 text-[11px] font-medium"
+                                className="inline-flex items-center gap-1 rounded btn-accent px-2 py-1 text-11 font-medium"
                             >
                                 <KeyRound className="h-3 w-3" />
                                 {t("embedding.setApiKey")}
@@ -1319,7 +1319,7 @@ function CloudProviderCard({
                                 value={keyDraft}
                                 onChange={(e) => onChangeKeyDraft(e.target.value)}
                                 placeholder={provider.env[0] ?? "API Key"}
-                                className="w-44 rounded-md border border-zinc-300 px-2 py-1 text-[11px] dark:border-zinc-600 dark:bg-zinc-800"
+                                className="w-44 rounded-md border border-zinc-300 px-2 py-1 text-11 dark:border-zinc-600 dark:bg-zinc-800"
                                 autoFocus
                                 onKeyDown={(e) => {
                                     if (e.key === "Enter") onSubmitKey();
@@ -1329,7 +1329,7 @@ function CloudProviderCard({
                             <button
                                 onClick={onSubmitKey}
                                 disabled={keySaving || !keyDraft.trim()}
-                                className="inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-[11px] font-medium disabled:opacity-50"
+                                className="inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-11 font-medium disabled:opacity-50"
                             >
                                 {keySaving ? (
                                     <Loader2 className="h-3 w-3 animate-spin" />
@@ -1341,7 +1341,7 @@ function CloudProviderCard({
                             <button
                                 onClick={onCancelKeyEdit}
                                 disabled={keySaving}
-                                className="inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-[11px] font-medium disabled:opacity-50"
+                                className="inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-11 font-medium disabled:opacity-50"
                             >
                                 {t("embedding.cancel")}
                             </button>
@@ -1352,7 +1352,7 @@ function CloudProviderCard({
 
             {/* Test result inline */}
             {testResult && (
-                <div className="mb-2 flex items-center gap-1 text-[11px]">
+                <div className="mb-2 flex items-center gap-1 text-11">
                     {testResult.success ? (
                         <>
                             <CheckCircle2 className="h-3 w-3 text-green-500" />
@@ -1381,18 +1381,18 @@ function CloudProviderCard({
                     return (
                         <div
                             key={m.id}
-                            className="flex items-center justify-between rounded border border-zinc-100 px-2 py-1.5 text-[11px] dark:border-zinc-800"
+                            className="flex items-center justify-between rounded border border-zinc-100 px-2 py-1.5 text-11 dark:border-zinc-800"
                         >
                             <div className="flex min-w-0 items-center gap-2">
                                 <span className="font-medium">{m.name || m.id}</span>
-                                <span className="font-mono text-[10px] text-text-tertiary">{m.id}</span>
+                                <span className="font-mono text-10 text-text-tertiary">{m.id}</span>
                                 <span className="text-text-tertiary">· {m.dimensions}d</span>
                                 {m.context_length && (
                                     <span className="text-text-tertiary">· {m.context_length} ctx</span>
                                 )}
                                 {isActiveModel && (
                                     <span
-                                        className="rounded px-1.5 py-0.5 text-[10px] font-medium"
+                                        className="rounded px-1.5 py-0.5 text-10 font-medium"
                                         style={{
                                             backgroundColor:
                                                 "color-mix(in srgb, var(--color-accent) 15%, transparent)",
@@ -1408,7 +1408,7 @@ function CloudProviderCard({
                                     onClick={() => onSelectModel(m.id)}
                                     disabled={isSelecting || !hasKey}
                                     title={!hasKey ? t("embedding.apiKeyRequired") : undefined}
-                                    className="inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-[11px] font-medium disabled:opacity-50"
+                                    className="inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-11 font-medium disabled:opacity-50"
                                 >
                                     {isSelecting ? (
                                         <Loader2 className="h-3 w-3 animate-spin" />
@@ -1664,7 +1664,7 @@ function AddCustomEmbeddingProviderDialog({
                             <button
                                 type="button"
                                 onClick={addModel}
-                                className="inline-flex items-center gap-1 text-[11px] text-text-tertiary hover:text-zinc-700  dark:hover:text-zinc-200"
+                                className="inline-flex items-center gap-1 text-11 text-text-tertiary hover:text-zinc-700  dark:hover:text-zinc-200"
                             >
                                 <Plus className="h-3 w-3" />
                                 {t("embedding.customAddModel")}
@@ -1684,7 +1684,7 @@ function AddCustomEmbeddingProviderDialog({
                                                 updateModel(idx, { id: e.target.value })
                                             }
                                             placeholder={t("embedding.customModelIdPlaceholder")}
-                                            className="rounded-md border border-input-border bg-input-bg px-2 py-1 text-[11px] font-mono"
+                                            className="rounded-md border border-input-border bg-input-bg px-2 py-1 text-11 font-mono"
                                         />
                                         <input
                                             type="text"
@@ -1693,7 +1693,7 @@ function AddCustomEmbeddingProviderDialog({
                                                 updateModel(idx, { name: e.target.value })
                                             }
                                             placeholder={t("embedding.customModelNamePlaceholder")}
-                                            className="rounded-md border border-input-border bg-input-bg px-2 py-1 text-[11px]"
+                                            className="rounded-md border border-input-border bg-input-bg px-2 py-1 text-11"
                                         />
                                     </div>
                                     <div className="flex items-center gap-2">
@@ -1704,7 +1704,7 @@ function AddCustomEmbeddingProviderDialog({
                                                 updateModel(idx, { dimensions: e.target.value })
                                             }
                                             placeholder={t("embedding.customModelDimensionsPlaceholder")}
-                                            className="w-24 rounded-md border border-input-border bg-input-bg px-2 py-1 text-[11px]"
+                                            className="w-24 rounded-md border border-input-border bg-input-bg px-2 py-1 text-11"
                                         />
                                         <input
                                             type="number"
@@ -1715,7 +1715,7 @@ function AddCustomEmbeddingProviderDialog({
                                                 })
                                             }
                                             placeholder={t("embedding.customModelContextLengthPlaceholder")}
-                                            className="w-28 rounded-md border border-input-border bg-input-bg px-2 py-1 text-[11px]"
+                                            className="w-28 rounded-md border border-input-border bg-input-bg px-2 py-1 text-11"
                                         />
                                         {models.length > 1 && (
                                             <button
@@ -1735,7 +1735,7 @@ function AddCustomEmbeddingProviderDialog({
 
                     {/* Inline error */}
                     {error && (
-                        <div className="rounded border border-red-200 bg-red-50 px-2 py-1.5 text-[11px] text-red-700 dark:border-red-800 dark:bg-red-950 dark:text-red-300">
+                        <div className="rounded border border-red-200 bg-red-50 px-2 py-1.5 text-11 text-red-700 dark:border-red-800 dark:bg-red-950 dark:text-red-300">
                             {error}
                         </div>
                     )}

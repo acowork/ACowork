@@ -236,7 +236,7 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden, readOnly }
                   <div className={cn("truncate text-xs", currentWsId === "__agent_home__" ? "font-semibold" : "text-text ")} style={currentWsId === "__agent_home__" ? { color: "var(--color-accent)" } : {}}>
                     Agent Home
                   </div>
-                  <div className="truncate text-[10px] text-text-tertiary ">
+                  <div className="truncate text-10 text-text-tertiary ">
                     {t("workspace.defaultWorkingDirectory")}
                   </div>
                 </div>
@@ -277,7 +277,7 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden, readOnly }
                               {displayName}
                             </div>
                             <Tooltip content={dir.path} variant="plain" position="bottom">
-                              <div className="truncate text-[10px] text-text-tertiary ">
+                              <div className="truncate text-10 text-text-tertiary ">
                                 {dir.path}
                               </div>
                             </Tooltip>
@@ -339,7 +339,7 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden, readOnly }
                                 e.stopPropagation();
                                 void handleToggleAccess(dir);
                               }}
-                              className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] transition-colors hover:bg-zinc-200 dark:hover:bg-zinc-600"
+                              className="flex items-center gap-1 rounded px-1.5 py-0.5 text-11 transition-colors hover:bg-zinc-200 dark:hover:bg-zinc-600"
                             >
                               {dir.access === "read-write" ? (
                                 <>

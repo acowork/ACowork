@@ -48,7 +48,7 @@ export function InviteTokenModal({ open, token, username, onClose }: InviteToken
         </h3>
 
         <div className="flex flex-col gap-3 px-5 py-4">
-          <p className="text-[11px] text-text-tertiary">
+          <p className="text-11 text-text-tertiary">
             {username
               ? t("account.inviteTokenHintFor", { name: username })
               : t("account.inviteTokenHint")}

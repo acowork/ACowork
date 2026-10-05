@@ -260,10 +260,10 @@ export function MemoryPanel() {
         >
           <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
           <div className="min-w-0 flex-1">
-            <p className="truncate text-[11px] font-semibold">
+            <p className="truncate text-11 font-semibold">
               {t(healthBanner.titleKey)}
             </p>
-            <p className="truncate text-[10px] opacity-80">
+            <p className="truncate text-10 opacity-80">
               {t(healthBanner.detailKey, healthBanner.vars)}
               {healthBanner.extraKey &&
                 ` · ${t(healthBanner.extraKey, healthBanner.vars)}`}
@@ -273,7 +273,7 @@ export function MemoryPanel() {
             onClick={handleRebuildIndex}
             disabled={migrationInProgress}
             data-testid="rebuild-index-button"
-            className="shrink-0 rounded btn-solid px-2.5 py-1 text-[11px] font-medium disabled:opacity-50"
+            className="shrink-0 rounded btn-solid px-2.5 py-1 text-11 font-medium disabled:opacity-50"
           >
             {migrationProgressLabel}
           </button>
@@ -313,7 +313,7 @@ export function MemoryPanel() {
       {consolidateMessage && (
         <div className="flex items-center gap-1.5 border-b border-[var(--color-accent)]/30 bg-[var(--color-accent)]/10 px-panel-gutter py-1.5">
           <Info className="h-3 w-3 shrink-0 text-[var(--color-accent)]" />
-          <span className="text-[11px] text-[var(--color-accent)]">{consolidateMessage}</span>
+          <span className="text-11 text-[var(--color-accent)]">{consolidateMessage}</span>
         </div>
       )}
 
@@ -499,7 +499,7 @@ function StatCard({
 }) {
   return (
     <div className="min-w-0 overflow-hidden rounded border border-border-outer bg-panel-block p-2">
-      <p className="truncate text-[10px] text-text-tertiary " title={label}>{label}</p>
+      <p className="truncate text-10 text-text-tertiary " title={label}>{label}</p>
       <p
         className="mt-0.5 truncate text-xs font-semibold text-text-secondary "
         title={String(value)}

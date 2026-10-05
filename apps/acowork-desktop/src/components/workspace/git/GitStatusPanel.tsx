@@ -364,13 +364,13 @@ export function GitStatusPanel({ agentId, workspaceId }: GitStatusPanelProps) {
                 {c.path}
               </span>
               {c.oldPath && (
-                <span className="truncate text-[10px] text-text-tertiary ">
+                <span className="truncate text-10 text-text-tertiary ">
                   ← {c.oldPath}
                 </span>
               )}
               {c.staged && (
                 <span
-                  className="shrink-0 rounded bg-emerald-100 px-1 text-[10px] text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300"
+                  className="shrink-0 rounded bg-emerald-100 px-1 text-10 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300"
                   title={t("gitStatus.staged")}
                 >
                   {t("gitStatus.staged")}
@@ -385,7 +385,7 @@ export function GitStatusPanel({ agentId, workspaceId }: GitStatusPanelProps) {
           data-testid="git-status-pagination"
           className="flex shrink-0 items-center justify-between gap-2 border-t border-border-divider px-2 py-1"
         >
-          <span className="text-[10px] tabular-nums text-text-tertiary ">
+          <span className="text-10 tabular-nums text-text-tertiary ">
             {pageIndex * PAGE_SIZE + 1}–{Math.min((pageIndex + 1) * PAGE_SIZE, changes.length)} / {changes.length}
           </span>
           <div className="flex items-center gap-1">

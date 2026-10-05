@@ -216,6 +216,33 @@
   --radius-md: 6px;
   --radius-lg: 8px;
   --radius-xl: 12px;
+
+  /* Micro font steps — the dense card-header / list-meta sizes that used
+     to be spelled as arbitrary px (`text-[11px]`, `text-[10px]`,
+     `text-[9px]`) on ~430 elements.
+
+     WHY this exists: an arbitrary px value is dead to the font-size
+     setting. That knob only reaches elements whose size resolves to a
+     `--text-*` token, so every card title, badge and meta line
+     silently ignored it while the surrounding body text scaled — which
+     is exactly the "title font didn't follow the global size" report.
+
+     Declared here, NOT in the `:root` block below: Tailwind v4 only
+     generates a `text-*` utility from a `@theme` token. The `:root`
+     copies of `--text-xs…xl` above are cascade overrides of the same
+     custom properties, not declarations of new ones.
+
+     The em ratios are the historical M-default px ÷ the 14px base, so
+     nothing moves at the default setting — only the ratio is now
+     expressed instead of the frozen result. Do NOT reintroduce `rem`
+     here: it would freeze the scale AND drag every rem-based layout
+     offset with it (see the note above the `:root` copies).
+
+     `text-[8px]` deliberately stays arbitrary — both uses are fixed
+     16px badge boxes where a growing glyph overflows the box. */
+  --text-9: 0.643em;  /*  9px — ExpandableRow description line */
+  --text-10: 0.714em; /* 10px — list meta lines, empty states */
+  --text-11: 0.786em; /* 11px — card titles, card body rows */
 }
 
 /* Enable class-based dark mode for Tailwind v4 */
@@ -366,6 +393,29 @@
   --text-base: 1.143em; /* 16px @ 0.875rem base */
   --text-lg: 1.286em;   /* 18px @ 0.875rem base */
   --text-xl: 1.429em;   /* 20px @ 0.875rem base */
+
+  /* Reading-column caps — the card flows of harness / settings / the
+     right-panel tabs. Overrides Tailwind's frozen `--container-lg` /
+     `--container-2xl` (32rem / 42rem) so the column tracks the font-size
+     setting instead of wrapping harder at every step up: 512px of card
+     width cannot hold titles that grow with the font, so a bigger font
+     size reflowed every card into a taller stack.
+
+     `calc()` against `--ui-font-size`, NOT `em` (which every --text-* step
+     above uses) and NOT `rem`. This value is a LENGTH, not a font step:
+     `em` would resolve it against the local element's inherited
+     font-size, so a card column nested under a `text-xs` ancestor would
+     silently get a different cap than the same column elsewhere. Binding
+     the global knob directly is the only form that means one thing.
+
+     Multipliers are 36.6 / 48 = the historical 32rem / 42rem expressed
+     against the 0.875rem base, so the M default renders pixel-identical
+     and only the scale moves. Ceiling (ponytail): at XXL (1.25rem) these
+     resolve to 46rem / 60rem. If one card still wraps at XXL, widen it
+     on that call site — loosening the token would also drag the pm /
+     doc / extension views, which share the same scale. */
+  --container-lg: calc(var(--ui-font-size, 0.875rem) * 36.57);
+  --container-2xl: calc(var(--ui-font-size, 0.875rem) * 48);
 
   /* Border radius — 3-tier design tokens (mirrors @theme above) */
   --radius-sm: 4px;

@@ -256,10 +256,12 @@ function getInputPlaceholderKey(
  * anything from "about to finish" to "stuck forever".
  *
  * Renders ONLY when:
- *   - gateway is connected (the banner is about the agent-side liveness,
- *     not the gateway HTTP side), AND
  *   - effectiveConnection is one of connecting / reconnecting / stale /
- *     disconnected (no banner for idle or connected).
+ *     disconnected / **idle** (was: no banner for idle — fixed so a
+ *     token-less boot that left the Rust client slot at `None` becomes
+ *     visible to the user; the input placeholder still shows "Gateway
+ *     not connected" while the HTTP side is down, so we don't double-up).
+ *   - NOT `connected` (no banner once things are working).
  *
  * The countdown is driven by the connecting-episode clock
  * (`staleSince`, see chatStore): it counts down to
@@ -268,9 +270,14 @@ function getInputPlaceholderKey(
  * connecting episode is in flight. `disconnected` is a terminal state
  * (the Rust session will not reconnect on its own), so instead of a
  * bogus "0s until auto-reconnect" it offers the one meaningful action:
- * a manual reconnect (H-2 of the review). We tick at 1 Hz, which is
- * enough resolution for a human-friendly display and avoids sub-second
- * re-renders that would trigger Zustand churn.
+ * a manual reconnect (H-2 of the review). `idle` is also a terminal
+ * state (the Rust client was never created) — `force_reconnect_mqtt`
+ * errors out without one (chat_mqtt.rs:887), so this branch offers
+ * `connect_mqtt` instead: it is idempotent when a client already
+ * targets the same broker, and it bootstraps one when none exists. We
+ * tick at 1 Hz, which is enough resolution for a human-friendly
+ * display and avoids sub-second re-renders that would trigger Zustand
+ * churn.
  */
 function ConnectionStatusBanner({
   effectiveConnection,
@@ -280,6 +287,7 @@ function ConnectionStatusBanner({
   staleSince: number | null;
 }): React.ReactElement | null {
   const { t } = useTranslation();
+  const { addToast } = useToast();
   // H-2: `disconnected` never auto-recovers — offer the manual action
   // (the button is disabled while the invoke is in flight).
   const [reconnecting, setReconnecting] = useState(false);
@@ -293,6 +301,25 @@ function ConnectionStatusBanner({
       setReconnecting(false);
     }
   }, []);
+  // `idle` mirrors `force_reconnect_mqtt` semantics but targets the
+  // bootstrap path: there is no Rust client to rebuild, so we ask
+  // Tauri to create one (`connect_mqtt` is idempotent — see
+  // chat_mqtt.rs:208-230). Same Idempotency holds once the client is
+  // already live: returns immediately when the endpoint matches.
+  const handleConnect = useCallback(async () => {
+    setReconnecting(true);
+    try {
+      await invoke("connect_mqtt");
+    } catch (err) {
+      log.warn("[connection-banner] connect_mqtt failed:", err);
+      // Used to die in the log — the button looked dead ("clicked it,
+      // nothing happened"). Surface the reason (e.g. the relay+http
+      // rejection) so the user can act instead of re-clicking forever.
+      addToast({ type: "error", message: String(err) });
+    } finally {
+      setReconnecting(false);
+    }
+  }, [addToast]);
   // The banner speaks for the MQTT/agent-side liveness — the single
   // authority for connection UI. It no longer requires the HTTP `status`
   // to read "connected": that display-side signal must not decide what
@@ -301,7 +328,8 @@ function ConnectionStatusBanner({
     effectiveConnection === "connecting" ||
     effectiveConnection === "reconnecting" ||
     effectiveConnection === "stale" ||
-    effectiveConnection === "disconnected";
+    effectiveConnection === "disconnected" ||
+    effectiveConnection === "idle";
 
   // Tick once per second so the countdown animates. Cheap (single
   // setState/ChatPanel re-render, no global store updates).
@@ -318,18 +346,32 @@ function ConnectionStatusBanner({
   const secondsRemaining =
     deadlineAt !== null ? Math.max(0, Math.ceil((deadlineAt - now) / 1000)) : null;
 
-  // Per-state label + icon.
-  const stateLabel: Record<"connecting" | "reconnecting" | "stale" | "disconnected", string> = {
+  // Per-state label + icon. `idle` shares the `disconnected` row in
+  // the visual treatment (amber / AlertTriangle / manual action) — both
+  // are terminal states where the Rust side needs the user's nudge —
+  // but it gets its own i18n string so the message says "MQTT not
+  // initialized" rather than "Agent disconnected" (the latter implies
+  // we WERE connected and lost it; `idle` means we never connected).
+  const stateLabel: Record<
+    "connecting" | "reconnecting" | "stale" | "disconnected" | "idle",
+    string
+  > = {
     connecting: t("chatPanel.connectionBanner.connecting"),
     reconnecting: t("chatPanel.connectionBanner.reconnecting"),
     stale: t("chatPanel.connectionBanner.stale"),
     disconnected: t("chatPanel.connectionBanner.disconnected"),
+    idle: t("chatPanel.connectionBanner.idle"),
   };
   const label = stateLabel[effectiveConnection as keyof typeof stateLabel] ?? "";
 
-  // Visual severity drives the colour. stale is amber (warning), the
-  // rest are sky/blue (info).
-  const isWarn = effectiveConnection === "stale" || effectiveConnection === "disconnected";
+  // Visual severity drives the colour. `idle` joins `stale`/`disconnected`
+  // as amber (warning); the rest are sky/blue (info). `idle` does not get
+  // a countdown — the user clicks Connect, the watchdog does not auto-
+  // recover an empty client slot.
+  const isWarn =
+    effectiveConnection === "stale" ||
+    effectiveConnection === "disconnected" ||
+    effectiveConnection === "idle";
   const containerCls = isWarn
     ? "border-amber-300/60 bg-amber-50 text-amber-900 dark:border-amber-700/60 dark:bg-amber-950/40 dark:text-amber-100"
     : "border-sky-300/60 bg-sky-50 text-sky-900 dark:border-sky-700/60 dark:bg-sky-950/40 dark:text-sky-100";
@@ -375,6 +417,21 @@ function ConnectionStatusBanner({
           )}
         >
           {t("chatPanel.connectionBanner.reconnectNow")}
+        </button>
+      ) : effectiveConnection === "idle" ? (
+        <button
+          type="button"
+          data-testid="chat-connection-banner-connect"
+          onClick={handleConnect}
+          disabled={reconnecting}
+          className={cn(
+            "flex-shrink-0 rounded border px-2 py-0.5 text-xs font-medium transition-colors",
+            "border-amber-400/70 text-amber-800 hover:bg-amber-100",
+            "dark:border-amber-600/70 dark:text-amber-200 dark:hover:bg-amber-900/40",
+            reconnecting && "opacity-60",
+          )}
+        >
+          {t("chatPanel.connectionBanner.connectNow")}
         </button>
       ) : retryText !== null ? (
         <span className={retryCls} data-testid="chat-connection-banner-countdown">
@@ -2338,7 +2395,7 @@ export function ChatPanel() {
                   </span>
                   <button
                     onClick={handleContinue}
-                    className="ml-auto flex w-fit max-w-full items-center gap-1 rounded bg-[var(--color-accent)] px-2 py-0.5 text-[11px] font-medium text-white transition-colors hover:brightness-90"
+                    className="ml-auto flex w-fit max-w-full items-center gap-1 rounded bg-[var(--color-accent)] px-2 py-0.5 text-11 font-medium text-white transition-colors hover:brightness-90"
                     style={{ fontSize: "calc(var(--ui-font-size, 0.875rem) * 0.9)" }}
                   >
                     <Play className="h-3 w-3" />
@@ -2359,7 +2416,7 @@ export function ChatPanel() {
                   </span>
                   <button
                     onClick={handleContinue}
-                    className="ml-auto flex w-fit max-w-full items-center gap-1 rounded bg-[var(--color-accent)] px-2 py-0.5 text-[11px] font-medium text-white transition-colors hover:brightness-90"
+                    className="ml-auto flex w-fit max-w-full items-center gap-1 rounded bg-[var(--color-accent)] px-2 py-0.5 text-11 font-medium text-white transition-colors hover:brightness-90"
                     style={{ fontSize: "calc(var(--ui-font-size, 0.875rem) * 0.9)" }}
                   >
                     <Play className="h-3 w-3" />
@@ -2398,7 +2455,7 @@ export function ChatPanel() {
                         clearServerError(selectedAgentId, currentSessionId);
                       }
                     }}
-                    className="ml-auto flex w-fit items-center gap-1 rounded bg-amber-500 px-2 py-0.5 text-[11px] font-medium text-white transition-colors hover:brightness-90"
+                    className="ml-auto flex w-fit items-center gap-1 rounded bg-amber-500 px-2 py-0.5 text-11 font-medium text-white transition-colors hover:brightness-90"
                     style={{ fontSize: "calc(var(--ui-font-size, 0.875rem) * 0.9)" }}
                   >
                     <X className="h-3 w-3" />
@@ -2506,7 +2563,7 @@ export function ChatPanel() {
               ) : (
                 <ChevronDown className="h-3 w-3 mr-1 text-text-tertiary  shrink-0" />
               )}
-              <span className="min-w-0 truncate text-[10px] font-medium text-text-tertiary  uppercase tracking-wider">
+              <span className="min-w-0 truncate text-10 font-medium text-text-tertiary  uppercase tracking-wider">
                 {(() => {
                   const completed = todos.filter(t => t.status === "completed").length;
                   const total = todos.length;
@@ -2580,7 +2637,7 @@ export function ChatPanel() {
             todos.length > 0 ? "" : "rounded-t-md"
           )}>
             <div className="flex items-center px-2.5 py-1.5 border-b border-border-divider">
-              <span className="text-[10px] font-medium text-text-tertiary  uppercase tracking-wider">
+              <span className="text-10 font-medium text-text-tertiary  uppercase tracking-wider">
                 {t("chatPanel.messageQueue", { count: queuedMessages.length })}
               </span>
             </div>
@@ -2590,7 +2647,7 @@ export function ChatPanel() {
                   key={i}
                   className="group flex items-start gap-1.5 px-2.5 py-1.5 hover:bg-zinc-100 dark:hover:bg-zinc-700/40 border-b border-border-divider last:border-b-0"
                 >
-                  <span className="shrink-0 text-[10px] mt-0.5 text-text-tertiary  select-none">{i + 1}.</span>
+                  <span className="shrink-0 text-10 mt-0.5 text-text-tertiary  select-none">{i + 1}.</span>
                   <span className="flex-1 min-w-0 text-xs text-text-secondary  truncate leading-relaxed">
                     {msg}
                   </span>
@@ -2987,7 +3044,7 @@ function UnsupportedImageDialog({
                   {m.reasoning && <Brain size={10} className="text-purple-400" />}
                 </span>
               </span>
-              <span className="text-[10px] text-text-tertiary  shrink-0 ml-2">
+              <span className="text-10 text-text-tertiary  shrink-0 ml-2">
                 {m.provider}
               </span>
             </button>
@@ -3092,7 +3149,7 @@ function ModelMenu({
   // Ponytail — ceiling: ~max(modelName * 7.5 + 74px, providerName * 7px + 42px).
   const menuWidth = useMemo(() => {
     const CHAR_WIDTH = 7.5; // px per char for text-xs (model rows)
-    const HEADER_CHAR_WIDTH = 7.5; // px per char for text-[10px] uppercase + tracking-wide
+    const HEADER_CHAR_WIDTH = 7.5; // px per char for text-10 uppercase + tracking-wide
     const PADDING = 24; // px-3 on each side
     const ROW_CHROME = 66; // feature icons + check slot + chevron + gaps on model rows
     const HEADER_CHROME = 18; // 12 logo + 6 gap, before the provider name
@@ -3324,7 +3381,7 @@ function ModelMenu({
                       Suppressed for the first group so the menu top edge stays flush. */}
                   {groupIdx > 0 && <div className="border-t border-border-divider" />}
                   {/* Sticky so the provider stays visible while its models scroll */}
-                  <div className="sticky top-0 z-10 flex items-center gap-1.5 bg-modal-surface px-3 py-1 text-[10px] font-semibold uppercase tracking-wide text-text-tertiary">
+                  <div className="sticky top-0 z-10 flex items-center gap-1.5 bg-modal-surface px-3 py-1 text-10 font-semibold uppercase tracking-wide text-text-tertiary">
                     <ProviderLogo providerId={provider} size={12} />
                     <span className="truncate">{provider}</span>
                   </div>
@@ -3468,7 +3525,7 @@ function ModelMenu({
                         )}
                       </span>
                       <span className="ml-2 flex shrink-0 items-center gap-1">
-                        <span className="text-[10px] text-text-tertiary">{a.preview}</span>
+                        <span className="text-10 text-text-tertiary">{a.preview}</span>
                         {isActive && <Check size={12} />}
                       </span>
                     </button>

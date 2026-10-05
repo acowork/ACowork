@@ -377,7 +377,7 @@ export function GatewayTab() {
             )}
           </div>
           {localIsForeign && (
-            <p className="mt-2 text-[10px] text-text-tertiary ">
+            <p className="mt-2 text-10 text-text-tertiary ">
               {t("settings.gatewayRunningExternal")}
             </p>
           )}
@@ -495,7 +495,7 @@ export function GatewayTab() {
               <button
                 onClick={() => void fetchAll()}
                 disabled={nodesLoading || agentsLoading}
-                className="rounded btn-solid px-2 py-1 text-[11px] font-medium disabled:opacity-50"
+                className="rounded btn-solid px-2 py-1 text-11 font-medium disabled:opacity-50"
               >
                 {t("settings.nodesRefresh")}
               </button>
@@ -680,7 +680,7 @@ function RelayTunnelPanel() {
           <span onClick={(e) => e.stopPropagation()}>
             <button
               onClick={() => void refreshRelay()}
-              className="rounded btn-solid px-2 py-1 text-[11px] font-medium"
+              className="rounded btn-solid px-2 py-1 text-11 font-medium"
             >
               {t("settings.nodesRefresh")}
             </button>
@@ -777,7 +777,7 @@ function RecentEventsLog() {
           return (
             <li
               key={`${entry.timestamp}-${idx}`}
-              className="flex items-center gap-2 px-3 py-1.5 text-[11px] font-mono"
+              className="flex items-center gap-2 px-3 py-1.5 text-11 font-mono"
             >
               <span className="text-text-tertiary ">{ts}</span>
               <span className="text-text-secondary ">
@@ -851,7 +851,7 @@ function NodesTree({
             surface="inset"
             title={node?.node_name ?? node?.hostname ?? node?.node_id ?? t("settings.nodesUnassigned")}
             meta={
-              <span className="inline-flex items-center gap-1 text-[10px]">
+              <span className="inline-flex items-center gap-1 text-10">
                 <span
                   className={cn(
                     "h-1.5 w-1.5 rounded-full",
@@ -941,7 +941,7 @@ function RuntimeRow({ agent, padding }: { agent: AgentListResponse; padding?: "d
             (debug_state), not startup intent (dev_mode) — an agent can be
             flipped into DevMode at runtime without restart. */}
         {agent.debug_state === "enabled" && (
-          <span className="inline-flex items-center gap-1 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] text-amber-700 dark:bg-amber-900/30 dark:text-amber-400">
+          <span className="inline-flex items-center gap-1 rounded bg-amber-100 px-1.5 py-0.5 text-10 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400">
             <Bug className="h-3 w-3" />
             {t("settings.debug")}
           </span>
@@ -1243,7 +1243,7 @@ function GeneralTab() {
               ]}
             />
           </div>
-          <p className="mt-1 text-[10px] text-text-tertiary">
+          <p className="mt-1 text-10 text-text-tertiary">
             {t("settings.frontendLogLevelHint")}
           </p>
         </div>
@@ -1277,7 +1277,7 @@ function GeneralTab() {
               {currentLogFileSize === 0 ? t("settings.noSplit") : t("settings.autoSplit", { size: currentLogFileSize })}
             </span>
           </div>
-          <p className="mt-1 text-[10px] text-text-tertiary">
+          <p className="mt-1 text-10 text-text-tertiary">
             {t("settings.logFileSizeHint")}
           </p>
         </div>
@@ -1311,7 +1311,7 @@ function GeneralTab() {
               {currentLogFileCount === 0 ? t("settings.unlimited") : t("settings.keepFiles", { count: currentLogFileCount })}
             </span>
           </div>
-          <p className="mt-1 text-[10px] text-text-tertiary">
+          <p className="mt-1 text-10 text-text-tertiary">
             {t("settings.maxLogFilesHint")}
           </p>
         </div>

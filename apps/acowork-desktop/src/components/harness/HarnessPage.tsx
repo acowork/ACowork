@@ -409,33 +409,33 @@ function ProvidersTab() {
                       <span className="text-xs" style={{ color: "var(--color-accent)" }}>{t("harness.active")}</span>
                       {isCustom ? (
                         <Tooltip content={t("harness.customProviderNoKey")} variant="plain">
-                          <span className="rounded bg-blue-100 px-1.5 py-0.5 text-[10px] text-blue-700 dark:bg-blue-900/30 dark:text-blue-400">
+                          <span className="rounded bg-blue-100 px-1.5 py-0.5 text-10 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400">
                             🔧 {t("harness.custom")}
                           </span>
                         </Tooltip>
                       ) : isLocal ? (
                         <Tooltip content={t("harness.localProviderNoKey")} variant="plain">
-                          <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] text-text-secondary dark:bg-zinc-700 ">
+                          <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-10 text-text-secondary dark:bg-zinc-700 ">
                             🏠 {t("harness.local")}
                           </span>
                         </Tooltip>
                       ) : (
-                        <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] text-text-secondary dark:bg-zinc-700">
+                        <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-10 text-text-secondary dark:bg-zinc-700">
                           {t("harness.keysCount", { count: accounts.length })}
                         </span>
                       )}
                     </div>
                     <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5">
                       {first?.models?.length ? (
-                        <span className="text-[11px] text-text-tertiary">{first.models.join(", ")}</span>
+                        <span className="text-11 text-text-tertiary">{first.models.join(", ")}</span>
                       ) : first?.default_model ? (
-                        <span className="text-[11px] text-text-tertiary">{first.default_model}</span>
+                        <span className="text-11 text-text-tertiary">{first.default_model}</span>
                       ) : (
-                        <span className="text-[11px] text-text-tertiary">—</span>
+                        <span className="text-11 text-text-tertiary">—</span>
                       )}
                       {first?.compact_model && (
                         <Tooltip content={t("harness.compactModelHint")} variant="plain">
-                          <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] text-text-secondary dark:bg-zinc-700 ">
+                          <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-10 text-text-secondary dark:bg-zinc-700 ">
                             {t("harness.compact")}: {first?.compact_model}
                           </span>
                         </Tooltip>
@@ -513,7 +513,7 @@ function ProvidersTab() {
                 <div>
                   <div className="mb-1 flex items-baseline justify-between">
                     <label className="block text-xs text-text-tertiary">{t("harness.apiKey")}</label>
-                    <span className="text-[10px] text-text-tertiary">
+                    <span className="text-10 text-text-tertiary">
                       {t("harness.accountLabel", { defaultValue: "alias" })}
                     </span>
                   </div>
@@ -854,7 +854,7 @@ export function McpTab() {
               <button
                 type="button"
                 onClick={() => setShowAddForm(true)}
-                className="inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-[11px] font-medium"
+                className="inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-11 font-medium"
               >
               {t("harnessMcp.addServer")}
             </button>
@@ -894,14 +894,14 @@ export function McpTab() {
                           type="button"
                           onClick={() => probeByName(server.name)}
                           disabled={status === "probing"}
-                          className="inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-[11px] font-medium disabled:opacity-50"
+                          className="inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-11 font-medium disabled:opacity-50"
                         >
                           {status === "probing" ? "..." : t("harnessMcp.testConn")}
                         </button>
                         <button
                           type="button"
                           onClick={() => removeServer(server.name)}
-                          className="inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-[11px] font-medium"
+                          className="inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-11 font-medium"
                         >
                           {t("harnessMcp.remove")}
                         </button>
@@ -919,7 +919,7 @@ export function McpTab() {
                       {status === "unhealthy" && (
                         <span className="h-2 w-2 shrink-0 rounded-full bg-red-500" title={healthErr || t("harnessMcp.connFailed")} />
                       )}
-                      <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] font-mono text-text-tertiary dark:bg-zinc-700">
+                      <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-10 font-mono text-text-tertiary dark:bg-zinc-700">
                         {server.transport}
                       </span>
                       {(() => {
@@ -929,21 +929,21 @@ export function McpTab() {
                       })()}
                       <span className="truncate text-xs font-medium text-text-secondary ">{server.name}</span>
                       {server.has_secrets && (
-                        <span className="text-[10px] text-amber-500 shrink-0">{t("harnessMcp.hasApiKey")}</span>
+                        <span className="text-10 text-amber-500 shrink-0">{t("harnessMcp.hasApiKey")}</span>
                       )}
                       {status === "healthy" && toolCount > 0 && (
-                        <span className="text-[10px] text-green-500 shrink-0">{toolCount} tools</span>
+                        <span className="text-10 text-green-500 shrink-0">{toolCount} tools</span>
                       )}
                     </div>
                     {(server.command || server.url) && (
-                      <p className="mt-0.5 truncate text-[10px] text-text-tertiary break-all">
+                      <p className="mt-0.5 truncate text-10 text-text-tertiary break-all">
                         {server.command || server.url}
                       </p>
                     )}
                     {/* Show health error inline */}
                     {status === "unhealthy" && healthErr && (
                       <div className="mt-0.5">
-                        <ErrorBox message={healthErr} className="!p-2 !text-[10px]" />
+                        <ErrorBox message={healthErr} className="!p-2 !text-10" />
                       </div>
                     )}
                   </ListRow>
@@ -985,7 +985,7 @@ export function McpTab() {
                   }
                   trailing={
                     isInstalled ? (
-                      <span className="inline-flex shrink-0 items-center gap-1 rounded bg-green-100 px-2 py-1 text-[11px] font-medium text-green-700 dark:bg-green-900/30 dark:text-green-400">
+                      <span className="inline-flex shrink-0 items-center gap-1 rounded bg-green-100 px-2 py-1 text-11 font-medium text-green-700 dark:bg-green-900/30 dark:text-green-400">
                         <CheckCircle2 className="h-3 w-3" />
                         {t("harnessMcp.installed")}
                       </span>
@@ -993,7 +993,7 @@ export function McpTab() {
                       /* Busy state lives on the row, not in a modal: the
                          install request stays open for minutes and a dialog
                          could be dismissed while it kept running. */
-                      <span className="inline-flex shrink-0 items-center gap-1 rounded bg-zinc-100 px-2 py-1 text-[11px] font-medium text-text-secondary dark:bg-zinc-700">
+                      <span className="inline-flex shrink-0 items-center gap-1 rounded bg-zinc-100 px-2 py-1 text-11 font-medium text-text-secondary dark:bg-zinc-700">
                         <Loader2 className="h-3 w-3 animate-spin" />
                         {t("harnessMcp.installing")}
                       </span>
@@ -1001,7 +1001,7 @@ export function McpTab() {
                       <button
                         type="button"
                         onClick={() => handleAddFromPreset(preset)}
-                        className="inline-flex shrink-0 items-center gap-1 rounded btn-solid px-2 py-1 text-[11px] font-medium"
+                        className="inline-flex shrink-0 items-center gap-1 rounded btn-solid px-2 py-1 text-11 font-medium"
                       >
                         {preset.install ? (
                           <>
@@ -1022,7 +1022,7 @@ export function McpTab() {
                 >
                   <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
                     <span className="truncate text-xs font-medium text-text-secondary ">{preset.name}</span>
-                    <span className="shrink-0 rounded bg-zinc-100 px-1 py-0.5 text-[10px] text-text-tertiary dark:bg-zinc-700">
+                    <span className="shrink-0 rounded bg-zinc-100 px-1 py-0.5 text-10 text-text-tertiary dark:bg-zinc-700">
                       {preset.category}
                     </span>
                     {/* Stage + elapsed while installing — the stage comes from
@@ -1038,16 +1038,16 @@ export function McpTab() {
                       return (
                         <span
                           data-testid={`mcp-install-stage-${preset.id}`}
-                          className="inline-flex shrink-0 items-center gap-1 text-[10px] text-text-tertiary"
+                          className="inline-flex shrink-0 items-center gap-1 text-10 text-text-tertiary"
                         >
                           {label}
                         </span>
                       );
                     })()}
                   </div>
-                  <p className="mt-0.5 line-clamp-1 text-[10px] text-text-tertiary">{preset.description}</p>
+                  <p className="mt-0.5 line-clamp-1 text-10 text-text-tertiary">{preset.description}</p>
                   {preset.requiredEnv.length > 0 && !isInstalled && !isInstalling && (
-                    <p className="mt-0.5 text-[10px] text-amber-500">
+                    <p className="mt-0.5 text-10 text-amber-500">
                       {t("harnessMcp.requires")}{preset.requiredEnv.join(", ")}
                     </p>
                   )}
@@ -1056,7 +1056,7 @@ export function McpTab() {
                   {outcome && !outcome.success && !isInstalling && (
                     <div className="mt-1">
                       <div className="flex items-center gap-2">
-                        <span className="inline-flex items-center gap-1 text-[10px] text-red-600 dark:text-red-400">
+                        <span className="inline-flex items-center gap-1 text-10 text-red-600 dark:text-red-400">
                           <XCircle className="h-2.5 w-2.5" />
                           {t("harnessMcp.installFailed")}
                         </span>
@@ -1071,7 +1071,7 @@ export function McpTab() {
                                 return next;
                               })
                             }
-                            className="text-[10px] text-text-tertiary hover:text-zinc-600 dark:hover:text-zinc-300"
+                            className="text-10 text-text-tertiary hover:text-zinc-600 dark:hover:text-zinc-300"
                           >
                             {showInstallOutput.has(preset.id)
                               ? t("common.hideDetails")
@@ -1081,16 +1081,16 @@ export function McpTab() {
                         <button
                           type="button"
                           onClick={() => clearInstallOutcome(preset.id)}
-                          className="text-[10px] text-text-tertiary hover:text-zinc-600 dark:hover:text-zinc-300"
+                          className="text-10 text-text-tertiary hover:text-zinc-600 dark:hover:text-zinc-300"
                         >
                           {t("harnessMcp.installDismiss")}
                         </button>
                       </div>
                       {outcome.error && (
-                        <p className="mt-0.5 break-all text-[10px] text-red-500">{outcome.error}</p>
+                        <p className="mt-0.5 break-all text-10 text-red-500">{outcome.error}</p>
                       )}
                       {outcome.stdout && showInstallOutput.has(preset.id) && (
-                        <pre className="mt-1 max-h-32 overflow-auto rounded bg-zinc-50 p-2 text-[10px] leading-relaxed dark:bg-zinc-900/50">
+                        <pre className="mt-1 max-h-32 overflow-auto rounded bg-zinc-50 p-2 text-10 leading-relaxed dark:bg-zinc-900/50">
                           <code>{outcome.stdout}</code>
                         </pre>
                       )}
@@ -1195,11 +1195,11 @@ export function McpTab() {
       {activePreset && (
         <div className="rounded-md border border-[var(--color-accent)]/40 bg-modal-surface p-4">
           <h2 className="text-xs font-medium mb-1">{t("harnessMcp.configure")}{activePreset.name}</h2>
-          <p className="text-[10px] text-text-tertiary mb-3">{activePreset.installHint}</p>
+          <p className="text-10 text-text-tertiary mb-3">{activePreset.installHint}</p>
           <div className="space-y-2">
             {activePreset.requiredEnv.map((envKey) => (
               <div key={envKey}>
-                <label className="mb-1 block text-[10px] text-text-tertiary">{envKey}</label>
+                <label className="mb-1 block text-10 text-text-tertiary">{envKey}</label>
                 <input
                   type="password"
                   value={presetEnvForm[envKey] || ""}
@@ -1244,13 +1244,13 @@ export function McpTab() {
                 {probeResult.tools.length > 0 && (
                   <div className="mb-3 max-h-32 overflow-y-auto rounded bg-zinc-50 p-2 dark:bg-zinc-700/50">
                     {probeResult.tools.map((tool) => (
-                      <span key={tool} className="mr-1 mb-1 inline-block rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] font-mono text-text-secondary dark:bg-zinc-600 ">
+                      <span key={tool} className="mr-1 mb-1 inline-block rounded bg-zinc-100 px-1.5 py-0.5 text-10 font-mono text-text-secondary dark:bg-zinc-600 ">
                         {tool}
                       </span>
                     ))}
                   </div>
                 )}
-                <p className="text-[10px] text-text-tertiary mb-3">{probeResult.duration_ms}ms</p>
+                <p className="text-10 text-text-tertiary mb-3">{probeResult.duration_ms}ms</p>
                 <button
                   onClick={dismissProbe}
                   className="inline-flex items-center gap-1 rounded btn-accent px-3 py-1.5 text-xs font-medium"
@@ -1272,7 +1272,7 @@ export function McpTab() {
                     details={probeResult.error ?? undefined}
                   />
                 </div>
-                <p className="text-[10px] text-text-tertiary mb-3">{probeResult.duration_ms}ms</p>
+                <p className="text-10 text-text-tertiary mb-3">{probeResult.duration_ms}ms</p>
                 <div className="flex gap-2">
                   <button
                     onClick={handleAddAnyway}
@@ -1299,7 +1299,7 @@ export function McpTab() {
           <div className="w-[300px] rounded-md bg-modal-surface p-6 text-center shadow-xl">
             <div className="mx-auto mb-3 h-8 w-8 animate-spin rounded-full border-2 border-zinc-300 border-t-[var(--color-accent)]" />
             <p className="text-xs text-text-tertiary">{t("harnessMcp.testing")}</p>
-            <p className="mt-1 text-[10px] text-text-tertiary">{pendingConfig.name}</p>
+            <p className="mt-1 text-10 text-text-tertiary">{pendingConfig.name}</p>
           </div>
         </div>
       )}

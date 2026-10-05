@@ -135,7 +135,7 @@ export function GitStatusBar({ agentId, workspaceId }: GitStatusBarProps) {
           // read as a single height family. Was `h-6` (24px) — visually
           // ~16px shorter than the other two banners.
           "flex min-h-[2.5rem] w-full shrink-0 items-center gap-1.5 px-3 text-left",
-          "text-[10px] font-medium uppercase tracking-wide",
+          "text-10 font-medium uppercase tracking-wide",
           "text-text-tertiary hover:text-zinc-700 dark:hover:text-zinc-200",
           "transition-colors duration-150",
           "border-y border-nav-divider/40 dark:border-zinc-600/40",

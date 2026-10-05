@@ -167,7 +167,7 @@ export function ProjectHeader({ project, onNewTask }: ProjectHeaderProps) {
           )}
 
           {/* 统计 */}
-          <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-text-tertiary ">
+          <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-11 text-text-tertiary ">
             <span>
               {t("pm.statTotal")}: <strong className="tabular-nums">{total}</strong>
             </span>
@@ -189,7 +189,7 @@ export function ProjectHeader({ project, onNewTask }: ProjectHeaderProps) {
             <button
               type="button"
               onClick={() => setMembersOpen(true)}
-              className="group flex items-center gap-1.5 rounded-full border border-dashed border-zinc-300 px-2 py-0.5 text-[11px] text-text-tertiary hover:border-zinc-400 hover:text-zinc-700 dark:border-zinc-600  dark:hover:border-zinc-400 dark:hover:text-zinc-200"
+              className="group flex items-center gap-1.5 rounded-full border border-dashed border-zinc-300 px-2 py-0.5 text-11 text-text-tertiary hover:border-zinc-400 hover:text-zinc-700 dark:border-zinc-600  dark:hover:border-zinc-400 dark:hover:text-zinc-200"
               aria-label={t("pm.manageMembers")}
             >
               {project.members.length === 0 ? (

@@ -72,7 +72,7 @@ function SubtaskRow({ task, depth, byId, childrenByParent, onSelect }: SubtaskRo
         {hasChildren ? (
           <button
             type="button"
-            className="w-4 shrink-0 text-center text-[10px] text-text-tertiary hover:text-zinc-600 dark:hover:text-zinc-300"
+            className="w-4 shrink-0 text-center text-10 text-text-tertiary hover:text-zinc-600 dark:hover:text-zinc-300"
             onClick={(e) => {
               e.stopPropagation();
               setCollapsed((v) => !v);
@@ -86,7 +86,7 @@ function SubtaskRow({ task, depth, byId, childrenByParent, onSelect }: SubtaskRo
           <span className="w-4 shrink-0" aria-hidden />
         )}
         <StatusDot status={task.status} />
-        <TaskTypeIcon type={task.type} className="shrink-0 text-[10px]" />
+        <TaskTypeIcon type={task.type} className="shrink-0 text-10" />
         <span
           className={cn(
             "min-w-0 flex-1 truncate",

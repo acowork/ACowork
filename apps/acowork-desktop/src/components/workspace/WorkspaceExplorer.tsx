@@ -857,7 +857,7 @@ export function WorkspaceExplorer() {
                                 setSearchQuery("");
                                 searchInputRef.current?.focus();
                             }}
-                            className="text-[10px] text-text-tertiary hover:text-zinc-600 dark:hover:text-zinc-300"
+                            className="text-10 text-text-tertiary hover:text-zinc-600 dark:hover:text-zinc-300"
                             title={t("workspace.ariaLabelClearSearch")}
                         >
                             <X className="h-3 w-3" />
@@ -869,7 +869,7 @@ export function WorkspaceExplorer() {
                 {showDropdown && (
                     <div className="absolute left-0 right-0 top-full z-50 mt-1 rounded-lg border border-border-outer bg-modal-surface shadow-lg">
                         {/* Header with count */}
-                        <div className="flex items-center justify-between border-b border-border-divider px-3 py-1.5 text-[11px] text-text-tertiary">
+                        <div className="flex items-center justify-between border-b border-border-divider px-3 py-1.5 text-11 text-text-tertiary">
                             {searchLoading ? (
                                 <span>Searching…</span>
                             ) : matchingFiles.length > 0 ? (
@@ -907,7 +907,7 @@ export function WorkspaceExplorer() {
                                             <span className="shrink-0 text-xs text-text-secondary ">
                                                 {f.name}
                                             </span>
-                                            <span className="min-w-0 truncate text-[10px] text-text-tertiary  ml-3">
+                                            <span className="min-w-0 truncate text-10 text-text-tertiary  ml-3">
                                                 {abbreviatePath(f.dir)}
                                             </span>
                                         </div>

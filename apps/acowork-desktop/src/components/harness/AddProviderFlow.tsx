@@ -454,7 +454,7 @@ export function AddProviderFlow({
                 <div>
                   <div className="mb-1 flex items-baseline justify-between">
                     <label className="block text-xs text-text-tertiary">{t("harness.apiKey")}</label>
-                    <span className="text-[10px] text-text-tertiary">
+                    <span className="text-10 text-text-tertiary">
                       {t("harness.accountLabel", { defaultValue: "alias" })}
                     </span>
                   </div>
@@ -605,7 +605,7 @@ export function AddProviderFlow({
                   <label className="block text-xs text-text-tertiary">
                     {t("harness.apiKey")} <span className="text-text-tertiary">({t("harness.optional")})</span>
                   </label>
-                  <span className="text-[10px] text-text-tertiary">
+                  <span className="text-10 text-text-tertiary">
                     {t("harness.accountLabel", { defaultValue: "alias" })}
                   </span>
                 </div>
@@ -667,21 +667,21 @@ export function AddProviderFlow({
                   {t("harness.customJsonInputLabel", { defaultValue: "Or import model JSON" })}
                 </summary>
                 <div className="space-y-1.5 border-t border-border-divider p-3">
-                  <p className="text-[10px] text-text-tertiary">
+                  <p className="text-10 text-text-tertiary">
                     {t("harness.customJsonImportHint", {
                       defaultValue: "Same shape as offline_providers.json — see the formatted example below.",
                     })}
                   </p>
                   {/* Pretty-printed demo — gives users something to copy
                       from so they know where the schema starts and ends. */}
-                  <pre className="max-h-[160px] overflow-auto rounded-md bg-zinc-50 px-2 py-1.5 font-mono text-[10px] text-text-tertiary dark:bg-zinc-900">
+                  <pre className="max-h-[160px] overflow-auto rounded-md bg-zinc-50 px-2 py-1.5 font-mono text-10 text-text-tertiary dark:bg-zinc-900">
                     {OFFLINE_JSON_EXAMPLE}
                   </pre>
                   <div className="flex justify-end">
                     <button
                       type="button"
                       onClick={handleUseExampleJson}
-                      className="text-[10px] text-text-tertiary hover:text-text-primary"
+                      className="text-10 text-text-tertiary hover:text-text-primary"
                     >
                       {t("harness.customJsonUseExample", { defaultValue: "Use this example" })}
                     </button>
@@ -696,7 +696,7 @@ export function AddProviderFlow({
                       defaultValue: "Paste model JSON here, or click \"Use this example\" above",
                     })}
                     rows={5}
-                    className="w-full resize-y rounded-md border border-border-divider bg-transparent px-2 py-1.5 font-mono text-[11px] outline-none focus:border-zinc-400 dark:focus:border-zinc-500"
+                    className="w-full resize-y rounded-md border border-border-divider bg-transparent px-2 py-1.5 font-mono text-11 outline-none focus:border-zinc-400 dark:focus:border-zinc-500"
                   />
                   {customJsonError && <ErrorBox message={customJsonError} />}
                   <div className="flex justify-end">

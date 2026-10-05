@@ -109,7 +109,15 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
                 )
             })?;
             let token = state.gateway_auth.current_access_token().ok_or_else(|| {
-                "relay mode requires a logged-in account — no access token is mirrored".to_string()
+                // Identifies the symptom, not the cause: relay-mode CONNECT
+                // was issued before the webview's authStore had one to mirror.
+                // The bridge (`apps/acowork-desktop/src/lib/gatewayAuthBridge.ts`)
+                // re-invokes us on the `null → non-null` transition, so this
+                // error is self-healing for the normal login / init paths —
+                // a remaining occurrence here means the mirror is genuinely
+                // empty (no logged-in account), which is exactly what
+                // `chatPanel.connectionBanner.idle` surfaces to the user.
+                "relay mode: awaiting login token (no access token mirrored)".to_string()
             })?;
             // `refresh_relay_token_if_stale` already asked for a rotation
             // before we took the client lock. If the token is STILL at/near

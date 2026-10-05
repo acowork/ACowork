@@ -139,13 +139,13 @@ export function MemberManagerDialog({ project, onClose }: MemberManagerDialogPro
           </button>
         </header>
 
-        <p className="border-b border-border-divider px-5 py-2 text-[11px] text-text-tertiary">
+        <p className="border-b border-border-divider px-5 py-2 text-11 text-text-tertiary">
           {t("pm.memberManagerHint")}
         </p>
 
         <div className="flex-1 overflow-y-auto px-5 py-3">
           {/* 当前成员 */}
-          <div className="mb-1 text-[11px] font-medium text-text-tertiary ">
+          <div className="mb-1 text-11 font-medium text-text-tertiary ">
             {t("pm.members")}（{currentMembers.length}）
           </div>
           {currentMembers.length === 0 ? (
@@ -166,7 +166,7 @@ export function MemberManagerDialog({ project, onClose }: MemberManagerDialogPro
                       size={24}
                     />
                   ) : (
-                    <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-zinc-200 text-[10px] text-text-tertiary dark:bg-zinc-700">
+                    <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-zinc-200 text-10 text-text-tertiary dark:bg-zinc-700">
                       ?
                     </div>
                   )}
@@ -174,13 +174,13 @@ export function MemberManagerDialog({ project, onClose }: MemberManagerDialogPro
                     <div className="truncate text-xs text-text ">
                       {m.meta?.display_name ?? m.meta?.name ?? t("pm.memberNotFound")}
                     </div>
-                    <div className="truncate text-[10px] text-text-tertiary">{m.instance_id}</div>
+                    <div className="truncate text-10 text-text-tertiary">{m.instance_id}</div>
                   </div>
                   <button
                     type="button"
                     disabled={busyId === m.instance_id}
                     onClick={() => handleRemove(m.instance_id)}
-                    className="shrink-0 rounded-md px-2 py-1 text-[11px] text-red-600 hover:bg-red-50 disabled:opacity-40 dark:text-red-400 dark:hover:bg-red-950/40"
+                    className="shrink-0 rounded-md px-2 py-1 text-11 text-red-600 hover:bg-red-50 disabled:opacity-40 dark:text-red-400 dark:hover:bg-red-950/40"
                   >
                     {t("pm.removeMember")}
                   </button>
@@ -190,7 +190,7 @@ export function MemberManagerDialog({ project, onClose }: MemberManagerDialogPro
           )}
 
           {/* 可添加候选 */}
-          <div className="mb-1 text-[11px] font-medium text-text-tertiary ">
+          <div className="mb-1 text-11 font-medium text-text-tertiary ">
             {t("pm.manageMembers")}
           </div>
           {candidates.length === 0 ? (
@@ -213,13 +213,13 @@ export function MemberManagerDialog({ project, onClose }: MemberManagerDialogPro
                     <div className="truncate text-xs text-text ">
                       {a.meta.display_name ?? a.meta.name ?? a.meta.agent_id}
                     </div>
-                    <div className="truncate text-[10px] text-text-tertiary">{a.meta.instance_id}</div>
+                    <div className="truncate text-10 text-text-tertiary">{a.meta.instance_id}</div>
                   </div>
                   <button
                     type="button"
                     disabled={busyId === a.meta.instance_id}
                     onClick={() => handleAdd(a.meta.instance_id)}
-                    className="shrink-0 rounded-md px-2 py-1 text-[11px] font-medium text-text-secondary hover:bg-zinc-100 disabled:opacity-40  dark:hover:bg-zinc-700"
+                    className="shrink-0 rounded-md px-2 py-1 text-11 font-medium text-text-secondary hover:bg-zinc-100 disabled:opacity-40  dark:hover:bg-zinc-700"
                   >
                     {t("pm.addMember")}
                   </button>
