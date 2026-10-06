@@ -112,11 +112,27 @@ const NODE: PermissionTarget = { kind: "node", id: "n-1", name: "My Node" };
 
 /** The owner cell — carries `data-owner`, so it stays addressable when a
  *  guest row shows the same person (the roster legitimately lists the
- *  owner too). */
+ *  owner too). An admin renders it as a `<select>` (assignment is an
+ *  admin right, ADR-087 D7); everyone else gets a read-only `<span>`. */
 function ownerCell(): HTMLElement {
   const el = document.querySelector<HTMLElement>("[data-owner]");
   if (!el) throw new Error("owner cell not found");
   return el;
+}
+
+/** The owner NAME the cell actually displays.
+ *
+ *  Reading `textContent` is wrong for the picker: a `<select>`'s text is
+ *  every option concatenated, so it names accounts that are not the
+ *  owner. The question these rows ask is "who is the owner called?",
+ *  which for a select is its *selected* option. */
+function ownerLabel(): string {
+  const el = ownerCell();
+  if (el.tagName === "SELECT") {
+    const sel = el as unknown as HTMLSelectElement;
+    return sel.options[sel.selectedIndex]?.textContent ?? "";
+  }
+  return el.textContent ?? "";
 }
 
 beforeEach(() => {
@@ -303,8 +319,7 @@ describe("PermissionDialog visibility toggle", () => {
       await screen.findByText("permissionDialog.visibilityOffHint");
       // The directory is not consulted at all on the admin path.
       expect(authApi.fetchDirectory).not.toHaveBeenCalled();
-      expect(ownerCell().title).toBe("Bob Bobson");
-      expect(ownerCell().textContent).not.toBe("u-owner");
+      expect(ownerLabel()).toBe("Bob Bobson");
     });
 
     it("names a disabled guest, which the directory would have dropped", async () => {
@@ -332,8 +347,9 @@ describe("PermissionDialog visibility toggle", () => {
       });
       await renderOpen();
       await screen.findByText("permissionDialog.visibilityOffHint");
-      expect(ownerCell().title).toBe("Me");
-      expect(ownerCell().textContent).not.toBe("me-admin");
+      // The caller is in the pick list under their display name, not their
+      // id — the roster came back empty, so only `me` can name them.
+      expect(ownerLabel()).toBe("Me");
     });
 
     it("falls back to the directory for a non-admin viewer", async () => {
@@ -358,7 +374,100 @@ describe("PermissionDialog visibility toggle", () => {
       // would make the row look ownerless and invite a second claim.
       await renderOpen();
       await screen.findByText("permissionDialog.visibilityOffHint");
-      expect(ownerCell().textContent).toBe("u-owner");
+      // The id survives as its own option and stays the selected one.
+      expect(ownerLabel()).toBe("u-owner");
+    });
+  });
+
+  describe("owner assignment", () => {
+    // `PATCH .../owner` is the Admin tier (ADR-087 D7), so the picker is
+    // the admin's way to say who owns a resource. The whole point of the
+    // change: before it existed, the only owner the UI could produce was
+    // whoever was clicking, i.e. ownership was unassignable.
+    function ownerSelect(): HTMLSelectElement {
+      const el = screen.getByRole("combobox", {
+        name: "permissionDialog.owner",
+      }) as HTMLSelectElement;
+      return el;
+    }
+
+    it("lists every account for an admin, with the current owner selected", async () => {
+      authApi.fetchAccounts.mockResolvedValue([
+        { user_id: "u-owner", username: "bob", display_name: "Bob Bobson", role: "user" },
+        { user_id: "u-nick", username: "nicholas", display_name: "Nicholas", role: "user" },
+      ]);
+      await renderOpen();
+      await screen.findByText("permissionDialog.visibilityOffHint");
+
+      const sel = ownerSelect();
+      const labels = Array.from(sel.options).map((o) => o.textContent);
+      expect(labels).toContain("Nicholas");
+      // The record's current owner is what the select shows, not the first
+      // row of the list — a picker that silently defaults is a picker that
+      // reassigns on an innocent Save.
+      expect(sel.value).toBe("u-owner");
+    });
+
+    it("writes the picked account as owner, and nothing else", async () => {
+      const { patchNodeOwner, patchNodeVisibility, patchNodeGuests } =
+        await import("../../lib/gateway-api");
+      authApi.fetchAccounts.mockResolvedValue([
+        { user_id: "u-owner", username: "bob", display_name: "Bob Bobson", role: "user" },
+        { user_id: "u-nick", username: "nicholas", display_name: "Nicholas", role: "user" },
+      ]);
+      await renderOpen();
+      await screen.findByText("permissionDialog.visibilityOffHint");
+
+      fireEvent.change(ownerSelect(), { target: { value: "u-nick" } });
+      // Selecting is a draft: nothing travels until Save.
+      expect(patchNodeOwner).not.toHaveBeenCalled();
+
+      fireEvent.click(screen.getByRole("button", { name: "permissionDialog.save" }));
+      await waitFor(() =>
+        expect(patchNodeOwner).toHaveBeenCalledWith("n-1", "u-nick"),
+      );
+      // Assigning an owner is one decision. It must not ride along with a
+      // visibility or guest-list write the user never made.
+      expect(patchNodeVisibility).not.toHaveBeenCalled();
+      expect(patchNodeGuests).not.toHaveBeenCalled();
+    });
+
+    it("offers no owner control to a non-admin, including the owner themself", async () => {
+      // The privilege assertion. `can_attribute` is true for the owner, so
+      // gating the picker on `editable` would hand them a control that the
+      // Gateway answers with 403.
+      ACCOUNT.role = "user";
+      try {
+        (gatewayApi.fetchNodePermissions as ReturnType<typeof vi.fn>).mockResolvedValue({
+          ...PERMS,
+          owner_user_id: "me-admin",
+        });
+        await renderOpen();
+        await screen.findByText("permissionDialog.visibilityOffHint");
+
+        expect(
+          screen.queryByRole("combobox", { name: "permissionDialog.owner" }),
+        ).toBeNull();
+        // Still named, still read-only.
+        expect(ownerCell().tagName).toBe("SPAN");
+        expect(ownerLabel()).toBe("Me");
+      } finally {
+        ACCOUNT.role = "admin";
+      }
+    });
+
+    it("clears the owner back to ownerless when the unassigned entry is picked", async () => {
+      // The Gateway spells ownerless `null`; the select needs a real option
+      // value for it, and "" is that value. Losing this would make an
+      // already-owned row impossible to un-assign from the UI.
+      const { patchNodeOwner } = await import("../../lib/gateway-api");
+      await renderOpen();
+      await screen.findByText("permissionDialog.visibilityOffHint");
+
+      fireEvent.change(ownerSelect(), { target: { value: "" } });
+      fireEvent.click(screen.getByRole("button", { name: "permissionDialog.save" }));
+
+      await waitFor(() => expect(patchNodeOwner).toHaveBeenCalledWith("n-1", null));
     });
   });
 

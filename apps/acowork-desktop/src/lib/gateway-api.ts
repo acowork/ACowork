@@ -933,6 +933,11 @@ export const patchNodeGuests = (id: string, guests: string[]) =>
  * `shared`/`public` with a 409 until someone claims it. Without a UI path
  * to claim, the visibility switch is unusable on every install that
  * predates ADR-087 (all existing agents/nodes start out ownerless).
+ *
+ * It is also the write behind the dialog's owner picker, which is how an
+ * admin hands a resource to a specific account. Before that picker the only
+ * owner the UI could produce was whoever was clicking — so in practice
+ * ownership was not assignable at all, only self-claimable.
  */
 export const patchAgentOwner = (id: string, ownerUserId: string | null) =>
   patchPermissions("agents", id, "owner", { owner_user_id: ownerUserId });

@@ -18,6 +18,7 @@ import {
 } from "../../lib/gateway-api";
 import { ErrorBox } from "../common/ErrorBox";
 import { Switch } from "../common/Switch";
+import { Dropdown } from "../common/Dropdown";
 
 /** What the dialog edits: an agent instance or a node. */
 export interface PermissionTarget {
@@ -44,8 +45,11 @@ interface PermissionDialogProps {
  *   payload said `can_manage` — this component assumes a manageable caller.
  * - `can_attribute` (owner ∨ admin ∨ local) decides whether the form is
  *   editable; a manage-guest sees the same data read-only (D9 R1).
- * - Owner transfer is admin-only and intentionally not exposed here (the
- *   PATCH endpoint exists for the future admin surface).
+ * - Owner assignment is **admin-only** (`PATCH .../owner` is the Admin
+ *   tier, ADR-087 D7: transfer is an authorization change, so the owner
+ *   may share but never hand over mastership). Only the signed-in admin
+ *   therefore gets the picker; an owner sees the same row as read-only
+ *   text, which is what it always was.
  */
 export function PermissionDialog({ open, target, onClose }: PermissionDialogProps) {
   const { t } = useTranslation();
@@ -61,6 +65,9 @@ export function PermissionDialog({ open, target, onClose }: PermissionDialogProp
   // Local draft state — committed on Save.
   const [visibility, setVisibility] = useState<string>("private");
   const [guests, setGuests] = useState<Set<string>>(new Set());
+  /** Owner draft. `""` is the ownerless value the wire spells `null`;
+   *  the `<Dropdown>` needs a real option value to select. */
+  const [owner, setOwner] = useState<string>("");
   const closeRef = useRef<HTMLButtonElement>(null);
 
   const load = useCallback(async () => {
@@ -75,6 +82,7 @@ export function PermissionDialog({ open, target, onClose }: PermissionDialogProp
       setPerms(p);
       setVisibility(p.visibility);
       setGuests(new Set(p.guests));
+      setOwner(p.owner_user_id ?? "");
     } catch (e) {
       setError(String(e));
       setPerms(null);
@@ -146,6 +154,7 @@ export function PermissionDialog({ open, target, onClose }: PermissionDialogProp
   const dirty =
     perms !== null &&
     (visibility !== perms.visibility ||
+      owner !== (perms.owner_user_id ?? "") ||
       guests.size !== perms.guests.length ||
       perms.guests.some((g) => !guests.has(g)));
 
@@ -154,6 +163,15 @@ export function PermissionDialog({ open, target, onClose }: PermissionDialogProp
     setSaving(true);
     setSaveError(null);
     try {
+      // Owner first: a transfer is the write most likely to move the
+      // caller's own authority away, and doing it before the guest /
+      // visibility writes means those two are evaluated against the
+      // record the admin just wrote rather than the one they are
+      // replacing.
+      if (owner !== (perms.owner_user_id ?? "")) {
+        const fn = target.kind === "agent" ? patchAgentOwner : patchNodeOwner;
+        await fn(target.id, owner === "" ? null : owner);
+      }
       if (visibility !== perms.visibility) {
         const fn = target.kind === "agent" ? patchAgentVisibility : patchNodeVisibility;
         await fn(target.id, visibility);
@@ -173,6 +191,7 @@ export function PermissionDialog({ open, target, onClose }: PermissionDialogProp
       // above carries the reason (e.g. 409: claim an owner first).
       setVisibility(perms.visibility);
       setGuests(new Set(perms.guests));
+      setOwner(perms.owner_user_id ?? "");
     } finally {
       setSaving(false);
     }
@@ -240,12 +259,54 @@ export function PermissionDialog({ open, target, onClose }: PermissionDialogProp
   const ownerName = perms?.owner_user_id
     ? ownerRec?.display_name ?? perms.owner_user_id
     : null;
+  // The admin's pick list, over the roster already fetched above — no
+  // second request. Two additions on top of it:
+  //
+  // 1. The caller themself, if the listing somehow lacks them. On the
+  //    admin path `users` comes from `GET /api/users` (the full
+  //    roster, caller included) so this is belt-and-braces, but
+  //    "assign it to me" is a legitimate and common answer and must
+  //    never be missing from the options.
+  // 2. An owner whose account resolves to nothing (soft-deleted) is kept
+  //    as an option carrying its raw id — the same treatment
+  //    `orphanGuests` gets below. Dropping it would make the select
+  //    fall back to the first entry, i.e. display one owner while the
+  //    record names another.
+  const isAdminCaller = me?.role === "admin";
+  // Copy — the two `push`/`unshift` below must not mutate the `users`
+  // state array they alias, or a re-render compounds the additions.
+  const ownerOptions = [...users];
+  if (me && !ownerOptions.some((u) => u.user_id === me.user_id)) {
+    ownerOptions.unshift({
+      user_id: me.user_id,
+      username: "",
+      display_name: me.display_name,
+    });
+  }
+  if (perms?.owner_user_id && !ownerOptions.some((u) => u.user_id === perms.owner_user_id)) {
+    ownerOptions.push({
+      user_id: perms.owner_user_id,
+      username: "",
+      display_name: perms.owner_user_id,
+    });
+  }
   // An ownerless resource is admin-only and cannot be published (ADR-087
   // D6/D7). The Gateway ships `can_set_visibility` so the switch is
   // disabled rather than offered-then-rejected by a 409. Only an admin
   // may claim, since `PATCH .../owner` is the Admin tier.
   const isOwnerless = perms !== null && perms.owner_user_id === null;
-  const canClaim = isOwnerless && me?.role === "admin";
+  const canClaim = isOwnerless && isAdminCaller;
+  // Owner assignment is the Admin tier (ADR-087 D7), so the picker is
+  // rendered for admins only — an owner keeps the read-only text this
+  // row has always shown. `editable` is NOT the right gate: it is true
+  // for the owner too, and offering a control that 403s is exactly the
+  // dead end `can_set_visibility` exists to avoid.
+  //
+  // `!isOwnerless` keeps one owner control on screen per state: an
+  // ownerless row shows the one-click claim below, an owned row shows the
+  // picker. Both write the same field, so showing them together is two
+  // answers to one question.
+  const canAssignOwner = isAdminCaller && editable && !isOwnerless;
   // `can_attribute` gates the form; `can_set_visibility` gates the one
   // write the store would silently normalise away. Absent on a pre-087
   // Gateway — fall back so old Gateways keep working.
@@ -300,21 +361,50 @@ export function PermissionDialog({ open, target, onClose }: PermissionDialogProp
 
           {perms && !loading && (
             <>
-              {/* Owner (read-only — transfer is admin-only, ADR-087 D7) */}
+              {/* Owner — an admin picks any account; everyone else reads it.
+                  `PATCH .../owner` is the Admin tier (ADR-087 D7), so this
+                  is deliberately NOT gated on `editable`, which is also true
+                  for the owner. `data-owner` is on BOTH branches: it marks
+                  the cell as THE owner (the guest roster lists them too, so
+                  the name alone is ambiguous) and it is what the existing
+                  name-resolution assertions address. */}
               <div className="flex items-center justify-between gap-2">
                 <span className="text-text-tertiary">{t("permissionDialog.owner")}</span>
-                {/* `title` so a name too long for the row (or the raw id
-                    fallback for a deleted account) is still readable on
-                    hover instead of being silently truncated. `data-owner`
-                    marks this cell as THE owner — the guest roster also
-                    lists the owner, so the name alone is ambiguous. */}
-                <span
-                  data-owner
-                  className="truncate text-text-secondary"
-                  title={ownerName ?? undefined}
-                >
-                  {ownerName ?? t("permissionDialog.ownerUnassigned")}
-                </span>
+                {canAssignOwner ? (
+                  <Dropdown
+                    size="small"
+                    data-owner
+                    className="w-40 shrink-0"
+                    value={owner}
+                    onChange={setOwner}
+                    aria-label={t("permissionDialog.owner")}
+                    // The empty value is the ownerless record. It stays
+                    // pickable: an admin un-assigning a resource is a
+                    // legitimate repair (the Gateway accepts `null`), and
+                    // hiding it would make the ownerless state
+                    // unrepresentable once a row has an owner.
+                    placeholder={{
+                      value: "",
+                      label: t("permissionDialog.ownerUnassigned"),
+                      selectable: true,
+                    }}
+                    options={ownerOptions.map((u) => ({
+                      value: u.user_id,
+                      label: u.display_name || u.username || u.user_id,
+                    }))}
+                  />
+                ) : (
+                  /* `title` so a name too long for the row (or the raw id
+                     fallback for a deleted account) is still readable on
+                     hover instead of being silently truncated. */
+                  <span
+                    data-owner
+                    className="truncate text-text-secondary"
+                    title={ownerName ?? undefined}
+                  >
+                    {ownerName ?? t("permissionDialog.ownerUnassigned")}
+                  </span>
+                )}
               </div>
 
               {/* Ownerless ⇒ admin-only and unpublishable (ADR-087 D6/D7).
