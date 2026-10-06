@@ -681,6 +681,15 @@ impl AuthService {
                 "username '{username}' already exists"
             )));
         }
+        // `display_name` is free-form and NOT unique — two accounts may
+        // render the same name. Only `username` is unique (checked above).
+        // An empty display name falls back to the "User" placeholder.
+        let display_name = display_name.trim();
+        let display_name = if display_name.is_empty() {
+            "User".to_string()
+        } else {
+            display_name.to_string()
+        };
 
         let stamp = iso(now);
         let (password_hash, invite) = match password {
@@ -694,11 +703,7 @@ impl AuthService {
         let mut account = UserAccount {
             user_id: uuid::Uuid::new_v4().to_string(),
             username,
-            display_name: if display_name.trim().is_empty() {
-                "User".into()
-            } else {
-                display_name.trim().to_string()
-            },
+            display_name,
             role,
             password_hash,
             password_changed_at: stamp.clone(),
@@ -743,6 +748,8 @@ impl AuthService {
     ) -> Result<UserAccount, AuthError> {
         let mut list = self.load_accounts().map_err(AuthError::Store)?;
         let idx = self.index_of(&list, user_id)?;
+        // `display_name` is free-form and NOT unique (only `username` is),
+        // so a rename needs no collision check — apply the patch directly.
         patch.apply_to(&mut list.accounts[idx]);
         list.accounts[idx].updated_at = iso(now);
         list.version += 1;

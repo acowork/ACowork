@@ -6,13 +6,14 @@ import { useToast } from "../common/ToastProvider";
 import { ConfirmDialog } from "../common/ConfirmDialog";
 import { AgentDetailDialog } from "./AgentDetailDialog";
 import { CloneDialog } from "./CloneDialog";
+import { PermissionDialog, type PermissionTarget } from "./PermissionDialog";
 import { PublishWizard } from "./PublishWizard";
 import { CreateWizard } from "./CreateWizard";
 import { AgentAvatar } from "../common/AgentAvatar";
 import { Tooltip } from "../common/Tooltip";
 import { useTranslation } from "../../i18n/useTranslation";
 import { cn } from "../../lib/utils";
-import { Play, Square, Trash2, Info, Copy, Plus, Search, Package, Sparkles, Bug, ChevronRight } from "lucide-react";
+import { Play, Square, Trash2, Info, Copy, Plus, Search, Package, Sparkles, Bug, ChevronRight, UserCog } from "lucide-react";
 import { StyledInput } from "../common/StyledInput";
 import { open } from "@tauri-apps/plugin-dialog";
 import { isProcessing, instanceIdOf, type AgentInfo, type CloneResponse, type NodeInfo } from "../../lib/types";
@@ -139,6 +140,8 @@ export function AgentList({ width }: AgentListProps) {
 
   // Agent detail dialog state
   const [detailAgentId, setDetailAgentId] = useState<string | null>(null);
+  // ADR-087: agent/node permissions dialog target (owner/guests/visibility).
+  const [permTarget, setPermTarget] = useState<PermissionTarget | null>(null);
 
   // Clone dialog state
   const [cloneSource, setCloneSource] = useState<{ agentId: string; agentName: string } | null>(null);
@@ -417,6 +420,25 @@ export function AgentList({ width }: AgentListProps) {
       label: t("agentList.contextDetails"),
       onClick: ({ payload }) => payload && setDetailAgentId(payload.agentId),
     });
+    // ADR-087: permissions entry — hidden for callers without manage on
+    // this agent. `can_manage` absent/null = pre-087 Gateway or Local
+    // single-user mode, both of which are manageable → show.
+    if (contextAgent && contextAgent.can_manage !== false) {
+      items.push({
+        key: "permissions",
+        icon: <UserCog size={14} />,
+        label: t("agentList.contextPermissions"),
+        onClick: ({ payload }) => {
+          if (!payload || !contextAgent) return;
+          setPermTarget({
+            kind: "agent",
+            // Instance key (ADR-073) — the ownership row is keyed by it.
+            id: payload.agentId,
+            name: contextAgent.display_name ?? contextAgent.name,
+          });
+        },
+      });
+    }
     items.push({
       key: "clone",
       icon: <Copy size={14} />,
@@ -497,6 +519,8 @@ export function AgentList({ width }: AgentListProps) {
     // agent_id fallback); `agent.agent_id` is display-only.
     const id = instanceIdOf(agent);
     const sessionTitle = agentsMap[id]?.sessionTitle;
+    // ADR-087: set when the Gateway refused this agent's session calls.
+    const accessDenied = agentsMap[id]?.accessDenied === true;
 
     return (
       <div
@@ -586,7 +610,22 @@ export function AgentList({ width }: AgentListProps) {
               }}
             >
               {agent.alive ? (
-                sessionTitle === undefined ? (
+                accessDenied ? (
+                  // ADR-087: the Gateway refused every session call for
+                  // this agent. Showing the pulse skeleton here was
+                  // indistinguishable from "still loading" — the row
+                  // animated forever while nothing could ever arrive.
+                  <span
+                    className={cn(
+                      "block truncate",
+                      selectedAgentId === id
+                        ? "text-white/50"
+                        : "text-text-tertiary/70",
+                    )}
+                  >
+                    {t("agentList.noAccess")}
+                  </span>
+                ) : sessionTitle === undefined ? (
                   <span
                     aria-hidden
                     className={cn(
@@ -716,20 +755,39 @@ export function AgentList({ width }: AgentListProps) {
                     collapsed={collapsed}
                     onToggle={() => toggleNode(group.nodeId)}
                     agentCount={group.agents.length}
+                    // ADR-087: `can_manage` undefined = pre-087 Gateway →
+                    // treat as manageable (show); false = explicitly denied.
+                    canManage={group.node?.can_manage !== false}
+                    onManagePermissions={() =>
+                      setPermTarget({
+                        kind: "node",
+                        id: group.nodeId,
+                        name: nodeDisplayName(group),
+                      })
+                    }
+                    permissionsLabel={t("agentList.nodePermissions")}
                   />
-                  {!collapsed && group.agents.length === 0 && (
-                    <button
-                      type="button"
-                      onClick={() => void doInstall(group.nodeId)}
-                      disabled={!nodeOnline || installing}
-                      title={t("agentList.installAgent")}
-                      data-testid="node-group-install"
-                      className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs text-text-tertiary transition-colors hover:bg-nav-item-hover hover:text-text-secondary disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent"
-                    >
-                      <Plus className="h-3.5 w-3.5 shrink-0" />
-                      <span className="truncate">{t("agentList.installAgent")}</span>
-                    </button>
-                  )}
+                  {/* ADR-087 D5: install is a NODE-manage action
+                      (`check_node_manage` in the install handler), so the
+                      entry must not be offered to a caller who cannot use
+                      it. `public` nodes are visible to everyone but are
+                      still not manageable — previously this button showed
+                      regardless and only failed on click. */}
+                  {!collapsed &&
+                    group.agents.length === 0 &&
+                    group.node?.can_manage !== false && (
+                      <button
+                        type="button"
+                        onClick={() => void doInstall(group.nodeId)}
+                        disabled={!nodeOnline || installing}
+                        title={t("agentList.installAgent")}
+                        data-testid="node-group-install"
+                        className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs text-text-tertiary transition-colors hover:bg-nav-item-hover hover:text-text-secondary disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent"
+                      >
+                        <Plus className="h-3.5 w-3.5 shrink-0" />
+                        <span className="truncate">{t("agentList.installAgent")}</span>
+                      </button>
+                    )}
                   {!collapsed &&
                     group.agents.map((agent, index) => renderAgentItem(agent, index, group.agents.length))}
                 </Fragment>
@@ -862,6 +920,13 @@ export function AgentList({ width }: AgentListProps) {
         onClose={() => setDetailAgentId(null)}
       />
 
+      {/* ADR-087: agent / node permissions dialog */}
+      <PermissionDialog
+        open={!!permTarget}
+        target={permTarget}
+        onClose={() => setPermTarget(null)}
+      />
+
       {/* Clone dialog */}
       <CloneDialog
         open={!!cloneSource}
@@ -926,6 +991,12 @@ interface NodeGroupHeaderProps {
   collapsed: boolean;
   onToggle: () => void;
   agentCount: number;
+  /** ADR-087: caller may manage this node → show the permissions icon. */
+  canManage: boolean;
+  /** Opens the node permissions dialog. */
+  onManagePermissions: () => void;
+  /** Tooltip for the permissions icon. */
+  permissionsLabel: string;
 }
 
 function NodeGroupHeader({
@@ -935,19 +1006,17 @@ function NodeGroupHeader({
   collapsed,
   onToggle,
   agentCount,
+  canManage,
+  onManagePermissions,
+  permissionsLabel,
 }: NodeGroupHeaderProps) {
   return (
-    <button
-      type="button"
-      onClick={onToggle}
-      aria-expanded={!collapsed}
-      aria-label={`Toggle node group: ${nodeName}`}
-      title={statusLabel}
+    <div
       data-testid="node-group-header"
       className={cn(
         // h-6 (24px) — a touch taller than a third of the agent row's
         // ~56px, so the node label has comfortable breathing room.
-        "flex h-6 w-full items-center gap-1.5 px-3 text-left",
+        "flex h-6 w-full items-center text-left",
         // `text-xs` + normal case, matching the agent / user row names
         // right below it. This header was `text-10 uppercase tracking-wide`
         // — nominally a size SMALLER than the rows, but caps + letter
@@ -964,23 +1033,48 @@ function NodeGroupHeader({
         "border-y border-nav-divider/40 dark:border-zinc-600/40",
       )}
     >
-      <ChevronRight
-        className={cn(
-          "h-3 w-3 shrink-0 transition-transform duration-150",
-          !collapsed && "rotate-90",
-        )}
-      />
-      <span
-        className={cn(
-          "h-1.5 w-1.5 shrink-0 rounded-full",
-          online ? "bg-emerald-500" : "bg-zinc-400 dark:bg-zinc-500",
-        )}
-        aria-hidden
-      />
-      <span className="truncate">{nodeName}</span>
-      <span className="ml-auto text-xs font-normal opacity-60">
-        {agentCount}
-      </span>
-    </button>
+      {/* Collapse toggle — a real button filling the row; the permissions
+          icon sits beside it (buttons must not nest). */}
+      <button
+        type="button"
+        onClick={onToggle}
+        aria-expanded={!collapsed}
+        aria-label={`Toggle node group: ${nodeName}`}
+        title={statusLabel}
+        className="flex min-w-0 flex-1 items-center gap-1.5 px-3 py-1 text-left"
+      >
+        <ChevronRight
+          className={cn(
+            "h-3 w-3 shrink-0 transition-transform duration-150",
+            !collapsed && "rotate-90",
+          )}
+        />
+        <span
+          className={cn(
+            "h-1.5 w-1.5 shrink-0 rounded-full",
+            online ? "bg-emerald-500" : "bg-zinc-400 dark:bg-zinc-500",
+          )}
+          aria-hidden
+        />
+        <span className="truncate">{nodeName}</span>
+        <span className="ml-auto pl-1 text-xs font-normal opacity-60">
+          {agentCount}
+        </span>
+      </button>
+      {/* ADR-087: node permissions entry — hidden unless the caller may
+          manage this node (owner / guest / admin; Local mode counts). */}
+      {canManage && (
+        <button
+          type="button"
+          onClick={onManagePermissions}
+          title={permissionsLabel}
+          aria-label={permissionsLabel}
+          data-testid="node-permissions-btn"
+          className="mr-2 flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-text-tertiary transition-colors hover:bg-nav-item-hover hover:text-zinc-600 dark:hover:text-zinc-300"
+        >
+          <UserCog className="h-3.5 w-3.5" />
+        </button>
+      )}
+    </div>
   );
 }

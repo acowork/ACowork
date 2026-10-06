@@ -4,6 +4,7 @@
 //! gRPC server, lifecycle manager, package manager, and vault.
 
 pub mod node_manager;
+pub mod ownership;
 pub mod state;
 
 use std::sync::Arc;
@@ -779,6 +780,16 @@ impl Gateway {
         }
         let enrollment_tokens = crate::mqtt::new_shared_enrollment_store(&data_dir_path);
         let node_tokens = crate::mqtt::new_shared_node_token_store(&data_dir_path);
+        // ADR-087: ownership policy tables (same directory + atomic-write
+        // pattern as the token stores). Shared between the HTTP layer
+        // (permission middleware, install/uninstall handlers, list
+        // rendering) and the MQTT dispatch (enroll binds the node owner,
+        // retained-inventory clear prunes agent rows).
+        let node_owners = crate::gateway::ownership::new_shared_node_owners(&data_dir_path);
+        let agent_owners = crate::gateway::ownership::new_shared_agent_owners(&data_dir_path);
+        // ADR-087 D7 / review M4: staged installs (memory-only ledger,
+        // same Arc shared between HTTP staging and MQTT commit/drop).
+        let pending_installs = crate::gateway::ownership::new_shared_pending_installs();
         // `publisher_token` was generated before the user/doc supervisors
         // started — they already forwarded it to their services
         // (ADR-084 §决策 4b).
@@ -899,6 +910,32 @@ impl Gateway {
         // (LWT-driven online state + retained info snapshots).
         let node_registry = crate::mqtt::node_registry::new_shared_registry();
 
+        // ADR-087 D7: orphan audit. Ownership rows whose resource never
+        // materialized (uninstall raced the row removal, CLI-enrolled
+        // node deprovisioned out of band) are WARNed once per boot —
+        // kept, never auto-deleted. Delayed so the retained inventory /
+        // node-info replay has landed before "not seen" is judged.
+        {
+            let shared_state = shared_state.clone();
+            let node_registry = node_registry.clone();
+            let node_owners = node_owners.clone();
+            let agent_owners = agent_owners.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                let max_age = chrono::Duration::days(30);
+                {
+                    let gw = shared_state.read().await;
+                    let store = ownership::lock(&agent_owners);
+                    store.audit_orphans("agent", |id| gw.installed_agents.contains_key(id), max_age);
+                }
+                {
+                    let reg = node_registry.read().await;
+                    let store = ownership::lock(&node_owners);
+                    store.audit_orphans("node", |id| reg.get(id).is_some(), max_age);
+                }
+            });
+        }
+
         // Track whether the broker actually started — used to gate the
         // Gateway-side publisher without needing to re-check the broker
         // handle (which has been moved into the debug control slot above).
@@ -960,6 +997,11 @@ impl Gateway {
             // below).
             let enrollment_tokens_for_dispatch = enrollment_tokens.clone();
             let node_tokens_for_dispatch = node_tokens.clone();
+            // ADR-087: ownership stores — clone before the move-closure;
+            // the originals stay available for the HTTP server below.
+            let node_owners_for_dispatch = node_owners.clone();
+            let agent_owners_for_dispatch = agent_owners.clone();
+            let pending_installs_for_dispatch = pending_installs.clone();
             let auth_enabled_for_dispatch = mqtt_config.auth_enabled;
             // ADR-059 §7.2: NodeReady dispatch drives `node.{id}`
             // readiness on the bootstrap registry.
@@ -988,6 +1030,9 @@ impl Gateway {
                 let state_for_dispatch = state_for_dispatch.clone();
                 let enrollment_tokens_for_cb = enrollment_tokens_for_dispatch.clone();
                 let node_tokens_for_cb = node_tokens_for_dispatch.clone();
+                let node_owners_for_cb = node_owners_for_dispatch.clone();
+                let agent_owners_for_cb = agent_owners_for_dispatch.clone();
+                let pending_installs_for_cb = pending_installs_for_dispatch.clone();
                 let bootstrap_registry_for_cb = bootstrap_registry_for_dispatch.clone();
                 let operation_store_for_cb = operation_store_for_dispatch.clone();
                 let node_replay_guard_for_cb = node_replay_guard_for_cb.clone();
@@ -1010,6 +1055,9 @@ impl Gateway {
                         node_control,
                         enrollment_tokens: Some(enrollment_tokens_for_cb),
                         node_tokens: Some(node_tokens_for_cb),
+                        node_owners: Some(node_owners_for_cb),
+                        agent_owners: Some(agent_owners_for_cb),
+                        pending_installs: Some(pending_installs_for_cb),
                         auth_enabled: auth_enabled_for_dispatch,
                         bootstrap_registry: Some(bootstrap_registry_for_cb),
                         operation_store: Some(operation_store_for_cb),
@@ -1294,6 +1342,10 @@ impl Gateway {
             http_port: self.config.relay.remote_http_port,
             mqtt_port: self.config.relay.remote_mqtt_port,
         };
+        // ADR-087 D2: the HTTP server mints enrollment tokens bound to the
+        // caller; the store stays alive on this side for the local-node
+        // bootstrap token below, so hand the spawn a clone.
+        let enrollment_tokens_for_http = enrollment_tokens.clone();
         let http_handle = tokio::spawn(async move {
             if let Err(e) = crate::http::server::start_http_server(
                 &http_config,
@@ -1313,6 +1365,10 @@ impl Gateway {
                 http_auth_mode,
                 Some(http_relay_client),
                 Some(remote_listener),
+                node_owners,
+                agent_owners,
+                enrollment_tokens_for_http,
+                pending_installs,
             )
             .await
             {
@@ -1355,7 +1411,7 @@ impl Gateway {
                 enrollment_tokens
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .create_token(std::time::Duration::from_secs(3600)),
+                    .create_token(std::time::Duration::from_secs(3600), None),
             )
         } else {
             None

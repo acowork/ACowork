@@ -579,8 +579,17 @@ mod tests {
         dir
     }
 
-    fn flush() {
-        std::thread::sleep(std::time::Duration::from_millis(80));
+    /// Deterministic durability barrier: ask the writer thread to flush
+    /// and wait for its acknowledgement. The previous fixed 80 ms sleep
+    /// flaked under full-workspace parallel load (the writer thread was
+    /// starved and the JSONL lagged behind the assertions).
+    fn flush(session: &ConversationSession) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        rt.block_on(session.flush_pending())
+            .expect("flush pending");
     }
 
     #[test]
@@ -602,7 +611,7 @@ mod tests {
         .unwrap();
         session.append_message("user", "hi", None);
         session.append_message("assistant", "hello", None);
-        flush();
+        flush(&session);
 
         let path = work
             .join("conversations")
@@ -636,7 +645,7 @@ mod tests {
         session.append_message("user", "q", None);
         session.append_message("thought", "internal monologue", None);
         session.append_message("assistant", "a", None);
-        flush();
+        flush(&session);
 
         let path = work
             .join("conversations")
@@ -680,7 +689,7 @@ mod tests {
         session.append_message("user", "real question", None);
         session.append_internal_message("user", "output budget exhausted — wrap up");
         session.append_message("assistant", "real answer", None);
-        flush();
+        flush(&session);
 
         let path = work
             .join("conversations")
@@ -754,7 +763,7 @@ mod tests {
             "main.rs",
             Some(serde_json::json!({"tool_name":"glob_search","tool_call_id":"tc_2"})),
         );
-        flush();
+        flush(&session);
 
         let path = work
             .join("conversations")
@@ -828,7 +837,7 @@ mod tests {
             "main.rs",
             Some(serde_json::json!({"tool_name":"glob_search","tool_call_id":"tc_2"})),
         );
-        flush();
+        flush(&session);
 
         let path = work
             .join("conversations")
@@ -874,7 +883,7 @@ mod tests {
             Some(serde_json::json!({"tool_name":"x","tool_call_id":"missing"})),
         );
         session.append_message("assistant", "ok", None);
-        flush();
+        flush(&session);
 
         let path = work
             .join("conversations")
@@ -922,7 +931,7 @@ mod tests {
         // Post-compaction tail
         session.append_message("user", "u3", None);
         session.append_message("assistant", "a3", None);
-        flush();
+        flush(&session);
 
         let path = work
             .join("conversations")
@@ -964,7 +973,7 @@ mod tests {
         )
         .unwrap();
         session.append_message("user", "ok1", None);
-        flush();
+        flush(&session);
         // Inject a bogus line directly into the file
         let path = work
             .join("conversations")
@@ -978,7 +987,7 @@ mod tests {
             writeln!(f, "{{not valid json").unwrap();
         }
         session.append_message("user", "ok2", None);
-        flush();
+        flush(&session);
 
         let outcome = restore_history_from_jsonl(&path, None).unwrap();
         assert_eq!(outcome.messages.len(), 2);
@@ -1060,7 +1069,7 @@ mod tests {
         // Post-compaction tail (must survive).
         session.append_message("user", "u3", None);
         session.append_message("assistant", "a3", None);
-        flush();
+        flush(&session);
 
         let path = work
             .join("conversations")
@@ -1128,7 +1137,7 @@ mod tests {
             },
         );
         session.append_message("user", "post", None);
-        flush();
+        flush(&session);
 
         let path = work
             .join("conversations")
@@ -1229,7 +1238,7 @@ mod tests {
             Some(real_result_meta),
             Some("44e23ab4-0000-0000-0000-000000000000".to_string()),
         );
-        flush();
+        flush(&session);
 
         let path = work
             .join("conversations")

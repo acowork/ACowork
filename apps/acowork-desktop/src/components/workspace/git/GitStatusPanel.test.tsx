@@ -421,6 +421,31 @@ describe("GitStatusPanel", () => {
     expect(screen.getByText("boom 500")).toBeTruthy();
   });
 
+  // A view-only guest gets 403 on the git endpoints. Red alarm styling
+  // reads as "something broke / retry" — but there is nothing they can
+  // do; it must sit in the same neutral tone as "not a repo".
+  it("renders a 403 denial neutrally, not as a red error", () => {
+    const { container, unmount } = render(<GitStatusPanel agentId="a1" workspaceId="ws1" />);
+    unmount();
+
+    setEntry({
+      data: null,
+      loading: false,
+      error: "This action requires use access",
+      errorStatus: 403,
+    });
+    const { container: deniedBox } = render(<GitStatusPanel agentId="a1" workspaceId="ws1" />);
+    expect(screen.getByText("This action requires use access")).toBeTruthy();
+    expect(deniedBox.innerHTML).not.toContain("text-red-500");
+    expect(deniedBox.innerHTML).toContain("text-text-tertiary");
+  });
+
+  it("keeps a real failure red", () => {
+    setEntry({ data: null, loading: false, error: "boom 500", errorStatus: 500 });
+    const { container } = render(<GitStatusPanel agentId="a1" workspaceId="ws1" />);
+    expect(container.innerHTML).toContain("text-red-500");
+  });
+
   it("maps status states to icons (untracked / deleted / staged renamed / conflicted)", () => {
     const changes: GitStatusResponse["changes"] = [
       { path: "u.txt", oldPath: null, index: "unmodified", worktree: "untracked", staged: false },

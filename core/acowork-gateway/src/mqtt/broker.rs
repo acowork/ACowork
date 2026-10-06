@@ -762,7 +762,7 @@ mod tests {
     fn node_first_connect_accepts_enrollment_token() {
         let mut enrollment = empty_enrollment();
         let node_tokens = empty_node_tokens();
-        let tok = enrollment.create_token(std::time::Duration::from_secs(3600));
+        let tok = enrollment.create_token(std::time::Duration::from_secs(3600), None);
         let ctx = test_ctx(true, &enrollment, &node_tokens, Some("p"), Some("h"));
         assert!(check_connect_auth("node:gpu-1", "", &tok, &ctx));
 

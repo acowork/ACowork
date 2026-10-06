@@ -4,7 +4,7 @@
 > **Terminology**: see [GLOSSARY.md](./GLOSSARY.md)
 
 **Status**: Draft (v2 revision; Q1/Q2/Q4 and the "single owner + multiple guests" model are decided, see §12 for the rest)
-**Date**: 2026-10-28 (v2 revision: added D9 ownership cardinality and the guest model — the two review questions settled it: no "read-only" tier, no multiple owners; collaboration is carried by the manage authorization list; Q1/Q2/Q4 land as decisions)
+**Date**: 2026-10-28 (v2 revision: added D9 ownership cardinality and the guest model — no multiple owners; a guest is a use-tier authorization (not manage); Q1/Q2/Q4 land as decisions. v3 revision: the permission axis moves from two tiers to **three tiers manage/use/view** — manage narrows to "high-privilege / destructive / agent-defining", use covers every remaining write, view opens **metadata/definition reads**; "content reads" (workspace file content, git history, memory, global search) stay at use, not view (guards against the §7 option-G theft); start→use, stop→manage; the permissions roster is public at view)
 **Decision Makers**: (TBD)
 
 **Predecessors**:
@@ -22,7 +22,7 @@
 
 ### 1.1 In one sentence
 
-**Add a Gateway-side persistent `owner_user_id` (single owner) + a `guests` collaboration list to each Node and Agent instance, converging every operation that "changes the machine the Node lives on" (install/uninstall/start/stop agents, adding/removing workspaces, workspace file read/write, LSP/sidecar configuration, fs browse, enroll ownership) into a **manage tier = owner ∨ guest ∨ admin** gate (reads and writes are at the same tier; there is no "read-only" tier); "using" an agent (creating a session to chat) branches on the agent-level `visibility` (private/shared), while the session dimension stays unchanged per ADR-076. Authorization is executed at a single point — the Gateway reverse-proxy entry (where `AuthContext` and the `instance_id→owner` mapping already exist) — and is fail-closed: ownerless resources are admin-manageable only.**
+**Add a Gateway-side persistent `owner_user_id` (single owner) + a `guests` use-authorization list to each Node and Agent instance, with a three-tier gate: **manage = owner ∨ admin** (narrow — high-privilege / destructive only: install/uninstall/clone/stop/upgrade/debug, permission settings, agent-defining config writes, memory destructive writes, delete session); **use = owner ∨ guest ∨ admin** (broad — every write not in manage: start, chat, session create/modify, file/git operations, memory retrieval / global search); **view = use ∨ published (shared/public)** (read-only information offered as widely as possible, with session content additionally gated by the private/public second wall). The agent-level `visibility` (private/shared) decides **visibility only** (shared makes it *findable and read-only* for every logged-in user but does not open "use"), while the session dimension stays unchanged per ADR-076. Authorization is executed at a single point — the Gateway reverse-proxy entry (where `AuthContext` and the `instance_id→owner` mapping already exist) — and is fail-closed: an unregistered route defaults to manage, and ownerless resources are admin-manageable only.**
 
 ### 1.2 Key Decision Table (detailed rationale in §5)
 
@@ -30,13 +30,13 @@
 |---|----------|-----------|
 | D1 | Where owner is stored | **Two new Gateway-side persistent ownership tables** (`node_owners.json`, `agent_owners.json`, in the same directory and following the same pattern as `node_tokens.json`). **Not in the MQTT proto**: the inventory reported by Node remains the "existence authority" (ADR-055 §6.5); ownership is Gateway's policy data, and Node is not aware of users |
 | D2 | Where the node owner comes from | **The enrollment token binds its creator**: in multi_user mode a new `POST /api/nodes/enrollment-tokens` (login required); the token record carries `owner_user_id`, and a successful enroll writes `node_owners.json`. A CLI-issued token is ownerless → that node is ownerless (admin-only). `gateway_managed` local nodes default to ownerless |
-| D3 | Where the agent owner comes from | **Whoever installs, owns it**: on successful dispatch of `POST /api/agents/install` / `ensure` / `clone`, write to `agent_owners.json` keyed by `instance_id`, with owner = the caller's `AuthContext.user_id`. An admin can naturally install on any node (Q2 decided, see §12), so the resulting agent's owner = admin; an agent installed by a guest on a shared node has the guest as its owner (D9 rule 3) |
-| D4 | Two-tier gating | **Node gating** (ownership of the machine): install/uninstall onto that node, fs browse, rename/drain/remove, LSP sidecar configuration → the node's owner ∨ guest ∨ admin. **Agent gating** (ownership of the instance): start/stop/upgrade/config/prompts/skills/**workspace add/remove/modify**/**file read/write (reads and writes at the same tier)**/debug → the agent's owner ∨ guest ∨ admin. Installing an agent requires **simultaneously** satisfying "can manage the target node" |
+| D3 | Where the agent owner comes from | **Whoever installs, owns it**: on successful dispatch of `POST /api/agents/install` / `ensure` / `clone`, write to `agent_owners.json` keyed by `instance_id`, with owner = the caller's `AuthContext.user_id`. An admin can naturally install on any node (Q2 decided, see §12), so the resulting agent's owner = admin. (Installing requires the target node's manage list = owner ∨ admin; a guest is use-tier and cannot install.) |
+| D4 | Three-tier gating | **manage = owner ∨ admin** (narrow): Node gating — install/uninstall onto that node, fs browse, rename, enroll ownership. Agent gating — stop/upgrade/clone/debug, agent-defining config writes (config/prompts/skills/model/workspace add-remove-modify/avatar/manifest), memory destructive writes, delete session, permission settings. **use = owner ∨ guest ∨ admin** (broad): every write not in manage — start, chat, session create/modify, file/git read+write, memory retrieval, global search, interactions; **content reads** (workspace file content / git history / memory / search) also sit at use. **view = use ∨ published**: agent definition/metadata reads only (list/detail/config-definition reads/status/avatar/permissions roster). See the D4 gate table |
 | D5 | Execution point | **The Gateway reverse-proxy entry** (a routing policy table in `http/proxy.rs` + handler headers in `agents.rs` / `nodes_api.rs` / `fs_browse.rs`). Runtime does not gain an owner concept (it cannot get the ownership truth and should not); the `x-user-id` scope mechanism is retained as-is, used only for session filtering |
-| D6 | Agent use (chat) and visibility | Agents gain `visibility`: `private` (only the manage list may create/use sessions) and `shared` (every logged-in user may open **their own** session on it, with sessions still isolated per ADR-076). **`shared` only opens "use", never "manage"** (workspace/files/config remain the manage list). Defaults: instances installed/ensured/cloned by a user land as `private`; **the default agent preinstalled by onboarding lands as `shared`** (Q1 decided, see §12) |
+| D6 | Agent visibility and use | Agents gain `visibility`: `private` (only the use list = owner ∨ guest ∨ admin may see or use it) and `shared` (**every logged-in user may see it**, but **only the use list may use it** — opening a session to chat requires being authorized as a guest; sessions stay isolated per ADR-076). **`visibility` decides "can you see it", never "can you use it"; use always goes through the use list.** Defaults: instances installed/ensured/cloned by a user land as `private`; **the default agent preinstalled by onboarding lands as `shared`** (Q1 decided, see §12) — note this only makes it *visible* to everyone; whether one can chat still depends on being added to the guest list |
 | D7 | Ownerless, transfer and cleanup (fail-closed) | In multi_user mode **fail-closed**: resources with `owner=None` are admin-manageable only; an admin can claim/transfer via `PATCH .../owner`. Local mode is a complete no-op (the same `AuthMode` switch as ADR-076 §decision 12) |
 | D8 | Single source of truth on the server | `GET /api/agents` / `GET /api/nodes` deliver a server-computed `can_manage` / `can_use` boolean per record; Desktop/Mobile **only consumes the boolean for rendering and must not derive it itself** (continuing the discipline of ADR-086 invariant 1) |
-| D9 | Ownership cardinality and collaboration | **Single owner + multiple guests**. The owner is unique (unique responsibility, a two-party transfer); a guest is a "manage authorization list" member rather than ownership — it does not change ownership, cannot add/remove guests, cannot transfer, cannot change visibility; revocation immediately loses access and does not reclaim the ownership of agents installed in a guest's own name. Admin and the owner jointly maintain the list (see §5 D9) |
+| D9 | Ownership cardinality and collaboration | **Single owner + multiple guests**. The owner is unique (unique responsibility, a two-party transfer); a guest is a "**use authorization list**" member (authorized to use/chat, cannot configure) rather than ownership — it does not change ownership, cannot add/remove guests, cannot transfer, cannot change visibility, and **cannot manage** (config/workspace/files/lifecycle stay owner ∨ admin only); revocation immediately loses access and does not reclaim the ownership of agents installed in a guest's own name. Admin and the owner jointly maintain the list (see §5 D9) |
 
 ---
 
@@ -75,12 +75,12 @@ The session's `is_writable_by` only protects **conversation data**. The workspac
 **Goals**
 1. In multi_user mode, the files and process resources of the machine a Node lives on are, by default, open only to that Node's owner (and admin).
 2. An agent instance's configuration surface (config/prompts/skills/workspace/files/lifecycle) is by default open only to the agent's owner (and admin).
-3. Preserve legitimate sharing needs: an agent can explicitly declare `shared`, letting other users **use** it without **owning** it.
+3. Preserve legitimate sharing needs: an agent can explicitly declare `shared` to let other users **see** it; **using** it (chatting) is authorized per-user through the guest list, and neither changes **owning** it.
 4. Local mode (single-user self-use) has zero behaviour change; after upgrading to multi_user the migration path is explicit and fail-closed.
 5. A single permission decision point and a single source of truth (booleans delivered by the server; the client does not derive them).
 
 **Non-Goals**
-1. **No fine-grained RBAC** (per-workspace ACL, per-tool authorization, team role matrices). The two tiers (manage/use) + two roles (owner/admin) cover all currently known scenarios; extend only when a third stable requirement appears (Rule of three).
+1. **No fine-grained RBAC** (per-workspace ACL, per-tool authorization, team role matrices). The three tiers (manage/use/view) + two roles (owner/admin) cover all currently known scenarios; extend only when a third stable requirement appears (Rule of three).
 2. **No change to the MQTT data-plane ACL**. The broker's `can_subscribe` remains Phase-1 permissive ([acl.rs:178](../../../core/acowork-gateway/src/mqtt/acl.rs#L178)); the cross-account retained-event fan-out problem (known, the root cause of e2e flakes) is handled by a follow-up ACL ADR. This ADR only tightens the **HTTP control plane**.
 3. **No defence against Node itself misbehaving**. A Node is the user's own machine running the user's own processes; at the OS level it can already see everything on its own disk. What this ADR prevents is **other logged-in users** operating that machine through Gateway.
 4. **No approval workflow** (request-approve-authorize-duration, etc.). Transfer and sharing are a single PATCH step performed proactively by the owner.
@@ -91,10 +91,10 @@ The session's `is_writable_by` only protects **conversation data**. The workspac
 
 | Term | Definition |
 |---|---|
-| **manage** | operations that change the resource itself or its impact on the machine: lifecycle, configuration, workspace add/remove/modify, file read/write, install/uninstall, fs browse, enroll ownership, debug/dev-mode |
-| **use** | operations that don't change the resource: creating/opening **your own** session on an agent, sending messages (still bound by ADR-076 session isolation) |
+| **manage** | high-privilege operations that change the agent's definition, the machine's state, or are destructive: lifecycle (install/uninstall/clone/stop/upgrade/debug/dev-mode), agent-defining config writes (config/prompts/skills/model/workspace add-remove-modify/avatar/manifest), memory destructive writes, delete session, fs browse, enroll ownership, permission settings |
+| **use** | every remaining operation that drives the agent to work (all writes not in manage): creating/opening **your own** session and chatting, start, workspace file and git read/write (incl. revert), memory retrieval, global search, interactions. **Content reads** (workspace file content, git history, memory, search) also sit at use — they read the owner's real data with no second wall behind them (see §7 option G) |
 | **owner** | the **unique** user the resource belongs to (`user_id`, a UUID from the `acowork-user` account system). The responsibility anchor: adding/removing guests and changing visibility are owner ∨ admin; a change of the owner field itself is admin only (D7) |
-| **guest** | a user granted the **manage** tier on that resource by the owner or admin (the list lives in the ownership table). A guest is authorization, not ownership: no ownership operation power; revocation immediately loses access; no cascade (see D9) |
+| **guest** | a user granted the **use** tier on that resource by the owner or admin (the list lives in the ownership table, i.e. the "use/chat authorization list"). A guest is authorization, not ownership: may open their own session and chat, start the agent, read/write workspace files, and retrieve memory/search, but **cannot manage** (agent-defining config writes / workspace add-remove-modify / lifecycle / delete session / permission settings are owner ∨ admin only); no ownership operation power; revocation immediately loses access; no cascade (see D9) |
 | **admin** | `Role::Admin`; can manage every resource, claim/transfer ownerless resources, maintain any resource's guest list; following ADR-076's "can see but cannot impersonate" discipline (write operations execute as the admin's own identity, and ownership does not thereby change) |
 | **ownerless** | `owner=None`. Under multi_user = admin-only (fail-closed) |
 
@@ -103,12 +103,16 @@ The decision functions (the single implementation inside Gateway):
 ```text
 can_manage(user, resource) := user.is_admin
                             ∨ (resource.owner = Some(user.id))
-                            ∨ resource.guests.contains(user.id)
+                            // guests are NOT in the manage tier: a guest is "use authorization", not "co-maintenance" (D9)
 can_transfer(user, resource) := user.is_admin ∨ (resource.owner = Some(user.id))
                             // ownership operations (adding/removing guests / changing visibility) exclude guests;
                             // a change of the owner field itself is admin only (an extension of D7's "can see but cannot impersonate")
-can_use(user, agent)       := can_manage(user, agent)
-                            ∨ (agent.visibility = Shared ∧ user is logged in)
+can_use(user, resource)    := can_manage(user, resource)
+                            ∨ resource.guests.contains(user.id)
+                            // use tier = authorization list (guests) ∨ owner ∨ admin; visibility never opens use
+can_view(user, resource)   := can_use(user, resource)
+                            ∨ resource.visibility.is_published()
+                            // view tier = use list ∨ published (shared agent / public node)
 ```
 
 ---
@@ -147,34 +151,42 @@ Status quo: enrollment tokens can only be issued by the CLI `acowork-gateway nod
 
 `install_agent` ([agents.rs:1032](../../../core/acowork-gateway/src/http/agents.rs#L1032)) already has Gateway generate the `instance_id` (at install time, with the caller already authenticated), which is the natural anchor for writing ownership:
 
-- `POST /api/agents/install`, `POST /api/agents/ensure` (declarative; when first creating the instance), `POST /api/agents/{id}/clone`: after successful dispatch, write `agent_owners.json[instance_id] = { owner: AuthContext.user_id, visibility: Private }`.
+- `POST /api/agents/install`, `POST /api/agents/ensure` (declarative; when first creating the instance), `POST /api/agents/{id}/clone`: after successful dispatch the owner row is **staged** in an in-memory pending table keyed by the Gateway-minted `instance_id`; it is committed to `agent_owners.json[instance_id] = { owner: AuthContext.user_id, visibility: Private }` when the Node reports `ok` or the instance first appears in the retained inventory, and dropped when the Node reports `error` — a failed install leaves no orphan row (review M4). Clone is a synchronously-confirmed path and writes directly.
 - When `ensure` hits an existing instance the owner is **not** changed (the idempotency semantics constrain existence, not ownership).
 - Local mode has no `AuthContext` → write `owner=None`, which is fine since Local doesn't verify anything (D8).
-- **Initial visibility**: install/ensure/clone default to `Private` when writing the table; the only exception is the default agent preinstalled by Desktop onboarding (the ADR-077 bundled package), which lands as `Shared` — a team deployment's out-of-the-box assumption is "anyone can chat", with the risk wording carried by the UI (see D4's "the boundary of shared"). The default agent's owner is still the first user who ran onboarding, and the owner may later switch it back to private.
+- **Initial visibility**: install/ensure/clone default to `Private` when writing the table; the only exception is the default agent preinstalled by Desktop onboarding (the ADR-077 bundled package), which lands as `Shared` — a team deployment's out-of-the-box assumption is "anyone can *see* it" (note: `shared` opens visibility only; chatting still requires being added to the guest list, see D6), with the risk wording carried by the UI. The default agent's owner is still the first user who ran onboarding, and the owner may later switch it back to private.
 
 ### D4: Two-Tier Gating + the Permission Matrix
 
-**Node gating** (ownership of the machine: node owner ∨ guest ∨ admin) and **Agent gating** (ownership of the instance: agent owner ∨ guest ∨ admin) are layered. In the table below "manage list" = owner ∨ guests ∨ admin; "ownership list" = owner ∨ admin (guests are not included, see D9):
+**Node gating** (ownership of the machine: node owner ∨ admin) and **Agent gating** (ownership of the instance) are layered. Three tiers: **manage = owner ∨ admin** (guests excluded); **use = owner ∨ guests ∨ admin** (the guest list *is* the use authorization); **view = use ∨ published (shared/public)**. Tiers are assigned by *minimum necessity*: only operations that change the agent's definition, the machine's state, or are destructive enter manage; writes that drive the agent to work enter use; read-only information goes to view as widely as safe. Table:
 
 | Operation (Gateway HTTP route) | Gating tier | Required permission |
 |---|---|---|
 | `POST /api/nodes/enrollment-tokens` | open | login is enough (enrolling your own machine) |
-| `GET /api/nodes` | open (field trimming) | logged-in users see id/name/online/`can_manage`; hostname/OS/arch/endpoint only visible to the manage list |
-| `PATCH /api/nodes/{id}` (rename) | Node-manage | manage list |
-| `PATCH /api/nodes/{id}/visibility`, `PATCH /api/nodes/{id}/guests`, `PATCH /api/nodes/{id}/owner` | Node-transfer | ownership list (no guests) |
-| `POST /api/agents/install`, `ensure`, `clone` (choosing a target node) | Node-manage | the target node's manage list (installing onto someone else's machine requires machine permission first; an agent installed by a guest is owned by the guest, see D9 rule 3) |
+| `GET /api/nodes` | visibility-filtered | `private`: the use list sees the row; `public`: every logged-in user sees id/name/online/`can_manage`, sensitive fields stay manage-only (D6, option B) |
+| `PATCH /api/nodes/{id}` (rename), `.../visibility`, `.../guests`, `.../owner` | Node-manage / Node-transfer | manage list (owner ∨ admin); owner transfer is admin-only, guests have no ownership power (D9 R1) |
+| `GET /api/nodes/{id}/permissions` | Node-view | **the ownership roster is public**: anyone who can see the node may read the roster (knowing *who* to ask for access is not a secret) |
+| `POST /api/agents/install`, `ensure`, `clone` (choosing a target node) | Node-manage | the target node's manage list (installing onto someone else's machine requires machine permission first; a guest is use-tier and **cannot** install) |
 | `DELETE /api/agents/{id}` (uninstall) | Node-manage ∧ Agent-manage | both lists must pass (uninstall touches both the machine and the instance) |
-| `POST /api/agents/{id}/start` / `stop` / `restart` / `upgrade` | Agent-manage | the agent's manage list |
-| `PUT /api/agents/{id}/config` / `builtin-tools` / `model` / prompts / skills writes / avatar / manifest upload | Agent-manage | the agent's manage list |
-| `POST/PUT/DELETE /api/agents/{id}/workspaces*` (including file/dir/copy/rename/prompt-file/fs-watch) | Agent-manage | the agent's manage list |
-| `GET /api/agents/{id}/workspaces*`, `/tree`, `/file`, `/raw`, `/find`, `/search`, git reads | Agent-manage | the agent's manage list — **reads count as manage**: workspace content is files on the machine, so read permission is at the same tier as write permission; there is no "read-only" tier (otherwise the write gate is pointless, see rejected option H in §7) |
-| `POST /api/agents/{id}/git/revert`, `debug/enable` | Agent-manage | the agent's manage list |
-| `GET /api/fs/browse?target={node_id}` | Node-manage | the node's manage list (a Local target is the Gateway machine → ownerless → admin-only) |
-| `PATCH /api/agents/{id}/visibility`, `PATCH /api/agents/{id}/guests`, `PATCH /api/agents/{id}/owner` | Agent-transfer | the agent's ownership list (no guests) |
-| `GET /api/agents`, `GET /api/agents/{id}` (list/detail/avatar) | visibility filtering | private: the manage list (owner ∨ guests ∨ admin); shared: all logged-in users |
-| The session control plane (create/open/close/delete/messages) | Agent-use ∧ ADR-076 | `can_use(agent)`, everything else per the existing `user_id`/`visibility` isolation, **unchanged** |
+| `POST /api/agents/{id}/stop` / `restart` / `upgrade`, `debug/*` | Agent-manage | the agent's manage list (mutates/replaces the running agent; debug is high-privilege) |
+| `POST /api/agents/{id}/start` | Agent-use | the use list — waking a stopped agent is "use", not "manage"; non-destructive |
+| **agent-defining config writes**: `PUT config`/`prompts`/`skills`/`model`/`providers`/`mcp-*`/`builtin-tools`/`tools`/`shell-risk-rules`/`avatar-config`, `workspaces*` add/remove/modify, manifest upload | Agent-manage | the agent's manage list (rewrites what the agent *is*) |
+| **agent definition/metadata reads**: `GET config`/`prompts`/`skills`/`model`/`providers`/`mcp-*`/`tools`/`avatar`/`avatar-file`/`manifest`/`cron`/`status`/`health` | Agent-view | the view list (use ∨ shared) — metadata describing "what the agent is" is offered broadly |
+| **content read/write**: `GET/POST/PUT/DELETE /api/agents/{id}/files*`, `git*` (incl. diff/log reads, revert writes), `workspaces` tree/file reads | Agent-use | the use list — these read the owner's real working files (§7 option G: exposing content at view = the whole disk is theftable), so both directions stay at use; a pure viewer cannot read them |
+| `GET /api/fs/browse?target={node_id}` | Node-manage | the node's manage list (reads the whole machine's filesystem, not one agent's workspace — sensitive) |
+| `PATCH /api/agents/{id}/visibility`, `.../guests`, `.../owner` | Agent-transfer | the agent's ownership list (owner ∨ admin; guests have no ownership power, D9 R1) |
+| `GET /api/agents/{id}/permissions` | Agent-view | **the ownership roster is public** (same as node — knowing who to ask) |
+| `GET /api/agents`, `GET /api/agents/{id}` (list/detail/avatar/status/health) | visibility filtering | private: the use list may see; shared: all logged-in users may see (visible + read-only); **ownerless = admin-only** (D7 fail-closed) |
+| session **reads** (`GET sessions`/`sessions/{sid}`/`messages`/`latest-session`/`stream`) | Agent-view ∧ ADR-076 | view list first; **content is then gated by the session's own private/public flag** (the second wall, Runtime `is_readable_by`) — a private session is absent to a viewer |
+| session **writes** (create/open/close/messages/answer/approval/config/workspace-switch/stop/continue/compress) | Agent-use | the use list — opening your own session and chatting *is* the use tier; cross-session safety is the Runtime's per-session `is_writable_by` |
+| `DELETE /api/agents/{id}/sessions/{sid}` | Agent-manage | the manage list (destroys the session and its files — destructive) |
+| `GET /api/agents/{id}/memory/*`, `GET search`, `POST rag/query` | Agent-use | the use list — retrieval runs a query over the whole corpus and surfaces cross-conversation memory with no private/public wall, so **use, not view** |
+| **memory destructive writes** (`POST memory/distill`, `rebuild-embeddings`, `PUT/DELETE memory/nodes*`) | Agent-manage | the manage list (rewrites the agent's knowledge base) |
+| `POST /api/agents/{id}/interactions` | Agent-use | the use list — an activity stamp fired inside the chat-send path |
 
-**The boundary of shared must be spelled out**: marking an agent `shared` = allowing others to **drive this agent to work with its mounted workspaces** (the agent will read/write files with workspace permission, and content may enter conversations). This is the semantics of "sharing an assistant", not "sharing filesystem browse rights" — users not on the manage list still cannot see the workspace list/file tree and can only chat. The documentation and UI must write this risk statement clearly.
+**Two boundary principles must be spelled out**:
+1. **`shared` opens only view (visible + read-only metadata), never use.** To open a session and chat, one must be added to the guest list (use tier). A guest driving the agent with its mounted workspace reads/writes files at workspace permission and content may enter conversations — that is the real risk surface and the meaning of the use grant. A user not on the use list can see the list/detail/config metadata but **cannot chat, cannot change the agent definition, and cannot retrieve memory**. Docs and UI must state "shared = visible + read-only; chat and config changes require per-user authorization".
+2. **Reads default to view, but "retrieval reads" are the exception and stay at use**: memory reads, global search, and rag/query run a query over the whole corpus and surface cross-conversation content with no per-item private/public wall, so they are use even though they are GETs; whereas config/prompts/skills/model/files/git *definition and metadata* reads are static and go to view.
 
 ### D5: The Execution Point Is the Gateway Reverse-Proxy Entry; Runtime Is Not Aware of Owner
 
@@ -188,7 +200,28 @@ Status quo: enrollment tokens can only be issued by the CLI `acowork-gateway nod
 ### D6: The `visibility` Field for Agent / Node
 
 - `agent_owners.json.visibility: Private (default) | Shared`, switched by `PATCH /api/agents/{id}/visibility` (ownership list: owner ∨ admin; guests cannot change it, see D9 R1); `GET /api/agents` entries carry `visibility` + the server-computed `can_manage`/`can_use`. The default rules are in D3 (the onboarding default agent is the exception landing as Shared, Q1 decided).
-- `node_owners.json.visibility: Private (default) | Public`: `Public` refers **only to metadata** (name/online) being visible to everyone, so a team can know "this GPU machine exists"; **it opens no manage permission and does not open install** (install always requires the node manage list). The correct way to let others install/maintain agents on the machine is to **add a node guest** (D9), or for the owner to install a shared agent on it for people to chat with.
+- `node_owners.json.visibility: Private (default) | Public`: `Public` refers **only to metadata** (name/online) being visible to everyone, so a team can know "this GPU machine exists"; **it opens no manage permission and does not open install** (install always requires the node manage list = owner ∨ admin). The only way to let someone install/maintain agents on this machine is for them to be the **node owner or an admin** (a node guest is use-tier and carries no machine-management right); the way to let someone **use** a given agent to chat is to **add them to that agent's guest (use) list**.
+
+**List filtering (option B, revised 2026-10)**: a `private` node is **absent from `GET /api/nodes`** for callers outside the manage list — not merely field-trimmed. Rationale: such a caller has no action available on the row (install / fs browse / rename / LSP config are all Node-manage gated), yet keeping it would leak "this machine exists, is it online, how many agents does it run". Owner / guest / admin keep the row: the sidebar is the only place a node can be acted on, so hiding it would void the guest grant.
+
+**Single decision entry point `ownership::can_view`**: agent list, agent detail and node list **must** share one function rather than each deriving visibility:
+
+```text
+can_view = is_admin ∨ can_use ∨ visibility.is_published()
+```
+
+- `is_admin` comes first — otherwise an ownerless resource (`owner=None`) would be invisible even to admin, and the D7 claim flow would deadlock.
+- `can_use` includes guests: a guest must see the resources they were granted to use.
+- A missing record / `owner=None` is **invisible to every non-admin** (the fail-closed extension of D7: if an ownerless resource is admin-only, it must not appear in any normal account's list).
+
+**Two opposite fail-opens now fixed** (together they produced "the agent is listed but cannot be opened, and loads forever"):
+
+| Site | Old implementation | Problem |
+|---|---|---|
+| `list_agents` | `rec.is_some_and(\|r\| r.visibility == Private) && !can_use` | filtered only rows that **existed** → every unrecorded agent leaked to all accounts |
+| `get_agent_detail` | `rec.is_none_or(\|r\| …)` | a missing record counted as **visible** (the opposite of the list) → listed, then 404 on click |
+
+The same rule implemented with two opposite defaults in two places is the classic shape of this class of drift; `can_view` exists so it cannot happen again.
 - Entries with no historical `visibility` read as `Private` (fail-closed by default).
 
 ### D7: Ownerless Resources, Transfer and Cleanup (fail-closed)
@@ -206,30 +239,30 @@ Status quo: enrollment tokens can only be issued by the CLI `acowork-gateway nod
 
 **Local mode no-op**: structurally identical to ADR-076 §decision 12: under `AuthMode::Local`, `auth_middleware` produces no `AuthContext` and the authorization layer passes straight through (the policy table exists but is not evaluated); the owner tables are still written (Local also records owner, keeping data for a future switch to multi_user). **No new configuration knob is added** — the single `AUTH_MODE` dial is already an existing decision, and adding an `owner_enforcement=off` style knob would be leaving the back door open on a security fix.
 
-### D9: Ownership Cardinality = Single Owner + Multiple Guests (Collaboration through Authorization, Not Ownership)
+### D9: Ownership Cardinality = Single Owner + Multiple Guests (a guest is use authorization, not co-maintenance)
 
 **Problems**: ① Should owner be split into further permission tiers (read-write vs read-only)? Should non-owners be entirely invisible? ② Are multiple owners allowed (an admin adding an owner for a node)?
 
-**Decision 9a: the permission axis stays at two tiers (manage/use); no "read-only" tier.**
-"Read-only" is not a security tier in this domain: a workspace file "read-only" = all of the node machine's data can be dragged away by `GET /workspaces/file`, so reads and writes must be at the same tier (D4's table). Therefore no third state of "owner read-write / non-owner read-only" exists. A non-owner's only legal forms are:
-- **guest** (manage authorization; read-write and config fully open, but no ownership operation power);
-- **use** (opening your own session on a shared agent to chat, with no visibility into the workspace list/file tree).
-Plus the two pre-existing exceptions: resource metadata visibility (D6's public node / shared agent) and admin's `as_user` read-only view (ADR-076 §decision 4, retained as-is).
+**Decision 9a: the permission axis is three tiers (manage/use/view); guests sit in the use tier.**
+This model **does** have a read-only tier (view), but view covers only **metadata / definition reads that describe the agent** (detail, status, config/prompts/skills/model reads, avatar, the permissions roster); **interfaces that read the owner's real data** (workspace file content, git history, memory, global search) do **not** fall into view — they sit at **use**, because they surface content on the owner's machine with no session-style private/public wall behind them (see the D4 gate table's "retrieval/content reads go to use" principle and §7 option G's update). A non-owner's two legal forms:
+- **guest** (use authorization): opens **their own** session and chats, may `start`, read/write workspace files, retrieve memory/search — but **cannot manage** (agent-defining config writes / workspace add-remove-modify / lifecycle / delete session / permission settings are owner ∨ admin only);
+- **viewer** (published visibility): a `shared` agent / `public` node is **visible + read-only metadata** to every logged-in user (list/detail/config-definition/avatar/permissions roster), **with no use and no manage** — they cannot chat, cannot touch any write, cannot read workspace file content / memory.
+Plus one pre-existing exception: admin's `as_user` read-only view (ADR-076 §decision 4, retained as-is).
 
-**Decision 9b: the owner is unique; all collaboration needs are carried by the guest list.**
-Multiple owners (equal co-ownership) is rejected: who can transfer, who can revoke whom, who adjudicates conflicts — the semantics of ownership collapse, and "who is responsible for this machine" degrades from an anchor into a set, which is exactly the state this ADR aims to eliminate. Under a single owner + guest list: **a guest is authorization (addable, removable, revocable, with no residue), the owner is ownership (unique, transferred under audit)**. The real need behind "the admin adds an owner for someone" maps into this model as "add a guest" in every case.
+**Decision 9b: the owner is unique; manage cannot be delegated to a non-admin.**
+Multiple owners (equal co-ownership) is rejected: who can transfer, who can revoke whom, who adjudicates conflicts — the semantics of ownership collapse, and "who is responsible for this machine" degrades from an anchor into a set, which is exactly the state this ADR aims to eliminate. Under a single owner + guest list: **a guest is use authorization (addable, removable, revocable, with no residue), the owner is ownership (unique, transferred under audit)**. This model **does not support delegating manage to a peer collaborator** — if several people must jointly configure/maintain a machine or instance, that goes through the admin role, not through guests; guests only solve "let more people *use* (chat)".
 
 **The guest's three boundary rules**:
 
 | # | Rule | Meaning |
 |---|---|---|
-| R1 | **Grants manage, not ownership** | a guest cannot transfer the owner, cannot add/remove guests, cannot change visibility. Ownership operations always have exactly the two parties owner ∨ admin (`can_transfer`, §4) |
-| R2 | **No cascade** | a node guest is not a guest of the agents on that node. The node list answers "who may use this machine", the agent list answers "who co-maintains this instance"; the two levels' lists are maintained independently |
-| R3 | **Revocation immediately loses access; ownership is not reclaimed** | after being removed as a guest they immediately lose manage; but agents they installed on that resource in their own name are still theirs (ownership is independent of authorization). Uninstalling those agents requires that person / admin, or the target node's manage list |
+| R1 | **Grants use, not manage/ownership** | a guest may only use (chat) and **cannot manage** (config/workspace/files/lifecycle/install/uninstall), cannot transfer the owner, cannot add/remove guests, cannot change visibility. Manage and ownership operations always have exactly the two parties owner ∨ admin (`can_transfer`, §4) |
+| R2 | **No cascade** | a node guest is not a guest of the agents on that node. The node list answers "who may see/use this machine (not machine management)", the agent list answers "who may use (chat) this instance"; the two levels' lists are maintained independently |
+| R3 | **Revocation immediately loses access; ownership is not reclaimed** | after being removed as a guest they immediately lose use; but agents they own in their own name are still theirs (ownership is independent of authorization). Uninstalling those agents requires that person / admin, or the target node's manage list |
 
-**Guest list operations**: `PATCH /api/nodes/{id}/guests`, `PATCH /api/agents/{id}/guests` (full-replacement semantics, PUT-list style, so the ownership list is adjustable); `GET /api/agents|nodes` entries deliver `is_guest: bool` (folded into the `can_manage` computation; the client does not query the list itself — D8's single source of truth is unchanged).
+**Guest list operations**: `PATCH /api/nodes/{id}/guests`, `PATCH /api/agents/{id}/guests` (full-replacement semantics, PUT-list style, so the ownership list is adjustable); `GET /api/agents|nodes` entries deliver `is_guest: bool` (folded into the `can_use` computation; the client does not query the list itself — D8's single source of truth is unchanged).
 
-**Why guests have no sub-tiers (editor/viewer)**: same reason as 9a — being able to read a file means being able to take the file, so "viewing" and "editing" are inseparable in the file domain; the use tier is already solved globally by visibility, so no per-user "chat-only" list is needed (shared means everyone can chat; if private later needs "a designated few may chat", add `chat_guests` — Rule of three, not now).
+**Why guests have no sub-tiers (editor/viewer)**: a guest is a single use tier — "can you use (chat)" is binary, and config/files/lifecycle (manage) are never in a guest's grant, always owner ∨ admin only. Visibility (view) is solved globally by visibility (shared/public = visible to everyone), so there is no "chat-only vs can-configure" split to make within guests — the latter simply isn't part of being a guest.
 
 ---
 
@@ -245,7 +278,7 @@ sequenceDiagram
     G->>G: signature verification → AuthContext{user_id=U, role}
     G->>P: route match → Permission::AgentManage
     P->>P: agent_owners[id] → owner, guests, visibility
-    alt U == owner ∨ U ∈ guests ∨ U == admin (manage list)
+    alt U == owner ∨ U == admin (manage list; a guest is use-tier and is not in this list)
         P->>R: proxy forward (carrying x-user-id as-is)
         R-->>C: 200
     else not on the manage list
@@ -265,8 +298,8 @@ sequenceDiagram
 | **D. per-workspace ACL (workspace-level sharing authorization)** | rule of three not yet triggered; workspace permission naturally follows agent permission (both mean "touching this machine's files"); subdividing waits for a real need |
 | **E. Default shared, the owner only nominally in charge** | the opposite of the threat model — this ADR's motivation is precisely "public by default", so the default must be private and fail-closed |
 | **F. Auto-assigning existing data to the first admin who logs in** | silently changing ownership with no audit; ownerless + explicit claim is safer, and the cost is just one extra claiming click by the admin |
-| **G. Only blocking workspace writes, not reads / fs browse** | reads and writes are at the same tier (see D4's table); blocking only writes equals allowing `GET /workspaces/file` to exfiltrate the whole disk, making the gate pointless |
-| **H. A "non-owner read-only" tier (three tiers: owner read-write / guest read-only / others invisible)** | in this domain "read-only" is not a security tier: being able to read workspace files = the node machine's data can leak wholesale, so reads and writes must be at the same tier. A non-owner's only legal forms are guest (manage authorization) and use (shared chat). See D9a |
+| **G. Putting workspace file *content* reads into view** | Revised for the three-tier model: view covers only **metadata / definition reads** (config/prompts/skills/model/status/avatar/permissions roster); **interfaces that read the owner's real data** (workspace file content, git history, memory, global search) all sit at **use**, not open to a pure viewer of a shared agent. The rationale is unchanged — `GET /workspaces/file` at view would let any logged-in user drag the owner's working files off the machine; only the implementation changed from "reads and writes both at manage" to "content reads at use, metadata reads at view" (see the D4 table and D9a) |
+| **H. A "non-owner read-only" tier that opens all content reads** | Revised: this model **does** have a view tier, but it is **not** "read any file on the machine". A viewer (shared/public, non-guest) sees only what the agent *is* (detail, config definition, avatar, permission roster), not the owner's working-file content, memory, or chat records (session content is separately gated by private/public). If "read-only" meant the whole disk, it would still be node-machine data exfiltration, so content reads must stay at use |
 | **I. Multiple owners (equal co-ownership, an admin adding an owner for a resource)** | ownership semantics collapse: transfer/revocation/conflict adjudication has no arbiter, and "who is responsible for this machine" degrades from an anchor into a set. Collaboration needs are carried by the guest list; the real need behind "add an owner" maps into the model as "add a guest". See D9b |
 
 ---
@@ -281,8 +314,10 @@ sequenceDiagram
 **Costs and risks**
 - Two new Gateway local state files (the same pattern as the existing token tables, so the operational surface barely grows).
 - On upgrade day: all existing agents become private to ordinary users — the release note must clearly state the "admin claims" step.
-- Every agent route proxied through Gateway must enter the policy table; **missing one leaves a hole**. Mitigation: the policy table is designed as "deny by default" (an unregistered `/api/agents/{id}/**` write method is treated as Agent-manage; read methods are explicitly registered; forgetting to register a new route fails closed), plus a test for that invariant (§9).
+- Every agent route proxied through Gateway must enter the policy table; **missing one leaves a hole**. Mitigation: classify() is designed as "deny by default" (an unregistered `/api/agents/{id}/**` route, **any method**, falls to Agent-manage; real read routes must be explicitly registered as view/use), plus a test for that invariant (§9) and the `dev/ci.sh::run_permission_route_redline` enumeration gate.
 - The MQTT data plane remains permissive: this ADR does not solve the known "other users' session events fan out to all localhost clients" problem, which needs a follow-up ACL ADR (§13 Q3).
+- **Follow-up (not covered by this implementation)**: disabling or deleting an owner account does not automatically invalidate the owner rows of their nodes/agents. Current behavior is fail-closed (`can_manage` naturally 403s for a disabled account, leaving the resource effectively ownerless), but the explicit "deactivate ⇒ bulk-ownerless + audit" linkage is missing and must be designed together with the account-deletion flow (acowork-user).
+- **Fixed (the visibility switch silently snapping back)**: the `ownerless ⇒ not Shared` normalisation in `OwnershipStore::upsert_with` ran *after* the caller's mutation, so setting an ownerless agent to `shared` made the handler answer `200 {"visibility":"shared"}` while the store kept `private`; the Desktop dialog's post-save `load()` then re-read the old value and the switch snapped back with no error. The fix has two halves, both necessary: ① `PATCH .../visibility` now rejects up front when the target is ownerless and the request is to publish it (agent `shared` / node `public`), returning `409` whose message gives the two-step recovery (claim via `PATCH .../owner` first, then set visibility); ② the Desktop permission dialog rolls its draft back to the server truth when a save is rejected, so a refused write no longer looks identical to a write that never happened. The normalisation itself is kept — it is a data invariant, not an authorization decision (`can_view = is_admin ∨ can_manage ∨ shared` already keeps an ownerless resource invisible to everyone else), and removing it would let an ownerless agent escape fail-closed through `visibility`. Regression tests: `patch_agent_visibility_rejects_shared_on_ownerless_row` / `node_visibility_public_persists_once_an_owner_is_claimed`, plus the frontend `reverts the switch to the server value…`. **UI path added (a gap in the first fix)**: the 409 message prescribed a two-step recovery, but step one required a hand-written PATCH request, and the dialog rendered the owner read-only with no claim control at all — so for every pre-existing resource (ownerless is the post-upgrade default) the recovery path was unreachable, which is a dead end with better wording. Added `patchAgentOwner`/`patchNodeOwner` wrappers plus an admin-only "take ownership" button in the dialog (`canClaim = isOwnerless && account.role === admin`); after claiming, the dialog reloads, and an owned resource no longer shows the button. The claim is a separate call (not part of Save), so the "claim first, then set visibility in a second step" path still exists — the button just shortens the route the 409 already prescribed into one click.
 
 ---
 
@@ -290,11 +325,11 @@ sequenceDiagram
 
 1. **Unit tests (Gateway)**: the policy table as a pure function — the full route × role × ownership → allow/deny matrix; with emphasis on regressing "an unregistered route is denied by default".
 2. **Structural invariant test (into `dev/ci.sh`, alongside `run_gateway_fs_redline`)**: enumerate all `/api/agents/{id}/**` and `/api/fs/browse` routes registered in `proxy.rs`/`agents.rs`/`fs_browse.rs`, and assert that each has an explicit tier in the policy table or falls into the default-deny bucket — **a new route that isn't registered turns CI red**.
-3. **e2e (multi_user)**: alice installs an agent on node A and sets it private → bob `GET workspaces/tree` / `PUT file` / `fs/browse?target=A` all 403; alice marks it shared → bob `POST sessions` returns 201 and bob's session is still isolated from third parties other than alice per ADR-076; admin has full access + claim + transfer.
-4. **guest semantics (D9's three rules asserted one by one)**: alice adds bob as an agent guest → bob `POST workspaces` 200, bob `PATCH guests/visibility/owner` 403 (R1); bob added as a guest of node A → bob can install an agent on A and that agent's owner = bob; after alice revokes bob's node guest, bob's already-installed agent keeps its ownership (R2/R3); after guest revocation, manage calls immediately 403 (no cached residue).
+3. **e2e (multi_user)**: alice installs an agent on node A and sets it private → bob `POST workspaces` 403 (write = manage) / `GET workspaces/file` 403 (content read = use, non-guest denied) / `GET fs/browse?target=A` 403; alice marks it `shared` without adding bob as a guest → bob sees the agent and may `GET config`/`GET model`/`GET permissions` (metadata/definition reads = view allowed) but `POST sessions` returns **403** (shared opens visibility + read-only, not use), and `GET files`/`GET memory` **403** (content reads at use); alice then adds bob as an agent guest → bob `POST sessions` 201, `GET files` 200, `GET memory` 200 (use allowed) and bob's session is still isolated from third parties other than alice per ADR-076; admin has full access + claim + transfer.
+4. **guest semantics (D9's three rules asserted one by one)**: alice adds bob as an agent guest → bob `POST sessions` returns 200 (use allowed) but `POST workspaces` returns **403** (a guest has no manage) and `PATCH guests/visibility/owner` returns 403 (R1); bob added as a guest of node A → bob `POST install@A` returns **403** (a guest has no machine-management right; installing needs the node owner ∨ admin); after alice revokes bob's guest, bob's use calls (sessions) immediately 403 (no cached residue).
 5. **Local mode regression**: under `AuthMode::Local` all behaviour is byte-identical to pre-upgrade (the no-op assertion).
 6. **Migration rehearsal**: upgrading with existing data → an ordinary user's list only contains their own visible items; after an ownerless resource is claimed by the admin, functionality is restored.
-7. **e2e (Desktop + Mobile)**: non-owners' manage entries are disabled per `can_manage=false`; the shared agent's chat path works smoothly; the guest badge and list-management UI are usable.
+7. **e2e (Desktop + Mobile)**: non-owner/non-admin manage entries are disabled per `can_manage=false`; a guest's (use authorization) chat path works smoothly while a non-guest sees a shared agent but cannot chat (use writes 403); the guest badge and list-management UI are usable.
 
 ---
 
@@ -327,10 +362,10 @@ Steps 1-4 are the minimal closed loop of the security fix (plug the hole as soon
 
 | # | Question | Status |
 |---|---|---|
-| Q1 | **Ownership of the default agent (ADR-077)**: onboarding installs it as the first user → owner = that user, and by default other users cannot use it. Should the "default agent installed by onboarding" default to `shared` (out-of-the-box for teams)? | ✅ **Decided (2026-10-28): `Shared` by default**. The default agent preinstalled by onboarding lands as shared, and the owner may switch it back to private; instances the user installs themselves keep the default private. See D3 |
+| Q1 | **Ownership of the default agent (ADR-077)**: onboarding installs it as the first user → owner = that user, and by default other users cannot use it (unless added to the guest list). Should the "default agent installed by onboarding" default to `shared` (out-of-the-box **visibility** for teams)? | ✅ **Decided (2026-10-28): `Shared` by default**. The default agent preinstalled by onboarding lands as shared (visible to everyone), and the owner may switch it back to private; instances the user installs themselves keep the default private. **Note `shared` opens visibility only; chatting is still authorized per guest** (see D6) |
 | Q2 | **Where an admin's install lands**: when an admin installs an agent onto user X's node, does it require X's manage authorization? Or can an admin naturally install on any node? | ✅ **Decided (2026-10-28): an admin may install on any node**. An admin naturally passes all Node-manage/Agent-manage gates, with no `admin_overrides_nodes` knob added (no near-term need → no config surface, YAGNI). Ownership is still recorded as the admin's own, and the node owner can later reclaim it via an admin transfer |
 | Q3 | **MQTT data-plane ACL**: permissive subscribe causes cross-account event fan-out (the known e2e flake root cause). After the owner model lands, the ACL's subscription filtering rules (`user:{id}` may only subscribe to events for resources visible to them) should align with it | A separate ADR (orthogonal to this ADR's HTTP control plane; does not block this ADR) |
-| Q4 | **Cost attribution of a shared agent**: when someone else uses my shared agent, it burns my provider key / quota. Should the budget (budget tracker) account per caller or cap per agent? | ✅ **Decided (2026-10-28): account per agent, not per user**. Usage belongs to the agent (hence to its owner's key/quota), and the budget tracker stays at agent granularity; caller-level apportionment / caps are revisited when a real need appears |
+| Q4 | **Cost attribution of agent use**: when a guest uses my agent, it burns my provider key / quota. Should the budget (budget tracker) account per caller or cap per agent? | ✅ **Decided (2026-10-28): account per agent, not per user**. Usage belongs to the agent (hence to its owner's key/quota), and the budget tracker stays at agent granularity; caller-level apportionment / caps are revisited when a real need appears |
 | Q5 | **Read endpoints such as `GET /api/agents/{id}/avatar`**: for a private agent, should a non-owner get a 404 or be allowed? | Recommend 404 (the list is already filtered, avoiding existence probing); decided at implementation time |
 
 ---
@@ -347,3 +382,51 @@ Steps 1-4 are the minimal closed loop of the security fix (plug the hole as soon
 | [core/acowork-gateway/src/mqtt/dispatch.rs](../../../core/acowork-gateway/src/mqtt/dispatch.rs) | `decide_enroll`, the installed-inventory aggregation (the timing of owner binding / cleanup) |
 | [core/acowork-gateway/src/mqtt/node_registry.rs](../../../core/acowork-gateway/src/mqtt/node_registry.rs) | the Node online view; the `can_manage` rendering input |
 | [core/acowork-memory/src/session_meta.rs](../../../core/acowork-memory/src/session_meta.rs) | the reference for the session-dimension decision pattern (`is_readable_by`/`is_writable_by`) |
+
+---
+
+## Appendix A: Revision — a 409 is not a UI contract (2026-10)
+
+**Trigger**: a multi_user deployment. Signed in as admin, right-clicked an agent →
+Permissions → toggled visibility on → Save, and got
+`409 this agent has no owner yet…` (`owner_user_id: null` is the default state of every
+pre-existing resource — see the upgrade risk in §8).
+
+**Diagnosis**: the 409 was not lying. `upsert_with`'s `ownerless ⇒ not published`
+normalization really does silently roll that write back. But it **packaged a
+predictable data state as a runtime error**, and it ignored who was asking: the very
+admin who is the only role allowed to claim was the one the 409 blocked.
+D8 already said the client renders server-computed booleans only, yet
+`GET .../permissions` shipped just `can_attribute` — a **permission** answer, which is
+`true` for an admin even on an ownerless row. The UI therefore enabled the switch as
+usual and the user had to click to discover the write was impossible. Permission and
+data state had been conflated; the 409 was the symptom.
+
+**Revision** (a completion of D8, not a new decision):
+
+1. `ownership::can_publish` / `ownership::is_ownerless` become shared decision functions.
+   The normalization rule, the `permissions` payload, and the two `PATCH .../visibility`
+   guards each rolled their own version of the same question; they now share one.
+2. `GET /api/{agents,nodes}/{id}/permissions` gains `can_set_visibility` + `ownerless`.
+   The client disables the switch and states why (`needsOwnerHint`) instead of letting
+   the user find out by clicking.
+3. The 409 stays, as the non-UI fallback only — it stops a direct HTTP caller from
+   dressing the silent normalization up as success. Its message no longer tells the
+   user to hand-write a PATCH; end users should not be asked to open devtools.
+4. The dialog keeps its admin-only "claim ownership" action
+   (`canClaim = isOwnerless && role === admin`).
+
+**Explicitly rejected**: folding "and make it visible" into the claim. An ownerless row is
+private by construction, so defaulting it to published silently widens who can reach the
+agent. Saving a click is not worth an authorization change made on the admin's behalf;
+claim and publish stay two explicit actions, matching D7's two-step recovery.
+
+**Open**: migrating ownership for existing ownerless rows is still undesigned (§8 lists
+it as an upgrade risk; this change only makes the recovery reachable and silent errors
+impossible). The migration has to answer "who owns this machine / these agents", which
+ADR-087 deliberately leaves to the deployer.
+
+**Regression tests**: `permissions_reports_an_ownerless_row_as_unpublishable` /
+`permissions_reports_an_owned_row_as_publishable` (server data state),
+`disables the visibility switch instead of offering a write that 409s` /
+`keeps an owned resource's switch enabled` / `claims ownership without also changing visibility` (UI).

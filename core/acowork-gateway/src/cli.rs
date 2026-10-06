@@ -493,7 +493,7 @@ impl Cli {
                 let mut store = crate::mqtt::enrollment::EnrollmentTokenStore::load(
                     std::path::Path::new(&data_dir),
                 );
-                let plaintext = store.create_token(ttl);
+                let plaintext = store.create_token(ttl, None);
                 println!("Enrollment token created (one-time, TTL {}m):", ttl.as_secs() / 60);
                 println!("{plaintext}");
                 println!("\nPass it to a node on first boot:");

@@ -57,7 +57,9 @@ pub(crate) fn generate_token() -> String {
 /// Atomically persist a JSON store (write temp + rename) so a crash
 /// never leaves a corrupt file. Failures are logged, not fatal — the
 /// in-memory state stays authoritative for the current process.
-fn atomic_write_json<T: Serialize>(path: &Path, value: &T) {
+/// `pub(crate)` so the ADR-087 ownership stores reuse the same
+/// crash-safe write discipline.
+pub(crate) fn atomic_write_json<T: Serialize>(path: &Path, value: &T) {
     let tmp = path.with_extension("json.tmp");
     let result = (|| -> std::io::Result<()> {
         let content = serde_json::to_vec_pretty(value).map_err(std::io::Error::other)?;
@@ -91,6 +93,12 @@ struct EnrollmentTokenRecord {
     expires_at: DateTime<Utc>,
     /// node_id that consumed the token (set by [`consume_token`]).
     consumed_by: Option<String>,
+    /// ADR-087 D2: the logged-in user who created the token (from
+    /// `AuthContext`). Written to `node_owners.json` when the token is
+    /// consumed by a successful enroll. `None` = CLI-issued token → the
+    /// enrolled node stays ownerless (admin-only, fail-closed).
+    #[serde(default)]
+    owner_user_id: Option<String>,
 }
 
 /// One-time enrollment token store (`{data_dir}/enrollment_tokens.json`).
@@ -117,25 +125,50 @@ impl EnrollmentTokenStore {
             }),
             Err(_) => Vec::new(),
         };
-        Self { path, records }
+        let mut store = Self { path, records };
+        // ADR-087 review M7: sweep records that expired while the
+        // Gateway was down so a long-idle store cannot grow unbounded
+        // across restarts.
+        let now = Utc::now();
+        let before = store.records.len();
+        store.records.retain(|r| r.expires_at > now);
+        if store.records.len() != before {
+            store.persist();
+        }
+        store
     }
 
     /// Create a new one-time token valid for `ttl` and return its
     /// plaintext (printed exactly once to the operator). Only the
     /// sha256 hash is persisted. Expired-and-consumed records are
     /// purged opportunistically to bound the file size.
-    pub fn create_token(&mut self, ttl: std::time::Duration) -> String {
+    ///
+    /// ADR-087 D2: `owner_user_id` is the logged-in creator (HTTP path);
+    /// CLI-issued tokens pass `None` and the enrolled node stays
+    /// ownerless (admin-only).
+    pub fn create_token(
+        &mut self,
+        ttl: std::time::Duration,
+        owner_user_id: Option<String>,
+    ) -> String {
         let plaintext = generate_token();
         let now = Utc::now();
         let expires_at = now + chrono::Duration::from_std(ttl).expect("ttl within chrono range");
-        self.records.retain(|r| {
-            r.consumed_by.is_none() && r.expires_at > now && r.expires_at > expires_at
-        });
+        // ADR-087 review M7: purge records past their expiry — they can
+        // never validate again (Expired and Unknown are equivalent for a
+        // one-time token whose hash is gone from any live client).
+        // Unexpired records are KEPT regardless of consumption: a
+        // consumed-but-unexpired token must still answer `Consumed`
+        // (replay detection), and an unexpired unconsumed token must
+        // stay valid — the previous condition wrongly dropped valid
+        // tokens whose expiry was later than this new one's.
+        self.records.retain(|r| r.expires_at > now);
         self.records.push(EnrollmentTokenRecord {
             token_hash: hash_token(&plaintext),
             created_at: now,
             expires_at,
             consumed_by: None,
+            owner_user_id,
         });
         self.persist();
         plaintext
@@ -158,6 +191,20 @@ impl EnrollmentTokenStore {
             }
         }
         TokenValidation::Unknown
+    }
+
+    /// ADR-087 D2: the `owner_user_id` bound to a plaintext token
+    /// (`None` for CLI-issued tokens or unknown hashes). Read at enroll
+    /// time to seed `node_owners.json`.
+    pub fn token_owner(&self, token: &str) -> Option<String> {
+        let hash = hash_token(token);
+        self.records.iter().find_map(|r| {
+            if constant_time_eq(r.token_hash.as_bytes(), hash.as_bytes()) {
+                r.owner_user_id.clone()
+            } else {
+                None
+            }
+        })
     }
 
     /// Mark a token consumed by `node_id` and persist. Returns false
@@ -329,7 +376,7 @@ mod tests {
         let mut store = EnrollmentTokenStore::load(&dir);
         assert_eq!(store.validate_token("nope"), TokenValidation::Unknown);
 
-        let token = store.create_token(Duration::from_secs(3600));
+        let token = store.create_token(Duration::from_secs(3600), None);
         assert_eq!(token.len(), 64);
         assert_eq!(store.validate_token(&token), TokenValidation::Valid);
         assert_eq!(store.live_count(), 1);
@@ -341,8 +388,38 @@ mod tests {
     fn wrong_token_is_unknown() {
         let dir = test_dir("enroll-wrong");
         let mut store = EnrollmentTokenStore::load(&dir);
-        store.create_token(Duration::from_secs(3600));
+        store.create_token(Duration::from_secs(3600), None);
         assert_eq!(store.validate_token("deadbeef"), TokenValidation::Unknown);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn new_token_does_not_evict_valid_long_lived_token() {
+        // Review M7 regression: the old opportunistic purge keyed on the
+        // NEW token's expiry and silently invalidated outstanding
+        // long-lived tokens. Creating a short-TTL token must keep a
+        // previously issued, unexpired token valid.
+        let dir = test_dir("enroll-noevict");
+        let mut store = EnrollmentTokenStore::load(&dir);
+        let long = store.create_token(Duration::from_secs(3600), None);
+        let _short = store.create_token(Duration::from_secs(1), None);
+        assert_eq!(store.validate_token(&long), TokenValidation::Valid);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn expired_records_purged_on_load() {
+        // Review M7: expiry sweep runs at load too, so a store nobody
+        // writes to cannot accumulate dead records across restarts.
+        let dir = test_dir("enroll-loadpurge");
+        {
+            let mut store = EnrollmentTokenStore::load(&dir);
+            let _live = store.create_token(Duration::from_secs(3600), None);
+            let dead = store.create_token(Duration::ZERO, None);
+            assert_eq!(store.validate_token(&dead), TokenValidation::Expired);
+        }
+        let store = EnrollmentTokenStore::load(&dir);
+        assert_eq!(store.live_count(), 1, "expired record purged at load");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -351,7 +428,7 @@ mod tests {
         let dir = test_dir("enroll-expired");
         let mut store = EnrollmentTokenStore::load(&dir);
         // Zero TTL = expires immediately.
-        let token = store.create_token(Duration::ZERO);
+        let token = store.create_token(Duration::ZERO, None);
         assert_eq!(store.validate_token(&token), TokenValidation::Expired);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -360,7 +437,7 @@ mod tests {
     fn one_time_consumption() {
         let dir = test_dir("enroll-consume");
         let mut store = EnrollmentTokenStore::load(&dir);
-        let token = store.create_token(Duration::from_secs(3600));
+        let token = store.create_token(Duration::from_secs(3600), None);
 
         assert!(store.consume_token(&token, "gpu-1"));
         // Consuming twice is a no-op.
@@ -375,7 +452,7 @@ mod tests {
         let dir = test_dir("enroll-persist");
         {
             let mut store = EnrollmentTokenStore::load(&dir);
-            let token = store.create_token(Duration::from_secs(3600));
+            let token = store.create_token(Duration::from_secs(3600), None);
             assert!(store.consume_token(&token, "gpu-1"));
         }
         {

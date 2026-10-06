@@ -2,10 +2,9 @@
  * Top-bar account menu (ADR-076 §决策 7).
  *
  * Reuses the shared `ContextMenu` popover (the same one the right-click
- * menus use) instead of hand-rolling a dropdown. The avatar button keeps
- * its old "open user preferences" behaviour when the account system is a
- * no-op (`AUTH_MODE=local`) or the user is not logged in; under
- * `multi_user` + `logged_in` it opens the account menu.
+ * menus use) instead of hand-rolling a dropdown. Left click on the avatar
+ * opens user preferences (the historical behaviour, same as the `!loggedIn`
+ * path below); right click opens the account menu — WeChat-style.
  *
  * 切换账号 / 退出登录 / 注销 all funnel into a store action that clears
  * the token pair and reloads the webview — the §9 open-question-6
@@ -72,7 +71,10 @@ export function AccountMenu({ onOpenProfile }: AccountMenuProps) {
     <>
       <Tooltip content={account?.display_name ?? profile.displayName} variant="plain" position="right">
         <button
-          onClick={(e) => menu.openAt(e)}
+          // 左键 = 打开用户资料（原有点击行为），右键 = 账号菜单，
+          // 与微信一致。`openAt` 内部已 preventDefault 掉浏览器原生菜单。
+          onClick={onOpenProfile}
+          onContextMenu={(e) => menu.openAt(e)}
           className="mb-3 flex items-center justify-center rounded-md transition-colors duration-150 hover:ring-2 hover:ring-zinc-400 dark:hover:ring-zinc-500"
           aria-label={t("account.menuAriaLabel")}
         >

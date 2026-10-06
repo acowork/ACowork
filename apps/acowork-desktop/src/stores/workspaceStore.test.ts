@@ -102,3 +102,70 @@ describe("workspaceStore.setPromptFile", () => {
         expect(useWorkspaceStore.getState().workspaces[0].prompt_file).toBeNull();
     });
 });
+
+/**
+ * ADR-087: a shared agent's workspace list is `AgentManage`, so a
+ * non-owner caller gets 403. The old code logged it and left the list
+ * empty, which the panel rendered as "未配置工作区" — telling the caller
+ * to go add one they are not allowed to add.
+ */
+describe("workspaceStore.fetchWorkspaces — 403 is a state, not a silent empty", () => {
+    afterEach(() => {
+        useWorkspaceStore.getState().reset();
+    });
+
+    it("records deniedReason and does not present it as an empty list", async () => {
+        vi.stubGlobal(
+            "fetch",
+            vi.fn(() =>
+                Promise.resolve({
+                    ok: false,
+                    status: 403,
+                    statusText: "Forbidden",
+                    json: () => Promise.resolve({ error: "forbidden", required: "manage" }),
+                } as Response),
+            ),
+        );
+
+        await useWorkspaceStore.getState().fetchWorkspaces("agent-shared");
+
+        const { deniedReason, loading } = useWorkspaceStore.getState();
+        expect(deniedReason).toBe("manage");
+        expect(loading).toBe(false);
+    });
+
+    it("does not pin deniedReason on a 5xx, which still owns the retry path", async () => {
+        // 5xx is transient (Runtime boot) and must keep flowing through
+        // with503Retry — treating it as "denied" would permanently show
+        // the permission copy for what is a start-order race.
+        vi.stubGlobal(
+            "fetch",
+            vi.fn(() =>
+                Promise.resolve({
+                    ok: false,
+                    status: 500,
+                    statusText: "Internal Server Error",
+                    json: () => Promise.resolve({ error: "boom" }),
+                } as Response),
+            ),
+        );
+
+        await useWorkspaceStore.getState().fetchWorkspaces("agent-1");
+
+        expect(useWorkspaceStore.getState().deniedReason).toBeNull();
+    });
+
+    it("clears a previous denial once the caller becomes a guest", async () => {
+        vi.stubGlobal(
+            "fetch",
+            vi.fn(() =>
+                Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ workspaces: [] }) } as Response),
+            ),
+        );
+        useWorkspaceStore.setState({ deniedReason: "manage" });
+
+        await useWorkspaceStore.getState().fetchWorkspaces("agent-1");
+
+        expect(useWorkspaceStore.getState().deniedReason).toBeNull();
+    });
+});

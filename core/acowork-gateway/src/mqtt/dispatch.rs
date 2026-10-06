@@ -188,6 +188,16 @@ pub struct DispatchContext {
     pub enrollment_tokens: Option<SharedEnrollmentTokenStore>,
     /// Node token store (ADR-055 Phase 5a).
     pub node_tokens: Option<SharedNodeTokenStore>,
+    /// ADR-087: node ownership table — the enroll accept path binds the
+    /// enrollment token's creator as the node owner.
+    pub node_owners: Option<crate::gateway::ownership::SharedOwnershipStore>,
+    /// ADR-087: agent ownership table — the retained-inventory clear
+    /// path prunes rows for instances that no longer exist anywhere.
+    pub agent_owners: Option<crate::gateway::ownership::SharedOwnershipStore>,
+    /// ADR-087 D7 / review M4: pending installs — committed to
+    /// `agent_owners` when the instance's retained inventory lands,
+    /// dropped when the Node reports the operation failed.
+    pub pending_installs: Option<crate::gateway::ownership::SharedPendingInstalls>,
     /// Whether enrollment-token validation is enforced (ADR-055 Phase 5a).
     pub auth_enabled: bool,
     /// Subsystem readiness registry — receives `node.{id}` readiness
@@ -220,6 +230,9 @@ impl Default for DispatchContext {
             node_control: None,
             enrollment_tokens: None,
             node_tokens: None,
+            node_owners: None,
+            agent_owners: None,
+            pending_installs: None,
             auth_enabled: false,
             bootstrap_registry: None,
             inventory_trigger: None,
@@ -635,6 +648,7 @@ pub fn handle_plaintext_message(topic: &str, payload: &[u8], ctx: &DispatchConte
         let mqtt_for_reply = ctx.mqtt_client.clone();
         let enroll_store = ctx.enrollment_tokens.clone();
         let node_store = ctx.node_tokens.clone();
+        let node_owners_store = ctx.node_owners.clone();
         // `auth_enabled` is a Copy bool — hoist it out of the context
         // before the `'static` spawn so the task does not borrow `ctx`.
         let auth_enabled = ctx.auth_enabled;
@@ -647,6 +661,7 @@ pub fn handle_plaintext_message(topic: &str, payload: &[u8], ctx: &DispatchConte
                 mqtt_for_reply,
                 enroll_store,
                 node_store,
+                node_owners_store,
                 auth_enabled,
             )
             .await;
@@ -661,6 +676,12 @@ pub fn handle_plaintext_message(topic: &str, payload: &[u8], ctx: &DispatchConte
         let payload_owned = payload.to_vec();
         let topic_owned = topic.to_string();
         let op_store = ctx.operation_store.clone();
+        // ADR-087 D7 / review M4: the pending-install ledger is keyed by
+        // the instance id carried in this very topic — "ok" commits the
+        // staged owner row, a terminal failure drops it (no orphan row).
+        let pending_installs = ctx.pending_installs.clone();
+        let agent_owners_for_events = ctx.agent_owners.clone();
+        let instance_id = extract_agent_events_instance_id(topic);
         tokio::spawn(async move {
             match DataEnvelope::decode(payload_owned.as_slice()) {
                 Ok(envelope) => {
@@ -677,8 +698,24 @@ pub fn handle_plaintext_message(topic: &str, payload: &[u8], ctx: &DispatchConte
                             match event.status.as_str() {
                                 "ok" => {
                                     store.transition(&op_id, OperationState::Completed, None, None);
+                                    // ADR-087: install confirmed — commit
+                                    // the staged owner row (no-op unless a
+                                    // pending install exists for this id).
+                                    if let (Some(pending), Some(owners), Some(iid)) =
+                                        (pending_installs.as_ref(), agent_owners_for_events.as_ref(), instance_id.as_ref())
+                                    {
+                                        crate::gateway::ownership::commit_pending(pending, owners, iid);
+                                    }
                                 }
                                 "error" => {
+                                    // ADR-087 D7 / review M4: a failed
+                                    // install must not leave its owner row
+                                    // behind — drop the staged pending.
+                                    if let (Some(pending), Some(iid)) =
+                                        (pending_installs.as_ref(), instance_id.as_ref())
+                                    {
+                                        crate::gateway::ownership::drop_pending(pending, iid);
+                                    }
                                     // Log the failure at WARN so a
                                     // failing install/upgrade is visible
                                     // in the Gateway log without needing
@@ -736,6 +773,16 @@ pub fn handle_plaintext_message(topic: &str, payload: &[u8], ctx: &DispatchConte
         let state_for_installed = ctx.state.clone();
         let payload_owned = payload.to_vec();
         let node_id_owned = node_id.clone();
+        // ADR-087 D7: the retained-inventory clear is the authoritative
+        // "this instance no longer exists" signal — prune its ownership
+        // row there (the uninstall handler prunes eagerly; this is the
+        // backstop for uninstalls the Gateway did not dispatch).
+        let agent_owners = ctx.agent_owners.clone();
+        // ADR-087 backstop: if the install's "ok" NodeEvent was lost
+        // (QoS-1 drop, Gateway restart between dispatch and event), the
+        // first inventory sighting still commits the staged owner row.
+        let pending_installs_installed = ctx.pending_installs.clone();
+        let agent_owners_installed = ctx.agent_owners.clone();
         // Inventory-change signal: every mutation to installed_agents
         // (install complete / retained replay / empty-payload clear)
         // must wake the publisher so subscribers (Desktop) refresh.
@@ -744,6 +791,12 @@ pub fn handle_plaintext_message(topic: &str, payload: &[u8], ctx: &DispatchConte
             let mut gw = state_for_installed.write().await;
             if payload_owned.is_empty() {
                 gw.remove_installed(&agent_id);
+                if let Some(store) = agent_owners.as_ref() {
+                    store
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .remove(&agent_id);
+                }
                 if let Some(t) = inventory_trigger.as_ref() {
                     t.notify();
                 }
@@ -766,6 +819,18 @@ pub fn handle_plaintext_message(topic: &str, payload: &[u8], ctx: &DispatchConte
                         let Some(aid) = gw.upsert_installed_from_node(&node_id_owned, &info) else {
                             return;
                         };
+                        if is_new
+                            && let (Some(pending), Some(owners)) = (
+                                pending_installs_installed.as_ref(),
+                                agent_owners_installed.as_ref(),
+                            )
+                        {
+                            crate::gateway::ownership::commit_pending(
+                                pending,
+                                owners,
+                                &info.instance_id,
+                            );
+                        }
 
                         // ADR-055 §3.2 / S3.3: register the manifest-declared
                         // cron triggers on first install. The node no longer
@@ -936,6 +1001,16 @@ pub async fn remove_node_records(ctx: &DispatchContext, node_id: &str) {
             gw.cron_scheduler.unregister_agent(id);
         }
     }
+    // ADR-087 D7: instances that vanish with their node have no
+    // ownership left to govern — prune their rows (node rows stay; the
+    // machine's owner is an audit fact, and re-enrolling the same
+    // node_id keeps it).
+    if let Some(store) = ctx.agent_owners.as_ref() {
+        let mut guard = store.lock().unwrap_or_else(|e| e.into_inner());
+        for id in &all_instances {
+            guard.remove(id);
+        }
+    }
     // Bulk uninstalls from a permanently-offline node also need to wake
     // the inventory notifier (Desktop subscribes to one signal per
     // change; coalescing handles the burst on the publish side).
@@ -1034,6 +1109,26 @@ fn extract_installed_topic_ids(topic: &str) -> Option<(String, String)> {
         if !node_id.is_empty() && !agent_id.is_empty() {
             return Some((node_id.to_string(), agent_id.to_string()));
         }
+    }
+    None
+}
+
+/// Extract the instance id from
+/// `acowork/nodes/{node_id}/agents/{instance_id}/events` — the reply
+/// channel of a per-agent Node command (ADR-055 §6.2). Used by the
+/// ADR-087 pending-install rollback: a failed install must drop its
+/// staged owner row, and only the topic carries the instance identity
+/// (the NodeEvent itself is keyed by `request_id`).
+fn extract_agent_events_instance_id(topic: &str) -> Option<String> {
+    let parts: Vec<&str> = topic.split('/').collect();
+    if parts.len() == 6
+        && parts[0] == "acowork"
+        && parts[1] == "nodes"
+        && parts[3] == "agents"
+        && parts[5] == "events"
+        && !parts[4].is_empty()
+    {
+        return Some(parts[4].to_string());
     }
     None
 }
@@ -1192,6 +1287,7 @@ async fn process_enroll_message(
     mqtt_client: Option<Arc<GatewayMqttClient>>,
     enrollment_tokens: Option<SharedEnrollmentTokenStore>,
     node_tokens: Option<SharedNodeTokenStore>,
+    node_owners: Option<crate::gateway::ownership::SharedOwnershipStore>,
     auth_enabled: bool,
 ) {
     let enrollment_token = match parse_enroll_payload(&payload, &node_id) {
@@ -1264,6 +1360,31 @@ async fn process_enroll_message(
                     )
                     .await;
                     return;
+                }
+            }
+
+            // ADR-087 D2: bind the enrollment token's creator as the
+            // node owner (first enrollment wins — `put_if_absent` keeps
+            // a re-enroll from changing the owner; CLI-issued tokens
+            // have no owner, so the node stays ownerless = admin-only).
+            if consume_enrollment_token
+                && let (Some(token), Some(owners)) =
+                    (enrollment_token.as_deref(), node_owners.as_ref())
+            {
+                let owner = enrollment_tokens.as_ref().and_then(|store| {
+                    store
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .token_owner(token)
+                });
+                if let Some(owner) = owner {
+                    owners
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .put_if_absent(
+                            &node_id,
+                            crate::gateway::ownership::OwnerRecord::new(Some(owner)),
+                        );
                 }
             }
 
@@ -2234,7 +2355,7 @@ mod tests {
         let node_store = NodeTokenStore::load(&dir);
 
         // Valid token → accept.
-        let valid = enrollment.create_token(std::time::Duration::from_secs(3600));
+        let valid = enrollment.create_token(std::time::Duration::from_secs(3600), None);
         let decision = decide_enroll(
             "gpu-1",
             Some(&valid),
@@ -2278,7 +2399,7 @@ mod tests {
         ));
 
         // Expired token (ttl = 0 → expires_at == now) → reject.
-        let expired = enrollment.create_token(std::time::Duration::ZERO);
+        let expired = enrollment.create_token(std::time::Duration::ZERO, None);
         let decision = decide_enroll(
             "gpu-1",
             Some(&expired),
@@ -2323,7 +2444,7 @@ mod tests {
         let token = enrollment_store
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .create_token(std::time::Duration::from_secs(3600));
+            .create_token(std::time::Duration::from_secs(3600), None);
 
         let port = 18979; // distinct from the broker smoke-test ports (18976/18977 in mqtt/client.rs, 18978 in global_resources_publisher.rs)
         let host = "127.0.0.1";
@@ -2476,7 +2597,7 @@ mod tests {
         let reused = enrollment_store
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .create_token(std::time::Duration::from_secs(3600));
+            .create_token(std::time::Duration::from_secs(3600), None);
         let mut re_mqttoptions = MqttOptions::new("node:gpu-1", host, port);
         re_mqttoptions.set_keep_alive(std::time::Duration::from_secs(5));
         // Reconnect with the minted node token — the realistic

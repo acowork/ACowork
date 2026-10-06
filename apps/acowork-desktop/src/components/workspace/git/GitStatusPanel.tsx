@@ -16,6 +16,7 @@ import {
   FileMinus,
   FilePlus,
   GitMerge,
+  Lock,
   Pencil,
 } from "lucide-react";
 import {
@@ -111,6 +112,7 @@ export function GitStatusPanel({ agentId, workspaceId }: GitStatusPanelProps) {
   const data = entry?.data;
   const loading = entry?.loading ?? false;
   const error = entry?.error ?? null;
+  const errorStatus = entry?.errorStatus ?? null;
   const changes = data?.changes ?? EMPTY_CHANGES;
 
   // ── Pagination (ADR-078 decision 6 follow-up) ───────────────────
@@ -308,9 +310,17 @@ export function GitStatusPanel({ agentId, workspaceId }: GitStatusPanelProps) {
       );
     }
     if (error && !data) {
+      // A 403 is an access state, not a failure — render it in the same
+      // neutral tone as "not a repo" / "clean", so a view-only guest sees
+      // information rather than a red alarm they cannot act on.
+      const denied = errorStatus === 403;
       return (
-        <div className="flex h-full items-center justify-center gap-1.5 text-xs text-red-500">
-          <AlertCircle size={13} /> {error}
+        <div
+          className={`flex h-full items-center justify-center gap-1.5 text-xs ${
+            denied ? "text-text-tertiary" : "text-red-500"
+          }`}
+        >
+          {denied ? <Lock size={13} /> : <AlertCircle size={13} />} {error}
         </div>
       );
     }

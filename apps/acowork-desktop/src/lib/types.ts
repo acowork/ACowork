@@ -108,6 +108,16 @@ export interface NodeInfo {
   max_agents?: number;
   agent_count?: number;
   http_endpoint?: string;
+  /**
+   * ADR-087 D8: caller may manage this node (owner / guest / admin, or
+   * anyone in Local mode). Server-computed — gates the node-group-header
+   * permissions icon. Optional: absent on Gateways predating ADR-087.
+   */
+  can_manage?: boolean;
+  /** ADR-087 D9: caller is on the manage list as a guest (not owner). */
+  is_guest?: boolean;
+  /** ADR-087 D2: "private" | "public". */
+  visibility?: string;
 }
 
 // ── P1: Full-stack service diagnostics (desktop-unified-diagnostics §3.2) ──
@@ -271,6 +281,18 @@ export interface AgentInfo {
    * for tooltips and future "last active" UI affordances.
    */
   last_interaction_at?: string | null;
+  /**
+   * ADR-087 D7: caller may manage this agent (owner / guest / admin).
+   * `undefined`/`null` = local single-user mode — treat as manageable.
+   * Gates the context-menu "Permissions" entry (hidden otherwise).
+   */
+  can_manage?: boolean | null;
+  /** ADR-087 D7: caller may chat with this agent. */
+  can_use?: boolean | null;
+  /** ADR-087 D5: "shared" | "private". */
+  visibility?: string;
+  /** ADR-087: caller is on this agent's guest list. */
+  is_guest?: boolean;
 }
 
 /** Agent detail response */

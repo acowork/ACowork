@@ -15,7 +15,6 @@
   },
   "account": {
     "loginTitle": "Sign in",
-    "loginSubtitle": "Sign in to continue",
     "username": "Username",
     "password": "Password",
     "login": "Sign in",
@@ -140,6 +139,14 @@
     "retry": "Retry",
     "refreshPage": "Refresh page"
   },
+  "apiError": {
+    "permissionDenied": "You don't have permission for this action. Ask the resource owner to grant you access.",
+    "permissionUse": "This action requires use permission. Ask the owner to add you as an authorized user.",
+    "permissionManage": "This action requires manage permission — only the resource owner or an admin can do it.",
+    "permissionAdmin": "This action is restricted to administrators.",
+    "permissionTransfer": "Only the resource owner or an admin can change its authorization settings.",
+    "readOnlyBanner": "You have view-only access to this resource; changes cannot be saved. Contact the owner to request permission."
+  },
   "chatPanel": {
     "sessionLoadFailed": "Session failed to load",
     "agentStopped": "{{name}} is stopped",
@@ -150,6 +157,9 @@
     "uploadFile": "Upload file",
     "uploadHint": "Upload file (PDF/DOCX/PPTX/XLSX/PNG/JPG/GIF/WebP)",
     "sendMessage": "Send message",
+    "sendFailedNotConnected": "Failed to send message: the agent may not be connected yet. Please wait and try again.",
+    "modelSwitchFailed": "Failed to switch model: {{model}}",
+    "reasoningEffortFailed": "Failed to update reasoning effort",
     "addToQueue": "Add to queue",
     "sendQueuedAndStop": "Send queued & stop",
     "stop": "Stop",
@@ -405,7 +415,10 @@
     "errorFailedToRestartInDebug": "Failed to restart in debug: {{error}}",
     "errorFailedToStopAgent": "Failed to stop agent: {{error}}",
     "errorFailedToUninstallAgent": "Failed to uninstall agent: {{error}}",
-    "node": "Node"
+    "node": "Node",
+    "contextPermissions": "Permissions",
+    "nodePermissions": "Node permissions",
+    "noAccess": "No access"
   },
   "cloneDialog": {
     "skeleton": "Skeleton",
@@ -507,7 +520,12 @@
     },
     "defaultWorkingDirectory": "Default working directory",
     "noMatchingWorkspaces": "No matching workspaces",
-    "noWorkspacesConfigured": "No workspaces configured"
+    "noWorkspacesConfigured": "No workspaces configured",
+    "deniedTitle": "Workspaces not visible",
+    "deniedHint": "This agent is shared with you, but its workspaces are visible only to the owner and authorized users. Ask the owner to add you, or just describe your working directory in the conversation.",
+    "treeLoadFailed": "Failed to load workspace ({{detail}})",
+    "retry": "Retry",
+    "treeLoadAborted": "Request aborted"
   },
   "gitStatusBar": {
     "title": "Git",
@@ -1726,5 +1744,32 @@
     "imagePrompt": "Image URL or relative path",
     "tbUndo": "Undo",
     "tbRedo": "Redo"
+  },
+  "permissionDialog": {
+    "title": "Permissions",
+    "ariaLabelClose": "Close",
+    "owner": "Owner",
+    "ownerUnassigned": "Unassigned (admin only)",
+    "visibility": "Visibility",
+    "visibilityShared": "Shared",
+    "visibilityPublic": "Public",
+    "visibilityPrivate": "Private",
+    "visibilityOnHint": "Every logged-in user can see it read-only (details & configuration). Chatting still requires adding them as a guest.",
+    "visibilityOffHint": "Only owner, guests and admin can see it",
+    "needsOwnerHint": "Take ownership to make this {{pub}}.",
+    "guests": "Guests (can use & chat)",
+    "guestsHint": "Guests can chat with and use this resource (including its workspace files), but cannot change its configuration, permissions, or owner.",
+    "noUsers": "No other accounts yet",
+    "guestUnavailable": "Deleted account — uncheck to remove",
+    "readOnly": "You can see this list but only the owner or an admin can change it.",
+    "loadFailed": "Failed to load permissions",
+    "saveFailed": "Failed to save",
+    "close": "Close",
+    "save": "Save",
+    "claimOwner": "Take ownership",
+    "claiming": "Taking ownership…",
+    "claimOwnerHint": "This {{kind}} has no owner, so only you can manage it and it cannot be made {{pub}} yet. Take ownership to set its visibility.",
+    "agent": "agent",
+    "node": "node"
   }
 }

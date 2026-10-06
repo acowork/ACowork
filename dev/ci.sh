@@ -321,6 +321,78 @@ run_user_boundary_redline() {
     echo "User-domain boundary red lines: OK"
 }
 
+# ADR-087 D5: the permission middleware is the single enforcement point for
+# every /api/agents/{id}/** and /api/nodes/{id}/** route. Its classifier
+# answers unregistered routes with the fail-closed AgentManage tier, but a
+# route that bypasses the classifier (e.g. a future non-/api mount of an
+# agent handler) would silently skip the gate. Invariant: every route
+# pattern registered on the Gateway router that addresses an agent or node
+# resource must live under /api/agents/ or /api/nodes/ (or be an
+# explicitly whitelisted machine endpoint).
+run_permission_route_redline() {
+    echo "Checking ADR-087 permission-route registration red line..."
+    local root="$SCRIPT_DIR/../core/acowork-gateway/src"
+    local offenders
+    # (1) Prefix check: every `.route("...")` literal that mentions
+    # agents/{id} or nodes/{id} but is NOT under the /api prefix the
+    # classifier walks — such a route would be invisible to ADR-087.
+    offenders=$(grep -rhoE '\.route\("[^"]+"' --include='*.rs' "$root"         | sed -E 's/\.route\("//'         | grep -E '^(/agents/|/nodes/|v1/agents|v1/nodes)'         || true)
+    if [ -n "$offenders" ]; then
+        echo "ERROR: route registered outside /api — invisible to the ADR-087"
+        echo "permission classifier (http/permission.rs extract_target):"
+        echo "$offenders"
+        echo "Register under /api/agents/ or /api/nodes/, or extend the"
+        echo "classifier deliberately in the same change."
+        exit 1
+    fi
+
+    # (2) Enumeration assertion (ADR-087 §9.2): every `{rest}` head
+    # segment registered under /api/agents/{id}/ must be a KNOWN segment.
+    # A new sub-route forces an explicit update of the list below — the
+    # update IS the review moment where the author must state the tier
+    # (classify() default-denies unknown segments to AgentManage, so this
+    # red line guards the *visibility* of new routes, not their safety).
+    local known_segments="avatar avatar-config avatar-file clone config cron debug files git health interactions latest-session lsp-endpoint manifest mcp-servers mcp-tools memory messages model owner permissions prompts publish rag search sessions shell-risk-rules skills start status stop tools upgrade visibility workspaces {*rest}"
+    local segments seg
+    segments=$(grep -rhoE '\.route\("/api/agents/\{id\}/[^"{]*' --include='*.rs' "$root"         | sed -E 's|.*\{id\}/||; s|/.*$||'         | grep -v '^$' | sort -u)
+    # Also the bare catch-all wildcard (proxy forwards `{*rest}`).
+    if grep -rq '\.route("/api/agents/{id}/{\*rest}"' --include='*.rs' "$root"; then
+        segments=$(printf '%s\n{*rest}\n' "$segments" | sort -u)
+    fi
+    for seg in $segments; do
+        case " $known_segments " in
+            *" $seg "*) ;;
+            *)
+                echo "ERROR: new /api/agents/{id}/$seg route is not in the"
+                echo "permission red-line enumeration. Add it to"
+                echo "known_segments in dev/ci.sh AND give it an explicit"
+                echo "tier in http/permission.rs classify() (or confirm it"
+                echo "belongs in the default-deny AgentManage bucket)."
+                exit 1
+                ;;
+        esac
+    done
+
+    # (3) Node side: /api/nodes/{id}/... head segments must be known too
+    # (owner / guests / visibility are the attribution trio; anything else
+    # is NodeManage by the route_requirement default).
+    local known_node_segments="owner guests visibility permissions"
+    local nsegs nseg
+    nsegs=$(grep -rhoE '\.route\("/api/nodes/\{id\}/[^"{]*' --include='*.rs' "$root"         | sed -E 's|.*\{id\}/||; s|/.*$||'         | grep -v '^$' | sort -u)
+    for nseg in $nsegs; do
+        case " $known_node_segments " in
+            *" $nseg "*) ;;
+            *)
+                echo "ERROR: new /api/nodes/{id}/$nseg route is not in the"
+                echo "permission red-line enumeration (known_node_segments)."
+                exit 1
+                ;;
+        esac
+    done
+
+    echo "Permission-route red line: OK"
+}
+
 run_clippy() {
     echo "Running cargo clippy..."
     cargo clippy --all-targets -- -D warnings
@@ -388,6 +460,7 @@ case "$MODE" in
         run_gateway_auth_scope_redline
         run_user_auth_mode_redline
         run_user_chat_path_redline
+        run_permission_route_redline
         run_check
         ;;
     clippy)

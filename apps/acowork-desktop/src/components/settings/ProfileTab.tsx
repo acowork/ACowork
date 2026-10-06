@@ -2,6 +2,9 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { KeyRound, LogOut } from "lucide-react";
+import { useAuthStore } from "../../stores/authStore";
+import { ChangePasswordModal } from "../account/ChangePasswordModal";
 import { useUserProfileStore } from "../../stores/userProfileStore";
 import { UserAvatar, BUILTIN_ICONS, BUILTIN_ICON_IDS } from "../common/UserAvatar";
 import { AuthedImage } from "../common/AuthedImage";
@@ -271,8 +274,14 @@ export function ProfileTab() {
   const [profileOpen, setProfileOpen] = useState(true);
   const [identityOpen, setIdentityOpen] = useState(true);
 
+  // Account actions (see the buttons next to the avatar below).
+  const loggedIn = useAuthStore((s) => s.status === "logged_in");
+  const [changePasswordOpen, setChangePasswordOpen] = useState(false);
+
   return (
     <div className="max-w-lg space-y-4">
+      <ChangePasswordModal open={changePasswordOpen} onClose={() => setChangePasswordOpen(false)} />
+
       {/* ── Avatar & Display Name ────────────────────────────────── */}
       <ListBox dividers={false}>
         <ExpandableRow
@@ -424,6 +433,32 @@ export function ProfileTab() {
               {profile.displayName}
             </p>
           </div>
+          {/* Account actions — the same two the avatar's right-click menu
+              offers (AccountMenu.tsx), duplicated here because the menu is
+              now right-click only and the profile page is the left-click
+              target. `ml-auto` parks them on the row's trailing edge, well
+              clear of the avatar + name. Hidden when there is no account to
+              act on (AUTH_MODE=local / not logged in). */}
+          {loggedIn && (
+            <div className="ml-auto flex flex-col gap-1.5">
+              <button
+                type="button"
+                onClick={() => setChangePasswordOpen(true)}
+                className="flex items-center justify-center gap-1.5 rounded btn-outline px-2.5 py-1 text-xs"
+              >
+                <KeyRound size={12} />
+                {t("account.changePassword")}
+              </button>
+              <button
+                type="button"
+                onClick={() => void useAuthStore.getState().logout()}
+                className="flex items-center justify-center gap-1.5 rounded btn-outline px-2.5 py-1 text-xs"
+              >
+                <LogOut size={12} />
+                {t("account.logout")}
+              </button>
+            </div>
+          )}
         </div>
 
         {/* Display name */}

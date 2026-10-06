@@ -41,7 +41,7 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden, readOnly }
   // registration recover transparently.
   const { gatewayUrl, gatewayMode } = useSettingsStore();
   const { addToast } = useToast();
-  const { workspaces, sessionWorkspaceMap, loading, fetchWorkspaces, setSessionWorkspace } =
+  const { workspaces, sessionWorkspaceMap, loading, deniedReason, fetchWorkspaces, setSessionWorkspace } =
     useWorkspaceStore();
   const activeSessionId = useChatStore((s) => {
     if (!selectedAgentId) return null;
@@ -250,6 +250,17 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden, readOnly }
 
               {loading ? (
                 <div className="py-4 text-center text-xs text-text-tertiary">{t("workspace.loading")}</div>
+              ) : deniedReason === "manage" ? (
+                // ADR-087: the empty list here is a 403, not "this agent
+                // has no workspaces". Without this the panel rendered
+                // "未配置工作区" — actively wrong, it told the caller to
+                // add one, which they are not allowed to do.
+                <div className="px-4 py-4 text-center">
+                  <div className="text-xs text-text-secondary">{t("workspace.deniedTitle")}</div>
+                  <div className="mt-1 text-10 leading-relaxed text-text-tertiary">
+                    {t("workspace.deniedHint")}
+                  </div>
+                </div>
               ) : filteredWorkspaces.length === 0 ? (
                 <div className="py-4 text-center text-xs text-text-tertiary">
                   {searchQuery ? t("workspace.noMatchingWorkspaces") : t("workspace.noWorkspacesConfigured")}
@@ -368,7 +379,10 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden, readOnly }
             {/* Add workspace button */}
             <button
               onClick={handleBrowse}
-              disabled={gatewayMode === "relay"}
+              // ADR-087: mutation is manage-tier; a caller who was just
+              // denied the list has no business offering the add path
+              // either. One gate, both buttons.
+              disabled={gatewayMode === "relay" || deniedReason === "manage"}
               className="mx-3 mt-2 mb-2.5 flex w-[calc(100%-1.5rem)] items-center justify-center gap-1.5 rounded-md bg-zinc-100 px-3 py-[var(--ui-btn-py)] text-xs font-medium text-text-secondary transition-colors hover:bg-zinc-200 hover:text-zinc-900 disabled:opacity-40 disabled:hover:bg-zinc-100 dark:bg-white/10  dark:hover:bg-white/15 dark:hover:text-zinc-100"
             >
               <FolderPlus className="h-3.5 w-3.5" />

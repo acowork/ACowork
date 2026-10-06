@@ -83,6 +83,19 @@ pub struct AppState {
     /// Design doc 24 §6.3: relay tunnel client — runtime enable/disable
     /// and status for the outbound WSS tunnel to an acowork-relay.
     pub relay_client: Option<std::sync::Arc<crate::relay::RelayClient>>,
+    /// ADR-087: node ownership table (`{data_dir}/node_owners.json`).
+    /// Shared with the MQTT dispatch (enroll writes rows).
+    pub node_owners: Option<crate::gateway::ownership::SharedOwnershipStore>,
+    /// ADR-087: agent instance ownership table (`{data_dir}/agent_owners.json`).
+    pub agent_owners: Option<crate::gateway::ownership::SharedOwnershipStore>,
+    /// ADR-087 D7 / review M4: installs dispatched but not yet confirmed
+    /// by the node's retained inventory. The owner row is committed when
+    /// the instance first appears, dropped when the Node reports failure.
+    pub pending_installs: Option<crate::gateway::ownership::SharedPendingInstalls>,
+    /// ADR-087 D2: enrollment token store — `POST /api/nodes/enrollment-tokens`
+    /// mints tokens bound to the caller. Shared with the MQTT dispatch
+    /// (enroll consumes them).
+    pub enrollment_tokens: Option<crate::mqtt::SharedEnrollmentTokenStore>,
 }
 
 impl AppState {
@@ -104,6 +117,10 @@ impl AppState {
             ip_allowlist: crate::security::IpAllowlist::default(),
             auth_mode: AuthMode::Local,
             relay_client: None,
+            node_owners: None,
+            agent_owners: None,
+            pending_installs: None,
+            enrollment_tokens: None,
         }
     }
 }
@@ -286,6 +303,16 @@ pub fn build_router(state: AppState) -> Router {
         // limits produce a clean error body instead of an opaque
         // extractor parse failure.
         .layer(DefaultBodyLimit::max(GLOBAL_BODY_LIMIT))
+        // ADR-087: authorization policy layer. axum runs layers
+        // bottom-to-top, so adding it *before* `auth_middleware` makes it
+        // the inner layer — it sees the `AuthContext` the auth gate
+        // injects, and every `/api/agents/{id}/**` route is checked
+        // against the ownership tables (default-deny for unregistered
+        // routes). No-op under `AUTH_MODE=local` (ADR-087 D8).
+        .layer(middleware::from_fn_with_state(
+            auth_layer_state.clone(),
+            crate::http::permission::permission_middleware,
+        ))
         // ADR-076 §决策 3: bearer-token gate. Placed inside CORS (so a
         // 401 still carries `Access-Control-Allow-Origin`) and outside
         // every route (so no handler can be added without passing it).
@@ -565,6 +592,22 @@ impl IntoResponse for ApiError {
         // HTTP response rather than axum panicking on a status-code
         // conversion.
         let status = StatusCode::from_u16(self.code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        // ADR-087 D5.3: every permission denial leaves the Gateway with the
+        // same machine-readable shape as `acl::render` /
+        // `permission::forbidden` — `code: "not_authorized"`, never the
+        // numeric status — so the Desktop maps one code, not one per
+        // emitter. The human-readable detail moves to `message`.
+        if status == StatusCode::FORBIDDEN {
+            return (
+                status,
+                Json(serde_json::json!({
+                    "error": "forbidden",
+                    "code": "not_authorized",
+                    "message": self.error,
+                })),
+            )
+                .into_response();
+        }
         (status, Json(self)).into_response()
     }
 }

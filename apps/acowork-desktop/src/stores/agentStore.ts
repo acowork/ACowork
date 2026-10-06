@@ -188,6 +188,20 @@ export interface AgentStorage {
   };
   /** Currently loading sessions for this agent */
   isLoading: boolean;
+  /**
+   * ADR-087: the Gateway refused every session call for this agent
+   * (403 `not_authorized` / 404 `not found` on a visibility-filtered
+   * read). `undefined` = not yet determined, `false` = accessible.
+   *
+   * Why this exists: `sessionTitle === undefined` is the sidebar's
+   * "still loading" signal, and every session call used to swallow its
+   * error. A user who could see an agent but not use it therefore sat
+   * on a permanent skeleton with no explanation. The backend now
+   * filters those agents out of the list entirely (fail-closed), but
+   * a revoked grant can still land between two list polls, and the
+   * agent must say WHY instead of spinning.
+   */
+  accessDenied: boolean | undefined;
 }
 
 const DEFAULT_PAGINATION = { currentPage: 1, totalPages: 1, totalCount: 0, pageSize: 20 };
@@ -200,7 +214,57 @@ function createStorage(meta: AgentInfo, profile: AgentProfileSettings): AgentSto
     sessionTitle: undefined,
     pagination: { ...DEFAULT_PAGINATION },
     isLoading: false,
+    accessDenied: undefined,
   };
+}
+
+/**
+ * ADR-087 D5: the permission middleware answers a visibility-filtered
+ * read with a bare `{"error":"not found"}` (404) so the resource's
+ * existence is not leaked — deliberately indistinguishable from "no
+ * such thing". The Runtime's genuine "SESSIONS_READY but you have no
+ * session" answer travels a different body, so a shape check on the
+ * error field is what separates the two cases at this call site.
+ */
+function isVisibilityFiltered(body: string): boolean {
+  if (!body) return false;
+  try {
+    const parsed = JSON.parse(body) as { error?: unknown };
+    return parsed?.error === "not found";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Resolve the storage-map key for an agent id.
+ *
+ * ADR-073: `agents` is keyed by INSTANCE identity (`instance_id`), while
+ * every session-control call site only has the PACKAGE id — the two
+ * differ as soon as a package has more than one instance, and a
+ * `patchAgent(state, agentId, …)` then silently no-ops (the row keeps
+ * spinning). Look the instance up by its meta so the patch lands.
+ */
+function storageKeyFor(state: AgentStoreState, agentId: string): string | null {
+  if (state.agents[agentId]) return agentId;
+  for (const [key, storage] of Object.entries(state.agents)) {
+    if (storage.meta?.agent_id === agentId) return key;
+  }
+  return null;
+}
+
+/**
+ * Flag an agent as inaccessible so the UI can explain instead of spin.
+ *
+ * Module-level (declared before the store) so it can be reached from the
+ * module-level `fetchLatestSession` body without a circular reference to
+ * the store object itself.
+ */
+function markAccessDenied(agentId: string) {
+  useAgentStore.setState((state) => {
+    const key = storageKeyFor(state, agentId);
+    return key ? patchAgent(state, key, { accessDenied: true }) : { agents: state.agents };
+  });
 }
 
 /** Helper: patch a specific agent's storage fields inside agents map */
@@ -986,11 +1050,26 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
         { tag: `AgentStore.fetchLatestSession(${agentId})`, logger: log },
       );
       if (!resp.ok) {
-        // ADR-085 D4: 404 now has a canonical meaning — the Runtime is
-        // SESSIONS_READY and there is no readable session. Everything
-        // else (503 session_not_ready / agent_not_running, network) is
-        // `unavailable`, never "zero sessions".
+        // ADR-087: 403 means the Gateway refused this account outright
+        // (not on the manage list / not `use`-able). Terminal — mark the
+        // agent so the UI can say why instead of spinning forever.
+        if (resp.status === 403) {
+          markAccessDenied(agentId);
+          return { status: "unavailable" };
+        }
+        // ADR-085 D4: a 404 here normally means the Runtime is
+        // SESSIONS_READY and there is no readable session. It is ALSO
+        // what the ADR-087 D5 visibility filter returns for an agent the
+        // caller may not see, and the two are indistinguishable by
+        // status — so the body decides. The permission 404 is the
+        // middleware's bare `{"error":"not found"}`; a genuine
+        // no-session answer comes from the Runtime proxy.
         if (resp.status === 404) {
+          const body = await resp.text().catch(() => "");
+          if (isVisibilityFiltered(body)) {
+            markAccessDenied(agentId);
+            return { status: "unavailable" };
+          }
           return { status: "no_session" };
         }
         console.warn(
@@ -1009,7 +1088,15 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       // (the AgentList treats `""` and `null` differently: `""` →
       // untitled, `null` → idle animation). Only running agents reach
       // this branch.
-      set((state) => patchAgent(state, agentId, { sessionTitle: title ?? "" }));
+      // A successful read proves the caller may reach this agent, so any
+      // `accessDenied` left from a revoked grant is stale — clear it or
+      // the row would keep showing "no access" next to a working title.
+      set((state) => {
+        const key = storageKeyFor(state, agentId);
+        return key
+          ? patchAgent(state, key, { sessionTitle: title ?? "", accessDenied: false })
+          : { agents: state.agents };
+      });
       return { status: "ok", session_id: data.session_id, title };
     } catch (e) {
       log.error(`[AgentStore] fetchLatestSession(${agentId}) failed:`, e);
@@ -1062,7 +1149,21 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       // rides on the `session_created` MQTT event (the Runtime publishes
       // it either way), so the frontend keeps listening for it.
       // Session meta (workspace_id) is applied when that event arrives.
+      //
+      // Reaching here proves the Gateway accepted us, so clear any
+      // accessDenied left over from a revoked grant (the list will
+      // re-filter the agent on its own if the grant is really gone).
+      set((state) => patchAgent(state, agentId, { accessDenied: false }));
     } catch (e) {
+      // ADR-087: a 403/404 here is terminal for this account. Swallowing
+      // it as a generic log left the sidebar on its "loading" skeleton
+      // forever, with no indication that the real problem is a
+      // permission the user does not have.
+      if (sessionControl.isAccessDenied(e)) {
+        markAccessDenied(agentId);
+        log.warn(`[AgentStore] createSession denied for ${agentId}:`, e);
+        return;
+      }
       log.error("[AgentStore] Failed to create session:", e);
     }
   },

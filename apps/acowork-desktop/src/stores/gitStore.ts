@@ -20,6 +20,7 @@ import { create } from "zustand";
 import { getGatewayUrl } from "../lib/config";
 import { with503Retry } from "../lib/httpRetry";
 import { log } from "../lib/logger";
+import { httpApiError } from "../lib/api-error";
 
 // ── DTOs (mirror of runtime usecases/git_query.rs) ─────────────────────────
 
@@ -137,6 +138,10 @@ interface GitStatusEntry {
   data: GitStatusResponse | null;
   loading: boolean;
   error: string | null;
+  /** HTTP status behind `error`, so the panel can tell a failure
+   *  (red) from a denial (neutral — "not allowed" is an access state,
+   *  not something the user can fix by retrying). */
+  errorStatus: number | null;
   fetchedAt: number;
 }
 
@@ -212,15 +217,10 @@ export const useGitStore = create<GitStore>((set, get) => {
       { tag: `gitStore.${path}`, logger: log },
     );
     if (!resp.ok) {
-      let detail = "";
-      try {
-        detail = JSON.stringify(await resp.json());
-      } catch {
-        /* non-JSON error body */
-      }
-      throw new Error(
-        `git ${path} ${resp.status} ${resp.statusText} ${detail}`.trim(),
-      );
+      // `HttpApiError.message` is already localized — a 403 reads as
+      // "ask the owner to grant you access", not a `git … 403 {}` dump
+      // (the panel renders `entry.error` verbatim).
+      throw await httpApiError(resp);
     }
     return (await resp.json()) as T;
   }
@@ -291,7 +291,7 @@ export const useGitStore = create<GitStore>((set, get) => {
         status: {
           ...s.status,
           [viewKey]: {
-            ...(s.status[viewKey] ?? { data: null, error: null, fetchedAt: 0 }),
+            ...(s.status[viewKey] ?? { data: null, error: null, errorStatus: null, fetchedAt: 0 }),
             loading: true,
           },
         },
@@ -312,6 +312,7 @@ export const useGitStore = create<GitStore>((set, get) => {
                 data,
                 loading: false,
                 error: null,
+                errorStatus: null,
                 fetchedAt: Date.now(),
               },
             },
@@ -322,9 +323,13 @@ export const useGitStore = create<GitStore>((set, get) => {
             status: {
               ...s.status,
               [viewKey]: {
-                ...(s.status[viewKey] ?? { data: null, fetchedAt: 0 }),
+                ...(s.status[viewKey] ?? { data: null, errorStatus: null, fetchedAt: 0 }),
                 loading: false,
                 error: e instanceof Error ? e.message : String(e),
+                errorStatus:
+                  typeof (e as { status?: unknown })?.status === "number"
+                    ? ((e as { status: number }).status as number)
+                    : null,
               },
             },
           }));
@@ -390,15 +395,7 @@ export const useGitStore = create<GitStore>((set, get) => {
         { tag: "gitStore.revertFile", logger: log },
       ).then(async (resp) => {
         if (!resp.ok) {
-          let detail = "";
-          try {
-            detail = JSON.stringify(await resp.json());
-          } catch {
-            /* non-JSON error body */
-          }
-          throw new Error(
-            `git revert ${resp.status} ${resp.statusText} ${detail}`.trim(),
-          );
+          throw await httpApiError(resp);
         }
         return (await resp.json()) as GitRevertResponse;
       });

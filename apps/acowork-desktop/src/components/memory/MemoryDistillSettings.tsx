@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { httpApiError } from "../../lib/api-error";
 import type { VaultKeyEntry, DistillerStatus } from "../../lib/types";
 import { fetchProviders } from "../../lib/gateway-api";
 import { getGatewayUrl } from "../../lib/config";
@@ -133,12 +134,18 @@ export function MemoryDistillSettings({
           },
         );
         if (!res.ok) {
+          const err = await httpApiError(res);
           addToast({
             type: "error",
-            message: t("memoryPanel.distillerSaveFailed", {
-              status: res.status,
-            }),
+            message:
+              err.status === 403
+                ? err.message
+                : t("memoryPanel.distillerSaveFailed", {
+                    status: res.status,
+                  }),
           });
+          // Roll the optimistic local update back to the server's truth.
+          void loadConfig();
           return false;
         }
         return true;
@@ -148,12 +155,13 @@ export function MemoryDistillSettings({
           type: "error",
           message: t("memoryPanel.distillerSaveFailed", { status: "network" }),
         });
+        void loadConfig();
         return false;
       } finally {
         setSavingField(null);
       }
     },
-    [agentId, addToast, t],
+    [agentId, addToast, t, loadConfig],
   );
 
   const handleToggle = (v: boolean) => {

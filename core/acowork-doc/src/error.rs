@@ -122,7 +122,7 @@ impl DocError {
             AlreadyReviewed(_) => "already_reviewed",
             RequestExpired(_) => "request_expired",
             TrashMissing(_) => "trash_missing",
-            Forbidden(_) => "forbidden",
+            Forbidden(_) => "not_authorized",
             Io(_) | CorruptIndex(_) | Serde(_) | Internal(_) => "internal_error",
         }
     }

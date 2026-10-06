@@ -7,6 +7,7 @@ import { StyledInput } from "../common/StyledInput";
 import { ListBox, ExpandableRow } from "../common/list";
 import { log } from "../../lib/logger";
 import { with503Retry } from "../../lib/httpRetry";
+import { httpApiError } from "../../lib/api-error";
 
 /**
  * "记忆遗忘" settings card — right below the 记忆沉淀 card (ADR-057 §5.3
@@ -111,12 +112,19 @@ export function MemoryForgettingSettings({
           },
         );
         if (!res.ok) {
+          const err = await httpApiError(res);
           addToast({
             type: "error",
-            message: t("memoryPanel.forgettingSaveFailed", {
-              status: res.status,
-            }),
+            message:
+              err.status === 403
+                ? err.message
+                : t("memoryPanel.forgettingSaveFailed", {
+                    status: res.status,
+                  }),
           });
+          // Roll the optimistic local value back to the server's truth —
+          // a refused write must not leave the switch flipped.
+          void loadConfig();
         }
       } catch (e) {
         log.warn("[MemoryForgettingSettings] save failed:", field, e);
@@ -124,11 +132,12 @@ export function MemoryForgettingSettings({
           type: "error",
           message: t("memoryPanel.forgettingSaveFailed", { status: "network" }),
         });
+        void loadConfig();
       } finally {
         setSavingField(null);
       }
     },
-    [agentId, addToast, t],
+    [agentId, addToast, t, loadConfig],
   );
 
   const handleToggle = (v: boolean) => {

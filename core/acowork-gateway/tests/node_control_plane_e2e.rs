@@ -370,7 +370,7 @@ async fn node_enrolls_and_reconnects_with_node_token_under_auth() {
     // ── Auth-enabled broker + fresh token stores ───────────────────────
     let gw_home = tempfile::tempdir().unwrap();
     let mut enrollment_store = EnrollmentTokenStore::load(gw_home.path());
-    let enrollment_token = enrollment_store.create_token(Duration::from_secs(3600));
+    let enrollment_token = enrollment_store.create_token(Duration::from_secs(3600), None);
     let enrollment_tokens: SharedEnrollmentTokenStore = Arc::new(Mutex::new(enrollment_store));
     let node_tokens: SharedNodeTokenStore = Arc::new(Mutex::new(NodeTokenStore::load(gw_home.path())));
 
@@ -895,7 +895,7 @@ async fn node_control_rejects_invalid_instance_id_before_spawn() {
 async fn auth_broker_rejects_uncredentialed_node_connects() {
     let gw_home = tempfile::tempdir().unwrap();
     let mut enrollment_store = EnrollmentTokenStore::load(gw_home.path());
-    let enrollment_token = enrollment_store.create_token(Duration::from_secs(3600));
+    let enrollment_token = enrollment_store.create_token(Duration::from_secs(3600), None);
     let enrollment_tokens: SharedEnrollmentTokenStore = Arc::new(Mutex::new(enrollment_store));
     let node_tokens: SharedNodeTokenStore = Arc::new(Mutex::new(NodeTokenStore::load(gw_home.path())));
 

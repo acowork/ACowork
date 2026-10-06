@@ -1,7 +1,7 @@
 # ADR-087: Node 与 Agent 的 Owner 权限模型 — 堵住"整台机器对全体用户默认可写"的洞
 
 **状态**：草案（v2 修订稿；Q1/Q2/Q4 与"单 owner + 多 guest"模型已决策，剩余见 §12）
-**日期**：2026-10-28（v2 修订：新增 D9 归属基数与 guest 模型——评审两问定调：不设"只读"档、不许多 owner，协作由 manage 授权名单承接；Q1/Q2/Q4 落决策）
+**日期**：2026-10-28（v2 修订：新增 D9 归属基数与 guest 模型——评审两问定调：不许多 owner，guest 是 use 档使用授权（非 manage）；Q1/Q2/Q4 落决策。v3 修订：权限轴从两档改为**三档 manage/use/view**——manage 收窄为"高权限/破坏性/agent 定义修改"，use 覆盖其余全部写，view 放开**元数据/定义类只读**；工作区文件内容、git 历史、memory、全局 search 等"内容读"仍归 use 不归 view（防 §7 方案 G 窃取）；start 归 use、stop 归 manage；permissions 名单公开归 view）
 **决策者**：（待定）
 
 **前置**：
@@ -19,7 +19,7 @@
 
 ### 1.1 一句话
 
-**给 Node 和 Agent instance 各增加一个 Gateway 侧持久化的 `owner_user_id`（单 owner）+ `guests` 协作名单，把所有"会改动 Node 所在机器"的操作（安装/卸载/启停 agent、增删工作区、工作区文件读写、LSP/sidecar 配置、fs browse、enroll 归属）收敛为 **manage 档 = owner ∨ guest ∨ admin** 门控（读与写同级，不设"只读"档）；"使用"一个 agent（建 session 聊天）则按 agent 级 `visibility`（private/shared）分流，session 维度沿用 ADR-076 不变。鉴权在 Gateway 反代入口单点执行（那里已有 `AuthContext` 与 `instance_id→owner` 映射），fail-closed：无主资源只有 admin 可管理。**
+**给 Node 和 Agent instance 各增加一个 Gateway 侧持久化的 `owner_user_id`（单 owner）+ `guests` 使用授权名单，三档门控：**manage = owner ∨ admin**（窄，仅高权限/破坏性——安装/卸载/克隆/停止/升级/调试、权限设置、agent 定义类配置写、memory 破坏写、删 session）；**use = owner ∨ guest ∨ admin**（宽，除 manage 外一切写操作——启动、聊天、session 增改、文件/git 操作、memory 检索/全局 search）；**view = use ∨ published（shared/public）**（只读信息尽量提供，session 内容再叠加 private/public 第二道墙）。agent 级 `visibility`（private/shared）只决定**可见性**（shared 让全体登录用户"看得到 + 只读"，但不放开"用"），session 维度沿用 ADR-076 不变。鉴权在 Gateway 反代入口单点执行（那里已有 `AuthContext` 与 `instance_id→owner` 映射），fail-closed：未登记路由默认落 manage，无主资源只有 admin 可管理。**
 
 ### 1.2 关键决策表（详细理由见 §5）
 
@@ -28,12 +28,12 @@
 | D1 | owner 存哪 | **Gateway 侧新增两个持久化归属表**（`node_owners.json`、`agent_owners.json`，与 `node_tokens.json` 同目录同范式）。**不进 MQTT proto**：Node 上报的 inventory 仍是"存在性权威"（ADR-055 §6.5），归属是 Gateway 的策略数据，Node 不感知用户 |
 | D2 | node owner 从哪来 | **enrollment token 绑定创建者**：multi_user 模式下新增 `POST /api/nodes/enrollment-tokens`（需登录），token 记录带 `owner_user_id`，enroll 成功即写 `node_owners.json`。CLI 签发的 token 无主 → 该 node 无主（admin-only）。`gateway_managed` 本机节点默认无主 |
 | D3 | agent owner 从哪来 | **谁装谁所有**：`POST /api/agents/install` / `ensure` / `clone` 成功派发时，以 `instance_id` 为键写入 `agent_owners.json`，owner = 调用者 `AuthContext.user_id`。admin 天然可装任意 node（Q2 已决策，见 §12），装出的 agent owner = admin；guest 在共享 node 上装的 agent owner = guest 本人（D9 规则 3） |
-| D4 | 两级门控 | **Node 门控**（对机器的所有权）：install/uninstall 到该 node、fs browse、rename/drain/remove、LSP sidecar 配置 → node 的 owner ∨ guest ∨ admin。**Agent 门控**（对实例的所有权）：start/stop/upgrade/config/prompts/skills/**workspace 增删改**/**文件读写（读与写同级）**/debug → agent 的 owner ∨ guest ∨ admin。装 agent 需**同时**满足"可管理目标 node" |
+| D4 | 三档门控 | **manage = owner ∨ admin**（窄）：Node 门控——install/uninstall 到该 node、fs browse、rename、enroll 归属；Agent 门控——stop/upgrade/clone/debug、agent 定义类配置写（config/prompts/skills/model/workspace 增删改/avatar/manifest）、memory 破坏写、删 session、权限设置。**use = owner ∨ guest ∨ admin**（宽）：除 manage 外一切写——start、聊天、session 增改、文件/git 读写、memory 检索、全局 search、interactions；**内容类读**（工作区文件/git 历史/memory/search）也归 use。**view = use ∨ published**：agent 定义/元数据只读（列表/详情/config 定义读/status/头像/permissions 名单）。详见 D4 门控表 |
 | D5 | 执行点 | **Gateway 反代入口**（`http/proxy.rs` 路由策略表 + `agents.rs`/`nodes_api.rs`/`fs_browse.rs` handler 头部）。Runtime 不引入 owner 概念（它拿不到也不该拿归属真相）；`x-user-id` scope 机制原样保留，只用于 session 过滤 |
-| D6 | agent 使用（chat）与 visibility | agent 新增 `visibility`：`private`（仅 manage 名单可建/用 session）与 `shared`（所有登录用户可在其上开**自己的** session，session 之间仍按 ADR-076 隔离）。**shared 只放开"用"，永远不放开"管"**（workspace/文件/配置仍是 manage 名单）。默认值：用户手动 install/ensure/clone 出的实例落 `private`；**onboarding 预装的 default agent 落 `shared`**（Q1 已决策，见 §12） |
+| D6 | agent 可见性与使用 | agent 新增 `visibility`：`private`（仅 use 名单 = owner ∨ guest ∨ admin 可见、可用）与 `shared`（**所有登录用户可见**，但**仍只有 use 名单能用**——开 session 聊天需 owner 授权为 guest，session 之间按 ADR-076 隔离）。**visibility 只决定"看得到"，不决定"能不能用"**；"用"永远走 use 名单。默认值：用户手动 install/ensure/clone 出的实例落 `private`；**onboarding 预装的 default agent 落 `shared`**（Q1 已决策，见 §12）——注意这只让它对全员**可见**，能否聊天仍取决于是否被加进 guest 名单 |
 | D7 | 无主与迁移 | multi_user 模式下**fail-closed**：`owner=None` 的资源只有 admin 可 manage；admin 可通过 `PATCH .../owner` claim/转移。Local 模式整体 no-op（与 ADR-076 §决策 12 同一开关 `AuthMode`） |
 | D8 | 服务端单一真相 | `GET /api/agents` / `GET /api/nodes` 每条记录服务端算好 `can_manage` / `can_use` 布尔下发，Desktop/Mobile **只消费布尔渲染，不再自行推导**（延续 ADR-086 不变量 1 的纪律） |
-| D9 | 归属基数与协作 | **单 owner + 多 guest**。owner 唯一（责任唯一、转移两元）；guest 是"manage 授权名单"而非归属——不改变所有权、不可加/删 guest、不可转移、不可改 visibility；撤销即失权且不回收 guest 以个人身份装的 agent 的归属。admin 与 owner 共同维护名单（详见 §5 D9） |
+| D9 | 归属基数与协作 | **单 owner + 多 guest**。owner 唯一（责任唯一、转移两元）；guest 是"**use 授权名单**"（被授权使用/聊天，不可配置）而非归属——不改变所有权、不可加/删 guest、不可转移、不可改 visibility、**不可 manage**（配置/workspace/文件/生命周期仍仅 owner ∨ admin）；撤销即失权且不回收 guest 以个人身份装的 agent 的归属。admin 与 owner 共同维护名单（详见 §5 D9） |
 
 ---
 
@@ -72,12 +72,12 @@ session 的 `is_writable_by` 只保护**对话数据**。workspace 配置与文�
 **目标**
 1. multi_user 模式下，Node 所在机器的文件与进程资源，默认只对 Node owner（与 admin）开放。
 2. Agent instance 的配置面（config/prompts/skills/workspace/文件/生命周期）默认只对 agent owner（与 admin）开放。
-3. 保留合法的共享诉求：agent 可显式声明 `shared`，让其他用户"用"它而不"拥有"它。
+3. 保留合法的共享诉求：agent 可显式声明 `shared` 让其他用户"看得到"它；"用"它（聊天）则由 owner 通过 guest 名单逐个授权，两者都不改变"拥有"。
 4. Local 模式（单人自用）零行为变化；升级 multi_user 后迁移路径明确、fail-closed。
 5. 权限判定单一执行点、单一真相（服务端下发布尔，客户端不推导）。
 
 **非目标**
-1. **不做细粒度 RBAC**（per-workspace ACL、per-tool 授权、团队角色矩阵）。两档（manage/use）+ 两角色（owner/admin）覆盖当前全部已知场景；出现第三个稳定需求再扩展（Rule of three）。
+1. **不做细粒度 RBAC**（per-workspace ACL、per-tool 授权、团队角色矩阵）。三档（manage/use/view）+ 两角色（owner/admin）覆盖当前全部已知场景；出现第三个稳定需求再扩展（Rule of three）。
 2. **不改 MQTT 数据面 ACL**。broker `can_subscribe` 仍是 Phase-1 permissive（[acl.rs:178](../../../core/acowork-gateway/src/mqtt/acl.rs#L178)），跨账号 retained 事件扇出问题（已知，e2e flake 根因）由后续 ACL ADR 处理。本 ADR 只收紧 **HTTP 控制面**。
 3. **不防 Node 本身作恶**。Node 是用户自己的机器、跑用户自己的进程，OS 层面它本来就看得见自己盘上的东西；本 ADR 防的是**其他登录用户**经由 Gateway 操作这台机器。
 4. **不引入审批工作流**（申请-批准-授权时限等）。转移/共享都是 owner 主动 PATCH 一步完成。
@@ -88,10 +88,10 @@ session 的 `is_writable_by` 只保护**对话数据**。workspace 配置与文�
 
 | 术语 | 定义 |
 |---|---|
-| **manage** | 会改变资源本身或其对机器影响的操作：生命周期、配置、workspace 增删改、文件读写、安装/卸载、fs browse、enroll 归属、debug/dev-mode |
-| **use** | 不改资源的操作：在 agent 上创建/打开**自己的** session、发消息（受 ADR-076 session 隔离约束） |
+| **manage** | 会改变 agent 定义、机器状态或具破坏性的高权限操作：生命周期（安装/卸载/克隆/停止/升级/debug/dev-mode）、agent 定义类配置写（config/prompts/skills/model/workspace 增删改/avatar/manifest）、memory 破坏写、删 session、fs browse、enroll 归属、权限设置 |
+| **use** | 驱动 agent 干活的其余操作（除 manage 外一切写）：创建/打开**自己的** session 并聊天、start、工作区文件与 git 读写（含 revert）、memory 检索、全局 search、interactions。**内容类读**（工作区文件内容、git 历史、memory、search）也归 use 不归 view——它们读 owner 真实数据、无二级墙兜底（见 §7 方案 G） |
 | **owner** | 资源归属的**唯一**用户（`user_id`，UUID，来自 `acowork-user` 账号体系）。责任锚点：增删 guest、改 visibility 属于 owner ∨ admin；owner 字段本身的转移仅 admin（D7） |
-| **guest** | 被 owner 或 admin 授予该资源 **manage** 档的用户（名单在归属表）。guest 是授权不是归属：无归属操作力，撤销即失权，不级联（见 D9） |
+| **guest** | 被 owner 或 admin 授予该资源 **use** 档的用户（名单在归属表，即"使用/聊天授权名单"）。guest 是授权不是归属：可开自己的 session 聊天、start、读写工作区文件、检索 memory/search，但**不可 manage**（agent 定义类配置写 / workspace 增删改 / 生命周期 / 删 session / 权限设置仅 owner ∨ admin）、无归属操作力，撤销即失权，不级联（见 D9） |
 | **admin** | `Role::Admin`，可 manage 一切资源、可 claim/转移无主资源、可维护任意资源 guest 名单；沿用 ADR-076 "能看不能冒充"纪律（写操作以 admin 自己身份执行，归属不因此改变） |
 | **无主（ownerless）** | `owner=None`。multi_user 下 = admin-only（fail-closed） |
 
@@ -100,12 +100,16 @@ session 的 `is_writable_by` 只保护**对话数据**。workspace 配置与文�
 ```text
 can_manage(user, resource) := user.is_admin
                             ∨ (resource.owner = Some(user.id))
-                            ∨ resource.guests.contains(user.id)
+                            // guest 不在 manage 档：guest 是"使用授权"，不是"共同维护"（D9）
 can_transfer(user, resource) := user.is_admin ∨ (resource.owner = Some(user.id))
                             // 归属操作（增删 guest / 改 visibility）不含 guest；
                             // 其中 owner 字段本身的变更仅 admin（D7"能看不能冒充"延伸）
-can_use(user, agent)       := can_manage(user, agent)
-                            ∨ (agent.visibility = Shared ∧ user 已登录)
+can_use(user, resource)    := can_manage(user, resource)
+                            ∨ resource.guests.contains(user.id)
+                            // use 档 = 授权名单（guest）∨ owner ∨ admin；visibility 不放开 use
+can_view(user, resource)   := can_use(user, resource)
+                            ∨ resource.visibility.is_published()
+                            // view 档 = use 名单 ∨ 发布态（shared agent / public node）
 ```
 
 ---
@@ -144,34 +148,42 @@ agent_owners.json   # instance_id (UUID v4, ADR-073) → { owner_user_id: Option
 
 `install_agent`（[agents.rs:1032](../../../core/acowork-gateway/src/http/agents.rs#L1032)）已经由 Gateway 生成 `instance_id`（install 时刻、调用者已鉴权），是写归属的天然锚点：
 
-- `POST /api/agents/install`、`POST /api/agents/ensure`（声明式，首次创建实例时）、`POST /api/agents/{id}/clone`：派发成功后写 `agent_owners.json[instance_id] = { owner: AuthContext.user_id, visibility: Private }`。
+- `POST /api/agents/install`、`POST /api/agents/ensure`（声明式，首次创建实例时）、`POST /api/agents/{id}/clone`：派发成功后**暂存**待提交 owner（内存 pending 表，键为 Gateway 铸造的 `instance_id`）；Node 回报 `ok` 或 retained inventory 首次出现该实例时提交写入 `agent_owners.json[instance_id] = { owner: AuthContext.user_id, visibility: Private }`，回报 `error` 时丢弃——安装失败不留孤儿行（评审 M4）。clone 是同步确认路径，直接写入。
 - `ensure` 命中已存在实例时**不改** owner（幂等语义只约束存在性，不约束归属）。
 - Local 模式无 `AuthContext` → 写入 `owner=None`，反正 Local 不校验（D8）。
-- **visibility 初始值**：install/ensure/clone 写表时默认 `Private`；唯一例外是 Desktop onboarding 预装的 default agent（ADR-077 bundled 包）落 `Shared`——团队部署开箱即用地假设"人人能聊天"，风险文案由 UI 承担（见 D4"shared 的边界"）。default agent 的 owner 仍 = 执行 onboarding 的首个用户，之后 owner 可改回 private。
+- **visibility 初始值**：install/ensure/clone 写表时默认 `Private`；唯一例外是 Desktop onboarding 预装的 default agent（ADR-077 bundled 包）落 `Shared`——团队部署开箱即用地让 default agent 对全员**可见**（注意：`shared` 只放开可见，能否聊天仍需 owner 逐个加进 guest 名单，见 D6）。default agent 的 owner 仍 = 执行 onboarding 的首个用户，之后 owner 可改回 private。
 
 ### D4：两级门控 + 权限矩阵
 
-**Node 门控**（对机器的所有权，node owner ∨ guest ∨ admin）与 **Agent 门控**（对实例的所有权，agent owner ∨ guest ∨ admin）分层。下表"manage 名单"= owner ∨ guests ∨ admin；"归属名单"= owner ∨ admin（guest 不在内，见 D9）：
+**Node 门控**（对机器的所有权，node owner ∨ admin）与 **Agent 门控**（对实例的所有权）分层。三档定义：**manage = owner ∨ admin**（guest 不在内）；**use = owner ∨ guests ∨ admin**（guest 名单即使用授权）；**view = use ∨ published（shared/public）**。门控档按"最小必要"分配：**只有会改动 agent 定义、机器状态，或具破坏性的操作才进 manage；驱动 agent 干活的写进 use；只读信息尽量进 view**。下表：
 
 | 操作（Gateway HTTP 路由） | 门控档 | 需要的权限 |
 |---|---|---|
 | `POST /api/nodes/enrollment-tokens` | 开放 | 登录即可（自己 enroll 自己的机器） |
-| `GET /api/nodes` | 开放（字段裁剪） | 登录可见 id/name/online/`can_manage`；hostname/OS/arch/endpoint 仅 manage 名单可见 |
-| `PATCH /api/nodes/{id}`（rename） | Node-manage | manage 名单 |
-| `PATCH /api/nodes/{id}/visibility`、`PATCH /api/nodes/{id}/guests`、`PATCH /api/nodes/{id}/owner` | Node-归属 | 归属名单（guest 无） |
-| `POST /api/agents/install`、`ensure`、`clone`（选目标 node） | Node-manage | 目标 node 的 manage 名单（装到别人机器上必须先有机器权限；guest 装的 agent 归 guest 自己，见 D9 规则 3） |
+| `GET /api/nodes` | visibility 过滤 | `private`：use 名单可见；`public`：所有登录用户可见 id/name/online/`can_manage`，敏感字段仅 manage 名单（D6 B 方案） |
+| `PATCH /api/nodes/{id}`（rename）、`PATCH .../{id}/visibility`、`/guests`、`/owner` | Node-manage / Node-归属 | manage 名单（owner ∨ admin）；owner 转移为 admin-only，guest 无归属权（D9 R1） |
+| `GET /api/nodes/{id}/permissions` | Node-view | **归属名单公开**：能看到这个 node 的人即可读名单（知道找谁申请权限，不算隐私） |
+| `POST /api/agents/install`、`ensure`、`clone`（选目标 node） | Node-manage | 目标 node 的 manage 名单（装到别人机器先要有机器权限；guest 仅 use，**不能**安装） |
 | `DELETE /api/agents/{id}`（uninstall） | Node-manage ∧ Agent-manage | 两个名单都过（卸载同时动机器与实例） |
-| `POST /api/agents/{id}/start` / `stop` / `restart` / `upgrade` | Agent-manage | agent manage 名单 |
-| `PUT /api/agents/{id}/config` / `builtin-tools` / `model` / prompts / skills 写 / avatar、manifest 上传 | Agent-manage | agent manage 名单 |
-| `POST/PUT/DELETE /api/agents/{id}/workspaces*`（含 file/dir/copy/rename/prompt-file/fs-watch） | Agent-manage | agent manage 名单 |
-| `GET /api/agents/{id}/workspaces*`、`/tree`、`/file`、`/raw`、`/find`、`/search`、git 读 | Agent-manage | agent manage 名单——**读也算 manage**：工作区内容就是机器上的文件，读权限与写权限同级，不设"只读"档（否则写门控形同虚设，见 §7 否决方案 H） |
-| `POST /api/agents/{id}/git/revert`、`debug/enable` | Agent-manage | agent manage 名单 |
-| `GET /api/fs/browse?target={node_id}` | Node-manage | node manage 名单（Local 段即 Gateway 机器 → 无主 → admin-only） |
-| `PATCH /api/agents/{id}/visibility`、`PATCH /api/agents/{id}/guests`、`PATCH /api/agents/{id}/owner` | Agent-归属 | agent 归属名单（guest 无） |
-| `GET /api/agents`、`GET /api/agents/{id}`（列表/详情/头像） | visibility 过滤 | private：manage 名单（owner ∨ guests ∨ admin）；shared：所有登录用户 |
-| session 控制面（create/open/close/delete/messages） | Agent-use ∧ ADR-076 | `can_use(agent)`，其余按现有 `user_id`/`visibility` 隔离，**不改** |
+| `POST /api/agents/{id}/stop` / `restart` / `upgrade`、`debug/*` | Agent-manage | agent manage 名单（改动/替换运行态、调试=高权限） |
+| `POST /api/agents/{id}/start` | Agent-use | use 名单——唤醒一个已停 agent 是"使用"而非"管理"，非破坏性 |
+| agent **定义类配置写**：`PUT config`/`prompts`/`skills`/`model`/`providers`/`mcp-*`/`builtin-tools`/`tools`/`shell-risk-rules`/`avatar-config`、`workspaces*` 增删改、manifest 上传 | Agent-manage | agent manage 名单（重写 agent 是什么，属高权限配置修改） |
+| agent **定义/元数据读**：`GET config`/`prompts`/`skills`/`model`/`providers`/`mcp-*`/`tools`/`avatar`/`avatar-file`/`manifest`/`cron`/`status`/`health` 等只读 | Agent-view | view 名单（use ∨ shared）——描述"agent 是什么"的元数据尽量提供 |
+| **内容类读写**：`GET/POST/PUT/DELETE /api/agents/{id}/files*`、`git*`（含 diff/log 读、revert 写）、`workspaces` 树/文件读 | Agent-use | use 名单——读的是 owner 机器上的真实工作文件（§7 方案 G：内容读归 view = 整盘可被窃取），故读写都留 use；纯 viewer 不可读 |
+| `GET /api/fs/browse?target={node_id}` | Node-manage | node manage 名单（读的是整台机器文件系统，非某 agent 工作区，敏感） |
+| `PATCH /api/agents/{id}/visibility`、`/guests`、`/owner` | Agent-归属 | agent 归属名单（owner ∨ admin；guest 无归属权，D9 R1） |
+| `GET /api/agents/{id}/permissions` | Agent-view | **归属名单公开**（同 node，知道找谁申请） |
+| `GET /api/agents`、`GET /api/agents/{id}`（列表/详情/头像/status/health） | visibility 过滤 | private：use 名单可见；shared：所有登录用户可见（仅可见）；**无归属记录 = admin-only**（D7 fail-closed） |
+| session **读**（`GET sessions`/`sessions/{sid}`/`messages`/`latest-session`/`stream`） | Agent-view ∧ ADR-076 | view 名单先过；**内容再由 session 自身 private/public 第二道墙**（Runtime `is_readable_by`）过滤，private session 对 view 不可见 |
+| session **写**（create/open/close/messages/answer/approval/config/workspace-switch/stop/continue/compress） | Agent-use | use 名单——开自己的 session 聊天即 use；跨 session 安全由 Runtime `is_writable_by` 兜底 |
+| `DELETE /api/agents/{id}/sessions/{sid}` | Agent-manage | manage 名单（销毁 session 及其文件，破坏性） |
+| `GET /api/agents/{id}/memory/*`（nodes/graph/stats）、`GET search`、`POST rag/query` | Agent-use | use 名单——检索跑的是覆盖全语料的查询，会浮出跨对话记忆，且无 session 那种 private/public 二级墙，故**归 use 不归 view** |
+| memory **破坏性写**（`POST memory/distill`、`rebuild-embeddings`、`PUT/DELETE memory/nodes*`） | Agent-manage | manage 名单（重写 agent 的知识底座） |
+| `POST /api/agents/{id}/interactions` | Agent-use | use 名单——活动戳记，发消息流程内触发，guest 聊天须能写 |
 
-**shared 的边界要说透**：把 agent 标为 `shared` = 允许别人**驱动这个 agent 用它已挂载的工作区干活**（agent 会以工作区权限读写文件，内容可能进入对话）。这是"共享一台助手"的语义，不是"共享文件系统浏览权"——不在 manage 名单的用户依然看不到 workspace 列表/文件树，只能聊天。文档与 UI 必须把这句风险说明写清楚。
+**三档边界的两条原则要说透**：
+1. **`shared` 只放开 view（可见 + 只读），绝不放开 use**。要开 session 用它聊天，必须被 owner 加进 guest 名单（use 档）。被授权为 guest 的人驱动 agent 用它挂载的工作区干活时，agent 以工作区权限读写文件、内容可能进入对话——这是真正的风险面，也是 use 档的授权含义。不在 use 名单的用户能看列表/详情/配置只读，但**不能聊天、不能改 agent 定义、不能检索记忆**。文档与 UI 必须把"shared=仅可见+只读、聊天与改配置需逐个授权"说清楚。
+2. **读默认 view，但"检索类读"例外归 use**：memory 读、全局 search、rag/query 是对整个语料跑查询、会浮出跨对话内容，且没有 session 的 private/public 二级墙兜底，所以它们虽为 GET 仍归 use；而 config/prompts/skills/model/files/git 的读是静态元数据/内容，归 view。
 
 ### D5：执行点 = Gateway 反代入口，Runtime 不感知 owner
 
@@ -186,8 +198,29 @@ agent_owners.json   # instance_id (UUID v4, ADR-073) → { owner_user_id: Option
 ### D6：agent / node 的 visibility 字段
 
 - `agent_owners.json.visibility: Private(默认) | Shared`，`PATCH /api/agents/{id}/visibility`（归属名单：owner ∨ admin，guest 不可改，见 D9 R1）切换；`GET /api/agents` 条目带 `visibility` + 服务端算好的 `can_manage`/`can_use`。默认值规则见 D3（onboarding default agent 例外落 Shared，Q1 已决策）。
-- `node_owners.json.visibility: Private(默认) | Public`：`Public` 仅指**元数据**（name/online）对全体可见，便于团队知道"这台 GPU 机存在"；**不放开任何 manage 权限，也不放开 install**（install 永远需要 node manage 名单）。让别人能在机器上装/维护 agent 的正确姿势是**加 node guest**（D9），或 owner 在上面装 shared agent 供人聊天。
+- `node_owners.json.visibility: Private(默认) | Public`：`Public` 仅指**元数据**（name/online）对全体可见，便于团队知道"这台 GPU 机存在"；**不放开任何 manage 权限，也不放开 install**（install 永远需要 node manage 名单 = owner ∨ admin）。让别人能在这台机器上装/维护 agent 的唯一姿势是**其人为 node owner 或 admin**（node guest 是 use 档，不含机器管理权）；让别人能**用**某个 agent 聊天的姿势是**把其加进该 agent 的 guest（use）名单**。
 - 无 `visibility` 历史条目读作 `Private`（fail-closed 默认）。
+
+**列表过滤（B 方案，2026-10 修订）**：`private` 的 node 对 manage 名单之外的调用者**整条不出现在 `GET /api/nodes`**，而不仅是字段裁剪。理由：对无权者保留这一行没有任何可执行动作（install / fs browse / rename / LSP 配置全部 Node-manage 门控），却泄露了"存在这台机器、在线与否、装了几个 agent"这样的拓扑信息。owner / guest / admin 保留该行——侧边栏是对 node 唯一可操作的地方，隐藏它等于把 guest 授权架空。
+
+**统一判定入口 `ownership::can_view`**：agent 列表、agent 详情、node 列表三处可见性过滤**必须**共用同一函数，不得各自推导：
+
+```text
+can_view = is_admin ∨ can_use ∨ visibility.is_published()
+```
+
+- `is_admin` 先行：否则无主资源（`owner=None`）对 admin 也不可见，admin 将无法发现并认领它（D7 的 claim 流程会死锁）。
+- `can_use` 含 guest：guest 必须看得到自己被授权使用（聊天）的资源。
+- 无记录 / `owner=None` 一律对非 admin **不可见**（D7 fail-closed 的一致延伸：既然无主资源是 admin-only，它就不该出现在任何普通账号的列表里）。
+
+**已修复的两个反向 fail-open**（二者叠加即"agent 看得见但点不开、永远 loading"）：
+
+| 位置 | 原实现 | 问题 |
+|---|---|---|
+| `list_agents` | `rec.is_some_and(\|r\| r.visibility == Private) && !can_use` | 仅过滤**已存在**的行 → 无记录 agent 全量泄露给所有账号 |
+| `get_agent_detail` | `rec.is_none_or(\|r\| …)` | 无记录 = **可见**（与列表语义相反）→ 列表放行、详情 404 |
+
+同一语义在两处用相反的默认值实现，是这类漂移的典型形态；`can_view` 的存在意义就是让它不再可能发生。
 
 ### D7：无主资源、转移与清理（fail-closed）
 
@@ -204,30 +237,31 @@ agent_owners.json   # instance_id (UUID v4, ADR-073) → { owner_user_id: Option
 
 **Local 模式 no-op**：与 ADR-076 §决策 12 完全同构：`AuthMode::Local` 时 `auth_middleware` 不产生 `AuthContext`，授权层直接放行（策略表存在但不评估），owner 表照常写（Local 也记 owner，为将来切 multi_user 留数据）。**不新增任何配置项**——一个 `AUTH_MODE` 旋钮已经是既有决策，加 `owner_enforcement=off` 这类旋钮等于给安全修复开后门。
 
-### D9：归属基数 = 单 owner + 多 guest（协作靠授权，不靠归属）
+### D9：归属基数 = 单 owner + 多 guest（guest 是使用授权，不是共同维护）
 
 **问题**：① owner 是否要再分权限档（读写 vs 只读）？非 owner 是否根本不可见？② 是否允许多 owner（admin 帮 node 加 owner）？
 
-**决策 9a：权限轴维持两档（manage/use），不设"只读"档。**
-"只读"在本领域不是安全档位：工作区文件"只读"= node 机器全部数据可被 `GET /workspaces/file` 拖走，读与写必须同级（D4 表）。因此不存在"owner 读写 / 非 owner 只读"的第三态。非 owner 的合法形态只有两种：
-- **guest**（manage 授权，读写配置全开，但无归属操作力）；
-- **use**（shared agent 上开自己的 session 聊天，看不到工作区列表/文件树）。
-外加两个既有例外：资源元数据可见性（D6 的 public node / shared agent）与 admin 的 `as_user` 只读视图（ADR-076 §决策 4，原样保留）。
+**决策 9a：权限轴三档（manage/use/view）；guest 落在 use 档，view 由 shared/public 放开。**
+本模型**有**只读档（view），但"只读"只覆盖**描述 agent 本身的元数据/定义**（详情、status、config/prompts/skills/model 读、头像、permissions 名单）；**读取 owner 真实数据的接口**（工作区文件内容、git 历史、memory、全局 search）不落在 view，而落在 **use**——因为它们会浮出 owner 机器上的实际内容且没有 session 那种 private/public 二级墙兜底（详见 D4 门控表"检索类读归 use"原则与 §7 方案 G 的更新说明）。非 owner 的合法形态有两种：
+- **guest**（use 授权）：开**自己的** session 聊天、启停中的"启"、读写工作区文件、检索 memory/search——但**不能改 agent 定义类配置、不能装卸/停止/克隆、不能改权限、不能删 session**（这些是 manage，永远只有 owner ∨ admin）；
+- **viewer**（shared/public 仅 view 档）：看得到列表/详情/配置只读元数据，**不能聊天、不能碰任何写、不能读工作区文件内容/memory**；
+- **viewer**（visibility 发布态）：`shared` agent / `public` node 对全体登录用户**仅可见**（列表/详情/元数据），**不含 use，也不含 manage**。
+外加一个既有例外：admin 的 `as_user` 只读视图（ADR-076 §决策 4，原样保留）。
 
-**决策 9b：owner 唯一；协作诉求全部由 guest 名单承接。**
-多 owner（对等共主）被否决：谁能转移、谁能撤销对方、冲突谁裁决——所有权语义塌方，且"这台机器谁负责"从锚点退化为集合，正是本 ADR 要消灭的状态。单 owner + guest 名单下：**guest 是授权（可增删、可收回、无残留），owner 是归属（唯一、转移走审计）**。admin 帮别人"加 owner"的真实需求，落进模型都是"加 guest"。
+**决策 9b：owner 唯一；manage 不可委派给非 admin。**
+多 owner（对等共主）被否决：谁能转移、谁能撤销对方、冲突谁裁决——所有权语义塌方，且"这台机器谁负责"从锚点退化为集合，正是本 ADR 要消灭的状态。单 owner + guest 名单下：**guest 是 use 授权（可增删、可收回、无残留），owner 是归属（唯一、转移走审计）**。本模型**不支持把 manage 委派给某个对等协作者**——需要多人共同配置/维护一台机器或实例，走 admin 角色，不走 guest；guest 只解决"让更多人能用（聊天）"这一诉求。
 
 **guest 三条边界规则**：
 
 | # | 规则 | 含义 |
 |---|---|---|
-| R1 | **授 manage，不授归属** | guest 不能转移 owner、不能增删 guest、不能改 visibility。归属操作永远只有 owner ∨ admin 两元（`can_transfer`，§4） |
-| R2 | **不级联** | node guest ≠ 该 node 上 agent 的 guest。node 名单答"谁准用这台机器"，agent 名单答"谁共同维护这个实例"，两级名单独立维护 |
-| R3 | **撤销即失权，归属不回收** | 移除 guest 后其立即失去 manage；但他以个人身份在该资源上装的 agent 仍归他所有（归属独立于授权）。卸载这些 agent 需要其本人/admin 或目标 node 的 manage 名单 |
+| R1 | **授 use，不授 manage/归属** | guest 只能使用（聊天），**不能 manage**（配置/workspace/文件/生命周期/安装/卸载），不能转移 owner、不能增删 guest、不能改 visibility。manage 与归属操作永远只有 owner ∨ admin 两元（`can_transfer`，§4） |
+| R2 | **不级联** | node guest ≠ 该 node 上 agent 的 guest。node 名单答"谁能看到/使用这台机器（不含机器管理）"，agent 名单答"谁能用（聊天）这个实例"，两级名单独立维护 |
+| R3 | **撤销即失权，归属不回收** | 移除 guest 后其立即失去 use；但他作为 owner 拥有的其他 agent 仍归他所有（归属独立于授权）。卸载那些 agent 需要其本人/admin 或目标 node 的 manage 名单 |
 
-**guest 名单操作**：`PATCH /api/nodes/{id}/guests`、`PATCH /api/agents/{id}/guests`（全量替换语义，PUT-list 风格，归属名单可调）；`GET /api/agents|nodes` 条目下发 `is_guest: bool`（并入 `can_manage` 计算，客户端不自行查名单——D8 单一真相不变）。
+**guest 名单操作**：`PATCH /api/nodes/{id}/guests`、`PATCH /api/agents/{id}/guests`（全量替换语义，PUT-list 风格，归属名单可调）；`GET /api/agents|nodes` 条目下发 `is_guest: bool`（并入 `can_use` 计算，客户端不自行查名单——D8 单一真相不变）。
 
-**为什么 guest 不分子档（editor/viewer）**：与 9a 同理——能看文件即能拿走文件，"看"与"改"在文件域不可分；use 档已由 visibility 全局解决，无需 per-user 的"仅聊天"名单（shared 即所有人可聊；private 若将来要"指定几人可聊"再加 `chat_guests`，Rule of three，现在不做）。
+**为什么 guest 不分子档（editor/viewer）**：guest 就是单一 use 档——"能不能用（聊天）"是二值的，配置/文件/生命周期（manage）不在 guest 授予范围内，永远只有 owner ∨ admin。可见性（view）由 visibility 全局解决（shared/public 即对全员可见），无需再为 guest 分"仅聊天 vs 可配置"两态——后者根本不属于 guest。
 
 ---
 
@@ -243,7 +277,7 @@ sequenceDiagram
     G->>G: 验签 → AuthContext{user_id=U, role}
     G->>P: 路由匹配 → Permission::AgentManage
     P->>P: agent_owners[id] → owner, guests, visibility
-    alt U == owner ∨ U ∈ guests ∨ U == admin（manage 名单）
+    alt U == owner ∨ U == admin（manage 名单，guest 为 use 档不在此列）
         P->>R: 反代转发（原样携带 x-user-id）
         R-->>C: 200
     else 不在 manage 名单
@@ -259,12 +293,12 @@ sequenceDiagram
 |---|---|
 | **A. owner 进 proto，由 Node 上报/回显** | 归属真相交给数据面（Node inventory 可被 Node 侧改写），Gateway 重启即被 inventory 覆盖；Node 不感知账号体系。见 D1 |
 | **B. Runtime 侧做 owner 校验（Gateway 只透传）** | Runtime 需要完整归属表同步 + node/agent 双层真相复制；Gateway 本来就是 multi_user 唯一入口与既有鉴权点（`AuthContext` 在此），加第二执行点违反单一真相 |
-| **C. 通用 RBAC（角色×资源×动作表）** | 当前只有两档权限、两种角色；泛化框架无近期消费者（YAGNI），且客户端渲染复杂度暴涨 |
+| **C. 通用 RBAC（角色×资源×动作表）** | 当前只有三档权限、两种角色；泛化框架无近期消费者（YAGNI），且客户端渲染复杂度暴涨 |
 | **D. per-workspace ACL（工作区级共享授权）** | 规则三尚未触发；workspace 权限天然跟 agent 权限一致（都是"动这台机器的文件"），细分先等真实需求 |
 | **E. 默认 shared、owner 只管不问** | 与威胁模型相反——本 ADR 的动机就是"默认即公开"，必须默认 private fail-closed |
 | **F. 存量数据自动归首个登录的 admin** | 静默改所有权无审计；无主+显式 claim 更安全，代价只是 admin 多点一次认领 |
-| **G. 只堵 workspace 写、不堵读/fs browse** | 读与写同级（见 D4 表）；只堵写等于允许 `GET /workspaces/file` 全盘窃取，门控形同虚设 |
-| **H. "非 owner 只读"权限档（owner 读写 / guest 只读 / 其余不可见 三档制）** | 在本领域"只读"不是安全档位：能读工作区文件 = node 机器数据可整盘外泄，读与写必须同级。非 owner 的合法形态只有 guest（manage 授权）与 use（shared 聊天），见 D9a |
+| **G. 把 workspace 文件内容读放进 view** | 已按新三档修订：view 只覆盖**描述 agent 的元数据/定义读**（config/prompts/skills/model/status/头像/permissions 名单）；**读取 owner 真实数据的接口**（工作区文件内容、git 历史、memory、全局 search）一律落在 **use**，不对 shared agent 的纯 viewer 开放。理由不变——`GET /workspaces/file` 若归 view，等于让任意登录用户把 owner 机器上的工作文件拖走；只是实现方式从"读写同级全归 manage"改为"内容读归 use、元数据读归 view"（见 D4 表"检索/内容类读归 use"原则、D9a） |
+| **H. "非 owner 只读"= 放开全部内容读** | 修订：本模型**有** view 档，但它**不是**"能读机器上的任何文件"。viewer（shared/public 非 guest）只看得到 agent 是什么（详情、配置定义、头像、权限名单），看不到 owner 的工作文件内容、memory、聊天记录（session 内容另由 private/public 第二道墙兜底）。"只读"若指整盘文件，仍等于 node 机器数据外泄，故内容读必须留在 use |
 | **I. 多 owner（对等共主，admin 帮资源加 owner）** | 所有权语义塌方：转移/撤销/冲突裁决无主，"这台机器谁负责"从锚点退化为集合。协作诉求由 guest 名单承接，"加 owner"的真实需求落进模型都是"加 guest"，见 D9b |
 
 ---
@@ -279,8 +313,10 @@ sequenceDiagram
 **代价与风险**
 - 新增两个 Gateway 本地状态文件（与既有 token 表同范式，运维面几乎不增）。
 - 升级当天：所有存量 agent 对普通用户变 private——需要 release note 明确"admin 认领"步骤。
-- 所有经 Gateway 反代的 agent 路由都要进策略表，**漏一条 = 留一个洞**。缓解：策略表按"默认拒绝"设计（未登记的 `/api/agents/{id}/**` 写方法一律按 Agent-manage，读方法显式登记；新增路由忘登记时 fail-closed），并为该不变量写测试（§9）。
+- 所有经 Gateway 反代的 agent 路由都要进策略表，**漏一条 = 留一个洞**。缓解：classify() 按"默认拒绝"设计（未登记的 `/api/agents/{id}/**` 路由**任何方法**一律落 Agent-manage，真实读路由必须显式登记为 view/use），并为该不变量写测试（§9）+ `dev/ci.sh::run_permission_route_redline` 枚举门。
 - MQTT 数据面仍 permissive：本 ADR 不解决"别人 session 的事件扇出到所有 localhost 客户端"的已知问题，需后续 ACL ADR（§13 Q3）。
+- **Follow-up（未在本实现中处理）**：owner 账号被禁用/注销时，其名下 node/agent 的 owner 行不会自动失效——当前行为是 fail-closed（`can_manage` 对禁用账号自然 403，资源转为事实无主），但缺少"注销即批量转无主 + 审计"的显式联动，需与账号注销流程（acowork-user）一并设计。
+- **已修复（visibility 静默回弹）**：`OwnershipStore::upsert_with` 的 `ownerless ⇒ not Shared` 归一化发生在调用方 mutation **之后**，因此把无主 agent 置为 `shared` 时：handler 回 `200 {"visibility":"shared"}`、存储仍是 `private`、Desktop 保存后重新 `load()` 读到旧值 → 开关无报错地弹回关闭。修复分两半且都必要：① `PATCH .../visibility` 在目标无主且请求"发布"（agent `shared` / node `public`）时前置拒绝，返回 `409` 并在错误文案里给出两步恢复（先 `PATCH .../owner` 认领，再设 visibility）；② Desktop 权限弹窗保存失败时把草稿回滚到服务端真值，避免"被拒的写入"与"根本没发生写入"在 UI 上无法区分。归一化本身保留——它是数据不变量而非授权判定（`can_view = is_admin ∨ can_manage ∨ shared` 已经保证无主资源对外不可见），删掉它反而会让无主 agent 借 visibility 逃逸 fail-closed。回归测试：`patch_agent_visibility_rejects_shared_on_ownerless_row` / `node_visibility_public_persists_once_an_owner_is_claimed` 及前端 `reverts the switch to the server value…`。**补 UI 入口（第一次修复的遗漏）**：409 文案虽然给出了两步恢复，但第一步要手发 HTTP 请求，而弹窗内 owner 一栏原本是只读的、也没有任何认领控件——对所有存量资源（无主是升级后的默认状态）而言恢复路径实际不可达，等于把死路换了个说法。因此补 `patchAgentOwner`/`patchNodeOwner` 前端封装 + 弹窗内 admin 专属的「认领归属」按钮（`canClaim = isOwnerless && account.role === admin`），认领后对话框自动 reload，有主资源不再显示该按钮。认领是独立的一次调用（不是 Save 的一部分），所以仍支持「先认领、再单独设可见性」的两步路径，按钮只是把 409 已经规定的那条路缩短成一次点击。
 
 ---
 
@@ -288,11 +324,11 @@ sequenceDiagram
 
 1. **单测（Gateway）**：策略表纯函数——路由×角色×归属 → allow/deny 全矩阵；重点回归"未登记路由默认拒绝"。
 2. **结构不变量测试（进 `dev/ci.sh`，与 `run_gateway_fs_redline` 并列）**：枚举 `proxy.rs`/`agents.rs`/`fs_browse.rs` 注册的全部 `/api/agents/{id}/**` 与 `/api/fs/browse` 路由，断言每条都在策略表中有显式档位或落入默认拒绝桶——**新增路由不登记就红**。
-3. **集成（multi_user 双账号）**：alice enroll node A（token 绑 owner）→ bob `POST install@A` 403；alice 装 agent → bob `POST workspaces` 403 / `GET workspaces/file` 403 / `GET fs/browse?target=A` 403；alice 标 shared → bob `POST sessions` 201 且 bob 的 session 对 alice 之外的第三方仍按 ADR-076 隔离；admin 全通 + claim + 转移。
-4. **guest 语义（D9 三规则逐条断言）**：alice 加 bob 为 agent guest → bob `POST workspaces` 200、bob `PATCH guests/visibility/owner` 403（R1）；bob 加为 node A guest → bob 可在 A 上装 agent 且该 agent owner=bob，alice 撤销 bob 的 node guest 后 bob 已装 agent 归属不变（R2/R3）；guest 撤销后 manage 调用立即 403（无缓存残留）。
+3. **集成（multi_user 双账号）**：alice enroll node A（token 绑 owner）→ bob `POST install@A` 403；alice 装 agent → bob `POST workspaces` 403（写=manage）/ `GET workspaces/file` 403（内容读=use，非 guest 拒）/ `GET fs/browse?target=A` 403；alice 仅标 `shared`（未加 bob 为 guest）→ bob 可见该 agent 且能 `GET config`/`GET model`/`GET permissions`（元数据/定义读=view 放行）但 `POST sessions` **403**（shared 只放开可见+只读，不放开 use）、`GET files`/`GET memory` **403**（内容读归 use）；alice 加 bob 为 agent guest → bob `POST sessions` 201、`GET files` 200、`GET memory` 200（use 放行）且 bob 的 session 对 alice 之外的第三方仍按 ADR-076 隔离；admin 全通 + claim + 转移。
+4. **guest 语义（D9 三规则逐条断言）**：alice 加 bob 为 agent guest → bob `POST sessions` 200（use 放行）但 `POST workspaces` **403**（guest 不含 manage）、bob `PATCH guests/visibility/owner` 403（R1）；bob 加为 node A guest → bob `POST install@A` **403**（guest 不含机器管理权，安装需 node owner ∨ admin）；alice 撤销 bob 的 guest 后 bob 的 use 调用（sessions）立即 403（无缓存残留）。
 5. **Local 模式回归**：`AuthMode::Local` 全部行为与升级前逐字节一致（no-op 断言）。
 6. **迁移演练**：带存量数据升级 → 普通用户列表只剩自己可见项、无主资源 admin 认领后功能恢复。
-7. **e2e（Desktop + Mobile）**：非 owner 的 manage 入口按 `can_manage=false` 禁用；shared agent 的聊天路径畅通；guest 徽标与名单管理 UI 可用。
+7. **e2e（Desktop + Mobile）**：非 owner/admin 的 manage 入口按 `can_manage=false` 禁用；guest（use 授权）的聊天路径畅通、非 guest 对 shared agent 仅可见不可聊（use 写操作 403）；guest 徽标与名单管理 UI 可用。
 
 ---
 
@@ -325,10 +361,10 @@ sequenceDiagram
 
 | # | 问题 | 现状 |
 |---|---|---|
-| Q1 | **default agent（ADR-077）的归属**：onboarding 由首个用户安装 → owner=该用户，其他用户默认不能用。是否应把"onboarding 装的 default agent"默认 `shared`（团队开箱即用）？ | ✅ **已决策（2026-10-28）：默认 `Shared`**。onboarding 预装的 default agent 落 shared，owner 仍可改回 private；用户自行安装的实例维持默认 private。见 D3 |
+| Q1 | **default agent（ADR-077）的归属**：onboarding 由首个用户安装 → owner=该用户，其他用户默认不能用（除非被加进 guest 名单）。是否应把"onboarding 装的 default agent"默认 `shared`（团队开箱即用地**可见**）？ | ✅ **已决策（2026-10-28）：默认 `Shared`**。onboarding 预装的 default agent 落 shared（全员可见），owner 仍可改回 private；用户自行安装的实例维持默认 private。**注意 `shared` 只放开可见，聊天仍逐个 guest 授权**（见 D6） |
 | Q2 | **admin 的 install 落点**：admin 把 agent 装到 user X 的 node，需要 X 的 manage 授权吗？还是 admin 天然可装任何 node？ | ✅ **已决策（2026-10-28）：admin 可装任意 node**。admin 天然通过所有 Node-manage/Agent-manage 门控，不加 `admin_overrides_nodes` 旋钮（无近期需求即不加配置面，YAGNI）。所有权仍记 admin 自己，node owner 事后经 admin 转移可回收 |
 | Q3 | **MQTT 数据面 ACL**：permissive subscribe 导致跨账号事件扇出（已知 e2e flake 根因）。owner 模型落地后，ACL 的订阅过滤规则（`user:{id}` 只能订自己可见资源的事件）应与其对齐 | 另立 ADR（与本 ADR 的 HTTP 控制面正交，不阻塞本 ADR 落地） |
-| Q4 | **shared agent 的成本归属**：别人用我的 shared agent 烧的是我的 provider key / 配额。预算（budget tracker）是否需要按 caller 记账或按 agent 限额？ | ✅ **已决策（2026-10-28）：按 agent 记账，不做 user 维度**。用量归属 agent（即其 owner 的 key/配额），budget tracker 维持 agent 粒度；caller 级分摊/限额出现真实需求再议 |
+| Q4 | **agent 使用的成本归属**：guest 用我的 agent 烧的是我的 provider key / 配额。预算（budget tracker）是否需要按 caller 记账或按 agent 限额？ | ✅ **已决策（2026-10-28）：按 agent 记账，不做 user 维度**。用量归属 agent（即其 owner 的 key/配额），budget tracker 维持 agent 粒度；caller 级分摊/限额出现真实需求再议 |
 | Q5 | **`GET /api/agents/{id}/avatar` 等读端点**：private agent 的头像对非 owner 404 还是允许？ | 建议 404（列表已过滤，避免探测存在性），实现时定 |
 
 ---
@@ -345,3 +381,39 @@ sequenceDiagram
 | [core/acowork-gateway/src/mqtt/dispatch.rs](../../../core/acowork-gateway/src/mqtt/dispatch.rs) | `decide_enroll`、installed inventory 聚合（owner 绑定/清理时机） |
 | [core/acowork-gateway/src/mqtt/node_registry.rs](../../../core/acowork-gateway/src/mqtt/node_registry.rs) | Node 在线视图；`can_manage` 渲染输入 |
 | [core/acowork-memory/src/session_meta.rs](../../../core/acowork-memory/src/session_meta.rs) | session 维度判定范式（`is_readable_by`/`is_writable_by`）的参照物 |
+
+---
+
+## 附录 A：修订记录 — 409 不是 UI 契约（2026-10 修订）
+
+**触发**：multi_user 现场。admin 登录，右键 agent → 权限 → 打开可见性开关 → 保存，得到
+`409 this agent has no owner yet…`（`owner_user_id: null` 是所有存量资源的默认状态，见 §8 升级风险）。
+
+**诊断**：409 本身没撒谎——`upsert_with` 的 `ownerless ⇒ not published` 归一化确实会让那次写入静默回滚。
+但**它把一个可预知的数据状态包装成了运行时错误**，且不看调用者身份：唯一有权认领的 admin 反而被这条 409 挡住。
+D8 早就写明"客户端只消费服务端算好的布尔"，而 `GET .../permissions` 当时只下发 `can_attribute`
+（**权限**答案）——admin 在无主行上照样 `true`，前端于是照常启用开关，点了才被服务端打回。
+**权限**与**数据状态**被混为一谈，这是根因；409 只是它的症状。
+
+**修订**（D8 的补齐，非新决策）：
+
+1. `ownership::can_publish` / `ownership::is_ownerless` 成为共享判定函数——`upsert_with` 的归一化规则、
+   `permissions` 响应、两个 `PATCH .../visibility` 的 guard 四处此前各自推导同一件事，现在共用（§4 "统一判定入口"的同理要求）。
+2. `GET /api/{agents,nodes}/{id}/permissions` 新增 `can_set_visibility` + `ownerless`。
+   客户端据此 `disabled` 开关并显示原因（`needsOwnerHint`），**不再靠点击去发现**。
+3. 409 保留，仅作非 UI 调用方的兜底（防止绕过 `can_set_visibility` 直连 HTTP 把静默归一化说成成功），
+   文案去掉"请手动 PATCH"——终端用户不该被要求打开 devtools。
+4. 弹窗内 admin 专属「认领归属」按钮（`canClaim = isOwnerless && role === admin`）保留。
+
+**明确否决的方案**：认领时"顺手"把可见性设为发布态。
+无主行按构造就是 private，把它默认开放给全体登录用户是一次**静默的授权扩大**——
+虽然省掉一次点击，但"点一下认领 = 把 agent 公开给所有人"不该由一个按钮替 admin 决定。
+故认领与发布是两个显式动作，与 ADR 正文 D7 的两步恢复一致。
+
+**未决**：存量 ownerless 行的**归属迁移**尚未设计（§8 已列为升级风险，本次只保证恢复路径可达、不再报错）。
+迁移需要回答"这台机器/这批 agent 归谁"——ADR-087 故意没定，留给部署方决策。
+
+**回归测试**：`permissions_reports_an_ownerless_row_as_unpublishable` /
+`permissions_reports_an_owned_row_as_publishable`（后端数据状态）、
+`disables the visibility switch instead of offering a write that 409s` /
+`keeps an owned resource's switch enabled` / `claims ownership without also changing visibility`（前端交互）。

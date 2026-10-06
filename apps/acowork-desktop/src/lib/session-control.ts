@@ -15,6 +15,36 @@
 import { getGatewayUrl } from "./config";
 import { with503Retry, WRITE_503_RETRY } from "./httpRetry";
 import { log } from "./logger";
+import { NOT_AUTHORIZED, permissionMessage } from "./api-error";
+
+/**
+ * A control-plane call the Gateway refused on authorization grounds
+ * (403 `not_authorized`) or because the resource is filtered away from
+ * this account (404 — ADR-087 D5 answers 404 rather than 403 so a
+ * private agent's existence is not leaked).
+ *
+ * Carrying the status as a field (instead of only embedding
+ * `HTTP 404` in the message) lets callers distinguish "you may not use
+ * this agent" from a transient network/503 failure and render a reason
+ * instead of an endless loading state.
+ */
+export class SessionAccessError extends Error {
+  constructor(
+    readonly status: number,
+    readonly agentId: string,
+    message: string,
+    /** For 403: the capability tier that refused (`use`/`manage`/…). */
+    readonly required?: string,
+  ) {
+    super(message);
+    this.name = "SessionAccessError";
+  }
+}
+
+/** Did this failure mean "the Gateway refused you", not "try again later"? */
+export function isAccessDenied(err: unknown): boolean {
+  return err instanceof SessionAccessError && (err.status === 403 || err.status === 404);
+}
 
 async function controlRequest(
   method: "POST" | "DELETE" | "PUT",
@@ -36,7 +66,31 @@ async function controlRequest(
     { policy: WRITE_503_RETRY, tag: `session-control ${method} ${path}`, logger: log },
   );
   if (!resp.ok) {
-    throw new Error(`HTTP ${resp.status}: ${await resp.text()}`);
+    const text = await resp.text();
+    // 401/403 = authenticated but not authorized; 404 = the resource is
+    // not visible to this account (ADR-087 D5). Both are terminal for
+    // this agent — a retry cannot help.
+    if (resp.status === 401 || resp.status === 403 || resp.status === 404) {
+      const agentId = path.split("/")[3] ?? "";
+      // ADR-087 D5.3: the Gateway denial is a flat JSON body — extract
+      // the refusing tier so callers render "需要使用权/管理权" instead
+      // of a raw `HTTP 403: {"error":"forbidden",…}` dump.
+      let required: string | undefined;
+      try {
+        const body = JSON.parse(text) as { code?: string; required?: string };
+        if (body?.code === NOT_AUTHORIZED && typeof body.required === "string") {
+          required = body.required;
+        }
+      } catch {
+        /* non-JSON denial — fall through to the raw text */
+      }
+      const message =
+        resp.status === 403 && required !== undefined
+          ? permissionMessage(required)
+          : `HTTP ${resp.status}: ${text}`;
+      throw new SessionAccessError(resp.status, agentId, message, required);
+    }
+    throw new Error(`HTTP ${resp.status}: ${text}`);
   }
 }
 

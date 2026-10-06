@@ -58,7 +58,7 @@ impl IntoResponse for ApiError {
             DocError::RequestExpired(_) => {
                 (StatusCode::UNPROCESSABLE_ENTITY, "request_expired")
             }
-            DocError::Forbidden(_) => (StatusCode::FORBIDDEN, "forbidden"),
+            DocError::Forbidden(_) => (StatusCode::FORBIDDEN, "not_authorized"),
             DocError::Io(_) | DocError::Serde(_) | DocError::Internal(_) => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal_error")
             }

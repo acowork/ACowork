@@ -8,6 +8,7 @@
  */
 
 import { getGatewayUrl } from "./config";
+import { NOT_AUTHORIZED, permissionMessage } from "./api-error";
 import type {
   ApproveResult,
   CreateDirInput,
@@ -31,12 +32,15 @@ const HUMAN_ACTOR = "human";
 export class DocApiError extends Error {
   readonly code: string;
   readonly status: number;
+  /** For denials: the capability tier that refused (`use`/`manage`/…). */
+  readonly required?: string;
 
-  constructor(status: number, code: string, message: string) {
+  constructor(status: number, code: string, message: string, required?: string) {
     super(message);
     this.name = "DocApiError";
     this.code = code;
     this.status = status;
+    this.required = required;
   }
 }
 
@@ -61,16 +65,34 @@ async function request<T>(
   if (!res.ok) {
     let code = "http_error";
     let message = `HTTP ${res.status}`;
+    let required: string | undefined;
     try {
       const body = (await res.json()) as {
-        error?: { code?: string; message?: string };
+        error?: { code?: string; message?: string } | string;
+        code?: string;
+        message?: string;
+        required?: string;
       };
-      code = body.error?.code ?? code;
-      message = body.error?.message ?? message;
+      if (typeof body.error === "object" && body.error !== null) {
+        // acowork-doc's nested envelope {"error":{"code","message"}}.
+        code = body.error.code ?? code;
+        message = body.error.message ?? message;
+      } else if (typeof body.code === "string") {
+        // Gateway ACL middleware's flat envelope (403 fires here before
+        // the request ever reaches the doc service).
+        code = body.code;
+        message = body.message ?? message;
+        required = typeof body.required === "string" ? body.required : undefined;
+      }
     } catch {
       // 非 JSON 响应体，保留默认
     }
-    throw new DocApiError(res.status, code, message);
+    // 权限拒绝统一换成可操作的本地化文案（ADR-087 D5.3），
+    // 服务端原文保留在 DocApiError.code / required 里供分类。
+    if (res.status === 403 || code === NOT_AUTHORIZED) {
+      message = permissionMessage(required);
+    }
+    throw new DocApiError(res.status, code, message, required);
   }
 
   if (res.status === 204) return undefined as T;

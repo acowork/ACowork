@@ -456,13 +456,26 @@ export function FileTree({
                         ? `${err.status}${err.statusText ? ` ${err.statusText}` : ""}`
                         : err.cause === "network"
                           ? err.message
-                          : "request aborted";
+                          : t("workspace.treeLoadAborted");
+                // A 403 is a denial, not a load failure: the tree endpoint
+                // requires the `use` tier, so a view-only guest sees the
+                // same wall as the workspace list (ADR-087).
+                const denied = err.cause === "http" && err.status === 403;
                 return (
                     <div
                         className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 py-8 text-text-tertiary"
                         style={{ fontSize: "var(--ui-text-size)" }}
                     >
-                        <span>{t("workspace.treeLoadFailed") ?? `Failed to load workspace (${detail})`}</span>
+                        {denied ? (
+                            <>
+                                <span className="text-text-secondary">{t("workspace.deniedTitle")}</span>
+                                <span className="max-w-sm text-center text-10 leading-relaxed">
+                                    {t("workspace.deniedHint")}
+                                </span>
+                            </>
+                        ) : (
+                            <span>{t("workspace.treeLoadFailed", { detail })}</span>
+                        )}
                         <button
                             type="button"
                             className="rounded border border-zinc-300 px-3 py-1 text-xs hover:bg-zinc-100 dark:border-zinc-600 dark:hover:bg-zinc-800"

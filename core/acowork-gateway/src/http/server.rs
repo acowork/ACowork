@@ -149,6 +149,15 @@ pub(crate) async fn start_http_server(
     // alongside the main server; the strict MQTT listener is hosted by
     // the broker instead (see `mqtt::RemoteMqttListener`).
     remote_listener: Option<RemoteListenerParams>,
+    // ADR-087: ownership policy tables (created in `Gateway::run` next to
+    // the token stores; shared with the MQTT dispatch).
+    node_owners: crate::gateway::ownership::SharedOwnershipStore,
+    agent_owners: crate::gateway::ownership::SharedOwnershipStore,
+    // ADR-087 D2: enrollment token store (HTTP mints, MQTT dispatch consumes).
+    enrollment_tokens: crate::mqtt::SharedEnrollmentTokenStore,
+    // ADR-087 D7 / review M4: staged installs (HTTP stages, MQTT dispatch
+    // commits on inventory / drops on failure).
+    pending_installs: crate::gateway::ownership::SharedPendingInstalls,
 ) -> Result<(), GatewayError> {
     if !http_config.enabled {
         tracing::info!("HTTP API disabled by configuration");
@@ -176,6 +185,15 @@ pub(crate) async fn start_http_server(
     app_state.operation_store = operation_store;
     app_state.auth_mode = auth_mode;
     app_state.relay_client = relay_client;
+    app_state.node_owners = Some(node_owners);
+    app_state.agent_owners = Some(agent_owners);
+    app_state.enrollment_tokens = Some(enrollment_tokens);
+    app_state.pending_installs = Some(pending_installs);
+    // ADR-087 §4: one-shot migration filling the denormalized
+    // `node_id` on agent ownership rows written before the field
+    // existed. Runs before the first request so the ACL cascade never
+    // observes a half-populated table.
+    backfill_agent_owner_node_ids(&app_state).await;
     if auth_mode.is_multi_user() {
         tracing::info!(
             "AUTH_MODE=multi_user: account system delegated to acowork-user              (verification starts once its public key is loaded)"
@@ -280,6 +298,75 @@ pub(crate) async fn start_http_server(
     .map_err(|e| GatewayError::Config(format!("HTTP server error: {}", e)))?;
 
     Ok(())
+}
+
+/// ADR-087 §4 — one-shot migration: fill the denormalized `node_id` on
+/// agent ownership rows written before the field existed.
+///
+/// The ACL cascade needs `agent → node` to evaluate `uninstall` (the one
+/// route gated on both lists) from policy data alone. Rows that predate
+/// the field carry `None`.
+///
+/// The source of truth for the mapping is the live install table
+/// (`AgentInfo.node_id`, refreshed from each node's retained inventory
+/// by ADR-055 §6.5) — not a second guess at the filesystem. At this
+/// point in boot the table may still be empty for a node that has not
+/// reported yet, which is why an unfilled row is *not* an error:
+///
+/// - The agent is still evaluated on its own row (see
+///   [`crate::http::acl::Resource::parent`]), so visibility and
+///   management are unaffected.
+/// - Only `uninstall`'s node half is missing, and that route
+///   re-checks the node explicitly.
+/// - Every boot retries, so a row written while a node was offline is
+///   filled on the next start. A long-offline node that never reports
+///   leaves the row unfilled forever, which is why the retry is
+///   unconditional rather than guarded by a "migrated" flag.
+///
+/// Writes once, at the end, only when something actually changed.
+async fn backfill_agent_owner_node_ids(state: &AppState) {
+    let Some(store) = state.agent_owners.clone() else {
+        return;
+    };
+    // Take the install table under the async lock FIRST and drop it
+    // before touching the ownership mutex — two locks, never nested,
+    // and never a sync read inside async (which panics on a runtime
+    // worker).
+    let pending: Vec<(String, String)> = {
+        let gw = state.gateway_state.read().await;
+        let guard = crate::gateway::ownership::lock(&store);
+        guard
+            .iter()
+            .filter(|(_, rec)| rec.node_id.is_none())
+            .filter_map(|(id, _)| {
+                gw.installed_agents
+                    .get(id)
+                    .map(|info| (id.clone(), info.node_id.clone()))
+            })
+            .collect()
+    };
+    if pending.is_empty() {
+        return;
+    }
+    let count = pending.len();
+    let mut guard = crate::gateway::ownership::lock(&store);
+    let mut filled = 0usize;
+    for (id, node_id) in pending {
+        // `update` runs `f` then persists — the per-row write is the
+        // simplest correct thing here. The row count is bounded by the
+        // number of agents installed before the migration, which is
+        // small; batching would need a bulk `persist` to be exposed
+        // and buys nothing at that size.
+        if guard.update(&id, |rec| rec.node_id = Some(node_id)) {
+            filled += 1;
+        }
+    }
+    drop(guard);
+    tracing::info!(
+        rows = filled,
+        considered = count,
+        "ADR-087: backfilled node_id on agent ownership rows"
+    );
 }
 
 /// Find an available port in the configured range.

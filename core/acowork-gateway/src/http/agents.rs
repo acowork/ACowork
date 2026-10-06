@@ -15,13 +15,16 @@
 use axum::{
     Json, Router,
     body::Body,
-    extract::{Multipart, Path, Query, State},
+    extract::{Extension, Multipart, Path, Query, State},
     http::{HeaderMap, Response, StatusCode, header},
-    routing::{get, post},
+    routing::{get, patch, post},
 };
 use serde::{Deserialize, Serialize};
 
 use crate::error::GatewayError;
+use crate::gateway::ownership::{self, OwnerRecord, Visibility};
+use crate::http::auth_middleware::AuthContext;
+use crate::http::permission;
 use crate::http::routes::{ApiError, AppState, OperationAck};
 use crate::gateway::state::GatewayState;
 use crate::mqtt::node_control::{NodeControlClient, NodeInstallDispatch, NodePackageSource};
@@ -63,6 +66,11 @@ pub fn agent_routes() -> Router<AppState> {
             post(restart_agent_in_debug),
         )
         .route("/api/agents/{id}/model", get(get_agent_model))
+        // ADR-087: ownership metadata endpoints.
+        .route("/api/agents/{id}/permissions", get(get_agent_permissions))
+        .route("/api/agents/{id}/visibility", patch(patch_agent_visibility))
+        .route("/api/agents/{id}/guests", patch(patch_agent_guests))
+        .route("/api/agents/{id}/owner", patch(patch_agent_owner))
         // ADR-034: `PUT /api/agents/{id}/config` is a pure reverse-proxy to
         // Runtime's `PUT /agents/{id}/config`.  The route itself is
         // registered in `proxy::proxy_routes` so all Runtime endpoints
@@ -195,6 +203,19 @@ pub struct AgentListResponse {
     /// sidebar sort order: newest first within each running/stopped group.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_interaction_at: Option<String>,
+    /// ADR-087 D7: whether the caller may manage this agent (owner /
+    /// guest / public). `None` = local single-user mode (no auth, every
+    /// resource is manageable — the client must treat `None` as true).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub can_manage: Option<bool>,
+    /// ADR-087 D7: whether the caller may use (chat with) this agent.
+    /// The only permission bit the client actually gates on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub can_use: Option<bool>,
+    /// ADR-087 D5: visibility — `"shared"` or `"private"`.
+    pub visibility: String,
+    /// ADR-087: the caller's user id is in this agent's guest list.
+    pub is_guest: bool,
 }
 
 /// Agent detail response
@@ -241,6 +262,16 @@ pub struct AgentDetailResponse {
     pub debug_state: crate::gateway::state::DebugState,
     /// Debug WebSocket port (set when dev_mode is true and agent is running)
     pub debug_port: Option<u16>,
+    /// ADR-087 D7: caller may manage (see [`AgentListResponse::can_manage`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub can_manage: Option<bool>,
+    /// ADR-087 D7: caller may use (chat with) this agent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub can_use: Option<bool>,
+    /// ADR-087 D5: `"shared"` | `"private"`.
+    pub visibility: String,
+    /// ADR-087: caller is in this agent's guest list.
+    pub is_guest: bool,
 }
 
 /// Generic message response
@@ -285,6 +316,7 @@ pub struct AgentListQuery {
 
 pub async fn list_agents(
     State(state): State<AppState>,
+    auth: Option<Extension<AuthContext>>,
     Query(query): Query<AgentListQuery>,
 ) -> Json<Vec<AgentListResponse>> {
     let gw = state.gateway_state.read().await;
@@ -307,7 +339,37 @@ pub async fn list_agents(
     let mut agents: Vec<AgentListResponse> = gw
         .installed_agents
         .values()
-        .map(|info| {
+        .filter_map(|info| {
+            // ADR-087 D5: a private agent is invisible to callers outside
+            // its sharing circle. `can_view` is the single source of
+            // truth and is FAIL-CLOSED on a missing row (D7: ownerless
+            // ⇒ admin-only), so an agent with no `agent_owners.json`
+            // entry is hidden from every non-admin account instead of
+            // leaking. The previous `is_some_and(Private)` guard only
+            // filtered rows that EXISTED, which let every unrecorded
+            // agent show up for everyone.
+            // `auth == None` means Local mode (ADR-087 D8: the whole
+            // authorization layer is a no-op) or a machine actor with no
+            // `AuthContext` (permission module invariant 4). Neither is
+            // subject to visibility filtering.
+            let rec = agent_owner_rec(&state, &info.instance_id);
+            if let Some(c) = auth.as_ref()
+                && !ownership::can_view(rec.as_ref(), &c.0.user_id, c.0.is_admin())
+            {
+                return None;
+            }
+            let can_manage =
+                Some(permission::caller_can_manage(auth.as_ref().map(|e| &e.0), rec.as_ref()));
+            let can_use =
+                Some(permission::caller_can_use(auth.as_ref().map(|e| &e.0), rec.as_ref()));
+            let is_guest = ownership::is_guest(
+                rec.as_ref(),
+                auth.as_ref().map(|e| e.0.user_id.as_str()),
+            );
+            let visibility = match rec.as_ref().map(|r| r.visibility) {
+                Some(Visibility::Private) => "private",
+                _ => "shared",
+            };
             // ADR-073: registries are keyed by INSTANCE identity. Cross-instance
             // reads are impossible by construction (each instance has
             // its own row in installed_agents and running_agents).
@@ -354,7 +416,7 @@ pub async fn list_agents(
             let eff_display_name = overrides
                 .and_then(|ov| ov.display_name.clone())
                 .or_else(|| info.manifest.display_name.clone());
-            AgentListResponse {
+            let resp = AgentListResponse {
                 instance_id: info.instance_id.clone(),
                 agent_id: info.agent_id.clone(),
                 node_id: info.node_id.clone(),
@@ -373,7 +435,12 @@ pub async fn list_agents(
                     .unwrap_or(crate::gateway::state::DebugState::Disabled),
                 debug_port: running_info.and_then(|r| r.debug_port),
                 last_interaction_at,
-            }
+                can_manage,
+                can_use,
+                visibility: visibility.to_string(),
+                is_guest,
+            };
+            Some(resp)
         })
         .collect();
     // ADR-073: optional query filters (package view / node view).
@@ -426,18 +493,51 @@ fn sort_agent_list(agents: &mut [AgentListResponse]) {
     });
 }
 
+/// Ownership row for an agent instance, cloned out of the store so no
+/// lock guard crosses an await point. `None` = no record (public).
+fn agent_owner_rec(
+    state: &AppState,
+    instance_id: &str,
+) -> Option<crate::gateway::ownership::OwnerRecord> {
+    ownership::lock_shared(&state.agent_owners)
+        .as_ref()
+        .and_then(|store| store.get(instance_id).cloned())
+}
+
 /// `GET /api/agents/:id` — get agent detail
 ///
 /// ADR-073: `:id` is the INSTANCE identity (UUIDv4).
 pub async fn get_agent_detail(
     State(state): State<AppState>,
+    auth: Option<Extension<AuthContext>>,
     Path(agent_id): Path<String>,
 ) -> Result<Json<AgentDetailResponse>, ApiError> {
-    let gw = state.gateway_state.read().await;
-    let info = gw
-        .installed(&agent_id)
-        .ok_or_else(|| ApiError::not_found(&format!("Agent not found: {}", agent_id)))?;
+    let user_id = auth.as_ref().map(|e| e.0.user_id.clone());
+    let info = {
+        let gw = state.gateway_state.read().await;
+        gw.installed(&agent_id)
+            .ok_or_else(|| ApiError::not_found(&format!("Agent not found: {}", agent_id)))?
+            .clone()
+    };
+    // ADR-087 D5: a private agent invisible to the caller answers 404 —
+    // the list view already filters it; the detail view must not leak
+    // its existence either.
+    // Shares `can_view` with the list so the two cannot drift again: this
+    // used `is_none_or` (a MISSING row counted as visible) while the list
+    // filtered on `is_some_and(Private)`, so an agent with no
+    // `agent_owners.json` entry was listed for every account yet 404'd on
+    // click — the "listed but permanently loading" report.
+    let rec = agent_owner_rec(&state, &info.instance_id);
+    let visible = match auth.as_ref() {
+        // Local mode / machine actor — unfiltered (ADR-087 D8).
+        None => true,
+        Some(c) => ownership::can_view(rec.as_ref(), &c.0.user_id, c.0.is_admin()),
+    };
+    if !visible {
+        return Err(ApiError::not_found(&format!("Agent not found: {}", agent_id)));
+    }
 
+    let gw = state.gateway_state.read().await;
     let running_info = gw.running(&agent_id);
     // Liveness = MQTT network signal (AgentRegistry), identical to the
     // list view. `running_agents` is process-managed metadata only —
@@ -494,6 +594,14 @@ pub async fn get_agent_detail(
             .map(|r| r.debug_state)
             .unwrap_or(crate::gateway::state::DebugState::Disabled),
         debug_port: running_info.and_then(|r| r.debug_port),
+        can_manage: Some(permission::caller_can_manage(auth.as_ref().map(|e| &e.0), rec.as_ref())),
+        can_use: Some(permission::caller_can_use(auth.as_ref().map(|e| &e.0), rec.as_ref())),
+        visibility: match rec.as_ref().map(|r| r.visibility) {
+            Some(Visibility::Private) => "private",
+            _ => "shared",
+        }
+        .to_string(),
+        is_guest: ownership::is_guest(rec.as_ref(), user_id.as_deref()),
     };
     Ok(Json(resp))
 }
@@ -712,6 +820,187 @@ pub struct AgentLspEndpointResponse {
     pub endpoint: Option<String>,
     /// Whether the node's LSP relay is ready.
     pub ready: bool,
+}
+
+// ─── ADR-087: ownership metadata endpoints ──────────────────────────────
+//
+// The permission middleware (`http/permission.rs`) enforces the tier for
+// these routes before the handler runs (visibility/guests → AgentManage,
+// owner → AgentTransfer); handlers only validate input and mutate the
+// record. In Local mode the middleware is a no-op and ownership edits
+// remain available to the single operator (D8).
+
+/// `GET /api/agents/{id}/permissions` — current attribution + guest list.
+///
+/// Read side of the three PATCH endpoints, gated at `AgentManage` by the
+/// permission middleware (classify's default-deny already lands GETs on
+/// unregistered segments there — a guest can see WHO manages the agent,
+/// attribution writes additionally require owner ∨ admin, D9 R1). The
+/// Desktop permission dialog renders from this; `can_attribute` tells
+/// the caller whether visibility/guests PATCHes will be accepted.
+async fn get_agent_permissions(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    auth: Option<Extension<AuthContext>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let instance_id = {
+        let gw = state.gateway_state.read().await;
+        gw.resolve_installed_key(&id)
+    }
+    .ok_or_else(|| ApiError::not_found(&format!("no such agent instance: {id}")))?;
+    let store = ownership::lock_shared(&state.agent_owners)
+        .ok_or_else(|| ApiError::internal("ownership store unavailable"))?;
+    let rec = store.get(&instance_id);
+    let local = auth.is_none();
+    let user_id = auth.as_ref().map(|a| a.0.user_id.clone()).unwrap_or_default();
+    let is_admin = auth.as_ref().is_some_and(|a| a.0.is_admin());
+    let can_attribute = local
+        || is_admin
+        || rec.and_then(|r| r.owner_user_id.as_deref()) == Some(user_id.as_str());
+    Ok(Json(serde_json::json!({
+        "owner_user_id": rec.and_then(|r| r.owner_user_id.clone()),
+        "guests": rec.map(|r| r.guests.clone()).unwrap_or_default(),
+        "visibility": rec
+            .map(|r| r.visibility.as_str())
+            .unwrap_or(if local { "shared" } else { "private" }),
+        "can_attribute": can_attribute,
+        // ADR-087 D6/D7 + D8: the client must not have to *discover*
+        // that an ownerless row cannot be published by flipping the
+        // switch and reading a 409. `can_attribute` answers "may you
+        // write attribution at all" (an admin passes it), so on its own
+        // it would enable the switch for a row that can only be
+        // rejected. Ship the data-state answer alongside it.
+        "can_set_visibility": ownership::can_publish(rec, local),
+        "ownerless": ownership::is_ownerless(rec),
+    })))
+}
+
+/// `PATCH /api/agents/{id}/visibility` — `{ "visibility": "shared"|"private" }`.
+/// Agents have exactly these two settings (ADR-087 D6: `public` is a
+/// node-only concept). The onboarding default agent starts `Shared` but
+/// its owner may flip it back to `Private` (D3 — "owner 仍可改回 private").
+///
+/// **Ownerless guard.** `OwnershipStore::upsert_with` normalises the
+/// `ownerless ⇒ not Shared` data-hygiene invariant *after* the caller's
+/// mutation runs, so flipping an ownerless agent to `shared` would be
+/// silently downgraded back to `private` while this handler answered
+/// 200 with the requested value — the Desktop switch then snapped back
+/// on its post-save reload, with no error anywhere. Rejecting the write
+/// here turns that silent no-op into a diagnosable 409 whose message
+/// names the two-call recovery (claim an owner, then set visibility).
+///
+/// The invariant itself is a data rule, not an authorization one:
+/// `ownership::can_view` is `is_admin ∨ can_use ∨ shared`, so an
+/// ownerless agent cannot be shared into reach by any other route.
+async fn patch_agent_visibility(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let vs = body
+        .get("visibility")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| ApiError::bad_request("missing `visibility`"))?;
+    let vis = match vs {
+        "shared" => Visibility::Shared,
+        "private" => Visibility::Private,
+        _ => return Err(ApiError::bad_request("visibility must be `shared` or `private`")),
+    };
+    // Read the row before editing so the guard can distinguish
+    // "ownerless" from "owned but private" — only the former conflicts.
+    let instance_id = {
+        let gw = state.gateway_state.read().await;
+        gw.resolve_installed_key(&id)
+    }
+    .ok_or_else(|| ApiError::not_found(&format!("no such agent instance: {id}")))?;
+    if vis == Visibility::Shared {
+        let store = ownership::lock_shared(&state.agent_owners)
+            .ok_or_else(|| ApiError::internal("ownership store unavailable"))?;
+        if ownership::is_ownerless(store.get(&instance_id)) {
+            // Reached only by a caller that skipped the
+            // `can_set_visibility` bit the permissions endpoint
+            // ships (ADR-087 D8) — the Desktop disables the switch in
+            // that case. Kept as a 409 so a non-UI client cannot turn
+            // the store's silent normalisation into a lie.
+            return Err(ApiError::conflict(
+                "this agent has no owner yet, so it cannot be shared. \
+                 Claim ownership first, then set visibility.",
+            ));
+        }
+    }
+    edit_agent_owner(&state, &id, |rec| rec.visibility = vis).await?;
+    Ok(Json(serde_json::json!({ "visibility": vs })))
+}
+
+/// `PATCH /api/agents/{id}/guests` — `{ "guests": [user_id, ...] }`,
+/// full-list replacement (ADR-087 D9: PUT-list semantics).
+async fn patch_agent_guests(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let list = body
+        .get("guests")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| ApiError::bad_request("missing `guests` array"))?;
+    let guests: Vec<String> = list
+        .iter()
+        .filter_map(|v| v.as_str().map(|x| x.to_string()))
+        .collect();
+    if guests.len() != list.len() {
+        return Err(ApiError::bad_request("guests must be user-id strings"));
+    }
+    edit_agent_owner(&state, &id, |rec| rec.guests = guests.clone())
+        .await?;
+    Ok(Json(serde_json::json!({ "guests": guests })))
+}
+
+/// `PATCH /api/agents/{id}/owner` — `{ "owner_user_id": "..." }` transfer
+/// or claim. Admin only (ADR-087 D7: transfer is an authorization change;
+/// the owner may share but never hand over mastership). `null` / empty
+/// string clears the owner → ownerless (fail-closed). On a resource with
+/// no ownership row this creates one — the D7 admin-claim path.
+async fn patch_agent_owner(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let new_owner = match body.get("owner_user_id") {
+        Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(s)) if s.is_empty() => None,
+        Some(serde_json::Value::String(s)) => Some(s.clone()),
+        _ => {
+            return Err(ApiError::bad_request(
+                "missing `owner_user_id` (string or null)",
+            ))
+        }
+    };
+    edit_agent_owner(&state, &id, |rec| rec.owner_user_id = new_owner.clone())
+        .await?;
+    Ok(Json(serde_json::json!({ "owner_user_id": new_owner })))
+}
+
+/// Load an agent's ownership row, apply `f`, persist. The `{id}` path
+/// variable is normalized to the canonical instance key (ADR-073) so
+/// package-id aliases cannot create ghost rows. When the instance has
+/// no row yet (legacy installs predate ADR-087), a default ownerless
+/// row is created and `f` applied — this is the admin-claim path of D7
+/// (the middleware has already restricted this tier; the instance must
+/// exist in the inventory).
+async fn edit_agent_owner<F: FnOnce(&mut OwnerRecord)>(
+    state: &AppState,
+    raw_id: &str,
+    f: F,
+) -> Result<(), ApiError> {
+    let instance_id = {
+        let gw = state.gateway_state.read().await;
+        gw.resolve_installed_key(raw_id)
+    }
+    .ok_or_else(|| ApiError::not_found(&format!("no such agent instance: {raw_id}")))?;
+    let mut store = ownership::lock_shared(&state.agent_owners)
+        .ok_or_else(|| ApiError::internal("ownership store unavailable"))?;
+    store.upsert_with(&instance_id, || OwnerRecord::new(None), f);
+    Ok(())
 }
 
 /// `GET /api/agents/{id}/lsp-endpoint` — resolve the LSP relay endpoint
@@ -958,10 +1247,19 @@ pub struct EnsureAck {
 /// an operation id when an install was dispatched.
 pub async fn ensure_agent(
     State(state): State<AppState>,
+    auth: Option<Extension<AuthContext>>,
     multipart: Multipart,
 ) -> Result<(StatusCode, Json<EnsureAck>), ApiError> {
     let form = read_agent_upload(&state, multipart).await?;
     let node_id = form.node_id;
+
+    // ADR-087 D4: ensure is an install-intent on the target node →
+    // Node-manage, on both the fast and the dispatch path.
+    permission::check_node_manage(
+        &state,
+        auth.as_ref().map(|e| &e.0),
+        &node_id,
+    )?;
 
     // The package must be opened to learn its `agent_id`; the staged temp
     // file is deleted when this scope ends, whichever way it ends.
@@ -1018,6 +1316,11 @@ pub async fn ensure_agent(
         .await
         .map_err(|e| ApiError::internal(&format!("Ensure dispatch failed: {}", e)))?;
 
+    // ADR-087: a dispatched ensure creates a new instance owned by the
+    // caller. The already-present fast path above never touches the
+    // owner record (ensure hit must not reassign ownership).
+    permission::stage_agent_owner(&state, auth.as_ref().map(|e| &e.0), &instance_id, &agent_id, Some(&node_id));
+
     Ok((
         StatusCode::ACCEPTED,
         Json(EnsureAck {
@@ -1031,12 +1334,20 @@ pub async fn ensure_agent(
 
 pub async fn install_agent(
     State(state): State<AppState>,
+    auth: Option<Extension<AuthContext>>,
     multipart: Multipart,
 ) -> Result<(StatusCode, Json<OperationAck>), ApiError> {
     let form = read_agent_upload(&state, multipart).await?;
     let package_bytes = form.package_bytes;
     let node_id = form.node_id;
     let expected_version = form.expected_version;
+
+    // ADR-087 D4: installing onto a node is using that node → Node-manage.
+    permission::check_node_manage(
+        &state,
+        auth.as_ref().map(|e| &e.0),
+        &node_id,
+    )?;
 
     // Persist the source into the package registry and build the download
     // URL the node will use (advertise_host = the address other machines
@@ -1098,6 +1409,9 @@ pub async fn install_agent(
         })
         .await
         .map_err(|e| ApiError::internal(&format!("Install dispatch failed: {}", e)))?;
+
+    // ADR-087 D2/D3: the caller becomes the owner of the new instance.
+    permission::stage_agent_owner(&state, auth.as_ref().map(|e| &e.0), &instance_id, &agent_id, Some(&node_id));
 
     Ok((StatusCode::ACCEPTED, Json(ack)))
 }
@@ -1346,6 +1660,7 @@ pub struct CloneResponse {
 /// `POST /api/agents/:id/clone` — clone an agent
 pub async fn clone_agent(
     State(state): State<AppState>,
+    auth: Option<Extension<AuthContext>>,
     Path(agent_id): Path<String>,
     Json(req): Json<CloneRequest>,
 ) -> Result<(StatusCode, Json<CloneResponse>), ApiError> {
@@ -1369,6 +1684,14 @@ pub async fn clone_agent(
             .map(|i| i.node_id.clone())
             .ok_or_else(|| ApiError::not_found(&format!("Agent not found: {}", agent_id)))?
     };
+    // ADR-087 D4: clone creates an instance on the source's node →
+    // Node-manage on that node (the Agent-manage gate on the source ran
+    // in the permission middleware).
+    permission::check_node_manage(
+        &state,
+        auth.as_ref().map(|e| &e.0),
+        &node_id,
+    )?;
 
     let mode = match req.mode {
         CloneModeParam::Skeleton => "skeleton",
@@ -1404,6 +1727,24 @@ pub async fn clone_agent(
                 .map(String::from)
         })
         .unwrap_or_default();
+
+    // ADR-087 D2: the clone is a new instance owned by the caller. The
+    // node mints the instance id (ADR-073 keeps it node-side), but the
+    // landing directory is `{new_agent_id}/{instance_id}/` — recover the
+    // id from the reported path instead of widening the wire protocol.
+    let new_instance_id = std::path::Path::new(&install_path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default();
+    if !new_instance_id.is_empty() {
+        permission::record_agent_owner(
+            &state,
+            auth.as_ref().map(|e| &e.0),
+            new_instance_id,
+            &req.new_agent_id,
+            Some(&node_id),
+        );
+    }
 
     Ok((
         StatusCode::CREATED,
@@ -1518,6 +1859,7 @@ pub async fn upgrade_agent(
 /// would block the tokio runtime if called directly in an async handler.
 pub async fn uninstall_agent(
     State(state): State<AppState>,
+    auth: Option<Extension<AuthContext>>,
     Path(agent_id): Path<String>,
 ) -> Result<Json<MessageResponse>, ApiError> {
     // Check if agent is running first (lightweight read)
@@ -1542,6 +1884,13 @@ pub async fn uninstall_agent(
     let (instance_id, resolved_agent_id) =
         resolve_agent_identity(&state, &agent_id).await?;
     let node_id = resolve_agent_node_id(&state, &instance_id).await?;
+    // ADR-087 D4: uninstall is Node-manage ∧ Agent-manage — the agent
+    // half ran in the permission middleware; add the node half here.
+    permission::check_node_manage(
+        &state,
+        auth.as_ref().map(|e| &e.0),
+        &node_id,
+    )?;
     let event = node_control
         .uninstall_agent(
             &node_id,
@@ -1556,6 +1905,8 @@ pub async fn uninstall_agent(
     // Drop the installed entry immediately (the node's retained clear is
     // the eventual-consistency backstop for a fresh Gateway).
     state.gateway_state.write().await.remove_installed(&instance_id);
+    // ADR-087 D7: the ownership row dies with the instance.
+    permission::remove_agent_owner(&state, &instance_id);
     // Wake the inventory-change notifier — subscribers (Desktop) refetch
     // `GET /api/agents` on each signal so the sidebar reflects the
     // uninstall without polling or a tab-switch remount.
@@ -2311,6 +2662,392 @@ mod tests {
         AppState::new(gw, Arc::new(HttpAuth::new(false)))
     }
 
+    /// AppState with instance `INST` installed and an (initially empty)
+    /// agent-ownership store wired in.
+    async fn state_with_installed(inst: &str) -> AppState {
+        let mut state = test_state();
+        let dir = std::env::temp_dir().join(format!("acowork-test-agent-perms-{}", inst));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        state.agent_owners = Some(ownership::new_shared_agent_owners(&dir));
+        state
+            .gateway_state
+            .write()
+            .await
+            .add_installed(crate::gateway::state::AgentInfo {
+                instance_id: inst.to_string(),
+                agent_id: "com.foo.bar".to_string(),
+                version: "1.0.0".to_string(),
+                name: "Foo Bar".to_string(),
+                install_path: format!("/tmp/pkg/{}", inst),
+                manifest: test_manifest("com.foo.bar"),
+                node_id: "local".to_string(),
+            });
+        state
+    }
+
+    /// ADR-087 D7 fail-closed. This is the reported bug verbatim: agents
+    /// with NO `agent_owners.json` row were listed for EVERY account
+    /// (the old guard only filtered rows that existed — `is_some_and`),
+    /// then 404'd on click because the detail route required `can_use`.
+    /// Users saw private agents they could not open, stuck loading.
+    #[tokio::test]
+    async fn list_agents_hides_unowned_agent_from_stranger() {
+        let inst = "cccccccc-0b1b-4c2c-8d3d-9e4e5f6a7b8c";
+        let state = state_with_installed(inst).await; // no ownership row
+        let ctx = Extension(AuthContext {
+            user_id: "stranger".to_string(),
+            role: acowork_core::account::Role::User,
+            as_user: None,
+        });
+        let Json(list) = list_agents(
+            State(state),
+            Some(ctx),
+            Query(AgentListQuery { agent_id: None, node_id: None }),
+        )
+        .await;
+        assert!(
+            list.iter().all(|a| a.instance_id != inst),
+            "an agent with no ownership row must not be listed to a normal user"
+        );
+    }
+
+    /// The mirror image: admin must still see it, or an unclaimed agent
+    /// could never be found and claimed.
+    #[tokio::test]
+    async fn list_agents_shows_unowned_agent_to_admin() {
+        let inst = "dddddddd-0b1b-4c2c-8d3d-9e4e5f6a7b8c";
+        let state = state_with_installed(inst).await; // no ownership row
+        let ctx = Extension(AuthContext {
+            user_id: "root".to_string(),
+            role: acowork_core::account::Role::Admin,
+            as_user: None,
+        });
+        let Json(list) = list_agents(
+            State(state),
+            Some(ctx),
+            Query(AgentListQuery { agent_id: None, node_id: None }),
+        )
+        .await;
+        assert!(
+            list.iter().any(|a| a.instance_id == inst),
+            "admin must see ownerless agents so they can be claimed"
+        );
+    }
+
+    /// A guest keeps the row even when the agent is private — the
+    /// sidebar is where a node/agent is acted on.
+    #[tokio::test]
+    async fn list_agents_shows_private_agent_to_its_guest() {
+        let inst = "eeeeeeee-0b1b-4c2c-8d3d-9e4e5f6a7b8c";
+        let state = state_with_installed(inst).await;
+        ownership::lock(&state.agent_owners.clone().unwrap()).put(
+            inst,
+            OwnerRecord {
+                owner_user_id: Some("alice".into()),
+                guests: vec!["bob".into()],
+                visibility: Visibility::Private,
+                created_at: chrono::Utc::now(),
+                node_id: None,
+            },
+        );
+        let ctx = Extension(AuthContext {
+            user_id: "bob".to_string(),
+            role: acowork_core::account::Role::User,
+            as_user: None,
+        });
+        let Json(list) = list_agents(
+            State(state),
+            Some(ctx),
+            Query(AgentListQuery { agent_id: None, node_id: None }),
+        )
+        .await;
+        assert!(
+            list.iter().any(|a| a.instance_id == inst),
+            "a guest must keep seeing the private agent"
+        );
+    }
+
+    /// List and detail MUST agree. They used opposite defaults
+    /// (`is_some_and` vs `is_none_or`), which is what produced rows
+    /// that were visible but unopenable.
+    #[tokio::test]
+    async fn list_and_detail_agree_on_visibility() {
+        let inst = "ffffffff-0b1b-4c2c-8d3d-9e4e5f6a7b8c";
+        let state = state_with_installed(inst).await; // no ownership row
+        let ctx = |id: &str| {
+            Extension(AuthContext {
+                user_id: id.to_string(),
+                role: acowork_core::account::Role::User,
+                as_user: None,
+            })
+        };
+
+        let Json(list) = list_agents(
+            State(state.clone()),
+            Some(ctx("stranger")),
+            Query(AgentListQuery { agent_id: None, node_id: None }),
+        )
+        .await;
+        let listed = list.iter().any(|a| a.instance_id == inst);
+
+        let detail = get_agent_detail(State(state), Some(ctx("stranger")), Path(inst.into())).await;
+        let readable = detail.is_ok();
+
+        assert_eq!(
+            listed, readable,
+            "list visibility and detail visibility must not disagree"
+        );
+        assert!(!listed && !readable);
+    }
+
+    #[tokio::test]
+    async fn agent_permissions_owner_caller_gets_full_state_editable() {
+        let inst = "aaaaaaaa-0b1b-4c2c-8d3d-9e4e5f6a7b8c";
+        let state = state_with_installed(inst).await;
+        ownership::lock(&state.agent_owners.clone().unwrap()).put(
+            inst,
+            OwnerRecord {
+                owner_user_id: Some("alice".into()),
+                guests: vec!["bob".into()],
+                visibility: Visibility::Shared,
+                created_at: chrono::Utc::now(),
+                node_id: None,
+            },
+        );
+        let ctx = Extension(AuthContext {
+            user_id: "alice".to_string(),
+            role: acowork_core::account::Role::User,
+            as_user: None,
+        });
+        let Json(v) = get_agent_permissions(State(state), Path(inst.into()), Some(ctx))
+            .await
+            .unwrap();
+        assert_eq!(v["owner_user_id"], serde_json::json!("alice"));
+        assert_eq!(v["guests"], serde_json::json!(["bob"]));
+        assert_eq!(v["visibility"], "shared");
+        assert_eq!(v["can_attribute"], true);
+    }
+
+    #[tokio::test]
+    async fn agent_permissions_guest_caller_is_read_only() {
+        // ADR-087 D9 R1: guests see the list, cannot change it.
+        let inst = "bbbbbbbb-0b1b-4c2c-8d3d-9e4e5f6a7b8c";
+        let state = state_with_installed(inst).await;
+        ownership::lock(&state.agent_owners.clone().unwrap()).put(
+            inst,
+            OwnerRecord {
+                owner_user_id: Some("alice".into()),
+                guests: vec!["bob".into()],
+                visibility: Visibility::Private,
+                created_at: chrono::Utc::now(),
+                node_id: None,
+            },
+        );
+        let ctx = Extension(AuthContext {
+            user_id: "bob".to_string(),
+            role: acowork_core::account::Role::User,
+            as_user: None,
+        });
+        let Json(v) = get_agent_permissions(State(state), Path(inst.into()), Some(ctx))
+            .await
+            .unwrap();
+        assert_eq!(v["can_attribute"], false);
+    }
+
+    #[tokio::test]
+    async fn agent_permissions_local_mode_no_row_is_editable() {
+        // No ownership row at all (Local mode / never attributed): empty
+        // state, editable, visibility reads as `shared` in local mode.
+        let inst = "cccccccc-0b1b-4c2c-8d3d-9e4e5f6a7b8c";
+        let state = state_with_installed(inst).await;
+        let Json(v) = get_agent_permissions(State(state), Path(inst.into()), None)
+            .await
+            .unwrap();
+        assert_eq!(v["owner_user_id"], serde_json::Value::Null);
+        assert_eq!(v["guests"], serde_json::json!([]));
+        assert_eq!(v["visibility"], "shared");
+        assert_eq!(v["can_attribute"], true);
+    }
+
+    /// The reported bug: an admin flips the visibility switch to
+    /// `shared` in the Desktop permission dialog, presses Save, and the
+    /// switch snaps back to off with no error shown.
+    ///
+    /// `upsert_with` normalised `ownerless ⇒ not Shared` *after* the
+    /// caller's mutation had been applied, so an ownerless agent
+    /// silently stored `private` — while the handler echoed the
+    /// requested value back as 200, and the dialog's post-save
+    /// `load()` then re-read the unchanged stored value.
+    ///
+    /// The invariant is a data-hygiene rule, not an authorization one:
+    /// `can_view` already gates on `is_admin ∨ can_use ∨ shared`, so
+    /// an ownerless+shared agent is still admin-only for everyone else.
+    /// Rejecting the write up front turns a silent no-op into a
+    /// diagnosable error.
+    #[tokio::test]
+    async fn patch_agent_visibility_rejects_shared_on_ownerless_row() {
+        let inst = "dddddddd-0b1b-4c2c-8d3d-9e4e5f6a7b8c";
+        let state = state_with_installed(inst).await;
+        ownership::lock(&state.agent_owners.clone().unwrap()).put(
+            inst,
+            OwnerRecord {
+                owner_user_id: None,
+                guests: vec!["babea202".into()],
+                visibility: Visibility::Private,
+                created_at: chrono::Utc::now(),
+                node_id: None,
+            },
+        );
+        let err = patch_agent_visibility(
+            State(state),
+            Path(inst.into()),
+            Json(serde_json::json!({ "visibility": "shared" })),
+        )
+        .await
+        .expect_err("ownerless + shared must be rejected, not silently downgraded");
+        assert_eq!(err.code, 409, "the client must be able to branch on the status");
+        assert!(
+            err.error.contains("owner"),
+            "the error must name the cause (claim an owner first): {}",
+            err.error
+        );
+    }
+
+    /// The inverse direction must keep working: ownerless ⇒ private is
+    /// already the stored value, so the write is a no-op that succeeds.
+    /// Only the `shared` side of the invariant needs the guard.
+    #[tokio::test]
+    async fn patch_agent_visibility_allows_private_on_ownerless_row() {
+        let inst = "eeeeeeee-0b1b-4c2c-8d3d-9e4e5f6a7b8c";
+        let state = state_with_installed(inst).await;
+        ownership::lock(&state.agent_owners.clone().unwrap()).put(
+            inst,
+            OwnerRecord {
+                owner_user_id: None,
+                guests: vec![],
+                visibility: Visibility::Private,
+                created_at: chrono::Utc::now(),
+                node_id: None,
+            },
+        );
+        let _ = patch_agent_visibility(
+            State(state.clone()),
+            Path(inst.into()),
+            Json(serde_json::json!({ "visibility": "private" })),
+        )
+        .await
+        .expect("private on an ownerless row is the invariant's resting state");
+        let store = ownership::lock_shared(&state.agent_owners).unwrap();
+        assert_eq!(
+            store.get(inst).map(|r| r.visibility),
+            Some(Visibility::Private)
+        );
+    }
+
+    /// The claim path that makes the switch usable again: once an admin
+    /// claims ownership, `shared` persists. This is the two-call recovery
+    /// the error message points at.
+    #[tokio::test]
+    async fn visibility_shared_persists_once_an_owner_is_claimed() {
+        let inst = "ffffffff-0b1b-4c2c-8d3d-9e4e5f6a7b8c";
+        let state = state_with_installed(inst).await;
+        ownership::lock(&state.agent_owners.clone().unwrap()).put(
+            inst,
+            OwnerRecord {
+                owner_user_id: None,
+                guests: vec![],
+                visibility: Visibility::Private,
+                created_at: chrono::Utc::now(),
+                node_id: None,
+            },
+        );
+        // 1. admin claims ownership (D7).
+        let _ = patch_agent_owner(
+            State(state.clone()),
+            Path(inst.into()),
+            Json(serde_json::json!({ "owner_user_id": "babea202" })),
+        )
+        .await
+        .unwrap();
+        // 2. now the visibility flip sticks.
+        let _ = patch_agent_visibility(
+            State(state.clone()),
+            Path(inst.into()),
+            Json(serde_json::json!({ "visibility": "shared" })),
+        )
+        .await
+        .unwrap();
+        let store = ownership::lock_shared(&state.agent_owners).unwrap();
+        let rec = store.get(inst).unwrap();
+        assert_eq!(rec.visibility, Visibility::Shared);
+        assert_eq!(rec.owner_user_id.as_deref(), Some("babea202"));
+    }
+
+    /// ADR-087 D8: the permissions payload must carry the *data-state*
+    /// answer, not just the permission answer. An admin passes
+    /// `can_attribute` on an ownerless row, so a client that only reads
+    /// that bit would enable the visibility switch and only learn from a
+    /// 409 that the write is impossible. `can_set_visibility` is what
+    /// lets the dialog disable the control up front.
+    #[tokio::test]
+    async fn permissions_reports_an_ownerless_row_as_unpublishable() {
+        let inst = "aaaaaaaa-0b1b-4c2c-8d3d-9e4e5f6a7b8c";
+        let state = state_with_installed(inst).await;
+        ownership::lock(&state.agent_owners.clone().unwrap()).put(
+            inst,
+            OwnerRecord {
+                owner_user_id: None,
+                guests: vec![],
+                visibility: Visibility::Private,
+                created_at: chrono::Utc::now(),
+                node_id: None,
+            },
+        );
+        // multi_user with an admin caller — the mode where the ownerless
+        // state is reachable at all. (`auth: None` would be Local mode,
+        // where the tables are never evaluated, D8.)
+        let admin = Extension(AuthContext {
+            user_id: "root".into(),
+            role: acowork_core::account::Role::Admin,
+            as_user: None,
+        });
+        let Json(v) = get_agent_permissions(State(state.clone()), Path(inst.into()), Some(admin))
+            .await
+            .unwrap();
+        assert_eq!(v["can_attribute"], serde_json::json!(true));
+        assert_eq!(v["can_set_visibility"], serde_json::json!(false));
+        assert_eq!(v["ownerless"], serde_json::json!(true));
+    }
+
+    /// The counterpart: an owned row is publishable, and the flag flips
+    /// with the claim — the client's only signal to re-enable the switch.
+    #[tokio::test]
+    async fn permissions_reports_an_owned_row_as_publishable() {
+        let inst = "bbbbbbbb-0b1b-4c2c-8d3d-9e4e5f6a7b8c";
+        let state = state_with_installed(inst).await;
+        ownership::lock(&state.agent_owners.clone().unwrap()).put(
+            inst,
+            OwnerRecord {
+                owner_user_id: Some("babea202".into()),
+                guests: vec![],
+                visibility: Visibility::Private,
+                created_at: chrono::Utc::now(),
+                node_id: None,
+            },
+        );
+        let admin = Extension(AuthContext {
+            user_id: "root".into(),
+            role: acowork_core::account::Role::Admin,
+            as_user: None,
+        });
+        let Json(v) = get_agent_permissions(State(state.clone()), Path(inst.into()), Some(admin))
+            .await
+            .unwrap();
+        assert_eq!(v["can_set_visibility"], serde_json::json!(true));
+        assert_eq!(v["ownerless"], serde_json::json!(false));
+    }
+
     /// Build an AppState with package `agent_id` installed as instance
     /// `instance_id`, and the MQTT agent registry seeded with a
     /// `DataEnvelope<AgentStatus{online}>` payload for that instance.
@@ -2465,6 +3202,7 @@ mod tests {
 
         let Json(resp) = list_agents(
             State(state),
+            None,
             Query(AgentListQuery {
                 agent_id: None,
                 node_id: None,
@@ -2522,6 +3260,7 @@ mod tests {
         // Unfiltered: one entry per INSTANCE, never collapsed by agent_id.
         let Json(all) = list_agents(
             State(state.clone()),
+            None,
             Query(AgentListQuery {
                 agent_id: None,
                 node_id: None,
@@ -2546,6 +3285,7 @@ mod tests {
         // Package view: ?agent_id=com.foo.bar → exactly its 2 instances.
         let Json(pkg_view) = list_agents(
             State(state.clone()),
+            None,
             Query(AgentListQuery {
                 agent_id: Some("com.foo.bar".to_string()),
                 node_id: None,
@@ -2561,6 +3301,7 @@ mod tests {
         // Node view: ?node_id=node-b → the 2 instances hosted there.
         let Json(node_view) = list_agents(
             State(state),
+            None,
             Query(AgentListQuery {
                 agent_id: None,
                 node_id: Some("node-b".to_string()),
@@ -2594,6 +3335,10 @@ mod tests {
             debug_state: crate::gateway::state::DebugState::Disabled,
             debug_port: None,
             last_interaction_at: None,
+            can_manage: None,
+            can_use: None,
+            visibility: "shared".to_string(),
+            is_guest: false,
         };
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("com.example.weather"));
@@ -2671,6 +3416,10 @@ mod tests {
             debug_state: crate::gateway::state::DebugState::Disabled,
             debug_port: None,
             last_interaction_at: ts.map(|s| s.to_string()),
+            can_manage: None,
+            can_use: None,
+            visibility: "shared".to_string(),
+            is_guest: false,
         }
     }
 

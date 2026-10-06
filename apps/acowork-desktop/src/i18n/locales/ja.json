@@ -114,7 +114,6 @@
   },
   "account": {
     "loginTitle": "ログイン",
-    "loginSubtitle": "続けるにはログインしてください",
     "username": "ユーザー名",
     "password": "パスワード",
     "login": "ログイン",
@@ -239,6 +238,14 @@
     "retry": "再試行",
     "refreshPage": "ページを更新"
   },
+  "apiError": {
+    "permissionDenied": "この操作を行う権限がありません。リソースの所有者に権限付与を依頼してください。",
+    "permissionUse": "この操作には使用権限が必要です。所有者に承認ユーザーへの追加を依頼してください。",
+    "permissionManage": "この操作には管理権限が必要です。リソースの所有者または管理者のみ実行できます。",
+    "permissionAdmin": "この操作は管理者のみ実行できます。",
+    "permissionTransfer": "権限設定の変更はリソースの所有者または管理者のみ可能です。",
+    "readOnlyBanner": "このリソースは閲覧権限のみのため、変更は保存されません。必要な場合は所有者に権限を依頼してください。"
+  },
   "chatPanel": {
     "sessionLoadFailed": "セッションの読み込みに失敗しました",
     "agentStopped": "{{name}} は停止しています",
@@ -249,6 +256,9 @@
     "uploadFile": "ファイルをアップロード",
     "uploadHint": "ファイルをアップロード（PDF/DOCX/PPTX/XLSX/PNG/JPG/GIF/WebP）",
     "sendMessage": "メッセージを送信",
+    "sendFailedNotConnected": "メッセージの送信に失敗しました:エージェントはまだ接続されていない可能性があります。しばらくしてから再試行してください",
+    "modelSwitchFailed": "モデルの切り替えに失敗しました:{{model}}",
+    "reasoningEffortFailed": "推論強度の設定に失敗しました",
     "addToQueue": "キューに追加",
     "sendQueuedAndStop": "キューを送信して停止",
     "stop": "停止",
@@ -388,7 +398,10 @@
     "errorFailedToRestartInDebug": "デバッグ再起動に失敗しました：{{error}}",
     "errorFailedToStopAgent": "Agent の停止に失敗しました：{{error}}",
     "errorFailedToUninstallAgent": "Agent のアンインストールに失敗しました：{{error}}",
-    "node": "Node"
+    "node": "Node",
+    "contextPermissions": "権限",
+    "nodePermissions": "ノードの権限",
+    "noAccess": "アクセス権がありません"
   },
   "cloneDialog": {
     "skeleton": "スケルトン",
@@ -827,7 +840,12 @@
     "loading": "読み込み中...",
     "defaultWorkingDirectory": "デフォルトの作業ディレクトリ",
     "noMatchingWorkspaces": "一致するワークスペースがありません",
-    "noWorkspacesConfigured": "ワークスペースが設定されていません"
+    "noWorkspacesConfigured": "ワークスペースが設定されていません",
+    "deniedTitle": "ワークスペースを表示できません",
+    "deniedHint": "このエージェントは共有されていますが、ワークスペースは所有者と権限を持つユーザーにのみ表示されます。追加を依頼するか、会話の中で作業ディレクトリを伝えてください。",
+    "treeLoadFailed": "ワークスペースの読み込みに失敗しました（{{detail}}）",
+    "retry": "再試行",
+    "treeLoadAborted": "リクエストが中止されました"
   },
   "fileEditor": {
     "emptyState": "ワークスペースツリーのファイルをダブルクリックして開く",
@@ -1666,5 +1684,32 @@
     "imagePrompt": "画像 URL または相対パス",
     "tbUndo": "元に戻す",
     "tbRedo": "やり直す"
+  },
+  "permissionDialog": {
+    "title": "権限",
+    "ariaLabelClose": "閉じる",
+    "owner": "所有者",
+    "ownerUnassigned": "未設定（管理者のみ）",
+    "visibility": "公開範囲",
+    "visibilityShared": "共有",
+    "visibilityPublic": "公開",
+    "visibilityPrivate": "非公開",
+    "visibilityOnHint": "ログイン中の全ユーザーが読み取り専用で閲覧できます（詳細と設定）。チャットにはゲストとしての追加許可が必要です。",
+    "visibilityOffHint": "所有者・許可されたユーザー・管理者のみ表示",
+    "needsOwnerHint": "所有権を取得すると{{pub}}にできます。",
+    "guests": "許可されたユーザー（利用・チャット可）",
+    "guestsHint": "許可されたユーザーはチャットやリソースの利用（ワークスペースファイルを含む）ができますが、設定・権限・所有者の変更はできません。",
+    "noUsers": "他のアカウントがありません",
+    "guestUnavailable": "削除済みアカウント — チェックを外して削除",
+    "readOnly": "一覧は閲覧できますが、変更は所有者または管理者のみ可能です。",
+    "loadFailed": "権限の読み込みに失敗",
+    "saveFailed": "保存に失敗",
+    "close": "閉じる",
+    "save": "保存",
+    "claimOwner": "所有権をclaimedする",
+    "claiming": "取得中…",
+    "claimOwnerHint": "この{{kind}}には所有者がいないため、あなたが管理でき、現時点では{{pub}}に設定できません。所有権を主張すると公開設定を変更できます。",
+    "agent": "エージェント",
+    "node": "ノード"
   }
 }

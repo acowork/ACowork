@@ -2073,11 +2073,20 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         });
       }
       // Transient client-side error - show a toast, don't pollute the
-      // messages array (sliding window over JSONL).
-      showToast({
-        type: "error",
-        message: "Failed to send message: Agent may not be connected yet. Please wait and try again.",
-      });
+      // messages array (sliding window over JSONL). A Gateway denial
+      // (403/404 `SessionAccessError`) is NOT a connection problem —
+      // say "you lack permission", not "wait and retry".
+      if (sessionControl.isAccessDenied(error)) {
+        showToast({
+          type: "error",
+          message: (error as sessionControl.SessionAccessError).message,
+        });
+      } else {
+        showToast({
+          type: "error",
+          message: i18n.t("chatPanel.sendFailedNotConnected"),
+        });
+      }
     }
   },
 
@@ -2170,9 +2179,48 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     // keep the previous base_url and yield 401s.
     // `account_id` selects the API key when the provider holds several
     // (multi-account, was the MQTT payload's `account_id`).
+    //
+    // Capture the pre-switch values: a refused write (403 for a
+    // view-only caller) must snap the picker back, or the UI would keep
+    // showing a model that was never persisted.
+    const prevAgent = getAgentState(get(), agentId);
+    const prevSession = prevAgent.sessionStates[sessionId];
+    const prev = {
+      model: prevSession?.model ?? null,
+      provider: prevSession?.provider ?? null,
+      providerAccountId: prevSession?.providerAccountId ?? null,
+      reasoningEffort: prevSession?.reasoningEffort ?? null,
+      preferredModel: prevAgent.preferredModel,
+      preferredProvider: prevAgent.preferredProvider,
+    };
     sessionControl
       .patchSessionConfig(agentId, sessionId, { model, provider, account_id: accountId ?? undefined })
-      .catch((err: unknown) => log.warn("[ChatStore] model switch failed:", err));
+      .catch((err: unknown) => {
+        log.warn("[ChatStore] model switch failed:", err);
+        // Two separate `set`s — `updateSessionState` returns only the
+        // patched `agentStates` slice, which is not a full `ChatStore`,
+        // so the two helpers cannot be nested.
+        set((state) =>
+          updateSessionState(state, agentId, sessionId!, {
+            model: prev.model,
+            provider: prev.provider,
+            providerAccountId: prev.providerAccountId,
+            reasoningEffort: prev.reasoningEffort,
+          }),
+        );
+        set((state) =>
+          updateAgentState(state, agentId, {
+            preferredModel: prev.preferredModel,
+            preferredProvider: prev.preferredProvider,
+          }),
+        );
+        showToast({
+          type: "error",
+          message: sessionControl.isAccessDenied(err)
+            ? (err as sessionControl.SessionAccessError).message
+            : i18n.t("chatPanel.modelSwitchFailed", { model }),
+        });
+      });
   },
 
   setSessionWorkspace: (agentId: string, sessionId: string, workspaceId: string) => {
@@ -2184,13 +2232,29 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     const sessionId = getAgentState(get(), agentId).activeSessionId;
     if (!sessionId) return;
 
+    const previous =
+      getAgentState(get(), agentId).sessionStates[sessionId]?.reasoningEffort ?? null;
+
     // Optimistically update frontend state (Runtime will confirm)
     set((state) => updateSessionState(state, agentId, sessionId, { reasoningEffort: effort }));
 
     // ADR-076 §决策 4: authenticated HTTP write (was MQTT `reasoning_effort`).
     sessionControl
       .patchSessionConfig(agentId, sessionId, { reasoning_effort: effort })
-      .catch((err: unknown) => log.warn("[ChatStore] reasoning effort failed:", err));
+      .catch((err: unknown) => {
+        log.warn("[ChatStore] reasoning effort failed:", err);
+        // Snap the menu back — a refused write must not leave the
+        // session claiming an effort level the Runtime never accepted.
+        set((state) =>
+          updateSessionState(state, agentId, sessionId, { reasoningEffort: previous }),
+        );
+        showToast({
+          type: "error",
+          message: sessionControl.isAccessDenied(err)
+            ? (err as sessionControl.SessionAccessError).message
+            : i18n.t("chatPanel.reasoningEffortFailed"),
+        });
+      });
   },
   setSessionContextWindow: (window: number | null, agentId: string) => {
     const sessionId = getAgentState(get(), agentId).activeSessionId;

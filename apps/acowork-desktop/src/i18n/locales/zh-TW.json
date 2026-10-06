@@ -114,7 +114,6 @@
   },
   "account": {
     "loginTitle": "登入",
-    "loginSubtitle": "登入後繼續使用",
     "username": "使用者名稱",
     "password": "密碼",
     "login": "登入",
@@ -239,6 +238,14 @@
     "retry": "重試",
     "refreshPage": "重新整理頁面"
   },
+  "apiError": {
+    "permissionDenied": "沒有權限執行該操作,請聯絡資源擁有者新增授權",
+    "permissionUse": "此操作需要使用權,請聯絡資源擁有者將你加入授權使用者",
+    "permissionManage": "此操作需要管理權限,僅資源擁有者或管理員可以執行",
+    "permissionAdmin": "此操作僅管理員可以執行",
+    "permissionTransfer": "僅資源擁有者或管理員可以修改授權設定",
+    "readOnlyBanner": "你目前只有檢視權限,修改不會被儲存。如需權限請聯絡資源擁有者。"
+  },
   "chatPanel": {
     "sessionLoadFailed": "工作階段載入失敗",
     "agentStopped": "{{name}} 已停止",
@@ -249,6 +256,9 @@
     "uploadFile": "上傳檔案",
     "uploadHint": "上傳檔案（PDF/DOCX/PPTX/XLSX/PNG/JPG/GIF/WebP）",
     "sendMessage": "傳送訊息",
+    "sendFailedNotConnected": "傳送失敗:Agent 可能尚未連線,請稍後重試",
+    "modelSwitchFailed": "切換模型失敗:{{model}}",
+    "reasoningEffortFailed": "推理強度設定失敗",
     "addToQueue": "加入佇列",
     "sendQueuedAndStop": "傳送佇列並停止",
     "stop": "停止",
@@ -387,7 +397,10 @@
     "errorFailedToRestartInDebug": "重新啟動偵錯失敗：{{error}}",
     "errorFailedToStopAgent": "停止 Agent 失敗：{{error}}",
     "errorFailedToUninstallAgent": "解除安裝 Agent 失敗：{{error}}",
-    "node": "節點"
+    "node": "節點",
+    "contextPermissions": "權限",
+    "nodePermissions": "節點權限",
+    "noAccess": "無存取權限"
   },
   "cloneDialog": {
     "skeleton": "骨架",
@@ -826,7 +839,12 @@
     "loading": "載入中...",
     "defaultWorkingDirectory": "預設工作目錄",
     "noMatchingWorkspaces": "無符合的工作區",
-    "noWorkspacesConfigured": "未設定工作區"
+    "noWorkspacesConfigured": "未設定工作區",
+    "deniedTitle": "無權檢視工作區",
+    "deniedHint": "此 Agent 已共享給你，但工作區僅對擁有者與被授權的使用者可見。如需使用，請讓擁有者將你加入協作名單，或在對話中直接說明你的工作目錄。",
+    "treeLoadFailed": "工作區載入失敗（{{detail}}）",
+    "retry": "重試",
+    "treeLoadAborted": "請求已取消"
   },
   "fileEditor": {
     "emptyState": "雙擊工作區目錄樹中的檔案以開啟",
@@ -1665,5 +1683,32 @@
     "imagePrompt": "圖片位址（URL 或相對路徑）",
     "tbUndo": "復原",
     "tbRedo": "重做"
+  },
+  "permissionDialog": {
+    "title": "權限",
+    "ariaLabelClose": "關閉",
+    "owner": "擁有者",
+    "ownerUnassigned": "未指定（僅管理員）",
+    "visibility": "可見性",
+    "visibilityShared": "共用",
+    "visibilityPublic": "公開",
+    "visibilityPrivate": "私人",
+    "visibilityOnHint": "所有登入使用者都能唯讀檢視它（詳情與設定）。聊天仍需將其加為被授權使用者。",
+    "visibilityOffHint": "僅擁有者、被授權使用者和管理員可見",
+    "needsOwnerHint": "認領歸屬後即可設為{{pub}}。",
+    "guests": "授權使用者（可聊天使用）",
+    "guestsHint": "被授權使用者可聊天并使用該資源（含其工作區檔案），但不能修改其設定、權限或擁有者。",
+    "noUsers": "暫無其他帳號",
+    "guestUnavailable": "已註銷帳號 — 取消勾選以移除",
+    "readOnly": "你可以檢視此清單，但只有擁有者或管理員可以修改。",
+    "loadFailed": "權限載入失敗",
+    "saveFailed": "儲存失敗",
+    "close": "關閉",
+    "save": "儲存",
+    "claimOwner": "認領歸屬",
+    "claiming": "認領中…",
+    "claimOwnerHint": "該{{kind}}無歸屬，因此僅你可管理，且暫時無法設為{{pub}}。認領歸屬後即可調整可見性。",
+    "agent": "Agent",
+    "node": "節點"
   }
 }

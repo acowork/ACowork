@@ -3,6 +3,7 @@
 //! Provides REST + WebSocket API for Desktop App and CLI access.
 //! Shares `Arc<RwLock<GatewayState>>` with the gRPC server.
 
+pub mod acl;
 pub mod agent_config;
 pub mod agents;
 pub mod auth;
@@ -25,6 +26,7 @@ pub mod memory_api;
 pub mod models_api;
 pub mod nodes_api;
 pub mod pm_proxy;
+pub mod permission;
 pub mod provider_api;
 pub mod proxy;
 pub mod publish_api;

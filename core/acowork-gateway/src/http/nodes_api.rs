@@ -12,11 +12,18 @@
 //! (no daemon state). The HTTP endpoint reads the *daemon's* in-memory
 //! registry instead, so it reflects the live Gateway's view.
 
-use axum::{extract::State, routing::get, Json, Router};
+use axum::{
+    extract::{Extension, Path, State},
+    routing::{get, patch, post},
+    Json, Router,
+};
 
 use serde::Serialize;
 
-use crate::http::routes::AppState;
+use crate::gateway::ownership::{self, Visibility};
+use crate::http::auth_middleware::AuthContext;
+use crate::http::permission;
+use crate::http::routes::{ApiError, AppState};
 
 /// Response for `GET /api/nodes` — a single Node Agent's live view.
 ///
@@ -74,48 +81,324 @@ pub struct NodeResponse {
     /// This node's reverse-proxy base URL.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub http_endpoint: Option<String>,
+    /// ADR-087 D8: caller may manage this node (owner / guest / admin,
+    /// or anyone in Local mode). Server-computed — the client renders
+    /// from this boolean and never re-derives from owner/guest lists.
+    pub can_manage: bool,
+    /// ADR-087 D9: caller is on the manage list *as a guest* (not owner)
+    /// — drives the "shared with you" badge; attribution edits stay
+    /// owner/admin-only regardless.
+    pub is_guest: bool,
+    /// ADR-087 D2: `"private"` (default — machine metadata trimmed for
+    /// non-manage callers) or `"public"`.
+    pub visibility: String,
 }
 
 /// `GET /api/nodes` — list all known nodes (online + offline).
 ///
 /// Reads the daemon's in-memory [`crate::mqtt::SharedNodeRegistry`],
 /// sorted by node_id (stable ordering for the Desktop table).
-pub async fn list_nodes(State(state): State<AppState>) -> Json<Vec<NodeResponse>> {
+pub async fn list_nodes(
+    State(state): State<AppState>,
+    auth: Option<Extension<AuthContext>>,
+) -> Json<Vec<NodeResponse>> {
     let nodes = match state.node_registry.as_ref() {
         Some(registry) => registry.read().await.list_nodes(),
         // No node registry (MQTT disabled) — empty topology, not an error.
         None => Vec::new(),
     };
 
+    let ctx = auth.as_ref().map(|e| &e.0);
     let resp = nodes
         .into_iter()
-        .map(|n| {
+        .filter_map(|n| {
             let info = n.info.as_ref();
-            NodeResponse {
+            let rec = node_owner_rec(&state, &n.node_id);
+            // ADR-087 D5/B: a `private` node is not merely field-trimmed,
+            // it is ABSENT from the list for callers outside its sharing
+            // circle. `can_view` is the same predicate the agent list and
+            // detail use, so the two resources cannot drift again.
+            //
+            // Why hide rather than trim: the fields a non-manager could
+            // still read (node_name / online / agent_count) tell them a
+            // machine exists and how busy it is, and the sidebar offers
+            // no action they are allowed to take — install and every
+            // other machine-touching route is Node-manage gated. Showing
+            // an inert row leaks topology for zero benefit. Managers
+            // (owner ∨ guest ∨ admin) keep the row, since the sidebar is
+            // the only place a node can be acted on.
+            // `ctx == None` means Local mode (ADR-087 D8: the whole
+            // authorization layer is a no-op) or a machine actor with
+            // no `AuthContext` (module invariant 4). Neither is subject
+            // to visibility filtering — only an authenticated
+            // multi-user caller is.
+            if let Some(c) = ctx
+                && !ownership::can_view(rec.as_ref(), &c.user_id, c.is_admin())
+            {
+                return None;
+            }
+            let can_manage = permission::caller_can_manage(ctx, rec.as_ref());
+            let is_guest = ownership::is_guest(rec.as_ref(), ctx.map(|c| c.user_id.as_str()));
+            // ADR-087 D5 table: machine-identifying metadata (hostname /
+            // OS / arch / endpoint) is manage-list only. Local mode (no
+            // ctx) sees everything. Operational fingerprints
+            // (node_version / protocol_version / capabilities / max_agents
+            // / agent_count) are pruned too — they identify the machine
+            // and its capacity just as concretely as the hostname.
+            let (hostname, os, arch, http_endpoint, node_version,
+                 protocol_version, capabilities, max_agents, agent_count) =
+                if can_manage {
+                    (
+                        info.map(|i| i.hostname.clone()),
+                        info.map(|i| i.os.clone()),
+                        info.map(|i| i.arch.clone()),
+                        info.map(|i| i.http_endpoint.clone()),
+                        info.map(|i| i.node_version.clone()),
+                        info.map(|i| i.protocol_version),
+                        info.map(|i| i.capabilities.clone()).unwrap_or_default(),
+                        info.map(|i| i.max_agents),
+                        info.map(|i| i.agent_count),
+                    )
+                } else {
+                    (
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        Vec::new(),
+                        None,
+                        None,
+                    )
+                };
+            Some(NodeResponse {
                 node_id: n.node_id,
                 online: n.online,
                 online_since: n.online_since.map(|t| t.to_rfc3339()),
                 node_name: n.node_name.clone(),
                 gateway_managed: n.gateway_managed,
-                hostname: info.map(|i| i.hostname.clone()),
-                os: info.map(|i| i.os.clone()),
-                arch: info.map(|i| i.arch.clone()),
-                node_version: info.map(|i| i.node_version.clone()),
-                protocol_version: info.map(|i| i.protocol_version),
-                capabilities: info.map(|i| i.capabilities.clone()).unwrap_or_default(),
-                max_agents: info.map(|i| i.max_agents),
-                agent_count: info.map(|i| i.agent_count),
-                http_endpoint: info.map(|i| i.http_endpoint.clone()),
-            }
+                hostname,
+                os,
+                arch,
+                node_version,
+                protocol_version,
+                capabilities,
+                max_agents,
+                agent_count,
+                http_endpoint,
+                can_manage,
+                is_guest,
+                visibility: rec
+                    .map(|r| r.visibility.as_str().to_string())
+                    .unwrap_or_else(|| "private".into()),
+            })
         })
         .collect();
 
     Json(resp)
 }
 
+// ---- ADR-087: node ownership endpoints -------------------------------
+//
+// The permission middleware gates the three attribution PATCHes as
+// Node-transfer (owner / admin) before the handler runs; handlers
+// validate input and mutate the row only.
+
+/// Ownership row for a node, cloned out of the store (no guard crosses an
+/// await). `None` = no record (ownerless -> admin-only, fail-closed).
+fn node_owner_rec(
+    state: &AppState,
+    node_id: &str,
+) -> Option<crate::gateway::ownership::OwnerRecord> {
+    ownership::lock_shared(&state.node_owners)
+        .as_ref()
+        .and_then(|store| store.get(node_id).cloned())
+}
+
+/// Load a node's ownership row, apply `f`, persist. When the node has no
+/// row yet (legacy nodes enrolled before ADR-087), a default ownerless
+/// row is created and `f` applied — the D7 admin-claim path, symmetric
+/// with the agent side. The middleware has already gated this to admin.
+async fn edit_node_owner<F: FnOnce(&mut ownership::OwnerRecord)>(
+    state: &AppState,
+    id: &str,
+    f: F,
+) -> Result<(), ApiError> {
+    // Existence gate (mirrors the agent side's `resolve_installed_key`):
+    // never create an ownership row for a node id that was never seen —
+    // otherwise arbitrary PATCHes would litter the store with ghost rows.
+    let known = ownership::lock_shared(&state.node_owners)
+        .map(|s| s.get(id).is_some())
+        .unwrap_or(false);
+    let known = known
+        || match state.node_registry.as_ref() {
+            Some(reg) => reg.read().await.get(id).is_some(),
+            None => false,
+        };
+    if !known {
+        return Err(ApiError::not_found(&format!("no such node: {id}")));
+    }
+    let mut store = ownership::lock_shared(&state.node_owners)
+        .ok_or_else(|| ApiError::internal("ownership store unavailable"))?;
+    store.upsert_with(id, || ownership::OwnerRecord::new(None), f);
+    Ok(())
+}
+
+/// `POST /api/nodes/enrollment-tokens` — mint a one-time enrollment token
+/// bound to the caller (ADR-087 D2). Body: optional `{ "ttl_seconds": n }`
+/// (default 3600, capped at 24h). The plaintext is returned exactly once.
+async fn create_enrollment_token(
+    State(state): State<AppState>,
+    auth: Option<Extension<AuthContext>>,
+    body: Option<Json<serde_json::Value>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let ttl_secs = body
+        .as_ref()
+        .and_then(|Json(v)| v.get("ttl_seconds").and_then(|x| x.as_u64()))
+        .unwrap_or(3600)
+        .min(86_400);
+    let store = state
+        .enrollment_tokens
+        .as_ref()
+        .ok_or_else(|| ApiError::internal("enrollment token store unavailable"))?;
+    let owner = auth.map(|e| e.0.user_id);
+    let plaintext = store
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .create_token(std::time::Duration::from_secs(ttl_secs), owner);
+    Ok(Json(serde_json::json!({ "token": plaintext })))
+}
+
+/// `GET /api/nodes/{id}/permissions` — current attribution + guest list.
+///
+/// Read side of the three PATCH endpoints, gated at `NodeManage` by the
+/// permission middleware (registered in `extract_target`). The Desktop
+/// permission dialog renders from this; `can_edit` tells the caller
+/// whether the PATCH endpoints will actually accept their write
+/// (attribution ops additionally require owner ∨ admin — ADR-087 D9 R1).
+async fn get_node_permissions(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    auth: Option<Extension<AuthContext>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let store = ownership::lock_shared(&state.node_owners)
+        .ok_or_else(|| ApiError::internal("ownership store unavailable"))?;
+    // No row = never attributed. In Local mode (no auth context) the
+    // resource is implicitly manageable; in multi-user mode an
+    // ownerless node is admin-only, so the dialog shows an empty state.
+    let rec = store.get(&id);
+    let local = auth.is_none();
+    let user_id = auth.as_ref().map(|a| a.0.user_id.clone()).unwrap_or_default();
+    let is_admin = auth.as_ref().is_some_and(|a| a.0.is_admin());
+    let can_attribute = local
+        || is_admin
+        || rec.and_then(|r| r.owner_user_id.as_deref()) == Some(user_id.as_str());
+    Ok(Json(serde_json::json!({
+        "owner_user_id": rec.and_then(|r| r.owner_user_id.clone()),
+        "guests": rec.map(|r| r.guests.clone()).unwrap_or_default(),
+        "visibility": rec.map(|r| r.visibility.as_str()).unwrap_or("private"),
+        "can_attribute": can_attribute,
+        // ADR-087 D6/D8 — see `agents.rs::get_agent_permissions`.
+        "can_set_visibility": ownership::can_publish(rec, local),
+        "ownerless": ownership::is_ownerless(rec),
+    })))
+}
+
+/// `PATCH /api/nodes/{id}/visibility` — `{ "visibility": "public"|"private" }`.
+///
+/// **Ownerless guard** — same rationale as the agent-side handler
+/// (`agents.rs::patch_agent_visibility`): `upsert_with` normalises
+/// `ownerless ⇒ not published` after the mutation, so publishing an
+/// ownerless node would answer 200 while silently storing `private`,
+/// and the Desktop switch would snap back with no error. Reject it with
+/// a 409 that names the claim-first recovery instead.
+async fn patch_node_visibility(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let vs = body
+        .get("visibility")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| ApiError::bad_request("missing `visibility`"))?;
+    let vis = match vs {
+        "public" => Visibility::Public,
+        "private" => Visibility::Private,
+        _ => {
+            return Err(ApiError::bad_request(
+                "visibility must be `public` or `private`",
+            ))
+        }
+    };
+    if vis == Visibility::Public {
+        let store = ownership::lock_shared(&state.node_owners)
+            .ok_or_else(|| ApiError::internal("ownership store unavailable"))?;
+        if ownership::is_ownerless(store.get(&id)) {
+            // Non-UI fallback only — the Desktop reads
+            // `can_set_visibility` and disables the switch.
+            return Err(ApiError::conflict(
+                "this node has no owner yet, so it cannot be made public. \
+                 Claim ownership first, then set visibility.",
+            ));
+        }
+    }
+    edit_node_owner(&state, &id, |rec| rec.visibility = vis).await?;
+    Ok(Json(serde_json::json!({ "visibility": vs })))
+}
+
+/// `PATCH /api/nodes/{id}/guests` — `{ "guests": [user_id, ...] }`,
+/// full-list replacement (ADR-087 D9: PUT-list semantics).
+async fn patch_node_guests(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let list = body
+        .get("guests")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| ApiError::bad_request("missing `guests` array"))?;
+    let guests: Vec<String> = list
+        .iter()
+        .filter_map(|v| v.as_str().map(|x| x.to_string()))
+        .collect();
+    if guests.len() != list.len() {
+        return Err(ApiError::bad_request("guests must be user-id strings"));
+    }
+    edit_node_owner(&state, &id, |rec| rec.guests = guests.clone()).await?;
+    Ok(Json(serde_json::json!({ "guests": guests })))
+}
+
+/// `PATCH /api/nodes/{id}/owner` — `{ "owner_user_id": "..." }` transfer
+/// (owner / admin, enforced by the middleware). `null`/empty -> ownerless.
+async fn patch_node_owner(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let new_owner = match body.get("owner_user_id") {
+        Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(s)) if s.is_empty() => None,
+        Some(serde_json::Value::String(s)) => Some(s.clone()),
+        _ => {
+            return Err(ApiError::bad_request(
+                "missing `owner_user_id` (string or null)",
+            ))
+        }
+    };
+    edit_node_owner(&state, &id, |rec| rec.owner_user_id = new_owner.clone()).await?;
+    Ok(Json(serde_json::json!({ "owner_user_id": new_owner })))
+}
+
 /// Route definitions for the node management API.
 pub fn nodes_routes() -> Router<AppState> {
-    Router::new().route("/api/nodes", get(list_nodes))
+    Router::new()
+        .route("/api/nodes", get(list_nodes))
+        .route("/api/nodes/enrollment-tokens", post(create_enrollment_token))
+        .route("/api/nodes/{id}/permissions", get(get_node_permissions))
+        .route("/api/nodes/{id}/visibility", patch(patch_node_visibility))
+        .route("/api/nodes/{id}/guests", patch(patch_node_guests))
+        .route("/api/nodes/{id}/owner", patch(patch_node_owner))
 }
 
 #[cfg(test)]
@@ -167,7 +450,7 @@ mod tests {
     #[tokio::test]
     async fn empty_registry_returns_empty_list() {
         let state = test_app_state();
-        let resp = list_nodes(State(state)).await;
+        let resp = list_nodes(State(state), None).await;
         assert!(resp.0.is_empty());
     }
 
@@ -178,7 +461,7 @@ mod tests {
             let mut reg = state.node_registry.as_ref().unwrap().write().await;
             reg.update_status_from_mqtt("acowork/nodes/local/status", b"online");
         }
-        let resp = list_nodes(State(state)).await;
+        let resp = list_nodes(State(state), None).await;
         assert_eq!(resp.0.len(), 1);
         let node = &resp.0[0];
         assert_eq!(node.node_id, "local");
@@ -203,7 +486,7 @@ mod tests {
             let bytes = prost::Message::encode_to_vec(&envelope);
             reg.update_info_from_mqtt("acowork/nodes/gpu-1/info", &bytes);
         }
-        let resp = list_nodes(State(state)).await;
+        let resp = list_nodes(State(state), None).await;
         assert_eq!(resp.0.len(), 1);
         let node = &resp.0[0];
         assert_eq!(node.hostname.as_deref(), Some("gpu-box"));
@@ -218,6 +501,284 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn private_node_is_absent_for_non_manager() {
+        // ADR-087 D5 (B): a `private` node is not field-trimmed for an
+        // outsider — it is ABSENT from the list. A non-manager has no
+        // action available on the row (install / fs browse / rename are
+        // all Node-manage gated), so keeping it would leak topology for
+        // no benefit.
+        let state = state_with_node_owner_pub("gpu-1", Some("alice"), &[], Visibility::Private);
+        {
+            let mut reg = state.node_registry.as_ref().unwrap().write().await;
+            reg.update_status_from_mqtt("acowork/nodes/gpu-1/status", b"online");
+        }
+        let ctx = Extension(AuthContext {
+            user_id: "stranger".to_string(),
+            role: acowork_core::account::Role::User,
+            as_user: None,
+        });
+        let resp = list_nodes(State(state), Some(ctx)).await;
+        assert!(
+            resp.0.is_empty(),
+            "private node must not be listed to a non-manager"
+        );
+    }
+
+    #[tokio::test]
+    async fn public_node_is_listed_but_not_manageable() {
+        // `public` opens metadata to every logged-in account, and the
+        // machine-identifying / capacity fields are STILL pruned —
+        // visibility never implies manage (ADR-087 D6).
+        let state = state_with_node_owner_pub("gpu-1", Some("alice"), &[], Visibility::Public);
+        {
+            let mut reg = state.node_registry.as_ref().unwrap().write().await;
+            reg.update_status_from_mqtt("acowork/nodes/gpu-1/status", b"online");
+            let envelope = acowork_core::mqtt_proto::DataEnvelope {
+                version: 1,
+                payload: Some(acowork_core::mqtt_proto::data_envelope::Payload::NodeInfo(
+                    info("gpu-1"),
+                )),
+            };
+            let bytes = prost::Message::encode_to_vec(&envelope);
+            reg.update_info_from_mqtt("acowork/nodes/gpu-1/info", &bytes);
+        }
+        let ctx = Extension(AuthContext {
+            user_id: "stranger".to_string(),
+            role: acowork_core::account::Role::User,
+            as_user: None,
+        });
+        let resp = list_nodes(State(state), Some(ctx)).await;
+        assert_eq!(resp.0.len(), 1);
+        let node = &resp.0[0];
+        assert_eq!(node.node_id, "gpu-1");
+        assert!(node.online);
+        assert!(!node.can_manage, "public never implies manage");
+        assert_eq!(node.visibility, "public");
+        assert!(node.hostname.is_none());
+        assert!(node.os.is_none());
+        assert!(node.arch.is_none());
+        assert!(node.http_endpoint.is_none());
+        assert!(node.agent_count.is_none());
+    }
+
+    #[tokio::test]
+    async fn guest_and_admin_keep_seeing_a_private_node() {
+        // A guest is use-tier: they must still *see* the private node
+        // (can_view keys off can_use, which includes guests) — the
+        // sidebar is the only place a granted resource is reachable —
+        // but seeing is not managing: a guest holds no manage rights.
+        async fn mark_online(state: &AppState) {
+            let mut reg = state.node_registry.as_ref().unwrap().write().await;
+            reg.update_status_from_mqtt("acowork/nodes/gpu-1/status", b"online");
+        }
+
+        let guest_state = state_with_node_owner_pub("gpu-1", Some("alice"), &["bob"], Visibility::Private);
+        mark_online(&guest_state).await;
+        let bob = Extension(AuthContext {
+            user_id: "bob".to_string(),
+            role: acowork_core::account::Role::User,
+            as_user: None,
+        });
+        let resp = list_nodes(State(guest_state), Some(bob)).await;
+        assert_eq!(resp.0.len(), 1, "guest must keep the private node visible");
+        assert!(!resp.0[0].can_manage, "a guest is use-tier, not manage");
+        assert!(resp.0[0].is_guest);
+
+        // Admin sees ownerless rows too — otherwise an unclaimed node
+        // could never be found and claimed (ADR-087 D7).
+        let admin_state = state_with_node_owner_pub("gpu-1", None, &[], Visibility::Private);
+        mark_online(&admin_state).await;
+        let admin = Extension(AuthContext {
+            user_id: "root".to_string(),
+            role: acowork_core::account::Role::Admin,
+            as_user: None,
+        });
+        let resp = list_nodes(State(admin_state), Some(admin)).await;
+        assert_eq!(resp.0.len(), 1, "admin must see the ownerless node");
+        assert!(resp.0[0].can_manage);
+    }
+
+    /// Seed a node-ownership row with an explicit visibility.
+    fn state_with_node_owner_pub(
+        node_id: &str,
+        owner: Option<&str>,
+        guests: &[&str],
+        visibility: Visibility,
+    ) -> AppState {
+        let mut state = test_app_state();
+        let dir = std::env::temp_dir().join(format!(
+            "acowork-test-node-vis-{}-{}",
+            std::process::id(),
+            node_id
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = ownership::new_shared_node_owners(&dir);
+        ownership::lock(&store).put(
+            node_id,
+            ownership::OwnerRecord {
+                owner_user_id: owner.map(|s| s.to_string()),
+                guests: guests.iter().map(|s| s.to_string()).collect(),
+                visibility,
+                created_at: chrono::Utc::now(),
+                node_id: None,
+            },
+        );
+        state.node_owners = Some(store);
+        state
+    }
+
+    #[tokio::test]
+    async fn ownerless_node_is_absent_for_normal_user() {
+        // No row / ownerless row ⇒ admin-only (ADR-087 D7). Before the
+        // `can_view` fix this case leaked the node to everyone.
+        let state = test_app_state();
+        // node_owners is None here — no record for any node, which the
+        // resolver reads as ownerless (admin-only, fail-closed).
+        {
+            let mut reg = state.node_registry.as_ref().unwrap().write().await;
+            reg.update_status_from_mqtt("acowork/nodes/gpu-1/status", b"online");
+            let envelope = acowork_core::mqtt_proto::DataEnvelope {
+                version: 1,
+                payload: Some(acowork_core::mqtt_proto::data_envelope::Payload::NodeInfo(
+                    info("gpu-1"),
+                )),
+            };
+            let bytes = prost::Message::encode_to_vec(&envelope);
+            reg.update_info_from_mqtt("acowork/nodes/gpu-1/info", &bytes);
+        }
+        let ctx = Extension(AuthContext {
+            user_id: "stranger".to_string(),
+            role: acowork_core::account::Role::User,
+            as_user: None,
+        });
+        let resp = list_nodes(State(state), Some(ctx)).await;
+        assert!(
+            resp.0.is_empty(),
+            "ownerless node is admin-only and must not be listed (D7)"
+        );
+    }
+
+    /// Wire a fresh node-ownership store into the test state and seed one row.
+    fn state_with_node_owner(node_id: &str, owner: Option<&str>, guests: &[&str]) -> AppState {
+        // mutable: ownership store is wired in after construction
+        let mut state = test_app_state();
+        let dir = std::env::temp_dir().join(format!(
+            "acowork-test-node-perms-{}-{}",
+            std::process::id(),
+            node_id
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = ownership::new_shared_node_owners(&dir);
+        ownership::lock(&store).put(
+            node_id,
+            ownership::OwnerRecord {
+                owner_user_id: owner.map(|s| s.to_string()),
+                guests: guests.iter().map(|s| s.to_string()).collect(),
+                visibility: ownership::Visibility::Private,
+                created_at: chrono::Utc::now(),
+                node_id: None,
+            },
+        );
+        state.node_owners = Some(store);
+        state
+    }
+
+    #[tokio::test]
+    async fn node_permissions_owner_caller_gets_full_state_editable() {
+        let state = state_with_node_owner("gpu-1", Some("alice"), &["bob"]);
+        let ctx = Extension(AuthContext {
+            user_id: "alice".to_string(),
+            role: acowork_core::account::Role::User,
+            as_user: None,
+        });
+        let Json(v) = get_node_permissions(State(state), Path("gpu-1".into()), Some(ctx)).await.unwrap();
+        assert_eq!(v["owner_user_id"], serde_json::json!("alice"));
+        assert_eq!(v["guests"], serde_json::json!(["bob"]));
+        assert_eq!(v["visibility"], "private");
+        assert_eq!(v["can_attribute"], true);
+    }
+
+    #[tokio::test]
+    async fn node_permissions_guest_caller_is_read_only() {
+        // ADR-087 D9 R1: a manage-guest may SEE the list but not change it.
+        let state = state_with_node_owner("gpu-1", Some("alice"), &["bob"]);
+        let ctx = Extension(AuthContext {
+            user_id: "bob".to_string(),
+            role: acowork_core::account::Role::User,
+            as_user: None,
+        });
+        let Json(v) = get_node_permissions(State(state), Path("gpu-1".into()), Some(ctx)).await.unwrap();
+        assert_eq!(v["can_attribute"], false);
+    }
+
+    #[tokio::test]
+    async fn node_permissions_local_mode_no_row_is_editable() {
+        // Local mode (no AuthContext) + never-attributed node → empty state,
+        // editable (every resource is manageable in single-user mode).
+        let state = state_with_node_owner("other", None, &[]);
+        let Json(v) = get_node_permissions(State(state), Path("gpu-1".into()), None).await.unwrap();
+        assert_eq!(v["owner_user_id"], serde_json::Value::Null);
+        assert_eq!(v["guests"], serde_json::json!([]));
+        assert_eq!(v["can_attribute"], true);
+    }
+
+    /// The node-side twin of `patch_agent_visibility_rejects_shared_on_
+    /// ownerless_row`: publishing an ownerless node used to answer 200
+    /// while `upsert_with` stored `private`, so the Desktop switch
+    /// snapped back with no error. Must be a diagnosable 409.
+    #[tokio::test]
+    async fn patch_node_visibility_rejects_public_on_ownerless_row() {
+        let state = state_with_node_owner_pub("gpu-1", None, &[], Visibility::Private);
+        {
+            let mut reg = state.node_registry.as_ref().unwrap().write().await;
+            reg.update_status_from_mqtt("acowork/nodes/gpu-1/status", b"online");
+        }
+        let err = patch_node_visibility(
+            State(state),
+            Path("gpu-1".into()),
+            Json(serde_json::json!({ "visibility": "public" })),
+        )
+        .await
+        .expect_err("ownerless + public must be rejected, not silently downgraded");
+        assert_eq!(err.code, 409, "the client must be able to branch on the status");
+        assert!(
+            err.error.contains("owner"),
+            "the error must name the cause (claim an owner first): {}",
+            err.error
+        );
+    }
+
+    /// The claim-then-publish path the 409 points at must work.
+    #[tokio::test]
+    async fn node_visibility_public_persists_once_an_owner_is_claimed() {
+        let state = state_with_node_owner_pub("gpu-1", None, &[], Visibility::Private);
+        {
+            let mut reg = state.node_registry.as_ref().unwrap().write().await;
+            reg.update_status_from_mqtt("acowork/nodes/gpu-1/status", b"online");
+        }
+        let _ = patch_node_owner(
+            State(state.clone()),
+            Path("gpu-1".into()),
+            Json(serde_json::json!({ "owner_user_id": "alice" })),
+        )
+        .await
+        .unwrap();
+        let _ = patch_node_visibility(
+            State(state.clone()),
+            Path("gpu-1".into()),
+            Json(serde_json::json!({ "visibility": "public" })),
+        )
+        .await
+        .unwrap();
+        let store = ownership::lock_shared(&state.node_owners).unwrap();
+        let rec = store.get("gpu-1").unwrap();
+        assert_eq!(rec.visibility, Visibility::Public);
+        assert_eq!(rec.owner_user_id.as_deref(), Some("alice"));
+    }
+
+    #[tokio::test]
     async fn nodes_are_sorted_by_id() {
         let state = test_app_state();
         {
@@ -225,7 +786,7 @@ mod tests {
             reg.update_status_from_mqtt("acowork/nodes/zeta/status", b"online");
             reg.update_status_from_mqtt("acowork/nodes/alpha/status", b"online");
         }
-        let resp = list_nodes(State(state)).await;
+        let resp = list_nodes(State(state), None).await;
         let ids: Vec<&str> = resp.0.iter().map(|n| n.node_id.as_str()).collect();
         assert_eq!(ids, vec!["alpha", "zeta"]);
     }
@@ -252,6 +813,9 @@ mod tests {
             max_agents: Some(16),
             agent_count: Some(2),
             http_endpoint: Some("http://127.0.0.1:19900".to_string()),
+            can_manage: true,
+            is_guest: false,
+            visibility: "private".to_string(),
         };
 
         let json = serde_json::to_value(&resp).expect("NodeResponse serializes");

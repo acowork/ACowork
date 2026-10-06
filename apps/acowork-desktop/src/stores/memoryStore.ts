@@ -18,6 +18,7 @@ import i18n from "../i18n";
 import { useGatewayStore } from "./gatewayStore";
 import { log } from "../lib/logger";
 import { with503Retry, WRITE_503_RETRY } from "../lib/httpRetry";
+import { httpApiError } from "../lib/api-error";
 
 interface MemoryFilters {
   type: "All" | "Knowledge" | "Episodic" | "Procedural" | "Autobiographical";
@@ -239,7 +240,7 @@ export const useMemoryStore = create<MemoryStore>((set, get) => ({
         () => fetch(`${getGatewayUrl()}/api/agents/${agentId}/memory/nodes?${params}`),
         { tag: `MemoryStore.fetchNodes(${agentId})`, logger: log },
       );
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) throw await httpApiError(res);
       const data: MemoryNodesListResponse = await res.json();
       set({ nodes: data.nodes, total: data.total, loading: false });
     } catch (e) {
@@ -254,7 +255,7 @@ export const useMemoryStore = create<MemoryStore>((set, get) => ({
         () => fetch(`${getGatewayUrl()}/api/agents/${agentId}/memory/stats`),
         { tag: `MemoryStore.fetchStats(${agentId})`, logger: log },
       );
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) throw await httpApiError(res);
       const data: MemoryStatsResponse = await res.json();
       set({ stats: data });
     } catch (e) {
@@ -268,7 +269,7 @@ export const useMemoryStore = create<MemoryStore>((set, get) => ({
         () => fetch(`${getGatewayUrl()}/api/agents/${agentId}/memory/nodes/${nodeId}`),
         { tag: `MemoryStore.fetchNode(${agentId},${nodeId})`, logger: log },
       );
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) throw await httpApiError(res);
       // `GET /memory/nodes/{nid}` returns the raw node JSON (with a `found`
       // flag). It carries every field MemoryNodeDetail reads.
       const data = (await res.json()) as MemoryNodeResponse & { found?: boolean };
@@ -293,7 +294,7 @@ export const useMemoryStore = create<MemoryStore>((set, get) => ({
           }),
         { policy: WRITE_503_RETRY, tag: `MemoryStore.deleteNode(${nodeId})`, logger: log },
       );
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) throw await httpApiError(res);
       const data: DeleteNodeResponse = await res.json();
       if (data.deleted) {
         set((s) => ({
@@ -320,14 +321,13 @@ export const useMemoryStore = create<MemoryStore>((set, get) => ({
         { tag: `MemoryStore.distill(${agentId})`, logger: log },
       );
       if (!res.ok) {
-        // 409 "distiller is disabled" / 503 "not ready" — surface the
-        // runtime error string so the user knows why the run didn't go.
-        const body = (await res.json().catch(() => null)) as {
-          error?: string;
-        } | null;
+        // 403 permission denial → localized "ask the owner" copy;
+        // 409 "distiller is disabled" / 503 "not ready" keep the runtime
+        // error string so the user knows why the run didn't go.
+        const err = await httpApiError(res);
         set({
           loading: false,
-          consolidateMessage: body?.error ?? `Distill failed (HTTP ${res.status})`,
+          consolidateMessage: err.message,
         });
         return null;
       }

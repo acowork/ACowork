@@ -46,6 +46,7 @@ vi.mock("../lib/logger", () => ({
 // ── SUT ──────────────────────────────────────────────────────────────────
 
 import { useGitStore, gitGroupKey, type GitChangeDto } from "./gitStore";
+import i18n from "../i18n";
 
 /** Capture URLs passed to the mocked global fetch. */
 let fetchUrls: string[] = [];
@@ -216,6 +217,37 @@ describe("gitStore error surfacing", () => {
     const entry = useGitStore.getState().status[gitGroupKey("a1", "ws1")];
     expect(entry?.error).toContain("404");
     expect(entry?.loading).toBe(false);
+  });
+
+  // The panel renders `entry.error` verbatim, so a denial must arrive as
+  // localized copy — the old `git … 403 {"error":"forbidden"}` dump was
+  // shown to the user word-for-word.
+  it("a 403 surfaces the localized denial, not the raw response dump", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        Promise.resolve({
+          ok: false,
+          status: 403,
+          statusText: "Forbidden",
+          json: () =>
+            Promise.resolve({
+              error: "forbidden",
+              code: "not_authorized",
+              resource: "agent",
+              required: "use",
+            }),
+        } as Response),
+      ),
+    );
+    await useGitStore.getState().fetchStatus("a1", "ws1");
+    const entry = useGitStore.getState().status[gitGroupKey("a1", "ws1")];
+    const msg = entry?.error ?? "";
+    expect(msg).toBe(i18n.t("apiError.permissionUse"));
+    // No wire artifacts: no path, no status line, no serialized body.
+    expect(msg).not.toContain("403");
+    expect(msg).not.toContain("not_authorized");
+    expect(msg).not.toContain("/api/agents");
   });
 
   it("surfaces camelCase DTO fields verbatim (wire contract, f02b7b46)", async () => {

@@ -283,6 +283,7 @@ pub async fn auth_middleware(
                 StatusCode::FORBIDDEN,
                 Json(json!({
                     "error": "forbidden",
+                    "code": "not_authorized",
                     "message": "as_user is a read-only view and cannot be used on a write request",
                 })),
             )
@@ -293,6 +294,7 @@ pub async fn auth_middleware(
                 StatusCode::FORBIDDEN,
                 Json(json!({
                     "error": "forbidden",
+                    "code": "not_authorized",
                     "message": "as_user requires an administrator token and a well-formed user id",
                 })),
             )

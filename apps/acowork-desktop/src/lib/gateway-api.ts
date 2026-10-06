@@ -34,6 +34,7 @@ import type {
   NodeInfo,
 } from "./types";
 import { getGatewayUrl } from "./config";
+import { httpApiError } from "./api-error";
 
 // ── LSP Relay endpoint cache ───────────────────────────────────────────
 //
@@ -828,8 +829,115 @@ function normalizeNode(raw: Record<string, unknown>): NodeInfo {
     max_agents: snakeOrCamel("max_agents", "maxAgents") as number | undefined,
     agent_count: snakeOrCamel("agent_count", "agentCount") as number | undefined,
     http_endpoint: snakeOrCamel("http_endpoint", "httpEndpoint") as string | undefined,
+    // ADR-087: permission bits (absent on pre-087 Gateways — undefined).
+    can_manage: raw.can_manage as boolean | undefined,
+    is_guest: raw.is_guest as boolean | undefined,
+    visibility: raw.visibility as string | undefined,
   };
 }
+
+// ── ADR-087: node / agent permissions (owner · guests · visibility) ───
+//
+// Read side is one `GET .../permissions` per resource (manage-gated);
+// writes go through the three PATCH endpoints (visibility / guests →
+// owner ∨ admin, owner → admin). The app-wide authFetch interceptor
+// attaches the bearer token, so these are plain fetches.
+
+/** Response of `GET /api/{agents|nodes}/{id}/permissions`. */
+export interface ResourcePermissions {
+  owner_user_id: string | null;
+  guests: string[];
+  /** `"shared"|"private"` for agents, `"public"|"private"` for nodes. */
+  visibility: string;
+  /** Caller may write visibility/guests (owner ∨ admin ∨ local). */
+  can_attribute: boolean;
+  /**
+   * Caller may *publish* this resource (`shared` / `public`).
+   *
+   * Distinct from `can_attribute`: that one is a permission answer, an
+   * admin passes it even on a row that has no owner. This one is the
+   * data answer — an ownerless row cannot hold a published value
+   * (ADR-087 D6), so the switch must be disabled rather than offered
+   * and then rejected. Absent on a pre-087 Gateway.
+   */
+  can_set_visibility?: boolean;
+  /** No owner on record — the row is admin-only (ADR-087 D7). */
+  ownerless?: boolean;
+}
+
+async function requestPermissions(
+  kind: "agents" | "nodes",
+  id: string,
+): Promise<ResourcePermissions> {
+  const resp = await fetch(
+    `${getGatewayUrl()}/api/${kind}/${encodeURIComponent(id)}/permissions`,
+  );
+  if (!resp.ok) {
+    throw new Error(`Failed to fetch permissions: ${await readGatewayError(resp)}`);
+  }
+  return (await resp.json()) as ResourcePermissions;
+}
+
+async function patchPermissions(
+  kind: "agents" | "nodes",
+  id: string,
+  segment: "visibility" | "guests" | "owner",
+  body: unknown,
+): Promise<void> {
+  const resp = await fetch(
+    `${getGatewayUrl()}/api/${kind}/${encodeURIComponent(id)}/${segment}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    },
+  );
+  if (!resp.ok) {
+    // `HttpApiError` carries the parsed denial: callers surface
+    // `err.message` (localized "you lack permission" for 403, server
+    // detail otherwise) instead of a raw `Failed to update …: forbidden`.
+    throw await httpApiError(resp);
+  }
+}
+
+/** Decode a Gateway error body (`{error}` or `{error:{message}}`) to text. */
+async function readGatewayError(resp: Response): Promise<string> {
+  try {
+    const body = await resp.json();
+    if (typeof body?.error === "string") return body.error;
+    if (typeof body?.error?.message === "string") return body.error.message;
+  } catch {
+    /* non-JSON — fall through */
+  }
+  return String(resp.status);
+}
+
+export const fetchAgentPermissions = (id: string) => requestPermissions("agents", id);
+export const fetchNodePermissions = (id: string) => requestPermissions("nodes", id);
+export const patchAgentVisibility = (id: string, visibility: string) =>
+  patchPermissions("agents", id, "visibility", { visibility });
+export const patchAgentGuests = (id: string, guests: string[]) =>
+  patchPermissions("agents", id, "guests", { guests });
+export const patchNodeVisibility = (id: string, visibility: string) =>
+  patchPermissions("nodes", id, "visibility", { visibility });
+export const patchNodeGuests = (id: string, guests: string[]) =>
+  patchPermissions("nodes", id, "guests", { guests });
+
+/**
+ * Claim or transfer ownership (ADR-087 D7). Admin only — transfer is an
+ * authorization change, so an owner may share but never hand over
+ * mastership. `null` / `""` clears the owner back to ownerless.
+ *
+ * The dialog needs this because an ownerless resource is admin-only and
+ * therefore cannot be published: `PATCH .../visibility` rejects
+ * `shared`/`public` with a 409 until someone claims it. Without a UI path
+ * to claim, the visibility switch is unusable on every install that
+ * predates ADR-087 (all existing agents/nodes start out ownerless).
+ */
+export const patchAgentOwner = (id: string, ownerUserId: string | null) =>
+  patchPermissions("agents", id, "owner", { owner_user_id: ownerUserId });
+export const patchNodeOwner = (id: string, ownerUserId: string | null) =>
+  patchPermissions("nodes", id, "owner", { owner_user_id: ownerUserId });
 
 // ── Structured error codes (ADR-059 §6.3) ──────────────────────────────
 //

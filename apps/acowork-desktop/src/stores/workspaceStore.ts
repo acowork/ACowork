@@ -64,6 +64,19 @@ interface WorkspaceState {
   /** Per-session current workspace selection. "__agent_home__" = agent home. */
   sessionWorkspaceMap: Record<string, string>;
   loading: boolean;
+  /**
+   * ADR-087: the last list failure that is *authorization*, not
+   * transport. A non-owner on a shared agent gets 403 from
+   * `GET /workspaces` (the route stays `AgentManage` — reading the
+   * owner's directory layout is exactly what D4's "read == write" tier
+   * withholds), and the empty list it produced was indistinguishable
+   * from "this agent has no workspaces". The selector renders an
+   * explanation instead. `null` = no such failure (including success).
+   *
+   * Only 403 sets it; 5xx keeps flowing through the retry path and must
+   * not permanently pin the panel into the "denied" copy.
+   */
+  deniedReason: "manage" | null;
 
   // Fetch workspace list for a given agent
   fetchWorkspaces: (agentId: string) => Promise<void>;
@@ -164,6 +177,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   workspaces: [],
   sessionWorkspaceMap: {},
   loading: false,
+  deniedReason: null,
   locateRequest: null,
 
   /**
@@ -184,7 +198,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
  */
 fetchWorkspaces: async (agentId: string) => {
   const seq = ++requestSeq;
-  set({ loading: true });
+  set({ loading: true, deniedReason: null });
   try {
     const baseUrl = getGatewayUrl();
     const resp = await with503Retry(
@@ -198,6 +212,15 @@ fetchWorkspaces: async (agentId: string) => {
       // All retries exhausted; with503Retry returned the last 503.
       log.error(`[WorkspaceStore] fetchWorkspaces(${agentId}) still 503 after retries`);
       set({ loading: false });
+      return;
+    }
+    if (resp.status === 403) {
+      // ADR-087: shared agent, caller is not on the manage list. Not an
+      // error to shout about — a state to render. See `deniedReason`.
+      log.info(
+        `[WorkspaceStore] fetchWorkspaces: 403 — caller is not on the manage list for ${agentId}`,
+      );
+      set({ loading: false, deniedReason: "manage" });
       return;
     }
     if (!resp.ok) {
@@ -575,6 +598,7 @@ fetchWorkspaces: async (agentId: string) => {
       workspaces: [],
       sessionWorkspaceMap: {},
       loading: false,
+      deniedReason: null,
       copiedEntry: null,
       locateRequest: null,
     });

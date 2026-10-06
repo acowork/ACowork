@@ -80,13 +80,19 @@ export function LoginView() {
         <h1 className="text-center text-sm font-semibold text-text">
           {t(mode === "password" ? "account.loginTitle" : "account.firstLoginTitle")}
         </h1>
-        <p className="text-center text-11 text-text-tertiary">
-          {t(mode === "password" ? "account.loginSubtitle" : "account.firstLoginSubtitle")}
-        </p>
+        {/* Subtitle — invite mode only. "登录" + "登录后继续使用" restated
+            the same thing twice on the password screen; the invite line
+            ("输入管理员给你的邀请码，然后设置密码。") is an actual
+            instruction, so it stays. */}
+        {mode === "invite" && (
+          <p className="text-center text-xs text-text-tertiary">
+            {t("account.firstLoginSubtitle")}
+          </p>
+        )}
 
         {mode === "password" ? (
           <>
-            <label className="flex flex-col gap-1 text-11 text-text-tertiary">
+            <label className="flex flex-col gap-1 text-xs text-text-tertiary">
               {t("account.username")}
               <StyledInput
                 value={username}
@@ -98,7 +104,7 @@ export function LoginView() {
               />
             </label>
 
-            <label className="flex flex-col gap-1 text-11 text-text-tertiary">
+            <label className="flex flex-col gap-1 text-xs text-text-tertiary">
               {t("account.password")}
               <StyledInput
                 type="password"
@@ -111,7 +117,7 @@ export function LoginView() {
           </>
         ) : (
           <>
-            <label className="flex flex-col gap-1 text-11 text-text-tertiary">
+            <label className="flex flex-col gap-1 text-xs text-text-tertiary">
               {t("account.inviteToken")}
               <StyledInput
                 value={inviteToken}
@@ -122,7 +128,7 @@ export function LoginView() {
               />
             </label>
 
-            <label className="flex flex-col gap-1 text-11 text-text-tertiary">
+            <label className="flex flex-col gap-1 text-xs text-text-tertiary">
               {t("account.newPassword")}
               <StyledInput
                 type="password"
@@ -136,7 +142,7 @@ export function LoginView() {
         )}
 
         {error && (
-          <p role="alert" className="text-11 text-red-500">
+          <p role="alert" className="text-xs text-red-500">
             {error}
           </p>
         )}
@@ -158,7 +164,7 @@ export function LoginView() {
             setError(null);
           }}
           disabled={busy}
-          className="text-11 text-[var(--color-accent)] hover:underline disabled:opacity-50"
+          className="text-xs text-[var(--color-accent)] hover:underline disabled:opacity-50"
         >
           {t(mode === "password" ? "account.useInvite" : "account.backToLogin")}
         </button>

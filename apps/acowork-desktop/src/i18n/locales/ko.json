@@ -114,7 +114,6 @@
   },
   "account": {
     "loginTitle": "로그인",
-    "loginSubtitle": "계속하려면 로그인하세요",
     "username": "사용자 이름",
     "password": "비밀번호",
     "login": "로그인",
@@ -239,6 +238,14 @@
     "retry": "재시도",
     "refreshPage": "페이지 새로고침"
   },
+  "apiError": {
+    "permissionDenied": "이 작업을 수행할 권한이 없습니다. 리소스 소유자에게 권한 부여를 요청하세요.",
+    "permissionUse": "이 작업에는 사용 권한이 필요합니다. 소유자에게 승인된 사용자로 추가해 달라고 요청하세요.",
+    "permissionManage": "이 작업에는 관리 권한이 필요합니다. 리소스 소유자 또는 관리자만 실행할 수 있습니다.",
+    "permissionAdmin": "이 작업은 관리자만 실행할 수 있습니다.",
+    "permissionTransfer": "권한 설정 변경은 리소스 소유자 또는 관리자만 가능합니다.",
+    "readOnlyBanner": "이 리소스는 읽기 전용 권한이므로 변경 사항이 저장되지 않습니다. 권한이 필요하면 소유자에게 요청하세요."
+  },
   "chatPanel": {
     "sessionLoadFailed": "세션 로드 실패",
     "agentStopped": "{{name}} 중지됨",
@@ -249,6 +256,9 @@
     "uploadFile": "파일 업로드",
     "uploadHint": "파일 업로드（PDF/DOCX/PPTX/XLSX/PNG/JPG/GIF/WebP）",
     "sendMessage": "메시지 전송",
+    "sendFailedNotConnected": "메시지 전송 실패: 에이전트가 아직 연결되지 않았을 수 있습니다. 잠시 후 다시 시도하세요",
+    "modelSwitchFailed": "모델 전환 실패:{{model}}",
+    "reasoningEffortFailed": "추론 강도 설정 실패",
     "addToQueue": "큐에 추가",
     "sendQueuedAndStop": "큐 전송 후 중지",
     "stop": "중지",
@@ -387,7 +397,10 @@
     "errorFailedToRestartInDebug": "디버그 재시작 실패: {{error}}",
     "errorFailedToStopAgent": "Agent 중지 실패: {{error}}",
     "errorFailedToUninstallAgent": "Agent 제거 실패: {{error}}",
-    "node": "Node"
+    "node": "Node",
+    "contextPermissions": "권한",
+    "nodePermissions": "노드 권한",
+    "noAccess": "접근 권한 없음"
   },
   "cloneDialog": {
     "skeleton": "스켈레톤",
@@ -828,7 +841,12 @@
     "loading": "로딩 중...",
     "defaultWorkingDirectory": "기본 작업 디렉터리",
     "noMatchingWorkspaces": "일치하는 작업 영역이 없습니다",
-    "noWorkspacesConfigured": "구성된 작업 영역이 없습니다"
+    "noWorkspacesConfigured": "구성된 작업 영역이 없습니다",
+    "deniedTitle": "작업 영역을 볼 수 없음",
+    "deniedHint": "이 에이전트는 공유되었지만 작업 영역은 소유자와 승인된 사용자에게만 표시됩니다. 소유자에게 추가를 요청하거나, 대화에서 작업 디렉터리를 직접 알려주세요.",
+    "treeLoadFailed": "작업 영역을 불러오지 못했습니다 ({{detail}})",
+    "retry": "다시 시도",
+    "treeLoadAborted": "요청이 중단되었습니다"
   },
   "fileEditor": {
     "emptyState": "워크스페이스 트리에서 파일을 더블클릭하여 열기",
@@ -1667,5 +1685,32 @@
     "imagePrompt": "이미지 URL 또는 상대 경로",
     "tbUndo": "실행 취소",
     "tbRedo": "다시 실행"
+  },
+  "permissionDialog": {
+    "title": "권한",
+    "ariaLabelClose": "닫기",
+    "owner": "소유자",
+    "ownerUnassigned": "미지정(관리자만)",
+    "visibility": "공개 범위",
+    "visibilityShared": "공유",
+    "visibilityPublic": "공개",
+    "visibilityPrivate": "비공개",
+    "visibilityOnHint": "로그인한 모든 사용자가 읽기 전용으로 볼 수 있습니다(세부 정보 및 구성). 채팅에는 게스트로 추가해야 합니다.",
+    "visibilityOffHint": "소유자, 권한 부여된 사용자, 관리자만 표시",
+    "needsOwnerHint": "소유권을 가져오면 {{pub}}로 설정할 수 있습니다.",
+    "guests": "권한 사용자(사용 및 채팅 가능)",
+    "guestsHint": "권한 사용자는 채팅 및 리소스 사용(작업 공간 파일 포함)이 가능하지만, 구성·권한·소유자는 변경할 수 없습니다.",
+    "noUsers": "다른 계정이 없습니다",
+    "guestUnavailable": "삭제된 계정 — 체크를 해제하여 제거",
+    "readOnly": "목록은 볼 수 있지만 소유자 또는 관리자만 변경할 수 있습니다.",
+    "loadFailed": "권한 로드 실패",
+    "saveFailed": "저장 실패",
+    "close": "닫기",
+    "save": "저장",
+    "claimOwner": "소유권 주장",
+    "claiming": "처리 중…",
+    "claimOwnerHint": "이 {{kind}}에는 소유자가 없어 관리할 수 있는 사람은 당신뿐이며 아직 {{pub}}(으)로 설정할 수 없습니다. 소유권을 주장하면 공개 범위를 변경할 수 있습니다.",
+    "agent": "에이전트",
+    "node": "노드"
   }
 }

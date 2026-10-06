@@ -9,6 +9,7 @@ import { BUILTIN_ICONS, BUILTIN_ICON_IDS } from "../common/UserAvatar";
 import { AgentAvatar } from "../common/AgentAvatar";
 import { AuthedImage } from "../common/AuthedImage";
 import { getGatewayUrl } from "../../lib/config";
+import { httpApiError } from "../../lib/api-error";
 import { ConfirmDialog } from "../common/ConfirmDialog";
 import { useTranslation } from "../../i18n/useTranslation";
 import { StyledInput } from "../common/StyledInput";
@@ -128,6 +129,14 @@ export function AgentSetupTab() {
   const debounceTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(
     new Map(),
   );
+
+  // Pre-edit values keyed by field, captured on the first keystroke of an
+  // in-flight debounce chain and cleared once the PUT settles. A refused
+  // write restores from here — the refresh event cannot, because its
+  // merge deliberately skips fields the server omits (null / absent,
+  // e.g. an unset temperature), which is exactly where an optimistic
+  // value would otherwise survive a "rollback".
+  const prevValuesRef = useRef<Map<string, unknown>>(new Map());
 
   // Avatar picker state (ADR-017)
   const [avatarTab, setAvatarTab] = useState<"custom" | "builtin">("custom");
@@ -389,6 +398,12 @@ export function AgentSetupTab() {
     async (field: WiredField, value: unknown) => {
       if (!selectedAgentId) return;
       const body: Record<string, unknown> = { [WIRE_FIELD[field]]: value };
+      const rollback = () => {
+        if (!prevValuesRef.current.has(field)) return;
+        const prev = prevValuesRef.current.get(field);
+        prevValuesRef.current.delete(field);
+        setProfile(selectedAgentId, { [field]: prev } as Partial<AgentProfileSettings>);
+      };
       try {
         setSavingFields((prev) => {
           if (prev.has(field)) return prev;
@@ -417,13 +432,21 @@ export function AgentSetupTab() {
           // Surface the failure instead of silently accepting the
           // optimistic local update — otherwise the panel lies about the
           // persisted value (the "shows 30 min but actually 5 min" trap).
+          const err = await httpApiError(res);
           addToast({
             type: "error",
-            message: t("agentSetup.saveFailed", {
-              field: WIRE_FIELD[field],
-              status: res.status,
-            }),
+            message:
+              err.status === 403
+                ? err.message
+                : t("agentSetup.saveFailed", {
+                    field: WIRE_FIELD[field],
+                    status: res.status,
+                  }),
           });
+          rollback();
+        } else {
+          // Persisted — the captured pre-edit value is no longer needed.
+          prevValuesRef.current.delete(field);
         }
       } catch (err) {
         log.warn("[AgentSetup] Field save error:", field, err);
@@ -434,6 +457,7 @@ export function AgentSetupTab() {
             status: "network",
           }),
         });
+        rollback();
       } finally {
         setSavingFields((prev) => {
           if (!prev.has(field)) return prev;
@@ -443,13 +467,18 @@ export function AgentSetupTab() {
         });
       }
     },
-    [selectedAgentId, t, addToast],
+    [selectedAgentId, t, addToast, setProfile],
   );
 
   const saveField = useCallback(
     (field: WiredField, value: unknown) => {
       if (!selectedAgentId) return;
-      // Step 1: optimistic local update.
+      // Step 1: optimistic local update. Remember the value from before
+      // the edit chain (only the first keystroke captures it) so a
+      // refused PUT can restore it — see `rollback` in `putField`.
+      if (!prevValuesRef.current.has(field)) {
+        prevValuesRef.current.set(field, getProfile(selectedAgentId)[field]);
+      }
       setProfile(selectedAgentId, { [field]: value } as Partial<AgentProfileSettings>);
 
       // Step 2: schedule PUT, debounced per field type.
@@ -468,7 +497,7 @@ export function AgentSetupTab() {
       }, debounceMs);
       debounceTimersRef.current.set(field, timer);
     },
-    [selectedAgentId, setProfile, putField],
+    [selectedAgentId, setProfile, getProfile, putField],
   );
 
   // Flush any pending debounced PUTs when the agent changes or the
@@ -642,6 +671,18 @@ export function AgentSetupTab() {
 
   return (
     <div data-tab-scroll className="flex-1 overflow-y-auto bg-right-panel p-3" style={{ scrollbarWidth: 'none' }}>
+      {/* ADR-087: view-only caller — say so up front instead of letting
+          each write fail one toast at a time. `can_manage === false` is
+          server-computed; `undefined` (Local mode / pre-087 Gateway)
+          means manageable. */}
+      {selectedAgent?.can_manage === false && (
+        <div
+          role="note"
+          className="mb-2 rounded-md border border-[var(--color-warning,#f5a623)]/40 bg-[var(--color-warning,#f5a623)]/10 px-3 py-2 text-11 text-text-secondary"
+        >
+          {t("apiError.readOnlyBanner")}
+        </div>
+      )}
       {/* ── Card 1: Agent Info ────────────────────────────────
           Avatar picker + display name. Level-1 collapsible card
           matching the Status-tab Session/Agent Status and
