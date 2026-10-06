@@ -204,14 +204,16 @@ export function TaskDetailDrawer({ taskId, onClose, onEdit, onAddSubtask }: Task
         aria-label={detail?.title || t("pm.task.details")}
         className="absolute inset-y-0 right-0 flex w-[480px] flex-col bg-page-bg shadow-xl outline-none dark:bg-zinc-900"
       >
-        {/* 头部：标题 + 徽章 + 关闭 */}
-        <header className="flex shrink-0 items-start justify-between border-b border-border-divider px-4 py-3 min-h-[var(--ui-dialog-zone-h)]">
+        {/* 头部：标题 + 徽章 + 关闭
+            flex-col：header 内是"标题行 + tab 条"两行堆叠。写成 flex 行
+            容器时两者左右并排抢宽度——标题被压到逐字折行、tab 溢出抽屉。*/}
+        <header className="flex shrink-0 flex-col border-b border-border-divider px-4 py-3 min-h-[var(--ui-dialog-zone-h)]">
           <div className="flex items-start justify-between gap-2">
             <div className="min-w-0 flex-1">
               <h2 className="break-words text-sm font-semibold text-text ">
                 {detail.title}
               </h2>
-              <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-text-tertiary ">
+              <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-11 text-text-tertiary ">
                 <TaskTypeIcon type={detail.type} className="text-xs" />
                 <PriorityBadge priority={detail.priority} />
                 <span>{statusLabel(t, detail.status)}</span>
@@ -248,7 +250,7 @@ export function TaskDetailDrawer({ taskId, onClose, onEdit, onAddSubtask }: Task
                 onClick={() => setActiveTab(tab.id)}
                 onKeyDown={(e) => handleTabKeyDown(e, i)}
                 className={cn(
-                  "-mb-px border-b-2 px-2 py-1 text-[11px] font-medium transition-colors",
+                  "-mb-px border-b-2 px-2 py-1 text-11 font-medium transition-colors",
                   activeTab === tab.id
                     ? "border-[var(--color-accent)] text-text "
                     : "border-transparent text-text-tertiary hover:text-zinc-600 dark:hover:text-zinc-300",
@@ -379,7 +381,7 @@ export function TaskDetailDrawer({ taskId, onClose, onEdit, onAddSubtask }: Task
                           className="flex h-20 flex-col items-center justify-center gap-0.5 text-text-tertiary hover:bg-zinc-50  dark:hover:bg-zinc-700"
                         >
                           <span className="text-lg" aria-hidden>📄</span>
-                          <span className="max-w-full truncate px-1 text-[10px]">{att.filename}</span>
+                          <span className="max-w-full truncate px-1 text-10">{att.filename}</span>
                         </a>
                       )}
                       {/* 删除按钮（opacity 模式：hover/focus 可见，DOM 常驻可聚焦） */}
@@ -388,11 +390,11 @@ export function TaskDetailDrawer({ taskId, onClose, onEdit, onAddSubtask }: Task
                         aria-label={t("pm.task.deleteAttachment")}
                         title={t("pm.task.deleteAttachment")}
                         onClick={() => setConfirmDeleteAtt(att.id)}
-                        className="absolute right-1 top-1 flex h-5 w-5 items-center justify-center rounded-full bg-black/50 text-[10px] text-white opacity-0 transition-opacity hover:bg-red-600 focus-visible:opacity-100 group-hover:opacity-100"
+                        className="absolute right-1 top-1 flex h-5 w-5 items-center justify-center rounded-full bg-black/50 text-10 text-white opacity-0 transition-opacity hover:bg-red-600 focus-visible:opacity-100 group-hover:opacity-100"
                       >
                         ✕
                       </button>
-                      <div className="px-1.5 py-1 text-[9px] text-text-tertiary">
+                      <div className="px-1.5 py-1 text-9 text-text-tertiary">
                         <span className="block truncate">{att.filename}</span>
                         <span>{formatBytes(att.size)}</span>
                       </div>

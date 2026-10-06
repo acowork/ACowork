@@ -29,7 +29,7 @@ export function ServiceOfflineBanner() {
       <button
         type="button"
         onClick={() => void check()}
-        className="shrink-0 rounded-md px-2 py-0.5 text-[11px] font-medium text-amber-900 hover:bg-amber-100 dark:text-amber-100 dark:hover:bg-amber-900"
+        className="shrink-0 rounded-md px-2 py-0.5 text-11 font-medium text-amber-900 hover:bg-amber-100 dark:text-amber-100 dark:hover:bg-amber-900"
       >
         {t("common.retry")}
       </button>

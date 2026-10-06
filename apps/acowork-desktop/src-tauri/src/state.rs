@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 use acowork_core::mqtt_proto::{BootstrapPhase, BootstrapState};
 
 use crate::gateway_client::{GatewayAuth, GatewayClient};
-use crate::mqtt_client::SharedDesktopMqttClient;
+use crate::mqtt_client::{MqttEndpoint, SharedDesktopMqttClient};
 
 /// Gateway deployment mode, mirrors frontend `GatewayMode`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,12 +41,22 @@ pub enum GatewayMode {
     /// Remote mode: Desktop App connects to a pre-existing Gateway at
     /// a user-configured URL (e.g. a Gateway running in WSL).
     Remote,
+    /// Relay mode (design doc 24 §8.0): the Gateway is reached through
+    /// the cloud relay over the public internet. `base_url` points at
+    /// the relay's device domain (`https://<gw-id>.<relay-suffix>`);
+    /// HTTP rides the relay's TLS byte pipe and MQTT connects over
+    /// WSS to `<base_url>/mqtt` (the Gateway-side `/mqtt` WS bridge,
+    /// reached through the same pipe). No local Gateway is spawned,
+    /// and the strict remote MQTT listener requires the logged-in
+    /// account's access token as the CONNECT password.
+    Relay,
 }
 
 impl GatewayMode {
     pub fn from_str(s: &str) -> Self {
         match s {
             "remote" => GatewayMode::Remote,
+            "relay" => GatewayMode::Relay,
             _ => GatewayMode::Local,
         }
     }
@@ -55,6 +65,7 @@ impl GatewayMode {
         match self {
             GatewayMode::Local => "local",
             GatewayMode::Remote => "remote",
+            GatewayMode::Relay => "relay",
         }
     }
 }
@@ -140,16 +151,20 @@ pub struct AppState {
     /// module docs.
     pub mqtt_client: Arc<Mutex<Option<SharedDesktopMqttClient>>>,
 
-    /// Broker `(host, port)` the active `mqtt_client` was created for.
+    /// Broker endpoint (transport + address) the active `mqtt_client`
+    /// was created for.
     ///
     /// Written by `connect_mqtt` on success and cleared by
-    /// `disconnect_mqtt`. It lets `connect_mqtt` detect that the Gateway
-    /// address changed while a stale client was still connected (e.g.
-    /// the user edited the remote URL on the SplashScreen timeout view
-    /// or in Settings) and rebuild the connection instead of
-    /// short-circuiting on the outdated client. Lock order (when both
-    /// are held): `mqtt_client` then `mqtt_endpoint`.
-    pub mqtt_endpoint: Arc<Mutex<Option<(String, u16)>>>,
+    /// `disconnect_mqtt`. It lets `connect_mqtt` detect that the
+    /// Gateway address OR transport changed while a stale client was
+    /// still connected (e.g. the user edited the remote URL on the
+    /// SplashScreen timeout view, or switched local↔relay mode in
+    /// Settings) and rebuild the connection instead of short-circuiting
+    /// on the outdated client. Transport is part of the identity:
+    /// `host:port` TCP and a WSS URL to the same authority are
+    /// different endpoints. Lock order (when both are held):
+    /// `mqtt_client` then `mqtt_endpoint`.
+    pub mqtt_endpoint: Arc<Mutex<Option<MqttEndpoint>>>,
 
     /// ADR-059: latest Gateway bootstrap snapshot.
     ///

@@ -26,8 +26,66 @@ use tokio::sync::Mutex;
 
 use acowork_core::defaults;
 use acowork_mqtt_session::{
-    ErrClass, MqttClient, MqttClientConfig, MqttClientHandler, SessionState,
+    ErrClass, MqttClient, MqttClientConfig, MqttClientHandler, MqttTransport, SessionState,
 };
+
+/// Where + how the Desktop MQTT client connects.
+///
+/// The endpoint is the full transport-level address of the broker —
+/// `connect_mqtt` derives it from the deployment mode (design doc 24
+/// §8.0): Local/Remote modes speak plain TCP to the broker host derived
+/// from the Gateway base URL (port from `/api/status`); Relay mode
+/// speaks WSS through the cloud relay's TLS byte pipe.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MqttEndpoint {
+    /// Plain TCP broker at `host:port` (local / LAN-remote modes).
+    Tcp { host: String, port: u16 },
+    /// Secure WebSocket through the cloud relay (relay mode). `url` is
+    /// the FULL broker URL — `wss://<base-url-authority>/mqtt` — where
+    /// the authority is the relay's device domain for this Gateway.
+    Wss { url: String },
+}
+
+impl MqttEndpoint {
+    /// Human-readable endpoint for logs and error messages.
+    pub fn display(&self) -> String {
+        match self {
+            MqttEndpoint::Tcp { host, port } => format!("{host}:{port}"),
+            MqttEndpoint::Wss { url } => url.clone(),
+        }
+    }
+}
+
+/// Fresh-credential source for MQTT soft-restarts: returns the current
+/// `(username, password)` pair, or `None` to keep the previous options.
+pub type MqttCredentialRefresher = Arc<dyn Fn() -> Option<(String, String)> + Send + Sync>;
+
+/// MQTT CONNECT credentials with an optional renewal source.
+///
+/// Relay mode MUST supply the [`MqttCredentials::refresher`]: the
+/// password is the logged-in account's access token, which expires
+/// after 15 minutes. MQTT 3.1.1 never re-authenticates a live
+/// connection, but every (re)connect re-sends the password — and the
+/// strict remote listener drops a bad-credential connection WITHOUT
+/// CONNACK (rumqttd `InvalidAuth` behavior) — so a stale token would
+/// turn every post-expiry reconnect into an endless silent retry loop.
+/// The refresher feeds the shared client's soft-restart path
+/// (`MqttClientHandler::on_soft_restart`), which is the only place a
+/// fresh `MqttOptions` password is ever applied.
+#[derive(Clone)]
+pub struct MqttCredentials {
+    /// Username for the initial CONNECT (relay mode: the account name,
+    /// i.e. the token's `sub`; the strict listener ignores the username
+    /// field but it keeps broker logs readable).
+    pub username: String,
+    /// Password for the initial CONNECT (relay mode: the access token).
+    pub password: String,
+    /// Fresh `(username, password)` for soft-restarts. `None` keeps the
+    /// initial pair verbatim (correct for local/LAN mode, where the
+    /// broker credential — when present at all — is a long-lived
+    /// node token from `/api/status`).
+    pub refresher: Option<MqttCredentialRefresher>,
+}
 
 /// MQTT QoS level (mirrors the Gateway's).
 #[derive(Debug, Clone, Copy)]
@@ -195,6 +253,9 @@ pub const ALL_TOPIC_FILTERS: &[(&str, MqttQoS)] = &[
 struct DesktopHandler {
     on_message: Arc<dyn Fn(MqttMessage) + Send + Sync>,
     on_status: Arc<dyn Fn(MqttStatus) + Send + Sync>,
+    /// Fresh CONNECT credentials for soft-restarts (relay mode's
+    /// expiring access token — see [`MqttCredentials`]).
+    credentials_refresher: Option<MqttCredentialRefresher>,
 }
 
 #[async_trait]
@@ -263,7 +324,9 @@ impl MqttClientHandler for DesktopHandler {
         // `on_status(MqttStatus::Connecting)` immediately before
         // recreating the EventLoop + AsyncClient.
         (self.on_status)(MqttStatus::Connecting);
-        None
+        // Relay mode: swap in the current access token. Returning None
+        // (local/LAN mode, or no session) keeps the original options.
+        self.credentials_refresher.as_ref().and_then(|f| f())
     }
 }
 
@@ -313,11 +376,20 @@ impl DesktopMqttClient {
     ///                 times over the lifetime of the client (initial
     ///                 connect, reconnects, outages); the consumer
     ///                 treats it as idempotent.
+    ///
+    /// `endpoint`   — transport + address of the broker (TCP for
+    ///                 local/LAN, WSS for relay — see [`MqttEndpoint`]).
+    /// `user_id`    — account/user name encoded into the client_id
+    ///                 (`user:{user_id}:desktop:{pid}`). Relay mode
+    ///                 derives it from the access token's `sub` so the
+    ///                 strict remote listener's cross-check passes.
+    /// `credentials`— optional CONNECT credentials; relay mode passes
+    ///                 the access token WITH a refresher so post-expiry
+    ///                 reconnects re-authenticate (see [`MqttCredentials`]).
     pub async fn connect<F, G>(
-        host: &str,
-        port: u16,
+        endpoint: MqttEndpoint,
         user_id: &str,
-        credentials: Option<(&str, &str)>,
+        credentials: Option<MqttCredentials>,
         on_message: F,
         on_status: G,
     ) -> Result<Self, String>
@@ -337,11 +409,25 @@ impl DesktopMqttClient {
         // `connection closed by peer`.
         let pkt_size = defaults::GATEWAY_MQTT_MAX_PACKET_SIZE;
 
+        // Map the endpoint onto the shared config. For WSS the URL
+        // rides inside the transport (rumqttc expects it in the
+        // MqttOptions "host" slot — `acowork-mqtt-session` centralizes
+        // that mapping in `build_mqtt_options`), so host/port are inert
+        // placeholders for that transport.
+        let (host, port, transport) = match &endpoint {
+            MqttEndpoint::Tcp { host, port } => (host.clone(), *port, MqttTransport::Tcp),
+            MqttEndpoint::Wss { url } => {
+                (String::new(), 0, MqttTransport::Wss { url: url.clone() })
+            }
+        };
+
+        let credentials_refresher = credentials.as_ref().and_then(|c| c.refresher.clone());
         let config = MqttClientConfig {
-            client_id,
-            host: host.to_string(),
+            client_id: client_id.clone(),
+            host,
             port,
-            credentials: credentials.map(|(u, p)| (u.to_string(), p.to_string())),
+            transport,
+            credentials: credentials.map(|c| (c.username, c.password)),
             last_will: None,
             max_packet_size: pkt_size,
             queue_capacity: 100,
@@ -350,12 +436,12 @@ impl DesktopMqttClient {
         let handler = DesktopHandler {
             on_message: Arc::new(on_message),
             on_status: Arc::new(on_status),
+            credentials_refresher,
         };
 
         tracing::info!(
-            host,
-            port,
-            client_id = %config.client_id,
+            endpoint = %endpoint.display(),
+            client_id = %client_id,
             "Desktop MQTT client creating via shared MqttClient (ADR-065 Step 4)"
         );
 
@@ -445,10 +531,12 @@ mod tests {
     async fn test_desktop_mqtt_client_connects() {
         // This test requires the Gateway broker to be running.
         // In CI, skip if the broker is not available.
-        let port = 19875;
+        let endpoint = MqttEndpoint::Tcp {
+            host: "127.0.0.1".to_string(),
+            port: 19875,
+        };
         let client = DesktopMqttClient::connect(
-            "127.0.0.1",
-            port,
+            endpoint,
             "test-user",
             None,
             |_msg| {

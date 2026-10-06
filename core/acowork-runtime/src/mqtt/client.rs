@@ -989,6 +989,7 @@ impl RuntimeMqttClient {
             client_id: client_id.clone(),
             host: cfg.host.to_string(),
             port: cfg.port,
+            transport: acowork_mqtt_session::MqttTransport::Tcp,
             // ADR-055 Phase 5a: authenticate when the broker requires it
             // (username `agent:{id}` + the spawning node's token).
             credentials: cfg

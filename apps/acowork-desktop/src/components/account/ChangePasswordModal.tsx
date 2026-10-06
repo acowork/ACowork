@@ -82,7 +82,7 @@ export function ChangePasswordModal({ open, onClose }: ChangePasswordModalProps)
         </h3>
 
         <div className="flex flex-col gap-3 px-5 py-4">
-          <label className="flex flex-col gap-1 text-[11px] text-text-tertiary">
+          <label className="flex flex-col gap-1 text-11 text-text-tertiary">
             {t("account.oldPassword")}
             <StyledInput
               type="password"
@@ -93,7 +93,7 @@ export function ChangePasswordModal({ open, onClose }: ChangePasswordModalProps)
               disabled={busy}
             />
           </label>
-          <label className="flex flex-col gap-1 text-[11px] text-text-tertiary">
+          <label className="flex flex-col gap-1 text-11 text-text-tertiary">
             {t("account.newPassword")}
             <StyledInput
               type="password"
@@ -103,7 +103,7 @@ export function ChangePasswordModal({ open, onClose }: ChangePasswordModalProps)
               disabled={busy}
             />
           </label>
-          <label className="flex flex-col gap-1 text-[11px] text-text-tertiary">
+          <label className="flex flex-col gap-1 text-11 text-text-tertiary">
             {t("account.confirmPassword")}
             <StyledInput
               type="password"
@@ -114,10 +114,10 @@ export function ChangePasswordModal({ open, onClose }: ChangePasswordModalProps)
             />
           </label>
           {mismatch && (
-            <p className="text-[11px] text-red-500">{t("account.passwordMismatch")}</p>
+            <p className="text-11 text-red-500">{t("account.passwordMismatch")}</p>
           )}
           {error && (
-            <p role="alert" className="text-[11px] text-red-500">
+            <p role="alert" className="text-11 text-red-500">
               {error}
             </p>
           )}

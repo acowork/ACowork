@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { useGatewayStore } from "../../stores/gatewayStore";
+import { useGatewayStore, type MigrationSession } from "../../stores/gatewayStore";
 import { useTranslation } from "../../i18n/useTranslation";
-import type { EmbeddingModelWithStatus, SelectModelMigrationResponse, CloudEmbeddingProvider, ActiveCloudEmbeddingProvider, CloudEmbeddingProvidersResponse } from "../../lib/types";
+import type { EmbeddingModelWithStatus, CloudEmbeddingProvider, ActiveCloudEmbeddingProvider, CloudEmbeddingProvidersResponse } from "../../lib/types";
 import { cn } from "../../lib/utils";
 import { ConfirmDialog } from "../common/ConfirmDialog";
 import { ErrorBox } from "../common/ErrorBox";
@@ -10,7 +10,7 @@ import { fetchEmbeddingModels, downloadEmbeddingModel, selectEmbeddingModel, fet
 import { fetchCloudEmbeddingProviders, selectCloudEmbeddingModel, setCloudEmbeddingApiKey, deleteCloudEmbeddingApiKey, testCloudEmbeddingProvider, addCloudEmbeddingProvider } from "../../lib/gateway-api";
 import type { EmbeddingTestResponse } from "../../lib/types";
 import { Download, Check, Loader2, Cpu, Languages, Zap, CheckCircle2, XCircle, Trash2, Cloud, KeyRound, HardDrive, Plus, RefreshCw } from "lucide-react";
-import { Badge, EmptyState, ExpandableRow, ListBox } from "../common/list";
+import { Badge, EmptyState, ExpandableRow, ListBox, ListRow } from "../common/list";
 import { Tooltip } from "../common/Tooltip";
 
 export function EmbeddingModelTab() {
@@ -29,11 +29,16 @@ export function EmbeddingModelTab() {
     const [downloadProgress, setDownloadProgress] = useState<Record<string, number>>({});
     const [error, setError] = useState<string | null>(null);
     const [dimensionConfirm, setDimensionConfirm] = useState<{ modelId: string; message: string } | null>(null);
-    const [migrationResponse, setMigrationResponse] = useState<SelectModelMigrationResponse | null>(null);
-    const [migrationAgentIds, setMigrationAgentIds] = useState<Set<string>>(new Set());
     const [migrationStarting, setMigrationStarting] = useState(false);
-    const [migrationStarted, setMigrationStarted] = useState(false);
-    const migrationPollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
+    // The migration session lives in the store, not here: a rebuild outlives
+    // this tab, and holding it in `useState` meant that visiting the chat
+    // unmounted the panel and the progress list never came back. See
+    // `MigrationSession` in gatewayStore.
+    const migrationSession = useGatewayStore((s) => s.migrationSession);
+    const beginMigrationSession = useGatewayStore((s) => s.beginMigrationSession);
+    const markMigrationStarted = useGatewayStore((s) => s.markMigrationStarted);
+    const setMigrationSelection = useGatewayStore((s) => s.setMigrationSelection);
+    const clearMigrationSession = useGatewayStore((s) => s.clearMigrationSession);
     const [testing, setTesting] = useState(false);
     const [testResult, setTestResult] = useState<EmbeddingTestResponse | null>(null);
     // Tools-tab level-1 collapsible group shells for Local / Cloud, default open.
@@ -231,17 +236,28 @@ export function EmbeddingModelTab() {
                 // Use migration-aware endpoint for forced selects
                 const result = await selectEmbeddingModelWithMigration(modelId, force);
                 if ("agents" in result && result.status === "migration_required") {
-                    // Dimension changed — show migration agent list
-                    setMigrationResponse(result);
-                    setMigrationAgentIds(new Set(result.agents.filter(a => a.is_running).map(a => a.instance_id)));
+                    // Dimension changed — show migration agent list. The
+                    // session goes to the store, not local state: a rebuild
+                    // outlives this tab (the user will go back to chat), and
+                    // local state took the whole progress list with it.
+                    beginMigrationSession({
+                        modelId: result.model_id,
+                        oldDimension: result.old_dimension ?? null,
+                        newDimension: result.new_dimension,
+                        message: result.message,
+                        agents: result.agents,
+                        selected: new Set(
+                            result.agents.filter((a) => a.is_running).map((a) => a.instance_id),
+                        ),
+                        started: false,
+                    });
                     setSelectingId(null);
                     await loadModels();
                     return;
                 }
                 // Same dimension or simple loaded response
                 if (result.status === "loaded" || result.status === "migration_started") {
-                    setMigrationResponse(null);
-                    setMigrationStarted(false);
+                    clearMigrationSession();
                 }
                 await loadModels();
             } else {
@@ -257,7 +273,7 @@ export function EmbeddingModelTab() {
         } finally {
             setSelectingId(null);
         }
-    }, [loadModels]);
+    }, [loadModels, beginMigrationSession, clearMigrationSession]);
 
     const handleDimensionConfirm = useCallback(async () => {
         if (!dimensionConfirm) return;
@@ -266,55 +282,64 @@ export function EmbeddingModelTab() {
     }, [dimensionConfirm, handleSelect]);
 
     const handleStartMigration = useCallback(async () => {
-        if (!migrationResponse || migrationAgentIds.size === 0) return;
-        const modelId = migrationResponse.model_id;
+        if (!migrationSession || migrationSession.selected.size === 0) return;
         setMigrationStarting(true);
         setError(null);
         try {
-            const instanceIds = Array.from(migrationAgentIds);
-            await startMigration(modelId, instanceIds);
-            setMigrationStarted(true);
-            // Start polling migration progress
-            if (migrationPollingRef.current) clearInterval(migrationPollingRef.current);
-            migrationPollingRef.current = setInterval(async () => {
-                const inProgress = await pollMigrationProgress();
-                if (!inProgress) {
-                    if (migrationPollingRef.current) {
-                        clearInterval(migrationPollingRef.current);
-                        migrationPollingRef.current = null;
-                    }
-                    setMigrationStarted(false);
-                    await loadModels();
-                }
-            }, 2000);
+            const instanceIds = Array.from(migrationSession.selected);
+            await startMigration(migrationSession.modelId, instanceIds);
+            markMigrationStarted();
+            // Polling itself lives in the effect below, keyed on
+            // `migrationSession.started`, so it survives this tab unmounting
+            // and resumes when the user comes back.
+            await pollMigrationProgress();
         } catch (e) {
             setError(e instanceof Error ? e.message : "Migration start failed");
         } finally {
             setMigrationStarting(false);
         }
-    }, [migrationResponse, migrationAgentIds, pollMigrationProgress, loadModels]);
+    }, [migrationSession, markMigrationStarted, pollMigrationProgress]);
 
     const handleMigrationCancel = useCallback(() => {
-        setMigrationResponse(null);
-        setMigrationAgentIds(new Set());
-        setMigrationStarted(false);
-        if (migrationPollingRef.current) {
-            clearInterval(migrationPollingRef.current);
-            migrationPollingRef.current = null;
-        }
-    }, []);
+        // Only reachable pre-flight or once the rebuild has finished — the
+        // running rebuild offers no cancel, because the Gateway has no way to
+        // stop a half-finished re-embed.
+        clearMigrationSession();
+    }, [clearMigrationSession]);
 
     const toggleMigrationAgent = useCallback((agentId: string) => {
-        setMigrationAgentIds((prev) => {
-            const next = new Set(prev);
-            if (next.has(agentId)) {
-                next.delete(agentId);
-            } else {
-                next.add(agentId);
-            }
-            return next;
-        });
-    }, []);
+        if (!migrationSession) return;
+        const next = new Set(migrationSession.selected);
+        if (next.has(agentId)) {
+            next.delete(agentId);
+        } else {
+            next.add(agentId);
+        }
+        setMigrationSelection(next);
+    }, [migrationSession, setMigrationSelection]);
+
+    // Poll progress while a rebuild is running.
+    //
+    // Keyed on the store's session rather than a ref, so it restarts when the
+    // user returns to this tab: the interval used to be a local ref whose
+    // callback set local state, so after one visit to the chat it was polling
+    // into a dead component. It also stops of its own accord the moment every
+    // agent reports done or failed — the panel stays until the work is
+    // actually over, and the user dismisses it.
+    useEffect(() => {
+        if (!migrationSession?.started) return;
+        let cancelled = false;
+        const tick = async () => {
+            const inProgress = await pollMigrationProgress();
+            if (cancelled) return;
+            if (!inProgress) await loadModels();
+        };
+        const timer = setInterval(tick, 2000);
+        return () => {
+            cancelled = true;
+            clearInterval(timer);
+        };
+    }, [migrationSession?.started, pollMigrationProgress, loadModels]);
 
     const handleTest = useCallback(async () => {
         setTesting(true);
@@ -538,7 +563,7 @@ export function EmbeddingModelTab() {
                                 <button
                                     onClick={handleTest}
                                     disabled={testing}
-                                    className="inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-[11px] font-medium disabled:opacity-50"
+                                    className="inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-11 font-medium disabled:opacity-50"
                                 >
                                     {testing ? (
                                         <Loader2 className="h-3 w-3 animate-spin" />
@@ -549,7 +574,7 @@ export function EmbeddingModelTab() {
                                 </button>
                                 {/* Test result inline */}
                                 {testResult && (
-                                    <span className="flex items-center gap-1 text-[11px]">
+                                    <span className="flex items-center gap-1 text-11">
                                         {testResult.success ? (
                                             <>
                                                 <CheckCircle2 className="h-3 w-3 text-green-500" />
@@ -583,13 +608,12 @@ export function EmbeddingModelTab() {
                 />
             )}
 
-            {/* Migration panel */}
-            {migrationResponse && (
+            {/* Migration panel — rendered from the store-held session, so it is
+                still here after a round trip to the chat. */}
+            {migrationSession && (
                 <MigrationPanel
-                    migrationResponse={migrationResponse}
-                    migrationAgentIds={migrationAgentIds}
+                    session={migrationSession}
                     migrationStarting={migrationStarting}
-                    migrationStarted={migrationStarted}
                     migrationProgress={migrationProgress}
                     onToggleAgent={toggleMigrationAgent}
                     onStartMigration={handleStartMigration}
@@ -685,7 +709,7 @@ export function EmbeddingModelTab() {
                         (no nested card box; the surrounding ExpandableRow
                         body is the only surface here). */}
                     {cloudActive && (
-                        <div className="mx-3 mt-3 flex items-center gap-2 text-[11px]">
+                        <div className="mx-3 mt-3 flex items-center gap-2 text-11">
                             <Badge tone="accent">{t("embedding.cloudActive")}</Badge>
                             <span className="font-medium">
                                 {cloudActive.provider_id}/{cloudActive.model_id}
@@ -702,7 +726,7 @@ export function EmbeddingModelTab() {
                     {/* Cloud error inline (kept as an emphasised box —
                         errors need to read at a glance). */}
                     {cloudError && (
-                        <div className="mx-3 mt-2 rounded border border-red-200 bg-red-50 px-2 py-1 text-[11px] text-red-700 dark:border-red-800 dark:bg-red-950 dark:text-red-300">
+                        <div className="mx-3 mt-2 rounded border border-red-200 bg-red-50 px-2 py-1 text-11 text-red-700 dark:border-red-800 dark:bg-red-950 dark:text-red-300">
                             {cloudError}
                         </div>
                     )}
@@ -835,137 +859,152 @@ export function EmbeddingModelTab() {
     );
 }
 
-/** Migration progress panel — shows agent migration queue and progress */
+/** Migration panel — the agents that must re-embed for a new model.
+ *
+ * Standard settings-card chrome (ListBox + ListRow), the same grammar as the
+ * sibling service-status / local-models cards. It was a hand-rolled
+ * `border-amber-200 bg-amber-50` box, which read as an alert that never
+ * cleared — the tint had nothing to do with severity, only with "this box needs
+ * a rebuild".
+ *
+ * Accent is now rationed: the only accent-coloured pixels are the primary
+ * action and the in-flight progress bar, the two things the user is waiting on.
+ * Row state is carried by Badge tones, which read as status rather than as a
+ * background wash. Interaction is unchanged — still checkbox-per-row.
+ */
 function MigrationPanel({
-    migrationResponse,
-    migrationAgentIds,
+    session,
     migrationStarting,
-    migrationStarted,
     migrationProgress,
     onToggleAgent,
     onStartMigration,
     onCancel,
 }: {
-    migrationResponse: SelectModelMigrationResponse;
-    migrationAgentIds: Set<string>;
+    session: MigrationSession;
     migrationStarting: boolean;
-    migrationStarted: boolean;
     migrationProgress: Record<string, { progress?: { rebuilt: number; total_scanned: number; errors: number; phase: string; label: string } | null; done: boolean; error?: string | null }>;
     onToggleAgent: (agentId: string) => void;
     onStartMigration: () => void;
     onCancel: () => void;
 }) {
-    const allDone = migrationResponse.agents
-        .filter((a) => migrationAgentIds.has(a.instance_id))
+    const { t } = useTranslation();
+    const { started } = session;
+    const allDone = session.agents
+        .filter((a) => session.selected.has(a.instance_id))
         .every((a) => {
             const p = migrationProgress[a.instance_id];
             return p?.done;
         });
 
     return (
-        <div className="rounded-md border border-amber-200 bg-amber-50 p-4 dark:border-amber-800 dark:bg-amber-900/20">
-            <h2 className="mb-2 text-xs font-medium text-amber-800 dark:text-amber-300">
-                {migrationStarted
-                    ? "Embedding Migration in Progress"
-                    : "Embedding Dimension Migration Required"}
-            </h2>
-            <p className="mb-3 text-[11px] text-amber-700 dark:text-amber-400">
-                {migrationResponse.message}
-                {` (Old: ${migrationResponse.old_dimension ?? "?"}, New: ${migrationResponse.new_dimension})`}
-            </p>
+        <ListBox dividers={false}>
+            <ExpandableRow
+                open
+                // Collapsing means "cancel" here, which is what the old panel's
+                // Cancel button did, so the chevron takes over that role — but
+                // only before the rebuild starts. Once a job is in flight the
+                // header must not hide live progress over work that keeps
+                // running, so the title switches to the in-progress wording and
+                // the chevron goes inert rather than lying about being clickable.
+                onToggle={started ? () => {} : onCancel}
+                title={started
+                    ? t("embedding.migrationInProgress")
+                    : t("embedding.migrationRequired")}
+                ariaLabel={t("embedding.migrationRequired")}
+                bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset p-3"
+            >
+                <p className="mb-3 text-11 text-text-secondary">
+                    {session.message}
+                    {` (Old: ${session.oldDimension ?? "?"}, New: ${session.newDimension})`}
+                </p>
 
-            {/* Agent list */}
-            <div className="mb-3 space-y-1.5">
-                {migrationResponse.agents.map((agent) => {
-                    const isSelected = migrationAgentIds.has(agent.instance_id);
-                    const prog = migrationProgress[agent.instance_id];
-                    const pct = prog?.progress?.total_scanned
-                        ? Math.round((prog.progress.rebuilt / prog.progress.total_scanned) * 100)
-                        : 0;
-                    const isDone = prog?.done;
-                    const hasError = prog?.error;
+                {/* Agent list */}
+                <ListBox variant="plain" className="mb-3">
+                    {session.agents.map((agent) => {
+                        const isSelected = session.selected.has(agent.instance_id);
+                        const prog = migrationProgress[agent.instance_id];
+                        const pct = prog?.progress?.total_scanned
+                            ? Math.round((prog.progress.rebuilt / prog.progress.total_scanned) * 100)
+                            : 0;
+                        const isDone = prog?.done;
+                        const hasError = prog?.error;
+                        const inFlight = started && !!prog && !isDone && !hasError;
 
-                    return (
-                        <div
-                            key={agent.instance_id}
-                            className="flex items-center gap-2 rounded border border-amber-200 bg-modal-surface px-3 py-2 text-xs dark:border-amber-700"
-                        >
-                            {/* Checkbox (only before migration starts) */}
-                            {!migrationStarted && (
-                                <input
-                                    type="checkbox"
-                                    checked={isSelected}
-                                    disabled={!agent.is_running}
-                                    onChange={() => onToggleAgent(agent.instance_id)}
-                                    className="h-3.5 w-3.5"
-                                />
-                            )}
+                        return (
+                            <ListRow
+                                key={agent.instance_id}
+                                disabled={!agent.is_running && !started}
+                                trailing={
+                                    <>
+                                        {!agent.is_running ? (
+                                            <Badge tone="neutral">{t("embedding.notRunning")}</Badge>
+                                        ) : isDone ? (
+                                            <Badge tone="success">{t("embedding.done")} ✓</Badge>
+                                        ) : hasError ? (
+                                            <Badge tone="danger">{t("embedding.failed")} ✗</Badge>
+                                        ) : inFlight ? (
+                                            <Badge tone="accent">{pct}%</Badge>
+                                        ) : (
+                                            <Badge tone="neutral">{t("embedding.pending")}</Badge>
+                                        )}
 
-                            {/* Agent name */}
-                            <span className="min-w-[100px] truncate font-medium">
-                                {/* ADR-073: backend currently fills `name` with the
-                                 * package `agent_id` (reverse-domain) — fine for display.
-                                 * Fallback is a SHORT instance id (first 8 hex chars,
-                                 * mirroring acowork_core::AgentInstanceId::short()) so
-                                 * we never leak a full 36-char UUID into the UI when
-                                 * `name` is unexpectedly empty. */}
-                                {agent.name
-                                    || agent.instance_id.slice(0, 8)
-                                    || agent.instance_id}
-                            </span>
-
-                            {/* Status badge */}
-                            {!agent.is_running ? (
-                                <span className="rounded bg-zinc-200 px-1.5 py-0.5 text-[10px] text-text-secondary dark:bg-zinc-700 ">
-                                    Not Running
-                                </span>
-                            ) : isDone ? (
-                                <span className="rounded bg-green-100 px-1.5 py-0.5 text-[10px] text-green-700 dark:bg-green-900/50 dark:text-green-400">
-                                    Done ✓
-                                </span>
-                            ) : hasError ? (
-                                <span className="rounded bg-red-100 px-1.5 py-0.5 text-[10px] text-red-700 dark:bg-red-900/50 dark:text-red-400">
-                                    Failed ✗
-                                </span>
-                            ) : migrationStarted && prog ? (
-                                <span className="rounded bg-blue-100 px-1.5 py-0.5 text-[10px] text-blue-700 dark:bg-blue-900/50 dark:text-blue-400">
-                                    {pct}%
-                                </span>
-                            ) : (
-                                <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] text-amber-700 dark:bg-amber-900/50 dark:text-amber-400">
-                                    Pending
-                                </span>
-                            )}
-
-                            {/* Progress bar */}
-                            {migrationStarted && prog && !isDone && !hasError && (
-                                <div className="ml-auto flex w-24 items-center gap-1">
-                                    <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-700">
-                                        <div
-                                            className="h-full rounded-full bg-blue-500 transition-all"
-                                            style={{ width: `${pct}%` }}
+                                        {/* Accent because this bar is the one thing the
+                                            user is actively waiting on. */}
+                                        {inFlight && (
+                                            <div className="flex w-24 items-center gap-1">
+                                                <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-700">
+                                                    <div
+                                                        className="h-full rounded-full bg-[var(--color-accent)] transition-all"
+                                                        style={{ width: `${pct}%` }}
+                                                    />
+                                                </div>
+                                                <span className="text-10 tabular-nums text-text-tertiary">
+                                                    {prog?.progress?.rebuilt ?? 0}/{prog?.progress?.total_scanned ?? "?"}
+                                                </span>
+                                            </div>
+                                        )}
+                                    </>
+                                }
+                            >
+                                {/* Checkbox is the only control, as before — a
+                                 * restyle must not change who can be clicked. */}
+                                <span className="flex items-center gap-2 text-xs">
+                                    {!started && (
+                                        <input
+                                            type="checkbox"
+                                            checked={isSelected}
+                                            disabled={!agent.is_running}
+                                            onChange={() => onToggleAgent(agent.instance_id)}
+                                            className="h-3.5 w-3.5"
                                         />
-                                    </div>
-                                    <span className="text-[10px] tabular-nums text-text-tertiary">
-                                        {prog.progress?.rebuilt ?? 0}/{prog.progress?.total_scanned ?? "?"}
+                                    )}
+                                    {/* ADR-073: backend currently fills `name` with the
+                                     * package `agent_id` (reverse-domain) — fine for display.
+                                     * Fallback is a SHORT instance id (first 8 hex chars,
+                                     * mirroring acowork_core::AgentInstanceId::short()) so
+                                     * we never leak a full 36-char UUID into the UI when
+                                     * `name` is unexpectedly empty. */}
+                                    <span className="min-w-[100px] truncate font-medium">
+                                        {agent.name
+                                            || agent.instance_id.slice(0, 8)
+                                            || agent.instance_id}
                                     </span>
-                                </div>
-                            )}
-                        </div>
-                    );
-                })}
-            </div>
+                                </span>
+                            </ListRow>
+                        );
+                    })}
+                </ListBox>
 
             {/* Actions */}
             <div className="flex items-center gap-2">
-                {!migrationStarted ? (
+                {!started ? (
                     <>
                         <button
                             onClick={onStartMigration}
-                            disabled={migrationStarting || migrationAgentIds.size === 0}
-                            className="rounded btn-solid px-3 py-[var(--ui-btn-py)] text-xs font-medium disabled:opacity-50"
+                            disabled={migrationStarting || session.selected.size === 0}
+                            className="rounded btn-accent px-3 py-[var(--ui-btn-py)] text-xs font-medium disabled:opacity-50"
                         >
-                            {migrationStarting ? "Starting..." : "Start Migration"}
+                            {migrationStarting ? t("embedding.starting") : t("embedding.startMigration")}
                         </button>
                         <button
                             onClick={onCancel}
@@ -977,17 +1016,19 @@ function MigrationPanel({
                 ) : allDone ? (
                     <button
                         onClick={onCancel}
-                        className="rounded btn-solid px-3 py-[var(--ui-btn-py)] text-xs font-medium"
+                        className="rounded btn-accent px-3 py-[var(--ui-btn-py)] text-xs font-medium"
                     >
-                        Migration Complete — Dismiss
+                        {t("embedding.migrationComplete")}
                     </button>
                 ) : (
-                    <span className="text-xs text-amber-700 dark:text-amber-400">
-                        ⏳ Migrating agents... Do not close this panel.
+                    <span className="flex items-center gap-1.5 text-xs text-text-tertiary">
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                        {t("embedding.migratingAgents")}
                     </span>
                 )}
             </div>
-        </div>
+            </ExpandableRow>
+        </ListBox>
     );
 }
 
@@ -1046,7 +1087,7 @@ function ModelCard({
                         <span className="text-xs font-semibold">{model.name}</span>
                         {model.recommended && (
                             <span
-                                className="rounded px-1.5 py-0.5 text-[10px] font-medium"
+                                className="rounded px-1.5 py-0.5 text-10 font-medium"
                                 style={{ backgroundColor: "color-mix(in srgb, var(--color-accent) 15%, transparent)", color: "var(--color-accent)" }}
                             >
                                 {t("embedding.recommended")}
@@ -1054,14 +1095,14 @@ function ModelCard({
                         )}
                         {isActive && (
                             <span
-                                className="rounded px-1.5 py-0.5 text-[10px] font-medium"
+                                className="rounded px-1.5 py-0.5 text-10 font-medium"
                                 style={{ backgroundColor: "color-mix(in srgb, var(--color-accent) 15%, transparent)", color: "var(--color-accent)" }}
                             >
                                 {t("embedding.active")}
                             </span>
                         )}
                     </div>
-                    <p className="mt-0.5 text-[10px] text-text-tertiary ">{model.id}</p>
+                    <p className="mt-0.5 text-10 text-text-tertiary ">{model.id}</p>
                 </div>
                 <div className="flex shrink-0 items-center gap-1.5">
                     {/* Variant selector — show when downloading and model has multiple variants */}
@@ -1082,7 +1123,7 @@ function ModelCard({
                         <button
                             onClick={() => onDownload(model.id, hasVariants ? selectedVariant : undefined)}
                             disabled={isBusy || !model.id}
-                            className="inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-[11px] font-medium disabled:opacity-50"
+                            className="inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-11 font-medium disabled:opacity-50"
                         >
                             {isDownloading ? (
                                 <Loader2 className="h-3 w-3 animate-spin" />
@@ -1097,7 +1138,7 @@ function ModelCard({
                         <button
                             onClick={onSelect}
                             disabled={isBusy}
-                            className="inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-[11px] font-medium disabled:opacity-50"
+                            className="inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-11 font-medium disabled:opacity-50"
                         >
                             {isSelecting ? (
                                 <Loader2 className="h-3 w-3 animate-spin" />
@@ -1112,7 +1153,7 @@ function ModelCard({
                         <button
                             onClick={onDelete}
                             disabled={isBusy}
-                            className="group/del inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-[11px] font-medium disabled:opacity-50"
+                            className="group/del inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-11 font-medium disabled:opacity-50"
                         >
                             {isDeleting ? (
                                 <Loader2 className="h-3 w-3 animate-spin" />
@@ -1139,14 +1180,14 @@ function ModelCard({
                             }}
                         />
                     </div>
-                    <p className="text-right text-[10px] text-text-tertiary ">
+                    <p className="text-right text-10 text-text-tertiary ">
                         {progress > 0 ? `${progress}%` : t("embedding.connecting")}
                     </p>
                 </div>
             )}
 
             {/* Meta info */}
-            <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-text-tertiary ">
+            <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-10 text-text-tertiary ">
                 <span className="inline-flex items-center gap-1">
                     <Cpu className="h-3 w-3" />
                     {model.dimension}d
@@ -1223,9 +1264,9 @@ function CloudProviderCard({
                 <div className="min-w-0">
                     <div className="flex items-center gap-2">
                         <h3 className="text-xs font-medium">{provider.name}</h3>
-                        <span className="text-[10px] text-text-tertiary">({provider.id})</span>
+                        <span className="text-10 text-text-tertiary">({provider.id})</span>
                     </div>
-                    <p className="mt-0.5 truncate font-mono text-[10px] text-text-tertiary ">
+                    <p className="mt-0.5 truncate font-mono text-10 text-text-tertiary ">
                         {provider.api}
                     </p>
                 </div>
@@ -1233,14 +1274,14 @@ function CloudProviderCard({
                     {!keyEditing ? (
                         hasKey ? (
                             <>
-                                <span className="inline-flex items-center gap-1 rounded bg-green-50 px-1.5 py-0.5 text-[10px] font-medium text-green-700 dark:bg-green-950 dark:text-green-300">
+                                <span className="inline-flex items-center gap-1 rounded bg-green-50 px-1.5 py-0.5 text-10 font-medium text-green-700 dark:bg-green-950 dark:text-green-300">
                                     <CheckCircle2 className="h-2.5 w-2.5" />
                                     Key
                                 </span>
                                 <button
                                     onClick={onTest}
                                     disabled={testing}
-                                    className="inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-[11px] font-medium disabled:opacity-50"
+                                    className="inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-11 font-medium disabled:opacity-50"
                                 >
                                     {testing ? (
                                         <Loader2 className="h-3 w-3 animate-spin" />
@@ -1251,13 +1292,13 @@ function CloudProviderCard({
                                 </button>
                                 <button
                                     onClick={onStartKeyEdit}
-                                    className="inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-[11px] font-medium"
+                                    className="inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-11 font-medium"
                                 >
                                     {t("embedding.changeKey")}
                                 </button>
                                 <button
                                     onClick={onDeleteKey}
-                                    className="inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-[11px] font-medium"
+                                    className="inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-11 font-medium"
                                 >
                                     {t("embedding.deleteKey")}
                                 </button>
@@ -1265,7 +1306,7 @@ function CloudProviderCard({
                         ) : (
                             <button
                                 onClick={onStartKeyEdit}
-                                className="inline-flex items-center gap-1 rounded btn-accent px-2 py-1 text-[11px] font-medium"
+                                className="inline-flex items-center gap-1 rounded btn-accent px-2 py-1 text-11 font-medium"
                             >
                                 <KeyRound className="h-3 w-3" />
                                 {t("embedding.setApiKey")}
@@ -1278,7 +1319,7 @@ function CloudProviderCard({
                                 value={keyDraft}
                                 onChange={(e) => onChangeKeyDraft(e.target.value)}
                                 placeholder={provider.env[0] ?? "API Key"}
-                                className="w-44 rounded-md border border-zinc-300 px-2 py-1 text-[11px] dark:border-zinc-600 dark:bg-zinc-800"
+                                className="w-44 rounded-md border border-zinc-300 px-2 py-1 text-11 dark:border-zinc-600 dark:bg-zinc-800"
                                 autoFocus
                                 onKeyDown={(e) => {
                                     if (e.key === "Enter") onSubmitKey();
@@ -1288,7 +1329,7 @@ function CloudProviderCard({
                             <button
                                 onClick={onSubmitKey}
                                 disabled={keySaving || !keyDraft.trim()}
-                                className="inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-[11px] font-medium disabled:opacity-50"
+                                className="inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-11 font-medium disabled:opacity-50"
                             >
                                 {keySaving ? (
                                     <Loader2 className="h-3 w-3 animate-spin" />
@@ -1300,7 +1341,7 @@ function CloudProviderCard({
                             <button
                                 onClick={onCancelKeyEdit}
                                 disabled={keySaving}
-                                className="inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-[11px] font-medium disabled:opacity-50"
+                                className="inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-11 font-medium disabled:opacity-50"
                             >
                                 {t("embedding.cancel")}
                             </button>
@@ -1311,7 +1352,7 @@ function CloudProviderCard({
 
             {/* Test result inline */}
             {testResult && (
-                <div className="mb-2 flex items-center gap-1 text-[11px]">
+                <div className="mb-2 flex items-center gap-1 text-11">
                     {testResult.success ? (
                         <>
                             <CheckCircle2 className="h-3 w-3 text-green-500" />
@@ -1340,18 +1381,18 @@ function CloudProviderCard({
                     return (
                         <div
                             key={m.id}
-                            className="flex items-center justify-between rounded border border-zinc-100 px-2 py-1.5 text-[11px] dark:border-zinc-800"
+                            className="flex items-center justify-between rounded border border-zinc-100 px-2 py-1.5 text-11 dark:border-zinc-800"
                         >
                             <div className="flex min-w-0 items-center gap-2">
                                 <span className="font-medium">{m.name || m.id}</span>
-                                <span className="font-mono text-[10px] text-text-tertiary">{m.id}</span>
+                                <span className="font-mono text-10 text-text-tertiary">{m.id}</span>
                                 <span className="text-text-tertiary">· {m.dimensions}d</span>
                                 {m.context_length && (
                                     <span className="text-text-tertiary">· {m.context_length} ctx</span>
                                 )}
                                 {isActiveModel && (
                                     <span
-                                        className="rounded px-1.5 py-0.5 text-[10px] font-medium"
+                                        className="rounded px-1.5 py-0.5 text-10 font-medium"
                                         style={{
                                             backgroundColor:
                                                 "color-mix(in srgb, var(--color-accent) 15%, transparent)",
@@ -1367,7 +1408,7 @@ function CloudProviderCard({
                                     onClick={() => onSelectModel(m.id)}
                                     disabled={isSelecting || !hasKey}
                                     title={!hasKey ? t("embedding.apiKeyRequired") : undefined}
-                                    className="inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-[11px] font-medium disabled:opacity-50"
+                                    className="inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-11 font-medium disabled:opacity-50"
                                 >
                                     {isSelecting ? (
                                         <Loader2 className="h-3 w-3 animate-spin" />
@@ -1623,7 +1664,7 @@ function AddCustomEmbeddingProviderDialog({
                             <button
                                 type="button"
                                 onClick={addModel}
-                                className="inline-flex items-center gap-1 text-[11px] text-text-tertiary hover:text-zinc-700  dark:hover:text-zinc-200"
+                                className="inline-flex items-center gap-1 text-11 text-text-tertiary hover:text-zinc-700  dark:hover:text-zinc-200"
                             >
                                 <Plus className="h-3 w-3" />
                                 {t("embedding.customAddModel")}
@@ -1643,7 +1684,7 @@ function AddCustomEmbeddingProviderDialog({
                                                 updateModel(idx, { id: e.target.value })
                                             }
                                             placeholder={t("embedding.customModelIdPlaceholder")}
-                                            className="rounded-md border border-input-border bg-input-bg px-2 py-1 text-[11px] font-mono"
+                                            className="rounded-md border border-input-border bg-input-bg px-2 py-1 text-11 font-mono"
                                         />
                                         <input
                                             type="text"
@@ -1652,7 +1693,7 @@ function AddCustomEmbeddingProviderDialog({
                                                 updateModel(idx, { name: e.target.value })
                                             }
                                             placeholder={t("embedding.customModelNamePlaceholder")}
-                                            className="rounded-md border border-input-border bg-input-bg px-2 py-1 text-[11px]"
+                                            className="rounded-md border border-input-border bg-input-bg px-2 py-1 text-11"
                                         />
                                     </div>
                                     <div className="flex items-center gap-2">
@@ -1663,7 +1704,7 @@ function AddCustomEmbeddingProviderDialog({
                                                 updateModel(idx, { dimensions: e.target.value })
                                             }
                                             placeholder={t("embedding.customModelDimensionsPlaceholder")}
-                                            className="w-24 rounded-md border border-input-border bg-input-bg px-2 py-1 text-[11px]"
+                                            className="w-24 rounded-md border border-input-border bg-input-bg px-2 py-1 text-11"
                                         />
                                         <input
                                             type="number"
@@ -1674,7 +1715,7 @@ function AddCustomEmbeddingProviderDialog({
                                                 })
                                             }
                                             placeholder={t("embedding.customModelContextLengthPlaceholder")}
-                                            className="w-28 rounded-md border border-input-border bg-input-bg px-2 py-1 text-[11px]"
+                                            className="w-28 rounded-md border border-input-border bg-input-bg px-2 py-1 text-11"
                                         />
                                         {models.length > 1 && (
                                             <button
@@ -1694,7 +1735,7 @@ function AddCustomEmbeddingProviderDialog({
 
                     {/* Inline error */}
                     {error && (
-                        <div className="rounded border border-red-200 bg-red-50 px-2 py-1.5 text-[11px] text-red-700 dark:border-red-800 dark:bg-red-950 dark:text-red-300">
+                        <div className="rounded border border-red-200 bg-red-50 px-2 py-1.5 text-11 text-red-700 dark:border-red-800 dark:bg-red-950 dark:text-red-300">
                             {error}
                         </div>
                     )}

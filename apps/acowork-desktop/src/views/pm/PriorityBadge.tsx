@@ -30,7 +30,7 @@ export function PriorityBadge({
   return (
     <span
       className={cn(
-        "inline-flex items-center rounded px-1 py-px text-[9px] font-semibold uppercase tracking-wide",
+        "inline-flex items-center rounded px-1 py-px text-9 font-semibold uppercase tracking-wide",
         STYLES[priority],
         className,
       )}

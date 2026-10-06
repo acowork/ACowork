@@ -8,14 +8,14 @@
 //!
 //! # Package-level prompt overrides (ADR-063)
 //!
-//! The 6 files listed in [`OVERRIDABLE_PROMPTS`] are the canonical
+//! The 5 files listed in [`OVERRIDABLE_PROMPTS`] are the canonical
 //! "package-declared overrides" for the hardcoded LLM prompt constants in
 //! [`crate::prompt`] and the downstream grafeo/memory modules. When a
 //! `.agent` package provides one of these files in `prompts/`, it
 //! replaces the built-in default at runtime via the
 //! `AgentCore.<field>` resolution chain (see ADR-063 §3.2).
 //!
-//! These 7 files are also **deliberately excluded** from the main dialog
+//! These files are also **deliberately excluded** from the main dialog
 //! system prompt assembled here — they are task-specific directives (a
 //! summarization rule, a search directive, a title-style preference, …)
 //! that would pollute every LLM call if folded into the dialog identity
@@ -82,24 +82,19 @@ pub const OVERRIDABLE_PROMPTS: &[(&str, &str)] = &[
     // `generalization.md`) were removed: see module-level docs.
     ("abstention.md", "DEFAULT_ABSTENTION_PROMPT (memory)"),
     // ADR-071 D7/D9 — per-agent EpisodicDistiller prompt overrides.
-    // These two files are consumed by the offline distiller pipeline
+    // Consumed by the offline distiller pipeline
     // (`acowork_memory::consolidation::distiller`), NOT by the main
-    // dialog / compaction call sites: `extraction_prompt_override`
-    // replaces the built-in `EXTRACTION_SYSTEM_PROMPT` (Step 2a) and
-    // `judge_prompt_override` replaces `JUDGE_SYSTEM_PROMPT` (Step 4).
+    // dialog / compaction call sites: `merge_prompt_override` replaces the
+    // built-in `MERGE_SYSTEM_PROMPT`.
     (
-        "distiller-extraction.md",
-        "distiller Step 2a extraction system prompt (ADR-071)",
-    ),
-    (
-        "distiller-judge.md",
-        "distiller Step 4 judge system prompt (ADR-071)",
+        "distiller-merge.md",
+        "distiller merge-decision system prompt (ADR-071)",
     ),
 ];
 
 /// O(1) lookup set of overridable filenames. Built lazily on first access
 /// via [`overridable_filenames`] so the cold-start cost is one allocation
-/// of seven `&str`s — cheaper than scanning [`OVERRIDABLE_PROMPTS`] on every
+/// of five `&str`s — cheaper than scanning [`OVERRIDABLE_PROMPTS`] on every
 /// file in `prompts/`.
 fn overridable_filenames() -> &'static HashSet<&'static str> {
     use std::sync::OnceLock;
@@ -228,11 +223,8 @@ pub fn reload_prompts_into_core(
             "abstention.md" => {
                 *core.abstention_prompt.write().unwrap() = loaded;
             }
-            "distiller-extraction.md" => {
-                *core.distiller_extraction_prompt.write().unwrap() = loaded;
-            }
-            "distiller-judge.md" => {
-                *core.distiller_judge_prompt.write().unwrap() = loaded;
+            "distiller-merge.md" => {
+                *core.distiller_merge_prompt.write().unwrap() = loaded;
             }
             other => {
                 return Err(format!(
@@ -600,7 +592,7 @@ Be friendly and welcoming.
     }
 
     #[test]
-    fn test_overridable_prompts_stays_at_7_entries() {
+    fn test_overridable_prompts_stays_at_5_entries() {
         // Sanity check: the closed-set invariant holds. A future
         // maintainer who adds an entry to `OVERRIDABLE_PROMPTS` without
         // teaching `reload_prompts_into_core` about the matching field
@@ -611,17 +603,14 @@ Be friendly and welcoming.
         // makes a silent drift (e.g. someone shrinks the list to 4)
         // immediately visible.
         //
-        // ADR-068: count went from 8 → 5 after removing the 3 grafeo
-        // overrides (extraction / conflict-classification /
-        // generalization).
-        // ADR-071 D7/D9: count went 5 → 7 after adding the two distiller
-        // overrides (distiller-extraction / distiller-judge).
-        // Web-search removal: count went 7 → 6 after dropping `search.md`
-        // (`SEARCH_SYSTEM_PROMPT` went with the built-in web-search module).
+        // History: 8 -> 5 (ADR-068 dropped the three grafeo overrides),
+        // 5 -> 7 (ADR-071 added distiller-extraction.md + distiller-judge.md),
+        // 7 -> 6 (web-search removal), 6 -> 5 (projection + merge rewrite
+        // collapsed the two distiller slots into distiller-merge.md).
         assert_eq!(
             OVERRIDABLE_PROMPTS.len(),
-            6,
-            "OVERRIDABLE_PROMPTS must stay at 6 — every entry maps 1:1 to an AgentCore field; drift here breaks reload"
+            5,
+            "OVERRIDABLE_PROMPTS must stay at 5 — every entry maps 1:1 to an AgentCore field; drift here breaks reload"
         );
     }
 
@@ -797,17 +786,18 @@ Be friendly and welcoming.
     /// overrides).
     /// ADR-071 D7/D9: count was 7 (5 + distiller-extraction.md +
     /// distiller-judge.md); the built-in web-search removal dropped
-    /// `search.md`, so it is now 6.
+    /// `search.md` to 6, and the projection + merge rewrite collapsed the two
+    /// distiller slots into one, so it is now 5.
     #[test]
-    fn test_overridable_prompts_count_is_6() {
+    fn test_overridable_prompts_count_is_5() {
         assert_eq!(
             OVERRIDABLE_PROMPTS.len(),
-            6,
-            "OVERRIDABLE_PROMPTS must have 6 entries: 1 compaction (ADR-053) + 2 prompt.rs + 1 memory abstention + 2 distiller prompts (ADR-071). Update AgentCore fields, LLM call sites, and Debug panel list together."
+            5,
+            "OVERRIDABLE_PROMPTS must have 5 entries: 1 compaction (ADR-053) + 2 prompt.rs + 1 memory abstention + 1 distiller merge prompt (ADR-071). Update AgentCore fields, LLM call sites, and Debug panel list together."
         );
     }
 
-    /// All 7 canonical filenames must be recognised. Pins the contract
+    /// Every canonical filename must be recognised. Pins the contract
     /// that `OVERRIDABLE_PROMPTS` and `is_overridable_prompt` agree.
     #[test]
     fn test_is_overridable_prompt_for_all_known_files() {

@@ -80,11 +80,18 @@ export function ProjectSidebar({ width }: { width?: number }) {
 
   return (
     <aside
-      className={cn(CAPSULE_PANE_CN, "shrink-0 bg-nav-surface")}
+      className={cn(CAPSULE_PANE_CN, "h-full shrink-0 bg-nav-surface text-xs")}
       style={{ width: width ?? 240 }}
     >
-      {/* Header — search input (与 AgentList 同款) */}
-      <div className="px-3 py-2">
+      {/* Header — search input (与 AgentList 同款)。高度绑定
+          --ui-list-header-h，与 harness / settings 的标题栏同高，
+          三个列表胶囊的分割线才能横向对齐。 */}
+      {/* `border-b` matches the other sidebar headers (SectionPane's title
+          row, DocTreeSidebar's title row) so the search band is separated
+          from the project list the same way everywhere. The search box
+          itself already has a border, which is what made the missing rule
+          read as "intentional" here. */}
+      <div className="flex min-h-[var(--ui-list-header-h)] shrink-0 items-center border-b border-border-divider px-3">
         <div className="relative min-w-0 flex-1">
           <Search className="absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-text-tertiary " />
           <StyledInput
@@ -100,7 +107,11 @@ export function ProjectSidebar({ width }: { width?: number }) {
 
       {/* 项目列表 */}
       <nav
-        className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-1.5"
+        // `py-1` matches SectionPane's list container (and harness/settings,
+        // which renders through it) — without it the pm rows sit flush
+        // against the header hairline while every other capsule list has
+        // the same 4px breathing room top and bottom.
+        className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-1.5 py-1"
         aria-label={t("pm.projectListAria")}
       >
         {filteredProjects.map((p, index) => {
@@ -118,11 +129,18 @@ export function ProjectSidebar({ width }: { width?: number }) {
                   ? "bg-[var(--color-accent)]/90 text-white"
                   : "text-text-secondary hover:bg-nav-item-hover ",
                 !isLast &&
-                  "after:absolute after:bottom-0 after:left-1.5 after:right-1.5 after:border-b after:border-nav-divider/40 dark:after:border-zinc-600/40",
+                  "row-divider-b",
               )}
               aria-current={active ? "page" : undefined}
             >
-              <span className={cn("min-w-0 flex-1 truncate", active ? "text-white" : "")}>
+              {/* `font-medium` 与 chat 侧边栏的 agent 名一致，见 SectionPane
+                  同一处的说明：`text-xs` 下 `semibold` 明显过重。 */}
+              <span
+                className={cn(
+                  "min-w-0 flex-1 truncate font-medium",
+                  active ? "text-white" : "",
+                )}
+              >
                 {p.title}
               </span>
               {/* 计数徽章：待审核数字色高亮（active 时用半透明白底以维持对比度） */}
@@ -131,7 +149,7 @@ export function ProjectSidebar({ width }: { width?: number }) {
                   {c.submitted > 0 && (
                     <span
                       className={cn(
-                        "rounded-full px-1.5 text-[10px] font-medium",
+                        "rounded-full px-1.5 text-10 font-medium",
                         active
                           ? "bg-white/20 text-white"
                           : "bg-amber-100 text-amber-700 dark:bg-amber-900/50 dark:text-amber-300",
@@ -142,7 +160,7 @@ export function ProjectSidebar({ width }: { width?: number }) {
                   )}
                   <span
                     className={cn(
-                      "rounded-full px-1.5 text-[10px]",
+                      "rounded-full px-1.5 text-10",
                       active
                         ? "bg-white/20 text-white"
                         : "bg-zinc-100 text-text-tertiary group-hover:bg-zinc-200 dark:bg-zinc-800 ",
@@ -168,7 +186,7 @@ export function ProjectSidebar({ width }: { width?: number }) {
 
       {/* 离线时禁用写操作 — 紧贴列表底部，但仍在 + 按钮上方 */}
       {healthy === false && (
-        <div className="border-t border-border-divider px-3 py-2 text-[10px] text-text-tertiary">
+        <div className="border-t border-border-divider px-3 py-2 text-10 text-text-tertiary">
           {t("pm.offlineReadonlyHint")}
         </div>
       )}

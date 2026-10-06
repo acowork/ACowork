@@ -146,6 +146,15 @@ pub struct AdminStats {
     pub stored_dim: u64,
     /// Number of nodes that have an embedding vector.
     pub nodes_with_embedding: u64,
+    /// Vectors stored at a width other than the engine's recorded embedding
+    /// dimension.
+    ///
+    /// This is the signal a model swap can leave behind: the recorded
+    /// dimension is updated while some rows still hold the previous width, and
+    /// vector search skips foreign-width rows silently. Those rows are not
+    /// missing - they are invisible - so no count of *missing* embeddings can
+    /// report them, and a comparison of declared dimensions cannot either.
+    pub vectors_of_other_dim: u64,
     /// On-disk schema version of the underlying store.
     ///
     /// For SQLite-backed implementations this is `PRAGMA user_version`, a

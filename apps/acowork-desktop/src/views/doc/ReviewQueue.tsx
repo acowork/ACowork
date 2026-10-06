@@ -104,7 +104,7 @@ export function ReviewQueue() {
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
         className={cn(
-          "flex w-full items-center gap-2 px-3 py-1 text-left text-[11px] transition-colors",
+          "flex w-full items-center gap-2 px-3 py-1 text-left text-11 transition-colors",
           pendingCount > 0
             ? "bg-amber-50 text-amber-800 hover:bg-amber-100 dark:bg-amber-900/20 dark:text-amber-200 dark:hover:bg-amber-900/30"
             : "text-text-tertiary hover:bg-zinc-50 dark:hover:bg-zinc-800/50",
@@ -126,7 +126,7 @@ export function ReviewQueue() {
             </div>
           )}
           {!loading && pendingCount === 0 && (
-            <div className="flex items-center justify-between px-2 py-2 text-[11px] text-text-tertiary">
+            <div className="flex items-center justify-between px-2 py-2 text-11 text-text-tertiary">
               <span>{t("doc.reviewQueueEmpty")}</span>
               <button
                 type="button"
@@ -152,11 +152,11 @@ export function ReviewQueue() {
                 >
                   <div className="flex items-center gap-1.5 truncate text-xs text-text-secondary ">
                     <span className="truncate font-medium">{req.path}</span>
-                    <span className="shrink-0 rounded bg-zinc-100 px-1 text-[10px] text-text-tertiary dark:bg-zinc-800 ">
+                    <span className="shrink-0 rounded bg-zinc-100 px-1 text-10 text-text-tertiary dark:bg-zinc-800 ">
                       base v{req.base_version}
                     </span>
                   </div>
-                  <div className="truncate text-[10px] text-text-tertiary">
+                  <div className="truncate text-10 text-text-tertiary">
                     {resolveAgentName(agents, req.submitted_by) ?? req.submitted_by} ·{" "}
                     {new Date(req.created_at).toLocaleString()}
                   </div>
@@ -166,7 +166,7 @@ export function ReviewQueue() {
                     type="button"
                     disabled={busyId === req.request_id}
                     onClick={() => void handleApprove(req)}
-                    className="inline-flex items-center gap-0.5 rounded bg-emerald-600 px-1.5 py-0.5 text-[10px] font-medium text-white hover:bg-emerald-700 disabled:opacity-40"
+                    className="inline-flex items-center gap-0.5 rounded bg-emerald-600 px-1.5 py-0.5 text-10 font-medium text-white hover:bg-emerald-700 disabled:opacity-40"
                   >
                     <Check className="h-2.5 w-2.5" aria-hidden />
                     {t("doc.approve")}
@@ -178,7 +178,7 @@ export function ReviewQueue() {
                       setNoteTarget(req);
                       setNote("");
                     }}
-                    className="inline-flex items-center gap-0.5 rounded border border-zinc-200 px-1.5 py-0.5 text-[10px] text-text-tertiary hover:bg-zinc-100 disabled:opacity-40 dark:border-zinc-700  dark:hover:bg-zinc-800"
+                    className="inline-flex items-center gap-0.5 rounded border border-zinc-200 px-1.5 py-0.5 text-10 text-text-tertiary hover:bg-zinc-100 disabled:opacity-40 dark:border-zinc-700  dark:hover:bg-zinc-800"
                   >
                     <X className="h-2.5 w-2.5" aria-hidden />
                     {t("doc.reject")}

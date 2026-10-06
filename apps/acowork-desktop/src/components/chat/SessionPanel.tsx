@@ -160,7 +160,7 @@ export function SessionPanel({ agentId }: SessionPanelProps) {
                         {session.title || t("sessionPanel.untitledSession")}
                       </span>
                     </div>
-                    <div className="ml-5.5 flex items-center gap-2 text-[10px] text-text-tertiary ">
+                    <div className="ml-5.5 flex items-center gap-2 text-10 text-text-tertiary ">
                       <span className="flex items-center gap-1">
                         <Clock className="h-3 w-3" />
                         {formatRelativeTime(session.created_at, t)}

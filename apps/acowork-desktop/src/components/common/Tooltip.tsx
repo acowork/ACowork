@@ -154,7 +154,7 @@ function InlineTooltip({
             // content (e.g. file paths) wraps within maxWidth instead of
             // overflowing the background. Short tooltips stay on one line
             // because they have natural break points (or none at all).
-            "whitespace-pre-wrap break-words px-2.5 py-1.5 text-[11px] leading-tight",
+            "whitespace-pre-wrap break-words px-2.5 py-1.5 text-11 leading-tight",
             variantClasses[variant],
           )}
           style={{ maxWidth }}
@@ -282,7 +282,7 @@ function PortalTooltip({
               className={cn(
                 // See InlineTooltip above for why whitespace-pre-wrap +
                 // break-words is used here instead of whitespace-nowrap.
-                "whitespace-pre-wrap break-words px-2.5 py-1.5 text-[11px] leading-tight",
+                "whitespace-pre-wrap break-words px-2.5 py-1.5 text-11 leading-tight",
                 variantClasses[variant],
               )}
               style={{ maxWidth }}

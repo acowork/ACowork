@@ -131,7 +131,7 @@ export function TrashDialog({ open, onClose, disabled }: TrashDialogProps) {
                   <div className="truncate text-xs text-text-secondary ">
                     {entry.original_name}
                   </div>
-                  <div className="truncate text-[10px] text-text-tertiary">
+                  <div className="truncate text-10 text-text-tertiary">
                     {new Date(entry.deleted_at).toLocaleString()} · {fmtSize(entry.file_size_bytes)}
                   </div>
                 </div>
@@ -162,7 +162,7 @@ export function TrashDialog({ open, onClose, disabled }: TrashDialogProps) {
         </div>
 
         {!isEmpty && (
-          <div className="border-t border-border-divider px-3 py-1.5 text-[10px] text-text-tertiary">
+          <div className="border-t border-border-divider px-3 py-1.5 text-10 text-text-tertiary">
             {t("doc.trashNote")}
           </div>
         )}

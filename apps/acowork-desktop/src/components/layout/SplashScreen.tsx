@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useGatewayStore } from "../../stores/gatewayStore";
 import { useSettingsStore } from "../../stores/settingsStore";
+import { useAuthStore } from "../../stores/authStore";
 import { initMqttListener } from "../../stores/chatStore";
 import { initWorkspaceFsListener } from "../../lib/workspaceFsEvents";
 import { initDocTreeChangeListener } from "../../lib/docFsEvents";
@@ -79,23 +80,59 @@ async function bootGateway(): Promise<void> {
     //    `installAgent` → `POST /api/agents/ensure`), not a dedicated Tauri
     //    command. No per-boot System-Agent step needed here.
     //
-    // 4) Connect MQTT client for real-time events (ADR-033).
+    // 4) Register the frontend event listeners UNCONDITIONALLY and BEFORE
+    //    the connect attempt (ADR-033 / ADR-058). They are pure event
+    //    subscriptions — valid while the Rust client slot is still `None`
+    //    (pre-login relay boot, or a failed connect) — and the status
+    //    watchdog converges the UI as soon as a client appears. Merging
+    //    them into the connect try-block (previous behaviour) meant any
+    //    connect rejection skipped ALL THREE, so even a later successful
+    //    reconnect (auth bridge / manual Connect) left the UI frozen at
+    //    `idle` with no live event stream.
     try {
-        await invoke("connect_mqtt");
-        log.debug("[bootGateway] MQTT connected");
-        // ADR-033: Register frontend MQTT event listener
         await initMqttListener();
         log.debug("[bootGateway] MQTT listener initialized");
+    } catch (err) {
+        log.warn("[bootGateway] initMqttListener failed:", err);
+    }
+    try {
         // ADR-058: workspace fs-changed listener (auto tree refresh +
         // editor conflict UX + reconnect full-sync fallback).
         await initWorkspaceFsListener();
         log.debug("[bootGateway] workspace fs listener initialized");
+    } catch (err) {
+        log.warn("[bootGateway] initWorkspaceFsListener failed:", err);
+    }
+    try {
         // Doc library tree-change listener (event-driven refresh of the
         // doc sidebar; reconnect full-sync fallback built in).
         await initDocTreeChangeListener();
         log.debug("[bootGateway] doc tree-change listener initialized");
     } catch (err) {
-        log.warn("connect_mqtt failed:", err);
+        log.warn("[bootGateway] initDocTreeChangeListener failed:", err);
+    }
+
+    // 5) Connect the MQTT client for real-time events (ADR-033).
+    //
+    //    Relay-mode prerequisite: the strict remote listener rejects
+    //    CONNECT without a mirrored access token (chat_mqtt.rs:111). No
+    //    token can exist this early on a fresh boot (login happens AFTER
+    //    the splash), so waiting blocks the whole pipeline for nothing —
+    //    skip the call and let the auth bridge (`gatewayAuthBridge.ts`)
+    //    fire `connect_mqtt` on the null→non-null token transition. The
+    //    chat banner / services panel keep a manual escape meanwhile.
+    if (mode === "relay" && !useAuthStore.getState().accessToken) {
+        log.info(
+            "[bootGateway] relay mode without an access token; " +
+            "deferring connect_mqtt to the auth bridge (fires on login)",
+        );
+    } else {
+        try {
+            await invoke("connect_mqtt");
+            log.debug("[bootGateway] MQTT connected");
+        } catch (err) {
+            log.warn("connect_mqtt failed:", err);
+        }
     }
 }
 
@@ -152,7 +189,7 @@ function CandidateChooser({
                 </p>
                 <button
                     onClick={onDismiss}
-                    className="text-[11px] text-text-tertiary hover:text-text-secondary"
+                    className="text-11 text-text-tertiary hover:text-text-secondary"
                 >
                     {t("splashScreen.candidateKeepWaiting")}
                 </button>
@@ -167,7 +204,7 @@ function CandidateChooser({
                             <span className="truncate font-mono text-xs text-text-secondary" title={c.url}>
                                 {c.url}
                             </span>
-                            <span className="ml-2 shrink-0 text-[11px] text-text-tertiary">
+                            <span className="ml-2 shrink-0 text-11 text-text-tertiary">
                                 {Math.round(c.latencyMs)} ms
                             </span>
                         </button>
@@ -334,8 +371,9 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
             // candidates (laptop moved LAN). Fires on a parallel track;
             // doesn't cancel the main boot pipeline. Skipped in local
             // mode (always 127.0.0.1) and when there's no history to
-            // probe.
-            if (gatewayMode === "remote" && !candidatesOffered) {
+            // probe. Applies to both off-site modes (remote LAN and
+            // relay — the relay device domain can change too).
+            if (gatewayMode !== "local" && !candidatesOffered) {
                 const history = useSettingsStore.getState().gatewayUrlHistory;
                 const currentUrl = useSettingsStore.getState().gatewayUrl;
                 const others = history.filter((u) => u !== currentUrl);
@@ -422,7 +460,11 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
         startTimeRef.current = Date.now();
         // Remote mode: the timeout view lets the user edit the Gateway
         // address. Persist + push to Rust before probing so this retry
-        // (and every later command) targets the new URL.
+        // (and every later command) targets the new URL. `applyGatewayUrl`
+        // also keeps the mode consistent — an `http://` address while the
+        // mode is still `relay` would be permanently rejected by Rust
+        // (`relay_mqtt_wss_url` only accepts `https://` device domains),
+        // so it flips the mode to `remote` in the same step.
         //
         // `overrideUrl` is used by the candidate-pick path: when the
         // user clicks a candidate chip, the chip passes the picked URL
@@ -432,10 +474,9 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
         // roll the store back to the dead host. When no override is
         // passed (the user clicked the "Retry" button on the timeout
         // view), fall back to the current input value.
-        const currentUrl = useSettingsStore.getState().gatewayUrl;
         const nextUrl = (overrideUrl ?? gatewayUrlInput).trim();
-        if (nextUrl && nextUrl !== currentUrl) {
-            useSettingsStore.getState().setGatewayUrl(nextUrl);
+        if (nextUrl) {
+            useSettingsStore.getState().applyGatewayUrl(nextUrl);
         }
         // Re-run the FULL boot sequence (config push → spawn/adopt →
         // system agent → MQTT + listeners) instead of the previous
@@ -567,7 +608,13 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
                                             // on the picked host. Also records
                                             // the picked URL back into history
                                             // so it stays at the top next boot.
-                                            useSettingsStore.getState().setGatewayUrl(url);
+                                            // `applyGatewayUrl` additionally
+                                            // keeps the mode consistent: an
+                                            // http LAN pick while mode is relay
+                                            // would otherwise create the exact
+                                            // relay+http combo Rust rejects
+                                            // forever.
+                                            useSettingsStore.getState().applyGatewayUrl(url);
                                             // Pass the picked URL explicitly so
                                             // handleRetry() doesn't read a stale
                                             // `gatewayUrlInput`. The input field
@@ -615,7 +662,7 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
                 className={`absolute bottom-6 transition-all duration-700 delay-300 ${fadeIn ? "translate-y-0 opacity-100" : "translate-y-2 opacity-0"
                     }`}
             >
-                <span className="text-[11px] text-text-tertiary ">ACowork v{pkg.version}</span>
+                <span className="text-11 text-text-tertiary ">ACowork v{pkg.version}</span>
             </div>
 
             {/* Keyframe styles injected once */}

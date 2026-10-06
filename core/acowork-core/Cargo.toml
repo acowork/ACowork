@@ -20,6 +20,8 @@ toml.workspace = true
 directories.workspace = true
 prost.workspace = true
 tracing.workspace = true
+# Raises the `log` facade gate for `log`-only dependencies (yamux, rumqttc).
+log.workspace = true
 tracing-subscriber.workspace = true
 tokio = { workspace = true, features = ["rt", "macros", "io-util", "sync", "process", "time"] }
 signal-hook.workspace = true
@@ -29,6 +31,16 @@ libc.workspace = true
 ed25519-dalek.workspace = true
 base64.workspace = true
 rand.workspace = true
+# Design doc 24 (cloud relay): the WSS ↔ byte-stream adapter and tunnel
+# control protocol shared by acowork-relay and the Gateway relay-client.
+tokio-tungstenite.workspace = true
+futures-util.workspace = true
+# Shared single-task yamux driver used by BOTH tunnel sides (relay server
+# + Gateway client) — one implementation of the tricky poll_fn pumping.
+yamux.workspace = true
+anyhow.workspace = true
+# tokio ↔ futures IO bridging (driver tests use duplex pipes).
+tokio-util.workspace = true
 
 [build-dependencies]
 prost-build = { workspace = true }

@@ -386,7 +386,7 @@ const handleCompressSummary = () => {
                     aria-label={t("contextUsage.editWindow")}
                     className="w-full min-w-0 rounded border border-input-border bg-input-bg px-1.5 py-1 text-xs tabular-nums text-text-secondary outline-none focus:border-indigo-400 "
                   />
-                  <span className="shrink-0 text-[10px] text-text-tertiary">{t("contextUsage.windowUnitK")}</span>
+                  <span className="shrink-0 text-10 text-text-tertiary">{t("contextUsage.windowUnitK")}</span>
                 </div>
                 <div className="mt-1.5 flex flex-wrap gap-1">
                   {WINDOW_PRESETS.map((preset) => (
@@ -398,7 +398,7 @@ const handleCompressSummary = () => {
                         setWindowError(null);
                       }}
                       className={cn(
-                        "rounded border border-zinc-200 px-1.5 py-0.5 text-[10px] text-text-secondary transition-colors",
+                        "rounded border border-zinc-200 px-1.5 py-0.5 text-10 text-text-secondary transition-colors",
                         "hover:border-indigo-300 hover:text-indigo-600",
                         "dark:border-zinc-700  dark:hover:border-indigo-500/50 dark:hover:text-indigo-300",
                       )}
@@ -408,26 +408,26 @@ const handleCompressSummary = () => {
                   ))}
                 </div>
                 {draftExceedsModel && (
-                  <p className="mt-1.5 text-[10px] leading-snug text-amber-600 dark:text-amber-400">
+                  <p className="mt-1.5 text-10 leading-snug text-amber-600 dark:text-amber-400">
                     {t("contextUsage.windowEffectiveHint", { setting: formatTokens(draftAbs ?? 0), model: formatTokens(modelWindow ?? 0) })}
                   </p>
                 )}
                 {windowError != null && (
-                  <p className="mt-1.5 text-[10px] leading-snug text-red-600 dark:text-red-400">{windowError}</p>
+                  <p className="mt-1.5 text-10 leading-snug text-red-600 dark:text-red-400">{windowError}</p>
                 )}
                 <div className="mt-2 flex items-center gap-1.5">
                   <button
                     type="button"
                     onClick={saveWindow}
                     disabled={readOnly}
-                    className="rounded bg-[var(--color-accent)] px-2 py-1 text-[11px] font-medium text-white transition-[filter] hover:brightness-90 disabled:cursor-not-allowed disabled:opacity-50"
+                    className="rounded bg-[var(--color-accent)] px-2 py-1 text-11 font-medium text-white transition-[filter] hover:brightness-90 disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     {t("contextUsage.save")}
                   </button>
                   <button
                     type="button"
                     onClick={() => setEditingWindow(false)}
-                    className="rounded px-2 py-1 text-[11px] text-text-tertiary transition-colors hover:bg-zinc-100  dark:hover:bg-zinc-700/50"
+                    className="rounded px-2 py-1 text-11 text-text-tertiary transition-colors hover:bg-zinc-100  dark:hover:bg-zinc-700/50"
                   >
                     {t("contextUsage.cancel")}
                   </button>

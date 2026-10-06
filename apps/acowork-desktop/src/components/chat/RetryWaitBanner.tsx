@@ -137,7 +137,7 @@ export function RetryWaitBanner() {
           </span>
         </span>
 
-        <span className="hidden sm:inline text-[11px] text-text-tertiary/70 ">
+        <span className="hidden sm:inline text-11 text-text-tertiary/70 ">
           {retryInfo.provider}
         </span>
 
@@ -155,7 +155,7 @@ export function RetryWaitBanner() {
           <button
             type="button"
             onClick={handleSkip}
-            className="flex items-center gap-1 rounded bg-[var(--color-accent)] px-2 py-0.5 text-[11px] font-medium text-white transition-colors hover:brightness-90"
+            className="flex items-center gap-1 rounded bg-[var(--color-accent)] px-2 py-0.5 text-11 font-medium text-white transition-colors hover:brightness-90"
           >
             <ButtonIcon className="h-3 w-3" />
             {buttonLabel}

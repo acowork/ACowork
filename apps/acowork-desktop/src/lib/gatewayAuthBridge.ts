@@ -27,6 +27,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useAuthStore, peekStoredTokens } from "../stores/authStore";
+import { isRecoveryReload } from "./recoveryReload";
 import { log } from "./logger";
 
 /** Mirrors `AUTH_REQUIRED_EVENT` in `src-tauri/src/gateway_client.rs`. */
@@ -63,14 +64,41 @@ export function installGatewayAuthBridge(): void {
   }
 
   let mirrored: string | null | undefined;
-  const mirror = (token: string | null) => {
+  /**
+   * Mirror a token into Rust. When `fireConnect` is set, a
+   * `null → non-null` transition (a fresh interactive login) also fires
+   * `connect_mqtt`: relay mode's strict remote listener rejects CONNECT
+   * without an access token, so the boot connect was skipped and nothing
+   * else re-runs it in that window (the only other places that call it
+   * are a Settings change / manual Connect).
+   */
+  const mirror = (token: string | null, fireConnect: boolean) => {
     if (token === mirrored) return;
+    // Capture the previous value before we overwrite `mirrored`. A
+    // `null → non-null` transition means an account session just became
+    // available — the Rust-side MQTT client never created one during
+    // boot (see `fireConnect` above). Fire-and-forget: errors are
+    // non-fatal because the boot path (SplashScreen) still has its own
+    // catch and the UI offers manual escapes.
+    const wasNull = (mirrored ?? null) === null;
     mirrored = token;
     pushAccessToken(token);
+    if (fireConnect && wasNull && token !== null) {
+      void invoke("connect_mqtt").catch((err) => {
+        log.warn("[gatewayAuth] connect_mqtt after token mirror failed:", err);
+      });
+    }
   };
 
-  mirror(useAuthStore.getState().accessToken);
-  useAuthStore.subscribe((state) => mirror(state.accessToken));
+  // Install-time mirror: suppressed on a normal boot — `SplashScreen`'s
+  // `bootGateway` owns the boot connect and must not be raced (its
+  // `set_gateway_config` hasn't run yet; Rust's default mode is `Local`,
+  // so connecting here would first build a client against the wrong
+  // endpoint). EXCEPTION: after a recovery reload the SplashScreen never
+  // runs (see recoveryReload.ts — the boot is skipped by design), so
+  // nothing else would ever connect; keep the install-time trigger there.
+  mirror(useAuthStore.getState().accessToken, isRecoveryReload);
+  useAuthStore.subscribe((state) => mirror(state.accessToken, true));
 
   // Rust stopped on a 401 and is waiting for a newer token (10s budget).
   void listen(AUTH_REQUIRED_EVENT, () => {

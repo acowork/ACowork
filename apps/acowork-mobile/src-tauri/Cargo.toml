@@ -1,0 +1,39 @@
+[package]
+name = "acowork-mobile"
+version = "0.1.0"
+description = "ACowork Mobile — portable conversation terminal"
+edition = "2021"
+rust-version = "1.77.2"
+
+# Standalone crate, like apps/acowork-desktop/src-tauri: the mobile app
+# targets a different platform (iOS/Android) and must not inherit the core
+# workspace's resolver or feature unification.
+[workspace]
+
+[lib]
+name = "acowork_mobile_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-store = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# The mobile webview talks to a REMOTE Gateway over HTTP. Unlike Desktop
+# there is no local Gateway process to spawn, supervise, or proxy, so this
+# crate deliberately carries no acowork-core / rumqttc / lifecycle deps.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

@@ -25,7 +25,7 @@ use prost::Message;
 
 #[test]
 fn test_build_broker_config() {
-    let config = build_broker_config("127.0.0.1", 19875);
+    let config = build_broker_config("127.0.0.1", 19875, None);
     let v4 = config.v4.as_ref().expect("v4 servers must be configured");
     let server = v4.get("acowork").expect("server 'acowork' must exist");
     assert_eq!(server.listen.to_string(), "127.0.0.1:19875");
@@ -34,7 +34,7 @@ fn test_build_broker_config() {
 
 #[test]
 fn test_build_broker_config_custom_port() {
-    let config = build_broker_config("0.0.0.0", 32100);
+    let config = build_broker_config("0.0.0.0", 32100, None);
     let v4 = config.v4.as_ref().expect("v4 servers must be configured");
     let server = v4.get("acowork").unwrap();
     assert_eq!(server.listen.to_string(), "0.0.0.0:32100");

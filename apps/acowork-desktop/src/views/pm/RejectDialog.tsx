@@ -56,7 +56,7 @@ export function RejectDialog({ open, taskTitle, onConfirm, onCancel }: RejectDia
         </p>
 
         <div className="mt-4">
-          <label className="mb-1 block text-[11px] font-medium text-text-tertiary ">
+          <label className="mb-1 block text-11 font-medium text-text-tertiary ">
             {t("pm.reject.reason")} <span className="text-text-tertiary">({t("pm.reject.optional")})</span>
           </label>
           <StyledTextarea

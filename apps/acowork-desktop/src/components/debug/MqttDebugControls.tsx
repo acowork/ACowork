@@ -96,7 +96,7 @@ export function MqttDebugControls() {
         title="Stop the MQTT broker (Desktop will reconnect)"
       >
         <PowerOff className="h-3 w-3" aria-hidden="true" />
-        <span className="text-[11px] font-medium">Stop</span>
+        <span className="text-11 font-medium">Stop</span>
       </button>
       <button
         type="button"
@@ -113,7 +113,7 @@ export function MqttDebugControls() {
         title="Start the MQTT broker"
       >
         <Power className="h-3 w-3" aria-hidden="true" />
-        <span className="text-[11px] font-medium">Start</span>
+        <span className="text-11 font-medium">Start</span>
       </button>
     </span>
   );

@@ -268,18 +268,18 @@ export function PromptList({ defaultOpen = false, agentIdOverride }: PromptListP
           bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset"
         >
           {loading && (
-            <div className="flex items-center gap-1.5 px-3 py-2 text-[10px] text-text-tertiary">
+            <div className="flex items-center gap-1.5 px-3 py-2 text-10 text-text-tertiary">
               <Loader2 className="h-3 w-3 animate-spin" />
               {t("prompts.loading")}
             </div>
           )}
           {error && (
-            <div className="px-3 py-2 text-[10px] text-red-600 dark:text-red-400">
+            <div className="px-3 py-2 text-10 text-red-600 dark:text-red-400">
               {t("prompts.error", { message: error })}
             </div>
           )}
           {reloadNotice && (
-            <div className="px-3 py-2 text-[10px] text-emerald-600 dark:text-emerald-400">
+            <div className="px-3 py-2 text-10 text-emerald-600 dark:text-emerald-400">
               {reloadNotice}
             </div>
           )}
@@ -308,7 +308,7 @@ export function PromptList({ defaultOpen = false, agentIdOverride }: PromptListP
                     }
                   >
                     <div className="flex min-w-0 items-center gap-1.5">
-                      <span className="min-w-0 truncate font-mono text-[11px] font-medium text-text ">
+                      <span className="min-w-0 truncate font-mono text-11 font-medium text-text ">
                         {p.name}
                       </span>
                       <span className="flex shrink-0 items-center gap-1">
@@ -335,7 +335,7 @@ export function PromptList({ defaultOpen = false, agentIdOverride }: PromptListP
                         )}
                       </span>
                     </div>
-                    <div className="mt-0.5 text-[10px] text-text-tertiary ">
+                    <div className="mt-0.5 text-10 text-text-tertiary ">
                       {p.purpose}
                     </div>
                   </ListRow>
@@ -346,7 +346,7 @@ export function PromptList({ defaultOpen = false, agentIdOverride }: PromptListP
       </ListBox>
 
       {/* Bottom — ToolsTab-style help hint under the card. */}
-      <p className="mt-1 text-[9px] text-text-tertiary ">
+      <p className="mt-1 text-9 text-text-tertiary ">
         {t("prompts.help")}
       </p>
     </div>

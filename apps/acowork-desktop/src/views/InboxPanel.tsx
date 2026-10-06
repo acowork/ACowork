@@ -99,14 +99,14 @@ export function InboxPanel() {
       </header>
 
       {error && (
-        <div role="alert" className="shrink-0 px-4 py-1 text-[11px] text-red-500">
+        <div role="alert" className="shrink-0 px-4 py-1 text-11 text-red-500">
           {t("messages.loadFailed")}
         </div>
       )}
 
       <div className="min-h-0 flex-1 overflow-y-auto px-4 py-2">
         {messages.length === 0 && !loadingMessages && (
-          <p className="py-2 text-[11px] text-text-tertiary">
+          <p className="py-2 text-11 text-text-tertiary">
             {t("messages.noMessages")}
           </p>
         )}
@@ -150,7 +150,7 @@ export function InboxPanel() {
               {pendingAttachments.map((a) => (
                 <span
                   key={a.id}
-                  className="flex items-center gap-1 rounded border border-border-outer bg-modal-surface px-1.5 py-0.5 text-[10px] text-text-secondary"
+                  className="flex items-center gap-1 rounded border border-border-outer bg-modal-surface px-1.5 py-0.5 text-10 text-text-secondary"
                 >
                   <span className="max-w-40 truncate">{a.filename}</span>
                   <span className="text-text-tertiary">
@@ -170,7 +170,7 @@ export function InboxPanel() {
               {uploading.map((name) => (
                 <span
                   key={name}
-                  className="flex items-center gap-1 rounded border border-border-outer bg-modal-surface px-1.5 py-0.5 text-[10px] text-text-tertiary"
+                  className="flex items-center gap-1 rounded border border-border-outer bg-modal-surface px-1.5 py-0.5 text-10 text-text-tertiary"
                 >
                   <span className="max-w-40 truncate">{name}</span>
                   <span>{t("messages.uploading")}</span>

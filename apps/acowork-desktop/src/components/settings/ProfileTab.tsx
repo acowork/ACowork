@@ -459,11 +459,11 @@ export function ProfileTab() {
           trailing={
             <span onClick={(e) => e.stopPropagation()} className="flex shrink-0 items-center gap-2">
               {savedMsg && (
-                <span className={`text-[10px] ${savedMsg === "saved" ? "text-[var(--color-accent)]" : "text-red-500"}`}>
+                <span className={`text-10 ${savedMsg === "saved" ? "text-[var(--color-accent)]" : "text-red-500"}`}>
                   {savedMsg === "saved" ? t("settings.saved") : t("settings.saveFailed")}
                 </span>
               )}
-              {saving && <span className="text-[10px] text-text-tertiary">{t("settings.saving")}</span>}
+              {saving && <span className="text-10 text-text-tertiary">{t("settings.saving")}</span>}
             </span>
           }
           bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset p-3"

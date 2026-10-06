@@ -19,9 +19,12 @@
 
 import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
+import { invoke } from "@tauri-apps/api/core";
 import { Loader, RefreshCw, Server } from "lucide-react";
 
 import { cn } from "../../lib/utils";
+import { log } from "../../lib/logger";
+import { useToast } from "../common/ToastProvider";
 import { useServicesStore } from "../../stores/servicesStore";
 import type { ServiceGroup, ServiceHealth, ServiceType } from "../../lib/types";
 
@@ -74,6 +77,7 @@ function groupLabelKey(g: ServiceGroup): string {
 
 export function ServicesPanel() {
   const { t } = useTranslation();
+  const { addToast } = useToast();
   const report = useServicesStore((s) => s.report);
   const loading = useServicesStore((s) => s.loading);
   const lastProbeAt = useServicesStore((s) => s.lastProbeAt);
@@ -139,7 +143,7 @@ export function ServicesPanel() {
               (legacy per-endpoint walk on a pre-P2 Gateway). */}
           {report && (
             <span
-              className="shrink-0 whitespace-nowrap rounded-full border border-zinc-300 px-1.5 py-px text-[10px] leading-4 text-text-tertiary dark:border-zinc-600 "
+              className="shrink-0 whitespace-nowrap rounded-full border border-zinc-300 px-1.5 py-px text-10 leading-4 text-text-tertiary dark:border-zinc-600 "
               data-testid="services-source"
             >
               {t(
@@ -182,7 +186,7 @@ export function ServicesPanel() {
           if (types.length === 0) return null;
           return (
             <section key={group} className="space-y-1">
-              <h4 className="text-[10px] font-medium uppercase tracking-wider text-text-tertiary ">
+              <h4 className="text-10 font-medium uppercase tracking-wider text-text-tertiary ">
                 {t(groupLabelKey(group))}
               </h4>
               <ul className="divide-y divide-border-divider overflow-hidden rounded-md border border-border-outer">
@@ -194,7 +198,29 @@ export function ServicesPanel() {
                       type={type}
                       row={row}
                       isProbing={!!probing[type]}
-                      onRetry={() => void probe(type)}
+                      onRetry={() => {
+                        // MQTT retry is the one service whose "retry"
+                        // button must actually re-trigger the connection,
+                        // not just re-read the snapshot. `probe()` would
+                        // ask Rust `get_mqtt_status` again and report the
+                        // same `idle` (no client → stuck offline) — the
+                        // user would conclude the system does nothing. The
+                        // `connect_mqtt` Tauri command is idempotent
+                        // (returns Ok if the client already targets the
+                        // same broker), so calling it on top of a live
+                        // connection is a safe no-op.
+                        if (type === "mqtt") {
+                          void invoke("connect_mqtt").catch((err) => {
+                            log.warn("[ServicesPanel] connect_mqtt failed:", err);
+                            // The retry used to fail silently (log-only) —
+                            // surface the reason so the user isn't left
+                            // clicking an apparently dead button.
+                            addToast({ type: "error", message: String(err) });
+                          });
+                        } else {
+                          void probe(type);
+                        }
+                      }}
                     />
                   );
                 })}
@@ -251,16 +277,16 @@ function ServiceRow({
         {t(NAME_KEY[type])}
       </span>
       {/* Version */}
-      <span className="font-mono text-[11px] text-text-tertiary ">
+      <span className="font-mono text-11 text-text-tertiary ">
         v{version}
       </span>
       {/* Latency */}
-      <span className="font-mono text-[11px] tabular-nums text-text-tertiary ">
+      <span className="font-mono text-11 tabular-nums text-text-tertiary ">
         {latency > 0 ? `${latency}ms` : "—"}
       </span>
       {/* Detail */}
       {detail && (
-        <span className="flex-1 truncate text-[11px] text-text-tertiary ">
+        <span className="flex-1 truncate text-11 text-text-tertiary ">
           {detail}
         </span>
       )}
@@ -270,7 +296,7 @@ function ServiceRow({
         type="button"
         onClick={onRetry}
         disabled={isProbing}
-        className="btn-solid ml-auto inline-flex items-center gap-1 rounded px-2 py-0.5 text-[11px] font-medium disabled:opacity-50"
+        className="btn-solid ml-auto inline-flex items-center gap-1 rounded px-2 py-0.5 text-11 font-medium disabled:opacity-50"
         aria-label={t("settings.services.retry", { name: t(NAME_KEY[type]) })}
       >
         {isProbing ? (

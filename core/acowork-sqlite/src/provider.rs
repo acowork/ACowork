@@ -24,13 +24,13 @@ use acowork_core::error::{AcoworkError, Result as AcoworkResult};
 use acowork_memory::MemoryProvider;
 use acowork_memory::quality::MemoryQualityConfig;
 use acowork_memory::types::{
-    AutobiographicalNode, CollaborationSpan, DISTILLER_SKIP_METADATA_KEY, DecayScanResult, Episode,
+    AutobiographicalNode, CollaborationSpan, DecayScanResult, Episode,
     EpisodicDecayConfig, KnowledgeNode, KnowledgeSubType, MemoryQuery, NodeStatus, ProceduralNode,
     ResultSource, SearchResult, StoreHealth, StoreStats,
 };
 use chrono::{DateTime, TimeDelta, Utc};
 use rusqlite::{OptionalExtension, params};
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use crate::{SqliteStore, labels, ts_text};
 
@@ -80,19 +80,21 @@ impl MemoryProvider for SqliteStore {
         Ok(())
     }
 
-    fn mark_episodes_skipped(
+    fn vector_search(
         &self,
-        ids: &[u64],
-        cluster_key: &str,
-        reason: &str,
-    ) -> AcoworkResult<()> {
-        let payload = json!({
-            "cluster_key": cluster_key,
-            "reason": reason,
-            "at": ts_text(Utc::now()),
-        })
-        .to_string();
-        Ok(self.set_episode_skip(ids, &payload)?)
+        label: &str,
+        query: &[f32],
+        k: usize,
+    ) -> AcoworkResult<Vec<(u64, f64)>> {
+        Ok(SqliteStore::vector_search(self, label, query, k)?)
+    }
+
+    fn get_knowledge(&self, id: u64) -> AcoworkResult<Option<KnowledgeNode>> {
+        Ok(SqliteStore::get_knowledge(self, id)?)
+    }
+
+    fn update_knowledge(&self, id: u64, node: &KnowledgeNode) -> AcoworkResult<()> {
+        Ok(SqliteStore::update_knowledge(self, id, node)?)
     }
 
     fn cleanup_episodes(&self, older_than: Duration) -> AcoworkResult<u64> {
@@ -547,26 +549,19 @@ impl SqliteStore {
         let conn = self.lock();
         crate::query_ids(
             &conn,
-            "SELECT id FROM nodes WHERE label = ?1 AND json_extract(props, '$.consolidated') = 0 AND json_extract(props, '$.metadata.distiller_skip') IS NULL ORDER BY created_at ASC",
+            // Newest first — see `MemoryProvider::get_episodes_by_subtype` for
+            // why the window must not start at the oldest rows.
+            //
+            // `knowledge_subtype IS NOT NULL` is required, not an optimisation:
+            // the distiller only ever consolidates subtype-bearing episodes, so
+            // a window that admits subtype-less rows spends part of its
+            // `limit` on entries the caller immediately drops. That silently
+            // shrinks the effective batch AND makes this scan disagree with
+            // `count_unconsolidated_episodes`, so the reported backlog would
+            // never drain to zero.
+            "SELECT id FROM nodes WHERE label = ?1 AND json_extract(props, '$.consolidated') = 0 AND json_extract(props, '$.knowledge_subtype') IS NOT NULL ORDER BY created_at DESC",
             &[&labels::EPISODIC],
         )
-    }
-
-    /// Write the distiller "skip" tombstone into each episode's metadata.
-    fn set_episode_skip(&self, ids: &[u64], payload: &str) -> crate::Result<()> {
-        let conn = self.lock();
-        for id in ids {
-            conn.execute(
-                "UPDATE nodes SET props = json_set(props, '$.metadata.' || ?2, json(?3)) WHERE id = ?1 AND label = ?4",
-                params![
-                    *id as i64,
-                    DISTILLER_SKIP_METADATA_KEY,
-                    payload,
-                    labels::EPISODIC
-                ],
-            )?;
-        }
-        Ok(())
     }
 
     /// Raw `status` column for a node.

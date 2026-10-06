@@ -1,10 +1,16 @@
 /**
  * GitStatusBar — ADR-078 decision 6. Collapsible version-control strip at
- * the bottom of the FileEditorPanel. Visual spec follows NodeGroupHeader
- * (AgentList.tsx): min-h-[2.5rem] (40px, matches the workspace-selector
- * toolbar row and the file-search row above), 10px uppercase
- * tracking-wide, zinc-400/500, border-y, hover tint, ChevronRight
- * rotation.
+ * the bottom of the FileEditorPanel. Visual spec: min-h-[2.5rem] (40px,
+ * matches the workspace-selector toolbar row and the file-search row
+ * above), text at the file-tree row step (`--ui-font-size` × 0.857 = 12px at
+ * the default base — the size of the rows it labels), no bold, normal case,
+ * zinc-400/500, border-y, hover tint, ChevronRight rotation.
+ *
+ * Not bold, not uppercase: a bold uppercase strip read as a foreign,
+ * heavier control family next to the panel's other two strips (workspace
+ * selector, file search), which are plain normal case — and uppercasing
+ * also mangled the branch name, which must match `git branch` output byte
+ * for byte.
  *
  * Right-side controls: `History` (clock icon) opens a CommitPicker
  * dropdown letting the user view files from any commit on the
@@ -102,15 +108,23 @@ export function GitStatusBar({ agentId, workspaceId }: GitStatusBarProps) {
   const historyPlacement: "top" | "bottom" =
     !isExpanded || changes < 6 ? "top" : "bottom";
 
+  // Branch name is an IDENTIFIER, not a label: the whole bar is
+  // `uppercase` to match the NodeGroupHeader spec, but rendering
+  // `feature/Foo_Bar` as `FEATURE/FOO_BAR` makes it impossible to
+  // eyeball-match against `git branch` output (and defeats the
+  // case-sensitive distinction some branch names rely on). So the
+  // ref keeps its own casing via `normal-case`; the surrounding
+  // copy ("· 3 changes", the not-a-repo / no-data strings) still
+  // picks up the bar's uppercase.
+  const ref = viewingCommit ? (branch ?? viewingRev) : branch;
+  const meta = `${changes} ${t("gitStatusBar.changes")}`;
   const title = !data
     ? t("gitStatusBar.title")
     : !isRepo
       ? t("gitStatusBar.notRepo")
-      : viewingCommit
-        ? `${branch ?? viewingRev} · ${changes} ${t("gitStatusBar.changes")}`
-        : branch
-          ? `${branch} · ${changes} ${t("gitStatusBar.changes")}`
-          : `${changes} ${t("gitStatusBar.changes")}`;
+      : ref
+        ? `${ref} · ${meta}`
+        : meta;
 
   return (
     // The wrapper div uses `display: contents` so it doesn't break the
@@ -135,7 +149,14 @@ export function GitStatusBar({ agentId, workspaceId }: GitStatusBarProps) {
           // read as a single height family. Was `h-6` (24px) — visually
           // ~16px shorter than the other two banners.
           "flex min-h-[2.5rem] w-full shrink-0 items-center gap-1.5 px-3 text-left",
-          "text-[10px] font-medium uppercase tracking-wide",
+          // Sized to the rows it labels: `.file-tree-row` in globals.css sets
+          // the tree and the status list below to `--ui-text-size` (12px at
+          // the default base), so the banner takes the same step rather than
+          // its own. Was `text-10` (10px) — visibly smaller than both lists
+          // it sits against.
+          // No `font-medium`: a bold strip read as heavier than the file
+          // names it labels.
+          "text-[length:var(--ui-text-size)] tracking-wide",
           "text-text-tertiary hover:text-zinc-700 dark:hover:text-zinc-200",
           "transition-colors duration-150",
           "border-y border-nav-divider/40 dark:border-zinc-600/40",
@@ -158,7 +179,24 @@ export function GitStatusBar({ agentId, workspaceId }: GitStatusBarProps) {
         )}
       />
       <GitBranch className="h-3 w-3 shrink-0" />
-      <span className="flex-1 truncate">{title}</span>
+      {/* No `uppercase` here: the bar's siblings in this panel (the
+          workspace-selector row and the file-search row, both
+          `toolbarButton` / `text-xs`) are normal case, so uppercasing
+          this one strip made it read as a different control family
+          rather than part of the panel. It also destroyed the ref —
+          `feature/Foo_Bar` → `FEATURE/FOO_BAR` can't be eyeball-matched
+          against `git branch` output. `truncate` keeps long refs from
+          widening the strip. */}
+      <span className="flex-1 truncate">
+        {ref ? (
+          <>
+            <span>{ref}</span>
+            <span> · {meta}</span>
+          </>
+        ) : (
+          title
+        )}
+      </span>
       {loading ? (
         <Loader2 className="h-3 w-3 shrink-0 animate-spin" />
       ) : (

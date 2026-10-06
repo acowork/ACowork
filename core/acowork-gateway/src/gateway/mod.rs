@@ -732,6 +732,18 @@ impl Gateway {
         // Start HTTP server in a separate tokio task (parallel with gRPC)
         let http_state = shared_state.clone();
 
+        // Design doc 24 §8.2: relay tunnel client. Always constructed
+        // (no tasks until enabled); the HTTP layer gets the handle for
+        // /api/relay/*, and the supervisor auto-starts below when
+        // [relay] enabled=true in the persisted config.
+        let relay_client = crate::relay::RelayClient::new(
+            crate::config::GatewayConfig::project_config_dir().join("relay_identity.json"),
+            std::net::SocketAddr::from(([127, 0, 0, 1], self.config.relay.remote_http_port)),
+        );
+        // The HTTP-server task captures its own Arc clone; the original
+        // stays with this scope for the boot auto-enable below.
+        let http_relay_client = relay_client.clone();
+
         // Start the embed supervisor. It watches the embed's SSE event
         // stream, updates `shared_state.embed_process.{active_model_id,
         // active_dimension, ready}` from the embed's state events, and
@@ -815,6 +827,19 @@ impl Gateway {
             } else {
                 None
             };
+            // Design doc 24 §7.2 (M3): the strict remote MQTT listener —
+            // always hosted alongside the main server (loopback-only;
+            // the only path to it is the `/mqtt` bridge on the remote
+            // HTTP listener). Its auth handler re-reads the user
+            // verifier from GatewayState per CONNECT, so it follows the
+            // user-service lifecycle without any wiring here.
+            let remote_mqtt = crate::mqtt::RemoteMqttListener {
+                host: "127.0.0.1".to_string(),
+                port: self.config.relay.remote_mqtt_port,
+                auth: crate::mqtt::RemoteMqttAuth {
+                    gateway_state: shared_state.clone(),
+                },
+            };
             // When the pre-filter is active the broker must bind loopback
             // (the pre-filter already owns the external address). Only the
             // pre-filter's absence lets the broker bind the configured host.
@@ -823,7 +848,12 @@ impl Gateway {
             } else {
                 &mqtt_config.host
             };
-            match crate::mqtt::start_broker_with_auth(broker_host, mqtt_config.port, auth) {
+            match crate::mqtt::start_broker_with_auth(
+                broker_host,
+                mqtt_config.port,
+                auth,
+                Some(remote_mqtt),
+            ) {
                 Ok(h) => {
                     if mqtt_filter.is_some() {
                         tracing::info!(addr = %h.listen_addr, "MQTT broker started (loopback, behind TCP pre-filter)");
@@ -1258,6 +1288,12 @@ impl Gateway {
         // from the mode alone — the account service itself now lives behind
         // the user proxy, and its public key arrives via the supervisor.
         let http_auth_mode = self.config.effective_auth_mode();
+        // Design doc 24 §7.2 (M3): remote-origin listener ports, read
+        // up front — the spawn below takes `self` out of scope.
+        let remote_listener = crate::http::server::RemoteListenerParams {
+            http_port: self.config.relay.remote_http_port,
+            mqtt_port: self.config.relay.remote_mqtt_port,
+        };
         let http_handle = tokio::spawn(async move {
             if let Err(e) = crate::http::server::start_http_server(
                 &http_config,
@@ -1275,12 +1311,35 @@ impl Gateway {
                 Some(http_operation_store),
                 http_auth,
                 http_auth_mode,
+                Some(http_relay_client),
+                Some(remote_listener),
             )
             .await
             {
                 tracing::error!("HTTP server failed: {}", e);
             }
         });
+
+        // Design doc 24 §8.2: auto-start the relay tunnel when the
+        // persisted config says so (enabled via `POST /api/relay/enable`
+        // in a previous run). Delayed a moment so boot logs stay ordered
+        // and the HTTP API (which surfaces the status) is already up.
+        if self.config.relay.enabled {
+            match self.config.relay.url.clone() {
+                Some(url) => {
+                    let client = relay_client.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        if let Err(e) = client.enable(url).await {
+                            tracing::error!(error = %e, "relay tunnel failed to start from persisted config");
+                        }
+                    });
+                }
+                None => tracing::warn!(
+                    "relay.enabled=true but relay.url is not set; tunnel not started"
+                ),
+            }
+        }
 
         // ADR-055 §6.11: ensure a local Node Agent is running and
         // supervise it (orphan cleanup → reuse window → spawn + reaper).
@@ -1519,21 +1578,6 @@ impl Gateway {
             .collect()
     }
 
-    /// Package an installed agent into .agent file (CLI command).
-    ///
-    /// Disabled until Phase 3 — publish build is delegated to the node.
-    pub async fn package_agent(
-        &self,
-        _agent_id: &str,
-        _output_dir: Option<&str>,
-        _sign: bool,
-        _key_dir: Option<&str>,
-    ) -> Result<String, GatewayError> {
-        Err(GatewayError::Lifecycle(
-            "Publish build is not available in the node topology yet (ADR-055 Phase 3)".to_string(),
-        ))
-    }
-
     /// Ensure the Gateway's own directories exist.
     ///
     /// `packages_dir` is deliberately absent: it points at the **node's**
@@ -1608,6 +1652,7 @@ mod tests {
             user: crate::config::UserConfig::default(),
             security: crate::config::SecurityConfig::default(),
             auth_mode: None,
+            relay: crate::config::RelayClientConfig::default(),
         }
     }
 

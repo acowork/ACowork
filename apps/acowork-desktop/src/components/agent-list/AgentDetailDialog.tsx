@@ -120,7 +120,7 @@ export function AgentDetailDialog({ open, agentId, onClose }: AgentDetailDialogP
                 value={
                   <span className="flex items-center gap-1.5">
                     <span className="font-mono text-xs" style={{ color: "var(--color-accent)" }}>{modelInfo.model}</span>
-                    <span className="text-[10px] text-text-tertiary">({modelInfo.provider})</span>
+                    <span className="text-10 text-text-tertiary">({modelInfo.provider})</span>
                   </span>
                 }
               />

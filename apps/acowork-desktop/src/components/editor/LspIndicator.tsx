@@ -156,21 +156,21 @@ export function LspIndicator({
     let content: React.ReactNode;
     if (status === "disconnected") {
         content = (
-            <span className="flex items-center gap-1 text-[10px] text-text-tertiary ">
+            <span className="flex items-center gap-1 text-text-tertiary">
                 <Circle className="h-2 w-2" />
                 <span>{t("fileStatus.lsp.unavailable", { language })}</span>
             </span>
         );
     } else if (status === "connecting") {
         content = (
-            <span className="flex items-center gap-1 text-[10px] text-text-tertiary">
+            <span className="flex items-center gap-1 text-text-tertiary">
                 <Circle className="h-2 w-2 animate-pulse" />
                 <span>{t("fileStatus.lsp.connecting", { language })}</span>
             </span>
         );
     } else if (status === "indexing") {
         content = (
-            <span className="flex items-center gap-1 text-[10px] text-amber-500 dark:text-amber-400">
+            <span className="flex items-center gap-1 text-amber-500 dark:text-amber-400">
                 <Circle className="h-2 w-2 animate-pulse" />
                 <span>
                     {statusMessage
@@ -183,14 +183,14 @@ export function LspIndicator({
         // Handshake done, but indexing has not started/finished yet —
         // hover/definition results may be incomplete.
         content = (
-            <span className="flex items-center gap-1 text-[10px] text-emerald-500/70 dark:text-emerald-400/70">
+            <span className="flex items-center gap-1 text-emerald-500/70 dark:text-emerald-400/70">
                 <Circle className="h-2 w-2" />
                 <span>{t("fileStatus.lsp.connected", { language })}</span>
             </span>
         );
     } else if (status === "ready") {
         content = (
-            <span className="flex items-center gap-1 text-[10px] text-emerald-600 dark:text-emerald-400">
+            <span className="flex items-center gap-1 text-emerald-600 dark:text-emerald-400">
                 <CircleDot className="h-2 w-2" />
                 <span>{t("fileStatus.lsp.ready", { language })}</span>
             </span>
@@ -200,7 +200,7 @@ export function LspIndicator({
         const tooltip = statusMessage || "unknown error";
         content = (
             <Tooltip content={tooltip} variant="plain">
-                <span className="flex items-center gap-1 text-[10px] text-amber-500">
+                <span className="flex items-center gap-1 text-amber-500">
                     <Circle className="h-2 w-2" />
                     <span>{t("fileStatus.lsp.unavailable", { language })}</span>
                 </span>
@@ -227,7 +227,7 @@ export function LspIndicator({
                     <div className="font-medium text-text-secondary  mb-1.5">
                         {t("fileStatus.lsp.installTitle", { name: hint.name })}
                     </div>
-                    <div className="flex items-center gap-1.5 rounded bg-zinc-100 dark:bg-zinc-900 px-2 py-1.5 font-mono text-[11px]">
+                    <div className="flex items-center gap-1.5 rounded bg-zinc-100 dark:bg-zinc-900 px-2 py-1.5 font-mono text-11">
                         <span className="flex-1 select-all break-all text-text-secondary ">
                             {hint.command}
                         </span>
@@ -248,7 +248,7 @@ export function LspIndicator({
                         onClick={runInstall}
                         disabled={installing}
                         className={cn(
-                            "mt-2 flex w-full items-center justify-center gap-1.5 rounded px-3 py-1.5 text-[11px] font-medium transition-colors",
+                            "mt-2 flex w-full items-center justify-center gap-1.5 rounded px-3 py-1.5 text-11 font-medium transition-colors",
                             installing
                                 ? "bg-zinc-200 text-text-tertiary dark:bg-zinc-700  cursor-not-allowed"
                                 : "bg-[var(--color-accent)] text-white hover:opacity-90",
@@ -271,7 +271,7 @@ export function LspIndicator({
                     {installResult && (
                         <div
                             className={cn(
-                                "mt-2 rounded px-2 py-1.5 text-[11px] leading-relaxed",
+                                "mt-2 rounded px-2 py-1.5 text-11 leading-relaxed",
                                 installResult.success
                                     ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400"
                                     : "bg-amber-50 text-amber-700 dark:bg-amber-50 dark:text-amber-400",
@@ -293,7 +293,7 @@ export function LspIndicator({
                             href={hint.url}
                             target="_blank"
                             rel="noopener noreferrer"
-                            className="mt-2 inline-block text-[var(--color-accent)] hover:underline text-[11px]"
+                            className="mt-2 inline-block text-[var(--color-accent)] hover:underline text-11"
                         >
                             {t("fileStatus.lsp.docsLink")}
                         </a>

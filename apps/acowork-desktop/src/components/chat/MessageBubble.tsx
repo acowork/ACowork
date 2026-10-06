@@ -368,7 +368,7 @@ const MessageBubble = React.memo(function MessageBubble({
                   </div>
                 </div>
                 {message.timestamp && (
-                  <span className="mt-1 text-[10px] text-text-tertiary  opacity-0 transition-opacity group-hover:opacity-100">
+                  <span className="mt-1 text-10 text-text-tertiary  opacity-0 transition-opacity group-hover:opacity-100">
                     {formatBubbleTime(message.timestamp)}
                   </span>
                 )}
@@ -410,7 +410,7 @@ const MessageBubble = React.memo(function MessageBubble({
             style={fontSizeStyle}
           >
             {message.timestamp && (
-              <span className="pointer-events-none absolute right-0 -top-5 whitespace-nowrap text-[10px] text-text-tertiary  opacity-0 transition-opacity group-hover:opacity-100">
+              <span className="pointer-events-none absolute right-0 -top-5 whitespace-nowrap text-10 text-text-tertiary  opacity-0 transition-opacity group-hover:opacity-100">
                 {formatBubbleTime(message.timestamp)}
               </span>
             )}
@@ -750,7 +750,7 @@ const MessageBubble = React.memo(function MessageBubble({
             <Wrench className="h-3 w-3 shrink-0" />
             <span className="font-medium">{message.toolName}</span>
             <span className="text-text-tertiary ">→ Result</span>
-            <span className="ml-auto text-[10px] text-text-tertiary ">Click to view</span>
+            <span className="ml-auto text-10 text-text-tertiary ">Click to view</span>
             {expanded ? <ChevronDown className="ml-2 h-3 w-3 shrink-0" /> : <ChevronRight className="ml-2 h-3 w-3 shrink-0" />}
           </button>
           {expanded && (

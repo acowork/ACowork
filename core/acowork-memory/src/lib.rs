@@ -46,12 +46,12 @@ pub use manager::{
 // Re-exports: consolidation types
 pub use consolidation::{
     DefaultEpisodicDistiller, EpisodicDistiller,
-    AutobioAspect, AutobioCandidate, BehaviorPattern, ConflictAction, ConflictResolutionDetail,
-    DistillerConfig, DistillerResult, EmbeddingFn, ExtractedKind, ExtractedStructure,
+    AutobioAspect, BehaviorPattern, ConflictAction, ConflictResolutionDetail, DistillerConfig,
+    DistillerResult, EmbeddingFn,
     GeneralizationConfig, GeneralizationResult, LlmMessage, LlmResponse, MemoryStoreInput,
     MemoryStoreResult, OfflineConsolidationConfig, OfflineConsolidationResult, PatternCategory,
     PromotionDecision, PromotionEvaluation, PromotionKind, PromotionMetadata, SchedulerConfig,
-    TripleExtractorLlm,
+    ConsolidationLlm,
 };
 
 // Backward-compatible alias: grafeo used `ProcessResult` for this type.

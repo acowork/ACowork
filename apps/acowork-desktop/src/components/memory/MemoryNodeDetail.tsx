@@ -10,6 +10,7 @@ import {
   type ContextMenuItem,
 } from "../common/ContextMenu";
 import { copySelectionOrFallback, copyText } from "../../lib/clipboard";
+import { Badge } from "../common/list";
 
 interface MemoryNodeDetailProps {
   node: MemoryNodeResponse;
@@ -17,12 +18,7 @@ interface MemoryNodeDetailProps {
   onDelete: (nodeId: number) => void;
 }
 
-const accentBg = "bg-[var(--color-accent)]/10 dark:bg-[var(--color-accent)]/20";
 const accentText = "text-[var(--color-accent)]";
-
-function getTypeColor(_nodeType: string) {
-  return { bg: accentBg, text: accentText, darkBg: "", darkText: "" };
-}
 
 function getDecayColor(_score: number): string {
   return "bg-[var(--color-accent)]";
@@ -44,7 +40,6 @@ export function MemoryNodeDetail({ node, onClose, onDelete }: MemoryNodeDetailPr
   const { t } = useTranslation();
   const labelOf = useNodeTypeLabel();
   const subLabelOf = useSubTypeLabel();
-  const colors = getTypeColor(node.node_type);
   const decayLabel = (() => {
     const tier = getDecayTier(node.decay_score);
     if (tier === "Stable") return t("memoryNodeDetail.statusStable");
@@ -174,33 +169,34 @@ export function MemoryNodeDetail({ node, onClose, onDelete }: MemoryNodeDetailPr
       <div className="flex items-center justify-between border-b border-border-divider px-3 py-2">
         <button
           onClick={onClose}
-          className="inline-flex items-center gap-1 rounded p-0.5 text-[11px] text-text-tertiary hover:bg-zinc-100  dark:hover:bg-zinc-800"
+          className="inline-flex items-center gap-1 rounded p-0.5 text-11 text-text-tertiary hover:bg-zinc-100  dark:hover:bg-zinc-800"
           aria-label={t("memoryNodeDetail.ariaLabelBackToList")}
         >
           <ArrowLeft className="h-3.5 w-3.5" />
-          Back to List
+          {t("common.back")}
         </button>
         <div className="flex items-center gap-1.5">
-          <span
-            className={cn(
-              "rounded px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider",
-              colors.bg,
-              colors.text,
-            )}
+          {/* Shared Badge (kills the hand-rolled pill + the uppercase /
+              tracking-wider), on `text-11` — same step as the list rows,
+              i.e. the card-title size and never above it. */}
+          <Badge
+            tone="accent"
+            className="text-11"
             data-node-type={node.node_type}
           >
             {labelOf(node.node_type)}
-          </span>
+          </Badge>
           {node.sub_type && (
-            <span
-              className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-text-secondary dark:bg-zinc-800 "
+            <Badge
+              tone="neutral"
+              className="text-11"
               data-sub-type={node.sub_type}
               title={node.sub_type}
             >
               {subLabelOf(node.node_type, node.sub_type)}
-            </span>
+            </Badge>
           )}
-          <span className="text-[11px] text-text-tertiary ">#{node.node_id}</span>
+          <span className="text-11 text-text-tertiary ">#{node.node_id}</span>
         </div>
       </div>
 
@@ -208,7 +204,7 @@ export function MemoryNodeDetail({ node, onClose, onDelete }: MemoryNodeDetailPr
       <div data-tab-scroll className="flex-1 overflow-y-auto p-3">
         {/* Full content */}
         <div className="mb-3">
-          <h3 className="mb-1 text-[11px] font-medium text-text-tertiary ">{t("memoryNodeDetail.content")}</h3>
+          <h3 className="mb-1 text-11 font-medium text-text-tertiary ">{t("memoryNodeDetail.content")}</h3>
           <p className="whitespace-pre-wrap text-xs text-text ">{node.content}</p>
         </div>
 
@@ -243,10 +239,10 @@ export function MemoryNodeDetail({ node, onClose, onDelete }: MemoryNodeDetailPr
         {/* Decay score visualization */}
         <div className="mb-3">
           <div className="mb-1 flex items-center justify-between">
-            <h3 className="text-[11px] font-medium text-text-tertiary ">Decay Score</h3>
+            <h3 className="text-11 font-medium text-text-tertiary ">Decay Score</h3>
             <span
               className={cn(
-                "text-[11px] font-medium",
+                "text-11 font-medium",
                 accentText,
               )}
             >
@@ -259,7 +255,7 @@ export function MemoryNodeDetail({ node, onClose, onDelete }: MemoryNodeDetailPr
               style={{ width: `${node.decay_score * 100}%` }}
             />
           </div>
-          <p className="mt-1 text-right text-[11px] text-text-tertiary ">
+          <p className="mt-1 text-right text-11 text-text-tertiary ">
             {node.decay_score.toFixed(3)}
           </p>
         </div>
@@ -269,7 +265,7 @@ export function MemoryNodeDetail({ node, onClose, onDelete }: MemoryNodeDetailPr
       <div className="border-t border-border-divider p-3">
         <button
           onClick={handleDelete}
-          className="inline-flex w-full items-center justify-center gap-1 rounded border border-red-200 bg-red-50 px-2 py-1.5 text-[11px] font-medium text-red-700 hover:bg-red-100 dark:border-red-900 dark:bg-red-950 dark:text-red-400 dark:hover:bg-red-900"
+          className="inline-flex w-full items-center justify-center gap-1 rounded border border-red-200 bg-red-50 px-2 py-1.5 text-11 font-medium text-red-700 hover:bg-red-100 dark:border-red-900 dark:bg-red-950 dark:text-red-400 dark:hover:bg-red-900"
         >
           <Trash2 className="h-3 w-3" />
           Delete Node
@@ -292,8 +288,8 @@ export function MemoryNodeDetail({ node, onClose, onDelete }: MemoryNodeDetailPr
 function MetaItem({ label, value }: { label: string; value: string }) {
   return (
     <div>
-      <p className="text-[10px] uppercase tracking-wider text-text-tertiary ">{label}</p>
-      <p className="mt-0.5 text-[11px] text-text-secondary ">{value}</p>
+      <p className="text-10 uppercase tracking-wider text-text-tertiary ">{label}</p>
+      <p className="mt-0.5 text-11 text-text-secondary ">{value}</p>
     </div>
   );
 }

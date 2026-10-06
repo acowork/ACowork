@@ -1,5 +1,25 @@
 import { describe, it, expect } from "vitest";
-import { formatPercent } from "./utils";
+import { cn, formatPercent } from "./utils";
+
+describe("cn — micro font steps survive a merged colour class", () => {
+  // Regression: `text-9/-10/-11` are custom @theme steps tailwind-merge does
+  // not know, so they were filed under `text-color` and silently deleted by
+  // the tone colour merged in the same call. The element then inherited the
+  // 14px body size and read larger than an 11px card title.
+  it("keeps the font size next to a named colour", () => {
+    expect(cn("text-10", "text-text-tertiary")).toBe("text-10 text-text-tertiary");
+  });
+
+  it("keeps the font size next to an arbitrary colour (Badge accent tone)", () => {
+    expect(cn("text-9", "text-[var(--color-accent)]")).toBe(
+      "text-9 text-[var(--color-accent)]",
+    );
+  });
+
+  it("still resolves two font steps against each other (last wins)", () => {
+    expect(cn("text-9 text-text-tertiary", "text-11")).toBe("text-text-tertiary text-11");
+  });
+});
 
 describe("formatPercent", () => {
   it("renders integers without decimals", () => {

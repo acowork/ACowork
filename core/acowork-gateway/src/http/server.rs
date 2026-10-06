@@ -23,6 +23,19 @@ pub struct PidFile {
     pub http_port: u16,
 }
 
+/// Remote-origin listener configuration (design doc 24 §7.2, M3).
+#[derive(Debug, Clone, Copy)]
+pub struct RemoteListenerParams {
+    /// Loopback port for the strict HTTP listener (guard + `/mqtt` WS
+    /// bridge). The relay tunnel client forwards inbound HTTP streams
+    /// here.
+    pub http_port: u16,
+    /// Loopback port of the strict MQTT listener the `/mqtt` bridge
+    /// dials. Owned by the broker config, consumed here only for the
+    /// bridge target.
+    pub mqtt_port: u16,
+}
+
 /// RAII guard for the pidfile — deletes the file on Drop.
 ///
 /// Ensures cleanup on both normal shutdown and panic-induced exits.
@@ -128,6 +141,14 @@ pub(crate) async fn start_http_server(
     // ADR-076 §决策 12: resolved deployment auth mode, and the account
     // service (`Some` only under `AUTH_MODE=multi_user`).
     auth_mode: crate::auth::AuthMode,
+    // Design doc 24 §6.3: relay tunnel client handle — always constructed
+    // by `Gateway::run`; the supervisor only runs when enabled.
+    relay_client: Option<std::sync::Arc<crate::relay::RelayClient>>,
+    // Design doc 24 §7.2 (M3): remote-origin loopback listener pair.
+    // `Some` starts the strict HTTP listener (guard + `/mqtt` WS bridge)
+    // alongside the main server; the strict MQTT listener is hosted by
+    // the broker instead (see `mqtt::RemoteMqttListener`).
+    remote_listener: Option<RemoteListenerParams>,
 ) -> Result<(), GatewayError> {
     if !http_config.enabled {
         tracing::info!("HTTP API disabled by configuration");
@@ -154,6 +175,7 @@ pub(crate) async fn start_http_server(
     app_state.bootstrap_registry = bootstrap_registry;
     app_state.operation_store = operation_store;
     app_state.auth_mode = auth_mode;
+    app_state.relay_client = relay_client;
     if auth_mode.is_multi_user() {
         tracing::info!(
             "AUTH_MODE=multi_user: account system delegated to acowork-user              (verification starts once its public key is loaded)"
@@ -201,9 +223,35 @@ pub(crate) async fn start_http_server(
     // Write pidfile for Desktop App discovery
     let _pidfile_guard = write_pidfile(data_dir, actual_port)?;
 
+    // Snapshot for the remote-origin listener (M3) — `build_router`
+    // consumes `app_state` below, and the remote listener serves the
+    // same routes from its own copy.
+    let app_state_for_remote = app_state.clone();
+
     // Build router — PM routes are reverse-proxied to the standalone
     // acowork-pm process (ADR-064); no in-process PM handle needed.
     let app = routes::build_router(app_state);
+
+    // Design doc 24 §7.2 (M3): remote-origin loopback listener, running
+    // the SAME router (plus the `/mqtt` bridge and the origin guard).
+    // Spawned, not awaited: the main listener below stays the
+    // lifecycle owner of this function. A startup failure is logged
+    // loudly but never aborts the Gateway — remote access is an
+    // additive path (§9 rollback design).
+    if let Some(remote) = remote_listener {
+        let remote_state = app_state_for_remote;
+        tokio::spawn(async move {
+            if let Err(e) = crate::relay::remote_listener::start_remote_http_listener(
+                remote_state,
+                remote.http_port,
+                remote.mqtt_port,
+            )
+            .await
+            {
+                tracing::error!("remote-origin HTTP listener failed: {}", e);
+            }
+        });
+    }
 
     // Convert std::net::TcpListener to tokio::net::TcpListener
     // This reuses the already-bound listener — no second bind() call.

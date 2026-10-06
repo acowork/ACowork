@@ -271,7 +271,7 @@ export function TaskEditDialog({
           <div className="grid grid-cols-2 gap-3">
             <Field label={t("pm.task.assignee")}>
               {memberIds.size === 0 ? (
-                <p className="rounded-md border border-dashed border-zinc-300 px-2 py-1.5 text-[11px] text-text-tertiary dark:border-zinc-600">
+                <p className="rounded-md border border-dashed border-zinc-300 px-2 py-1.5 text-11 text-text-tertiary dark:border-zinc-600">
                   {t("pm.assigneeNoMembersHint")}
                 </p>
               ) : (
@@ -359,7 +359,7 @@ function Field({
 }) {
   return (
     <label className="block">
-      <span className="mb-1 block text-[11px] font-medium text-text-tertiary ">
+      <span className="mb-1 block text-11 font-medium text-text-tertiary ">
         {label}
         {required && <span className="ml-0.5 text-red-500" aria-hidden>*</span>}
       </span>

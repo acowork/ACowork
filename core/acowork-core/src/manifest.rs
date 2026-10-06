@@ -410,22 +410,11 @@ pub struct ManifestDistillerConfig {
     pub idle_minutes: Option<u64>,
     /// Max episodes scanned per distillation run (DistillerConfig.batch_size).
     pub batch_size: Option<usize>,
-    /// Embedding cosine threshold for cluster merging (DistillerConfig.cluster_threshold).
-    pub cluster_threshold: Option<f32>,
-    /// Min episodes to promote a Fact.
-    pub fact_min_evidence: Option<usize>,
-    /// Min episodes to promote a Preference.
-    pub preference_min_evidence: Option<usize>,
-    /// Min episodes to promote a Relation.
-    pub relation_min_evidence: Option<usize>,
-    /// Min episodes to promote a Procedure.
-    pub procedure_min_evidence: Option<usize>,
-    /// Min episodes to promote an autobiographical cluster.
-    pub autobio_min_evidence: Option<usize>,
-    /// Min time span (days) for autobiographical promotion.
-    pub autobio_min_span_days: Option<i64>,
-    /// Min LLM judge confidence for promotion.
-    pub promotion_confidence_threshold: Option<f32>,
+    /// Floor below which an episode is not consolidated at all
+    /// (DistillerConfig.min_importance). The single remaining volume knob:
+    /// the per-subtype evidence gates it replaces were multiplying together
+    /// into a distiller that silently produced nothing. Default: 0.0.
+    pub min_importance: Option<f32>,
 }
 
 /// Optional memory-quality overrides from the `.agent` manifest

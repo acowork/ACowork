@@ -235,7 +235,7 @@ function getPersistedGatewayUrlHistory(): string[] {
 function getPersistedGatewayMode(): GatewayMode {
   try {
     const stored = localStorage.getItem(STORAGE_KEY_GATEWAY_MODE);
-    if (stored === "local" || stored === "remote") return stored;
+    if (stored === "local" || stored === "remote" || stored === "relay") return stored;
   } catch { }
   return DEFAULT_GATEWAY_MODE;
 }
@@ -312,6 +312,16 @@ interface SettingsStore {
   setOpacity: (opacity: number) => void;
   setAccentColor: (color: string) => void;
   setGatewayUrl: (url: string) => void;
+  /**
+   * Persist a Gateway URL and keep the mode consistent with it in one
+   * step. `relay` mode can only reach its Gateway through `https://`
+   * relay-device domains (Rust `relay_mqtt_wss_url` rejects every other
+   * scheme), so an `http://` URL picked while mode is `relay` (candidate
+   * chooser, timeout-view edit) would otherwise create the exact combo
+   * that leaves MQTT permanently rejected. Flips the mode to `remote` in
+   * that case. No-ops when the URL is unchanged and no fix is needed.
+   */
+  applyGatewayUrl: (url: string) => void;
   /** Push a URL to the front of the history (LRU). No-ops for falsy / duplicate-of-front. */
   recordGatewayUrl: (url: string) => void;
   setGatewayMode: (mode: GatewayMode) => void;
@@ -441,6 +451,28 @@ export const useSettingsStore = create<SettingsStore>((set, get) => {
       // turn every /api/* into 401.
       if (oldUrl !== gatewayUrl) {
         void useAuthStore.getState().onGatewayUrlChanged(gatewayUrl, oldUrl);
+      }
+    },
+    /**
+     * URL + mode atomic consistency (see interface docs). Composed of the
+     * two existing actions so every side effect stays in one place
+     * (localStorage write, Rust push, `onGatewayUrlChanged` probe): URL
+     * first — its push already carries the new URL — then the mode fix,
+     * which re-pushes the config with the URL updated. The LAST
+     * `set_gateway_config` Rust sees is therefore (remote, url); the
+     * intermediate (relay, url) push's follow-up `connect_mqtt` rejection
+     * is swallowed by `pushGatewayConfigToRust` by design.
+     */
+    applyGatewayUrl: (gatewayUrl) => {
+      const needsModeFix =
+        get().gatewayMode === "relay" &&
+        gatewayUrl.trim().toLowerCase().startsWith("http://");
+      if (gatewayUrl === get().gatewayUrl && !needsModeFix) return;
+      if (gatewayUrl !== get().gatewayUrl) {
+        get().setGatewayUrl(gatewayUrl);
+      }
+      if (needsModeFix) {
+        get().setGatewayMode("remote");
       }
     },
     /**

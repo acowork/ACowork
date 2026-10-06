@@ -1,0 +1,2968 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ACowork Mobile · IM 形态 v1 交互稿</title>
+<style>
+/* ============================================================
+   Design tokens — 移动端规范（对齐 iOS grouped list 语言）
+   主色沿用 desktop --color-accent: #3B82F6
+   ============================================================ */
+:root {
+  --accent: #3B82F6;
+  --accent-press: #2F6FE0;
+  --bg: #F2F2F7;
+  --bg-elev: #FFFFFF;
+  --card: #FFFFFF;
+  --inset: #F7F7FA;
+  --label: #000000;
+  --label-2: rgba(60, 60, 67, 0.62);
+  --label-3: rgba(60, 60, 67, 0.32);
+  --sep: rgba(60, 60, 67, 0.20);
+  --fill: rgba(120, 120, 128, 0.12);
+  --fill-2: rgba(120, 120, 128, 0.20);
+  --green: #34C759;
+  --orange: #FF9500;
+  --red: #FF3B30;
+  --purple: #AF52DE;
+  --teal: #5AC8FA;
+  --chat-bubble-me: #3B82F6;
+  --chat-bubble-me-label: #FFFFFF;
+  --chat-bubble-you: #E9E9EB;
+  --chat-bubble-you-label: #000000;
+  --shadow: 0 1px 2px rgba(0,0,0,.04), 0 8px 24px rgba(0,0,0,.06);
+  --r-card: 14px;
+  --safe-top: 44px;
+  --safe-bottom: 34px;
+  --tabbar-h: 56px;
+  /* 滚动条 —— 与 Desktop globals.css 的 --ui-scrollbar-* 同名同值，
+     保证原型预览与真机 App 的滚动条观感一致（zinc 色阶 / 6px / r3）。 */
+  --ui-scrollbar-thumb: #d4d4d8;          /* zinc-300 */
+  --ui-scrollbar-thumb-hover: #a1a1aa;    /* zinc-400 */
+  --ui-scrollbar-size: 6px;
+}
+html[data-theme="dark"] {
+  --bg: #000000;
+  --bg-elev: #1C1C1E;
+  --card: #1C1C1E;
+  --inset: #2C2C2E;
+  --label: #FFFFFF;
+  --label-2: rgba(235,235,245,0.60);
+  --label-3: rgba(235,235,245,0.30);
+  --sep: rgba(84,84,88,0.65);
+  --fill: rgba(120,120,128,0.24);
+  --fill-2: rgba(120,120,128,0.36);
+  --chat-bubble-you: #26262A;
+  --chat-bubble-you-label: #FFFFFF;
+  --shadow: 0 1px 2px rgba(0,0,0,.5), 0 8px 24px rgba(0,0,0,.4);
+  --ui-scrollbar-thumb: #3f3f46;          /* zinc-700 */
+  --ui-scrollbar-thumb-hover: #52525b;    /* zinc-600 */
+}
+
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+html, body { margin: 0; padding: 0; }
+
+/* ---------- 滚动条 ----------
+   对齐 Desktop src/styles/globals.css 的同名规则：不写裸色、不写裸宽度，
+   全部走 --ui-scrollbar-*，否则暗色模式下会渲染出一条白底滑块。 */
+::-webkit-scrollbar { width: var(--ui-scrollbar-size); height: var(--ui-scrollbar-size); }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--ui-scrollbar-thumb); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--ui-scrollbar-thumb-hover); }
+::-webkit-scrollbar-corner { background: transparent; }
+/* Firefox */
+* { scrollbar-width: thin; scrollbar-color: var(--ui-scrollbar-thumb) transparent; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC",
+    "Noto Sans SC", "Helvetica Neue", Arial, sans-serif;
+  background: #E8E8ED;
+  color: var(--label);
+  display: flex; align-items: center; justify-content: center;
+  min-height: 100vh; padding: 24px; gap: 28px;
+}
+html[data-theme="dark"] body { background: #0B0B0D; }
+
+/* ---------- 设备外框 ---------- */
+.stage { display: flex; gap: 28px; align-items: flex-start; }
+.phone {
+  width: 390px; height: 844px; flex: 0 0 390px;
+  background: var(--bg);
+  border-radius: 46px;
+  border: 11px solid #141416;
+  box-shadow: 0 30px 60px rgba(0,0,0,.28), 0 0 0 1px rgba(255,255,255,.06) inset;
+  position: relative; overflow: hidden;
+  display: flex; flex-direction: column;
+}
+.notch {
+  position: absolute; top: 0; left: 50%; transform: translateX(-50%);
+  width: 132px; height: 30px; background: #141416;
+  border-radius: 0 0 18px 18px; z-index: 200; pointer-events: none;
+}
+.statusbar {
+  height: var(--safe-top); flex: 0 0 var(--safe-top);
+  display: flex; align-items: flex-end; justify-content: space-between;
+  padding: 0 26px 6px; font-size: 13px; font-weight: 600; z-index: 150;
+  position: relative;
+  /* 纯装饰（预览用的假状态栏）。z-index 高于 #screenHost，若不关掉指针事件
+     会把顶部 44px 全吃掉 —— 导航栏按钮点不动就是这么来的。 */
+  pointer-events: none;
+}
+.statusbar .sb-r { display: flex; gap: 5px; align-items: center; }
+.sb-bat { width: 22px; height: 11px; border: 1.2px solid currentColor; border-radius: 3px; position: relative; }
+.sb-bat::after { content: ""; position: absolute; inset: 1.5px; right: 5px; background: currentColor; border-radius: 1px; }
+.sb-bat::before { content: ""; position: absolute; right: -3px; top: 3px; width: 1.6px; height: 4px; background: currentColor; border-radius: 0 1px 1px 0; }
+
+/* ---------- 侧栏说明（桌面预览用） ---------- */
+.notes { width: 460px; max-width: 46vw; }
+.notes h1 { font-size: 20px; margin: 0 0 4px; }
+.notes .sub { font-size: 12.5px; color: #6b6b76; line-height: 1.6; margin: 0 0 14px; }
+.notes h2 {
+  font-size: 11px; text-transform: uppercase; letter-spacing: .08em;
+  color: #8a8a94; margin: 18px 0 8px; border-top: 1px solid rgba(0,0,0,.08); padding-top: 10px;
+}
+.notes ul { margin: 0; padding-left: 16px; font-size: 12.5px; line-height: 1.75; color: #3a3a44; }
+.notes kbd {
+  font: inherit; font-size: 11px; background: #fff; border: 1px solid #d5d5dd;
+  border-bottom-width: 2px; border-radius: 5px; padding: 0 5px; color: #1a1a20;
+}
+.hint { font-size: 12px; color: #6b6b76; line-height: 1.7; }
+</style>
+</head>
+<body>
+<style>
+/* ============================================================
+   组件层 — 全部使用 iOS/mobile 规范组件
+   ============================================================ */
+
+/* ---------- 导航栏（顶部） ---------- */
+/* padding-top 让开系统状态栏（--safe-top）。#screenHost 是 absolute inset:0，
+   直接铺满 .phone 整个内框（含状态栏区域），所以每层 .layer 的内容都要自己
+   顶开 --safe-top，否则导航栏会压在状态栏下面。 */
+.navbar {
+  flex: 0 0 auto; position: relative; z-index: 100;
+  padding: var(--safe-top) 8px 8px;
+  display: grid; grid-template-columns: 56px 1fr 56px; align-items: center;
+  min-height: calc(44px + var(--safe-top));
+}
+/* 右侧承载两个动作时（聊天页：新建会话 + 更多），列宽改为自适应。
+   固定 56px 只放得下 36px 的单图标按钮，第二个按钮会被挤出屏幕外。 */
+.navbar.right-wide { grid-template-columns: 56px 1fr auto; }
+.navbar.right-wide .nav-btn.right { gap: 4px; }
+.nav-title {
+  text-align: center; font-size: 17px; font-weight: 600; letter-spacing: -0.2px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.nav-title .sub { display: block; font-size: 11px; font-weight: 400; color: var(--label-2); margin-top: 1px; }
+
+/* ---- 多会话：导航栏标题即会话切换器 ---- */
+.nav-title-btn {
+  display: flex; align-items: center; justify-content: center; gap: 3px;
+  min-width: 0; max-width: 100%; border: 0; background: transparent; padding: 2px 0;
+  cursor: pointer; font-family: inherit; color: inherit; overflow: hidden;
+}
+.nav-title-btn .nav-title {
+  min-width: 0; flex: 0 1 auto;   /* 关键：可收缩，由 ellipsis 接管；
+                                     fixed 布局下会顶破 grid 列并把 caret 挤出屏幕 */
+}
+.nav-title-btn .nav-title .t {
+  display: block; font-size: 17px; font-weight: 600; letter-spacing: -0.2px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.nav-title-btn .nav-title .sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.nav-caret { display: flex; flex: 0 0 auto; color: var(--label-2); }
+.nav-caret svg { width: 15px; height: 15px; }
+
+/* ---- 多会话：Action Sheet 内的会话行 ---- */
+/* 上限按「可见约 5 行」设定：既让长列表真的能滚，又不让 sheet 长到吃掉半屏。
+   标题/描述/操作区之外只剩这些行，46vh 在 940pt 视口上约 432px ≈ 7.5 行，
+   反而永远触发不了滚动，所以收到 300px。 */
+.sheet .grp.sess-grp { max-height: min(300px, 42vh); overflow-y: auto; -webkit-overflow-scrolling: touch; }
+.sess-row {
+  display: flex; align-items: center; gap: 10px; width: 100%;
+  padding: 11px 16px; border: 0; background: transparent; text-align: left;
+  font-family: inherit; color: var(--label); cursor: pointer;
+}
+.sess-row + .sess-row::before {
+  content: ""; position: absolute; left: 0; right: 0; top: 0; height: 0.5px; background: var(--sep);
+}
+.sess-row { position: relative; }
+.sess-row .s-main { flex: 1 1 auto; min-width: 0; }
+.sess-row .s-t {
+  display: block; font-size: 15px; font-weight: 500; color: var(--label);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.sess-row .s-p {
+  display: block; font-size: 12.5px; color: var(--label-2); margin-top: 2px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.sess-row .s-side { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }
+.sess-row .s-ico { display: flex; color: var(--label-2); }
+.sess-row .s-ico svg { width: 14px; height: 14px; }
+.sess-row .s-check { display: flex; color: var(--accent); }
+.sess-row .s-check svg { width: 17px; height: 17px; }
+.sess-row.on { background: rgba(59,130,246,.07); }
+.sess-row.on .s-t { color: var(--accent); font-weight: 600; }
+.sess-row.ro .s-t { color: var(--label-2); }
+
+/* 抽屉会话行（对齐列表行语言） */
+.sess-row-line { position: relative; }
+.sess-row-line .lead svg { width: 15px; height: 15px; }
+.sess-row-line.on { background: rgba(59,130,246,.07); }
+
+/* ---- 只读会话 ---- */
+.ro-banner { flex: 0 0 auto; }
+.composer.ro {
+  display: flex; align-items: center; gap: 7px; padding: 13px 16px;
+  background: var(--bg-elev); border-top: 0.5px solid var(--sep);
+  color: var(--label-2); font-size: 13.5px;
+}
+.composer.ro svg { width: 15px; height: 15px; flex: 0 0 auto; }
+.icon-btn.disabled { opacity: .38; cursor: default; }
+.nav-btn {
+  height: 36px; min-width: 36px; padding: 0 8px; border: 0; background: transparent;
+  color: var(--accent); font-size: 15px; cursor: pointer; display: flex;
+  align-items: center; gap: 2px; border-radius: 8px;
+}
+.nav-btn:active { opacity: .45; }
+.nav-btn.right { justify-content: flex-end; }
+.nav-btn.icon { padding: 0; justify-content: center; }
+.nav-btn.ghost { color: var(--label-2); }
+.nav-btn svg { width: 22px; height: 22px; }
+
+/* ---------- 底部 Tab Bar ---------- */
+.tabbar {
+  flex: 0 0 auto; height: calc(var(--tabbar-h) + var(--safe-bottom));
+  padding-bottom: var(--safe-bottom);
+  margin-top: auto;   /* 贴底：#screenHost 是 absolute，不占据 flex 流 */
+  display: grid; grid-template-columns: repeat(4, 1fr);
+  background: var(--bg-elev); border-top: 0.5px solid var(--sep);
+  z-index: 120; position: relative;
+}
+.tabbar.tucked { transform: translateY(100%); pointer-events: none; }
+.tabbar { transition: transform .3s cubic-bezier(.32,.72,0,1); }
+.tabbar::before {
+  content: ""; position: absolute; top: 0; left: 0; right: 0; height: 30px;
+  background: var(--bg-elev); z-index: -1;
+}
+html[data-theme="dark"] .tabbar { background: #1C1C1E; }
+.tab-item {
+  border: 0; background: transparent; cursor: pointer; color: var(--label-3);
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px;
+  font-size: 10px; padding-top: 6px; position: relative;
+}
+.tab-item svg { width: 25px; height: 25px; }
+.tab-item.active { color: var(--accent); }
+.tab-item .badge {
+  position: absolute; top: 2px; left: calc(50% + 6px);
+  min-width: 16px; height: 16px; padding: 0 4px; border-radius: 8px;
+  background: var(--red); color: #fff; font-size: 10px; font-weight: 700;
+  display: flex; align-items: center; justify-content: center; line-height: 1;
+}
+
+/* ---------- 页面容器 ---------- */
+/* 注意：安全区由 .navbar 自己 padding-top 顶开，不再有 .screen 包裹层。
+   （旧的 .screen / .screen.plain-nav 规则已删 —— 那个 class 从未被写进
+   markup，正是导航栏压住状态栏的根因，留着会误导后来人。） */
+.screen-scroll { flex: 1 1 auto; overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; min-width: 0; }
+/* 栈深 = 1（一级页）时，列表底部要让开 TabBar + 安全区 */
+.stack.root .screen-scroll { padding-bottom: calc(var(--tabbar-h) + var(--safe-bottom) + 8px); }
+.screen-body { padding-bottom: 24px; }
+
+/* 列表 / 详情 两级栈 */
+.stack { position: absolute; inset: 0; overflow: hidden; }
+.layer { position: absolute; inset: 0; display: flex; flex-direction: column; background: var(--bg); will-change: transform; }
+.layer.detail { box-shadow: -3px 0 14px rgba(0,0,0,.13); }
+html[data-theme="dark"] .layer.detail { box-shadow: -3px 0 14px rgba(0,0,0,.5); }
+.layer.anim { transition: transform .30s cubic-bezier(.32,.72,0,1); }
+.dim-veil { position: absolute; inset: 0; background: rgba(0,0,0,.32); z-index: 5; opacity: 0; pointer-events: none; transition: opacity .3s; }
+
+/* ---------- 抽屉（左滑滑出 = Agent 设置） ---------- */
+.drawer-scrim { position: absolute; inset: 0; background: rgba(0,0,0,.38); z-index: 140; opacity: 0; pointer-events: none; transition: opacity .3s; }
+.drawer {
+  position: absolute; top: 0; right: 0; bottom: 0; width: 86%; max-width: 336px;
+  background: var(--bg); z-index: 150; display: flex; flex-direction: column;
+  transform: translateX(100%); transition: transform .3s cubic-bezier(.32,.72,0,1);
+  box-shadow: -6px 0 24px rgba(0,0,0,.2);
+}
+.drawer.anim { transition: transform .32s cubic-bezier(.32,.72,0,1); }
+
+/* ---------- 头像 ---------- */
+.avatar {
+  flex: 0 0 auto; border-radius: 50%; display: flex; align-items: center; justify-content: center;
+  color: #fff; font-weight: 600; overflow: hidden; position: relative;
+  width: 48px; height: 48px; font-size: 18px; letter-spacing: -.5px;
+}
+.avatar.sm { width: 40px; height: 40px; font-size: 15px; }
+.avatar.xs { width: 28px; height: 28px; font-size: 12px; }
+.avatar.lg { width: 64px; height: 64px; font-size: 24px; }
+.avatar .dot {
+  position: absolute; right: -1px; bottom: -1px; width: 13px; height: 13px; border-radius: 50%;
+  border: 2px solid var(--bg-elev);
+}
+.avatar .dot.busy { background: var(--accent); }
+.avatar .dot.off { background: var(--label-3); }
+.avatar .dot.warn { background: var(--orange); }
+
+/* ---------- 搜索框 ---------- */
+.searchbar { padding: 2px 16px 10px; flex: 0 0 auto; }
+.search-field {
+  display: flex; align-items: center; gap: 6px; height: 36px; padding: 0 8px;
+  background: var(--fill); border-radius: 10px; color: var(--label-2);
+}
+.search-field svg { width: 16px; height: 16px; flex: 0 0 auto; }
+.search-field input {
+  flex: 1; border: 0; background: transparent; outline: none; color: var(--label);
+  font-size: 17px; font-family: inherit; min-width: 0;
+}
+.search-field input::placeholder { color: var(--label-2); }
+
+/* ---------- 分组列表（iOS inset grouped） ---------- */
+.group { margin: 18px 16px 0; }
+.group-title { font-size: 13px; color: var(--label-2); padding: 0 16px 7px; }
+.group-note { font-size: 12.5px; color: var(--label-2); line-height: 1.5; padding: 8px 16px 0; }
+.group-card {
+  background: var(--card); border-radius: var(--r-card); overflow: hidden;
+}
+.row {
+  display: flex; align-items: center; gap: 12px; min-height: 48px;
+  padding: 10px 16px; position: relative; width: 100%; border: 0; background: transparent;
+  color: var(--label); font-family: inherit; font-size: 16.5px; text-align: left; cursor: pointer;
+}
+.row:active:not(.static) { background: var(--fill); }
+.row.static { cursor: default; }
+.row + .row::before {
+  content: ""; position: absolute; left: 16px; right: 0; top: 0; height: 0.5px; background: var(--sep);
+}
+.row .lead { flex: 0 0 auto; display: flex; align-items: center; color: var(--accent); }
+.row .lead svg { width: 22px; height: 22px; }
+.row .grow { flex: 1 1 auto; min-width: 0; }
+.row .value { min-width: 0; }
+.row .grow .t { font-size: 16.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row .grow .d { font-size: 12.5px; color: var(--label-2); margin-top: 2px; line-height: 1.4; }
+.row .grow .d.multi { white-space: normal; }
+.row .value { color: var(--label-2); font-size: 16.5px; max-width: 52%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row .chev { flex: 0 0 auto; color: var(--label-3); display: flex; }
+.row .chev svg { width: 16px; height: 16px; }
+.row.danger .t, .row.danger .lead { color: var(--red); }
+
+/* ---------- Switch ---------- */
+.switch { flex: 0 0 auto; width: 51px; height: 31px; border-radius: 16px; background: var(--fill-2); position: relative; transition: background .22s; border: 0; cursor: pointer; padding: 0; }
+.switch::after { content: ""; position: absolute; top: 2px; left: 2px; width: 27px; height: 27px; border-radius: 50%; background: #fff; box-shadow: 0 2px 5px rgba(0,0,0,.22); transition: transform .22s cubic-bezier(.32,.72,0,1); }
+.switch[aria-checked="true"] { background: var(--green); }
+.switch[aria-checked="true"]::after { transform: translateX(20px); }
+.switch:disabled { opacity: .4; cursor: not-allowed; }
+
+/* ---------- Segmented control ---------- */
+.segmented { display: flex; background: var(--fill); border-radius: 9px; padding: 2px; gap: 2px; }
+.segmented button {
+  flex: 1; border: 0; background: transparent; border-radius: 7px; padding: 6px 4px;
+  font-size: 13.5px; font-family: inherit; color: var(--label); cursor: pointer; white-space: nowrap;
+}
+.segmented button.on { background: var(--bg-elev); box-shadow: 0 1px 3px rgba(0,0,0,.12); font-weight: 500; }
+html[data-theme="dark"] .segmented button.on { background: #636366; }
+
+/* ---------- Stepper / 数值 ---------- */
+.stepper { display: flex; align-items: center; gap: 0; background: var(--fill); border-radius: 8px; }
+.stepper button { width: 40px; height: 32px; border: 0; background: transparent; font-size: 20px; color: var(--accent); cursor: pointer; font-family: inherit; }
+.stepper .val { min-width: 52px; text-align: center; font-size: 15px; font-variant-numeric: tabular-nums; }
+
+/* ---------- Badge / 药丸 ---------- */
+.pill { display: inline-flex; align-items: center; gap: 4px; font-size: 11.5px; padding: 2px 7px; border-radius: 6px; background: var(--fill); color: var(--label-2); white-space: nowrap; }
+.pill.blue { background: rgba(59,130,246,.14); color: var(--accent); }
+.pill.orange { background: rgba(255,149,0,.16); color: #B26A00; }
+.pill.green { background: rgba(52,199,89,.16); color: #1B8E3A; }
+.pill.red { background: rgba(255,59,48,.14); color: var(--red); }
+.pill.purple { background: rgba(175,82,222,.16); color: #8944AB; }
+.pill.teal { background: rgba(90,200,250,.2); color: #0B84C4; }
+html[data-theme="dark"] .pill.orange { color: var(--orange); }
+html[data-theme="dark"] .pill.green { color: var(--green); }
+html[data-theme="dark"] .pill.purple { color: var(--purple); }
+html[data-theme="dark"] .pill.teal { color: var(--teal); }
+
+/* ---------- 会话列表（IM 核心） ---------- */
+.conv-row {
+  display: flex; align-items: center; gap: 12px; padding: 9px 16px; width: 100%;
+  border: 0; background: transparent; cursor: pointer; text-align: left; color: var(--label);
+  font-family: inherit; position: relative;
+}
+.conv-row:active { background: var(--fill); }
+.conv-row .mid { flex: 1 1 auto; min-width: 0; }
+.row, .conv-row, .kcard, .tree-dir, .tree-file { min-width: 0; }
+.conv-row .line1 { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.conv-row .nm { font-size: 16.5px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 0 1 auto; }
+.conv-row .tm { margin-left: auto; flex: 0 0 auto; font-size: 12px; color: var(--label-2); }
+.conv-row .line2 { display: flex; align-items: center; gap: 6px; margin-top: 2px; min-width: 0; }
+.conv-row .prev {
+  flex: 1 1 0; min-width: 0; font-size: 13.5px; color: var(--label-2);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.conv-row .prev.unread { color: var(--label); font-weight: 500; }
+.conv-row .unread {
+  flex: 0 0 auto; min-width: 20px; max-width: 46px; height: 20px; padding: 0 6px; border-radius: 10px;
+  background: var(--red); color: #fff; font-size: 12px; font-weight: 600;
+  display: flex; align-items: center; justify-content: center;
+}
+.conv-row .unread.dot-only { min-width: 10px; width: 10px; height: 10px; padding: 0; }
+
+/* ---- node 标识（多节点部署时才有意义）----
+   不做分组：Desktop 的按 node 分组承载的是「空节点里装第一个 Agent」这类
+   运维入口（ADR-073 §4），移动端 v1 不做安装，跳过。改成在行内挂一个
+   轻量 chip，只在 >1 个 node 时出现。 */
+.conv-row .ntag {
+  flex: 0 0 auto; max-width: 88px; display: inline-flex; align-items: center; gap: 3px;
+  padding: 1px 6px; border-radius: 5px; background: var(--fill);
+  font-size: 11px; line-height: 1.5; color: var(--label-2);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.conv-row .ntag .ndot {
+  flex: 0 0 auto; width: 5px; height: 5px; border-radius: 50%; background: var(--green);
+}
+.conv-row .ntag .ndot.off { background: var(--label-3); }
+/* Node 离线：整块 chip 一起降调，避免"绿点 + 灰底"读起来仍像正常态 */
+.conv-row .ntag.off { color: var(--label-3); }
+.section-label {
+  padding: 14px 16px 6px; font-size: 13px; color: var(--label-2);
+  display: flex; align-items: center; gap: 6px;
+}
+/* ICON.* 生成的 svg 只有 viewBox、没有 width/height，默认占 300x150。
+   每个放置图标的位置都必须显式定尺寸，否则图标会撑爆容器。 */
+.section-label svg { width: 15px; height: 15px; flex: 0 0 auto; }
+</style>
+
+<style>
+/* ---------- 聊天消息气泡 ---------- */
+.chat-scroll { flex: 1 1 auto; overflow-y: auto; overscroll-behavior: contain; padding: 10px 12px 6px; }
+.chat-day { text-align: center; font-size: 11.5px; color: var(--label-2); margin: 10px 0 12px; }
+.msg { display: flex; gap: 8px; margin-bottom: 14px; align-items: flex-start; }
+.msg.me { flex-direction: row-reverse; }
+.msg .bubble {
+  max-width: 76%; padding: 8px 12px; border-radius: 17px; font-size: 15.5px; line-height: 1.42;
+  white-space: pre-wrap; word-break: break-word;
+}
+.msg:not(.me) .bubble { background: var(--chat-bubble-you); color: var(--chat-bubble-you-label); border-bottom-left-radius: 5px; }
+.msg.me .bubble { background: var(--chat-bubble-me); color: var(--chat-bubble-me-label); border-bottom-right-radius: 5px; }
+.msg .meta { font-size: 10.5px; color: var(--label-2); margin-top: 3px; }
+.msg.me .meta { text-align: right; }
+.msg .meta.err { color: var(--red); }
+
+/* 工具调用块 */
+.toolcall {
+  max-width: 84%; margin: 0 0 14px 48px; border-radius: 12px; background: var(--card);
+  border: 0.5px solid var(--sep); overflow: hidden; font-size: 14px;
+}
+html[data-theme="dark"] .toolcall { background: var(--inset); }
+.toolcall .tc-head { display: flex; align-items: center; gap: 7px; padding: 8px 11px; color: var(--label-2); font-size: 13.5px; }
+.toolcall .tc-head svg { width: 15px; height: 15px; }
+.toolcall .tc-head .nm { font-weight: 500; color: var(--label); }
+.toolcall .tc-head .st { margin-left: auto; font-size: 11.5px; }
+.toolcall .tc-body {
+  padding: 8px 11px; border-top: 0.5px solid var(--sep); font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px; color: var(--label-2); line-height: 1.5; white-space: pre-wrap; word-break: break-all;
+  max-height: 120px; overflow: hidden; position: relative;
+}
+.toolcall .tc-body.fade::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 30px; background: linear-gradient(transparent, var(--card)); }
+html[data-theme="dark"] .toolcall .tc-body.fade::after { background: linear-gradient(transparent, var(--inset)); }
+.toolcall.failed .tc-head .st { color: var(--red); }
+.toolcall.running .spin { animation: spin 1s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* 审批卡片（移动端形态） */
+.approval {
+  margin: 0 12px 12px; border-radius: 14px; padding: 12px; background: var(--card);
+  border: 1px solid rgba(255,149,0,.4);
+}
+.approval .a-title { display: flex; align-items: center; gap: 6px; font-size: 14px; font-weight: 600; color: #B26A00; margin-bottom: 8px; }
+.approval .a-title svg { width: 17px; height: 17px; flex: 0 0 auto; }
+html[data-theme="dark"] .approval .a-title { color: var(--orange); }
+.approval .a-cmd { font-family: ui-monospace, Menlo, monospace; font-size: 12.5px; background: var(--inset); border-radius: 8px; padding: 8px 10px; word-break: break-all; margin-bottom: 10px; }
+.approval .a-acts { display: flex; gap: 8px; }
+.approval .a-acts .btn { flex: 1; height: 38px; border-radius: 10px; font-size: 15px; font-weight: 500; border: 0; cursor: pointer; font-family: inherit; }
+.btn-primary { background: var(--accent); color: #fff; }
+.btn-primary:active { background: var(--accent-press); }
+.btn-secondary { background: var(--fill); color: var(--label); }
+.btn-danger { background: var(--red); color: #fff; }
+.btn-ghost { background: transparent; color: var(--accent); }
+
+/* 问答卡片 */
+.askq { margin: 0 12px 12px; border-radius: 14px; padding: 12px; background: var(--card); border: 0.5px solid var(--sep); }
+.askq .q-text { font-size: 15px; line-height: 1.45; margin-bottom: 10px; }
+.askq .opt {
+  display: flex; align-items: center; gap: 9px; padding: 11px 12px; border-radius: 10px;
+  border: 1px solid var(--sep); margin-bottom: 8px; font-size: 15px; cursor: pointer; background: transparent;
+  color: var(--label); font-family: inherit; text-align: left; width: 100%;
+}
+.askq .opt.sel { border-color: var(--accent); background: rgba(59,130,246,.09); color: var(--accent); }
+.askq .opt .rd { width: 19px; height: 19px; border-radius: 50%; border: 1.6px solid var(--label-3); flex: 0 0 auto; display: flex; align-items: center; justify-content: center; }
+.askq .opt.sel .rd { border-color: var(--accent); }
+.askq .opt.sel .rd::after { content: ""; width: 10px; height: 10px; border-radius: 50%; background: var(--accent); }
+
+/* ---------- 输入区 ---------- */
+.composer {
+  flex: 0 0 auto; background: var(--bg-elev); border-top: 0.5px solid var(--sep);
+  padding: 7px 8px calc(8px + var(--safe-bottom));  /* 二级页 TabBar 已隐藏，安全区由输入区承担 */
+}
+.composer.slim { padding-bottom: 6px; }
+.composer .ctx-row { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 7px; scrollbar-width: none; }
+.composer .ctx-row::-webkit-scrollbar { display: none; }
+.ctx-chip {
+  display: flex; align-items: center; gap: 5px; flex: 0 0 auto; max-width: 190px;
+  background: var(--fill); border-radius: 8px; padding: 4px 8px; font-size: 12.5px; color: var(--label-2);
+}
+.ctx-chip .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ctx-chip .x { border: 0; background: transparent; color: var(--label-2); cursor: pointer; padding: 0; display: flex; }
+.ctx-chip .x svg { width: 13px; height: 13px; }
+.composer .input-row { display: flex; align-items: flex-end; gap: 7px; }
+.composer .ta {
+  flex: 1 1 auto; min-height: 36px; max-height: 108px; resize: none; border: 0; outline: none;
+  background: var(--fill); border-radius: 18px; padding: 8px 13px; font-size: 16.5px;
+  font-family: inherit; color: var(--label); line-height: 1.35;
+}
+.composer .ta::placeholder { color: var(--label-2); }
+.icon-btn {
+  flex: 0 0 auto; width: 34px; height: 34px; border-radius: 50%; border: 0; background: transparent;
+  color: var(--label-2); display: flex; align-items: center; justify-content: center; cursor: pointer; padding: 0;
+}
+.icon-btn:active { background: var(--fill); }
+.icon-btn svg { width: 24px; height: 24px; }
+/* 输入行整体不允许溢出 */
+.input-row { min-width: 0; }
+.send-btn { width: 34px; height: 34px; border-radius: 50%; border: 0; background: var(--accent); color: #fff; display: flex; align-items: center; justify-content: center; cursor: pointer; padding: 0; flex: 0 0 auto; }
+.send-btn:disabled { background: var(--fill-2); color: var(--label-3); }
+.send-btn svg { width: 20px; height: 20px; }
+
+/* 状态横幅 */
+.banner {
+  flex: 0 0 auto; display: flex; align-items: center; gap: 8px; padding: 7px 14px;
+  font-size: 13px; line-height: 1.4;
+}
+.banner svg { width: 16px; height: 16px; flex: 0 0 auto; }
+.banner.warn { background: rgba(255,149,0,.14); color: #8A5000; }
+html[data-theme="dark"] .banner.warn { color: var(--orange); }
+.banner.info { background: rgba(59,130,246,.12); color: #1B4FA0;
+/* ---- onboarding (v1.1: 启动/连接/登录/断连) ---- */
+.ob-wrap { flex: 1; display: flex; flex-direction: column; padding: 0 28px; overflow-y: auto; }
+.ob-hero { padding: 56px 0 28px; display: flex; flex-direction: column; align-items: center; gap: 12px; text-align: center; }
+.ob-logo { width: 72px; height: 72px; border-radius: 20px; background: var(--accent); color: #fff;
+  display: flex; align-items: center; justify-content: center; font-size: 30px; font-weight: 700; }
+.ob-title { font-size: 24px; font-weight: 700; }
+.ob-sub { font-size: 14px; color: var(--label-2); line-height: 1.5; max-width: 280px; }
+.ob-field { margin-top: 18px; }
+.ob-field label { display: block; font-size: 13px; color: var(--label-2); margin-bottom: 6px; }
+.ob-input { width: 100%; height: 48px; border-radius: 12px; border: 1px solid var(--separator);
+  background: var(--card); color: var(--label); font-size: 16px; padding: 0 14px; font-family: inherit; outline: none; }
+.ob-input:focus { border-color: var(--accent); }
+.ob-input.err { border-color: var(--red); }
+.ob-err { display: flex; align-items: center; gap: 6px; color: var(--red); font-size: 13px; margin-top: 8px; }
+.ob-err svg { width: 15px; height: 15px; }
+.ob-btn { margin-top: 22px; width: 100%; height: 50px; border-radius: 14px; border: 0; background: var(--accent);
+  color: #fff; font-size: 16px; font-weight: 600; font-family: inherit; cursor: pointer; }
+.ob-btn:disabled { opacity: .5; }
+.ob-btn.secondary { background: var(--card); color: var(--accent); border: 1px solid var(--separator); margin-top: 12px; }
+.ob-hint { margin-top: 14px; font-size: 12.5px; color: var(--label-3); text-align: center; line-height: 1.5; }
+.ob-saved { margin-top: 16px; }
+.ob-saved-title { font-size: 12px; color: var(--label-3); margin-bottom: 6px; }
+.ob-saved-item { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-radius: 10px;
+  background: var(--card); border: 1px solid var(--separator); margin-bottom: 8px; font-size: 14px; cursor: pointer; }
+.ob-saved-item .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); flex: 0 0 auto; }
+.ob-saved-item .dot.off { background: var(--label-3); }
+.ob-spin { display: inline-block; width: 16px; height: 16px; border: 2px solid rgba(255,255,255,.35);
+  border-top-color: #fff; border-radius: 50%; animation: obspin .8s linear infinite; vertical-align: -3px; margin-right: 6px; }
+@keyframes obspin { to { transform: rotate(360deg); } }
+.ob-disconnected { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; padding: 0 32px; text-align: center; }
+.ob-dis-icon { width: 64px; height: 64px; border-radius: 50%; background: rgba(255,59,48,.12); color: var(--red);
+  display: flex; align-items: center; justify-content: center; }
+.ob-dis-icon svg { width: 30px; height: 30px; }
+/* 断连 banner（全局，覆盖在内容上方） */
+.offline-banner { display: flex; align-items: center; gap: 8px; padding: 8px 16px; font-size: 13px;
+  background: rgba(255,149,0,.16); color: #8A5000; border-bottom: 0.5px solid var(--separator); }
+html[data-theme="dark"] .offline-banner { color: var(--orange); }
+.offline-banner svg { width: 15px; height: 15px; flex: 0 0 auto; }
+.offline-banner .retry { margin-left: auto; border: 0; background: none; color: var(--accent); font-size: 13px; font-family: inherit; cursor: pointer; padding: 2px 6px; }
+/* 发送失败气泡 */
+.msg.me .bubble.fail { background: rgba(255,59,48,.14); color: var(--red); border: 1px solid rgba(255,59,48,.4); }
+.msg.me .meta .fail-link { color: var(--red); font-weight: 600; cursor: pointer; }
+/* 会话状态指示（v1 轮询替代流式） */
+.status-line { display: flex; align-items: center; gap: 8px; padding: 6px 4px 10px; font-size: 13px; color: var(--label-2); }
+.status-line .pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); animation: obpulse 1.2s ease-in-out infinite; }
+@keyframes obpulse { 0%,100% { opacity: .35; } 50% { opacity: 1; } } }
+html[data-theme="dark"] .banner.info { color: var(--accent); }
+.banner.err { background: rgba(255,59,48,.12); color: #B3241B; }
+html[data-theme="dark"] .banner.err { color: var(--red); }
+.banner .btn { margin-left: auto; flex: 0 0 auto; border: 0; background: rgba(255,255,255,.6); color: inherit; font-size: 12.5px; font-weight: 600; padding: 4px 10px; border-radius: 7px; cursor: pointer; font-family: inherit; }
+html[data-theme="dark"] .banner .btn { background: rgba(255,255,255,.12); }
+
+/* ---------- 空态 ---------- */
+.empty { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; padding: 60px 40px; text-align: center; color: var(--label-2); }
+.empty svg { width: 46px; height: 46px; opacity: .35; }
+.empty .t { font-size: 16px; color: var(--label); font-weight: 500; }
+.empty .d { font-size: 13.5px; line-height: 1.55; }
+
+/* ---------- 文件树（工作区，move-only） ---------- */
+.tree-dir { display: flex; align-items: center; gap: 7px; padding: 9px 16px 9px 16px; width: 100%; border: 0; background: transparent; cursor: pointer; color: var(--label); font-family: inherit; font-size: 16px; text-align: left; position: relative; }
+.tree-dir:active { background: var(--fill); }
+.tree-dir .cv { color: var(--label-3); display: flex; transition: transform .2s; }
+.tree-dir .cv svg { width: 15px; height: 15px; }
+.tree-dir.open .cv { transform: rotate(90deg); }
+.tree-file { display: flex; align-items: center; gap: 7px; padding: 8px 16px 8px 38px; width: 100%; border: 0; background: transparent; cursor: pointer; color: var(--label); font-family: inherit; font-size: 15.5px; text-align: left; }
+.tree-file:active { background: var(--fill); }
+.tree-file .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tree-file .ext { color: var(--label-3); font-size: 14px; flex: 0 0 auto; }
+.tree-dir + .tree-dir::before, .tree-file + .tree-file::before, .tree-dir + .tree-file::before, .tree-file + .tree-dir::before { content: ""; position: absolute; left: 16px; right: 0; top: 0; height: 0.5px; background: var(--sep); }
+
+/* ---------- PM 看板（移动端 = 列表） ---------- */
+.klist { display: flex; flex-direction: column; }
+.kcard {
+  display: block; width: 100%; text-align: left; border: 0; background: transparent;
+  padding: 11px 16px; position: relative; cursor: pointer; font-family: inherit; color: var(--label);
+}
+.kcard:active { background: var(--fill); }
+.kcard + .kcard::before { content: ""; position: absolute; left: 16px; right: 0; top: 0; height: 0.5px; background: var(--sep); }
+.kcard .k-t { font-size: 15.5px; line-height: 1.4; margin-bottom: 6px; }
+.kcard .k-m { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.kcard .k-m .who { font-size: 12.5px; color: var(--label-2); display: flex; align-items: center; gap: 4px; }
+.board-nav { display: flex; gap: 8px; overflow-x: auto; padding: 8px 16px; scrollbar-width: none; border-bottom: 0.5px solid var(--sep); background: var(--bg-elev); flex: 0 0 auto; }
+.board-nav::-webkit-scrollbar { display: none; }
+.board-nav .bc {
+  flex: 0 0 auto; border: 0; background: var(--fill); color: var(--label); border-radius: 15px;
+  padding: 5px 12px; font-size: 13.5px; cursor: pointer; font-family: inherit; display: flex; gap: 5px; align-items: center;
+}
+.board-nav .bc.on { background: var(--accent); color: #fff; }
+
+/* ---------- Toast ---------- */
+.toast-wrap { position: absolute; left: 0; right: 0; bottom: calc(var(--tabbar-h) + var(--safe-bottom) + 14px); z-index: 400; display: flex; flex-direction: column; align-items: center; gap: 8px; pointer-events: none; padding: 0 24px; }
+.toast {
+  background: rgba(28,28,30,.92); color: #fff; font-size: 13.5px; padding: 9px 15px;
+  border-radius: 10px; box-shadow: 0 6px 20px rgba(0,0,0,.3); max-width: 100%; text-align: center;
+  animation: toastIn .25s cubic-bezier(.32,.72,0,1); line-height: 1.45;
+}
+@keyframes toastIn { from { opacity: 0; transform: translateY(10px); } }
+html[data-theme="dark"] .toast { background: rgba(240,240,245,.94); color: #000; }
+
+/* ---------- Action Sheet ---------- */
+.sheet-scrim { position: absolute; inset: 0; background: rgba(0,0,0,.4); z-index: 300; opacity: 0; pointer-events: none; transition: opacity .25s; }
+.sheet {
+  position: absolute; left: 8px; right: 8px; bottom: 8px; z-index: 310;
+  transform: translateY(110%); transition: transform .3s cubic-bezier(.32,.72,0,1);
+}
+.sheet .grp { background: var(--bg-elev); border-radius: 14px; overflow: hidden; margin-bottom: 8px; }
+.sheet .grp .it {
+  display: block; width: 100%; text-align: center; padding: 14px 16px; border: 0; background: transparent;
+  color: var(--accent); font-size: 18px; cursor: pointer; font-family: inherit; position: relative;
+}
+.sheet .grp .it.danger { color: var(--red); }
+.sheet .grp .it.bold { font-weight: 600; }
+.sheet .grp .it.disabled { color: var(--label-2); opacity: .55; }
+.sheet .grp .it .hint { display: block; font-size: 11.5px; font-weight: 400; color: var(--label-2); margin-top: 2px; }
+.sheet .grp .it + .it::before { content: ""; position: absolute; left: 0; right: 0; top: 0; height: 0.5px; background: var(--sep); }
+.sheet .grp .it.desc { color: var(--label-2); font-size: 12.5px; padding: 11px 16px; text-align: center; }
+.sheet .cancel { background: var(--bg-elev); border-radius: 14px; padding: 15px; text-align: center; color: var(--accent); font-size: 18px; font-weight: 600; cursor: pointer; border: 0; width: 100%; font-family: inherit; }
+
+/* ---------- Modal ---------- */
+.modal-scrim { position: absolute; inset: 0; background: rgba(0,0,0,.4); z-index: 300; opacity: 0; pointer-events: none; transition: opacity .22s; display: flex; align-items: center; justify-content: center; padding: 24px; }
+.modal { width: 100%; max-width: 300px; background: var(--bg-elev); border-radius: 14px; overflow: hidden; transform: scale(1.1); transition: transform .22s; }
+.modal .m-body { padding: 18px 16px 14px; text-align: center; }
+.modal .m-t { font-size: 16.5px; font-weight: 600; margin-bottom: 5px; }
+.modal .m-d { font-size: 13px; color: var(--label-2); line-height: 1.5; }
+.modal .m-acts { display: flex; border-top: 0.5px solid var(--sep); }
+.modal .m-acts button { flex: 1; border: 0; background: transparent; color: var(--accent); font-size: 16.5px; padding: 12px 8px; cursor: pointer; font-family: inherit; }
+.modal .m-acts button + button { border-left: 0.5px solid var(--sep); }
+.modal .m-acts button.danger { color: var(--red); }
+.modal .m-acts button.bold { font-weight: 600; }
+
+/* ---------- 输入弹窗 ---------- */
+.field { padding: 12px 16px; background: var(--card); border: 0.5px solid var(--sep); border-radius: 10px; display: flex; align-items: center; }
+.field input, .field textarea { flex: 1; border: 0; outline: none; background: transparent; font-size: 16.5px; font-family: inherit; color: var(--label); width: 100%; resize: none; }
+.field input::placeholder, .field textarea::placeholder { color: var(--label-2); }
+.select-box {
+  flex: 1; border: 0; outline: none; background: transparent; font-size: 16.5px; font-family: inherit; color: var(--label); appearance: none; cursor: pointer; text-align: right; padding-right: 16px;
+}
+.select-wrap { position: relative; flex: 1; display: flex; align-items: center; }
+.select-wrap::after { content: ""; position: absolute; right: 2px; top: 50%; width: 7px; height: 7px; border-right: 1.8px solid var(--label-3); border-bottom: 1.8px solid var(--label-3); transform: translateY(-70%) rotate(45deg); pointer-events: none; }
+</style>
+
+<div class="stage">
+  <div class="phone" id="phone">
+    <div class="notch"></div>
+    <div class="statusbar">
+      <span id="sbTime">9:41</span>
+      <span class="sb-r">
+        <svg width="17" height="11" viewBox="0 0 17 11" fill="currentColor"><rect x="0" y="7" width="3" height="4" rx="1"/><rect x="4.5" y="5" width="3" height="6" rx="1"/><rect x="9" y="2.5" width="3" height="8.5" rx="1"/><rect x="13.5" y="0" width="3" height="11" rx="1"/></svg>
+        <svg width="16" height="11" viewBox="0 0 16 11" fill="currentColor"><path d="M8 9.5a1.3 1.3 0 100 2.6 1.3 1.3 0 000-2.6z"/><path d="M8 5.6c1.4 0 2.7.5 3.6 1.5l1.3-1.3A7 7 0 008 3.9a7 7 0 00-4.9 1.9l1.3 1.3A5.3 5.3 0 018 5.6z" opacity=".9"/><path d="M8 1.6c2.5 0 4.8 1 6.5 2.6L15.8 3A10.4 10.4 0 008 0 10.4 10.4 0 00.2 3l1.3 1.2A8.7 8.7 0 018 1.6z" opacity=".7"/></svg>
+        <span class="sb-bat"></span>
+      </span>
+    </div>
+
+    <!-- ============ 底部 Tab（IM 主导航） ============ -->
+    <nav class="tabbar" id="tabbar">
+      <button class="tab-item active" data-tab="chat">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 3c-4.97 0-9 3.36-9 7.5 0 2.3 1.25 4.4 3.2 5.75l-.86 3.1a.5.5 0 00.73.55l3.62-2.06c.4.05.85.08 1.31.08 4.97 0 9-3.36 9-7.42S16.97 3 12 3z"/></svg>
+        <span>聊天</span>
+      </button>
+      <button class="tab-item" data-tab="projects">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6.5A2.5 2.5 0 015.5 4h4.2a2 2 0 011.5.7l1 1.2a2 2 0 001.5.7h4.8A2.5 2.5 0 0121 9.1v8.4A2.5 2.5 0 0118.5 20h-13A2.5 2.5 0 013 17.5z"/></svg>
+        <span>项目</span>
+      </button>
+      <button class="tab-item" data-tab="docs">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H6.5A2.5 2.5 0 004 5.5v13A2.5 2.5 0 006.5 21h11a2.5 2.5 0 002.5-2.5V9z"/><path d="M14 3v6h6"/><path d="M8.5 13h7M8.5 16.5h5"/></svg>
+        <span>文档</span>
+      </button>
+      <button class="tab-item" data-tab="settings">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2.2"/><circle cx="9" cy="17" r="2.2"/></svg>
+        <span>设置</span>
+      </button>
+    </nav>
+
+    <!-- ============ 屏幕层（由 JS 渲染） ============
+         inset:0 以 .phone 的 padding box 为准 = 可见屏幕区（390x844 减去两侧
+         11px 边框 = 368x822）。底部那 11px 是手机边框本身，不是布局缺陷。 -->
+    <div id="screenHost" style="position:absolute;inset:0;"></div>
+
+    <!-- 全局浮层 -->
+    <div class="drawer-scrim" id="drawerScrim"></div>
+    <aside class="drawer" id="drawer"></aside>
+    <div class="sheet-scrim" id="sheetScrim"></div>
+    <div class="sheet" id="sheet"></div>
+    <div class="modal-scrim" id="modalScrim"></div>
+    <div class="toast-wrap" id="toastWrap"></div>
+  </div>
+
+  <aside class="notes">
+    <h1>ACowork Mobile · IM 形态 v1</h1>
+    <p class="sub">
+      交互设计稿 — Desktop App 的移动端子集。定位：<b>便携终端</b>，v1 只做<b>基础对话控制</b>。
+      底部四栏对应 Desktop 左侧导航栏（Chat / Projects / Docs / Settings），<b>Harness 与 Extensions 不上 App 端</b>。
+    </p>
+    <h2>如何操作（原型手势）</h2>
+    <ul>
+      <li>点击底部 <kbd>聊天 / 项目 / 文档 / 设置</kbd> 切换一级页面</li>
+      <li>点击会话/条目进入详情；<b>详情页右滑</b>返回上一级</li>
+      <li><b>聊天页左滑</b>滑出 Agent 设置抽屉（= Desktop 右侧工作区）</li>
+      <li>长按会话行 → 操作菜单（启动/停止/删除等）</li>
+      <li>工作区文件树只有 <kbd>Add to Chat</kbd>，无 Monaco 预览</li>
+    </ul>
+    <h2>与 Desktop 的对应关系</h2>
+    <ul>
+      <li>聊天列表 = <b>AgentList + UserList</b> 合并为一个 IM 会话流</li>
+      <li>聊天抽屉 = <b>RightPanel</b>（Status / Workspace / Memory / Tools / Setup / Debug）</li>
+      <li>项目 = <b>ProjectsView</b>（侧栏 → 看板 → 任务抽屉，三级列表）</li>
+      <li>文档 = <b>DocsView</b>（目录树 → 文档，审阅队列独立入口）</li>
+      <li>设置 = <b>SettingsPage</b>（Profile / General / Appearance / Gateway 四个二级页）</li>
+    </ul>
+    <h2>能力边界（v1 明确不做）</h2>
+    <ul>
+      <li>文件预览 / Monaco 编辑器 → 只保留 Add to Chat</li>
+      <li>DevMode 断点调试（Desktop Debug tab）→ 不上 App</li>
+      <li>Git 状态条（ADR-078）→ 不上 App</li>
+      <li>Agent 创建 / 安装 / 克隆 / 发布（Desktop AgentList 右键菜单）→ 不上 App</li>
+      <li>Provider / API Key / MCP / Embedding（Harness）→ 不上 App</li>
+    </ul>
+    <h2>设计决策要点</h2>
+    <ul>
+      <li><b>一级只有 4 栏</b>：IM 心智里"更多"会稀释，PM/Doc 作为平级频道</li>
+      <li><b>左滑 = 上下文面板</b>：不侵入输入区，与微信"按住说话"侧滑一致</li>
+      <li><b>右滑 = 返回</b>：仅在非一级页生效，底部 Tab 永不右滑退出</li>
+      <li><b>列表即真相</b>：PM 看板列在手机上降级为横向 chip 筛选</li>
+    </ul>
+  </aside>
+</div>
+
+<script>
+/* ============================================================
+   ICONS — 线性图标，24x24 viewBox
+   ============================================================ */
+const I = (p, extra = "") => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" ${extra}>${p}</svg>`;
+const F = (p) => `<svg viewBox="0 0 24 24" fill="currentColor">${p}</svg>`;
+
+const ICON = {
+  back: I('<path d="M15 5l-7 7 7 7"/>'),
+  chev: I('<path d="M9 5l7 7-7 7"/>'),
+  chevDown: I('<path d="M5 9l7 7 7-7"/>'),
+  chevUp: I('<path d="M5 15l7-7 7 7"/>'),
+  close: I('<path d="M6 6l12 12M18 6L6 18"/>'),
+  search: I('<circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/>'),
+  plus: I('<path d="M12 5v14M5 12h14"/>'),
+  send: F('<path d="M3.4 20.4l17.45-7.48a1 1 0 000-1.84L3.4 3.6a.99.99 0 00-1.39.91L2 9.12c0 .5.37.93.87.99L17 12 2.87 13.88c-.5.07-.87.5-.87 1l.01 4.61c0 .71.73 1.2 1.39.91z"/>'),
+  mic: I('<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0014 0M12 18v3"/>'),
+  attach: I('<path d="M21 11.5l-8.9 8.9a5 5 0 01-7.07-7.07l9.2-9.2a3.3 3.3 0 014.67 4.67l-9.2 9.2a1.65 1.65 0 01-2.33-2.33l8.5-8.5"/>'),
+  gear: I('<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.6 1.6 0 00.32 1.77l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.6 1.6 0 00-1.77-.32 1.6 1.6 0 00-1 1.47V21a2 2 0 11-4 0v-.11a1.6 1.6 0 00-1.05-1.47 1.6 1.6 0 00-1.77.32l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.6 1.6 0 00.32-1.77 1.6 1.6 0 00-1.47-1H3a2 2 0 110-4h.11a1.6 1.6 0 001.47-1.05 1.6 1.6 0 00-.32-1.77l-.06-.06a2 2 0 112.83-2.83l.06.06a1.6 1.6 0 001.77.32H9a1.6 1.6 0 001-1.47V3a2 2 0 114 0v.11a1.6 1.6 0 001 1.47 1.6 1.6 0 001.77-.32l.06-.06a2 2 0 112.83 2.83l-.06.06a1.6 1.6 0 00-.32 1.77V9a1.6 1.6 0 001.47 1H21a2 2 0 110 4h-.11a1.6 1.6 0 00-1.47 1z"/>'),
+  folder: I('<path d="M3 7.5A2.5 2.5 0 015.5 5h3.2a2 2 0 011.5.7l1 1.1a2 2 0 001.5.7h5.8A2.5 2.5 0 0121 10v6.5A2.5 2.5 0 0118.5 19h-13A2.5 2.5 0 013 16.5z"/>'),
+  file: I('<path d="M14 3H7a2 2 0 00-2 2v14a2 2 0 002 2h10a2 2 0 002-2V8z"/><path d="M14 3v5h5"/>'),
+  terminal: I('<rect x="3" y="4.5" width="18" height="15" rx="2.5"/><path d="M7.5 9.5l2.5 2.5-2.5 2.5M12.5 15h4"/>'),
+  db: I('<ellipse cx="12" cy="6" rx="7.5" ry="3"/><path d="M4.5 6v6c0 1.66 3.36 3 7.5 3s7.5-1.34 7.5-3V6M4.5 12v6c0 1.66 3.36 3 7.5 3s7.5-1.34 7.5-3v-6"/>'),
+  wrench: I('<path d="M14.7 6.3a4 4 0 105.66 5.66l-8.2 8.2a2.4 2.4 0 01-3.4-3.4l8.2-8.2a4 4 0 00-2.26-2.26z"/><path d="M14.7 6.3L18 3"/>'),
+  info: I('<circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/>'),
+  gauge: I('<path d="M12 14.5l3.5-3.5"/><path d="M20.5 17a9 9 0 10-17 0"/><circle cx="12" cy="15" r="1.6"/>'),
+  play: F('<path d="M7 4.8c0-.9 1-1.5 1.8-1l9.2 6.2a1.2 1.2 0 010 2L8.8 20.2c-.8.5-1.8-.1-1.8-1z"/>'),
+  stop: F('<rect x="6" y="6" width="12" height="12" rx="2.4"/>'),
+  refresh: I('<path d="M20 11a8 8 0 10-.6 4"/><path d="M20 4v7h-7"/>'),
+  logout: I('<path d="M15 17l5-5-5-5M20 12H9M12 20H6.5A1.5 1.5 0 015 18.5v-13A1.5 1.5 0 016.5 4H12"/>'),
+  user: I('<circle cx="12" cy="8.5" r="3.8"/><path d="M4.5 20a7.5 7.5 0 0115 0"/>'),
+  users: I('<circle cx="9.5" cy="8.5" r="3.5"/><path d="M3 20a6.5 6.5 0 0113 0"/><path d="M16 5.4a3.5 3.5 0 010 6.2M17.5 14.4A6.5 6.5 0 0121 20"/>'),
+  bot: I('<rect x="4" y="8" width="16" height="11" rx="3.5"/><path d="M12 4.5V8M8.5 13v1.5M15.5 13v1.5"/><circle cx="12" cy="4" r="1.2"/>'),
+  doc: I('<path d="M14 3H7a2 2 0 00-2 2v14a2 2 0 002 2h10a2 2 0 002-2V8z"/><path d="M14 3v5h5M8.5 13h7M8.5 16.5h4.5"/>'),
+  board: I('<rect x="3" y="4.5" width="18" height="15" rx="2.5"/><path d="M9 4.5v15M15 4.5v15"/>'),
+  trash: I('<path d="M4 6.5h16M9.5 6.5V4.8A1.3 1.3 0 0110.8 3.5h2.4a1.3 1.3 0 011.3 1.3v1.7M6.5 6.5l.8 12.2A2 2 0 009.3 20.5h5.4a2 2 0 002-1.8l.8-12.2"/>'),
+  check: I('<path d="M4.5 12.5l5 5 10-11"/>'),
+  /* ADR-076 可见性图标：🔒 私有 / 🌐 公开，与 Desktop SessionVisibilityToggle 语义一致 */
+  lock: I('<rect x="4.8" y="10.5" width="14.4" height="9.7" rx="2.4"/><path d="M8.2 10.5V7.6a3.8 3.8 0 017.6 0v2.9"/>'),
+  globe: I('<circle cx="12" cy="12" r="8.2"/><path d="M3.8 12h16.4M12 3.8c2.1 2.3 3.2 5.2 3.2 8.2s-1.1 5.9-3.2 8.2c-2.1-2.3-3.2-5.2-3.2-8.2S9.9 6.1 12 3.8z"/>'),
+  alert: I('<path d="M12 3.8L21.5 20H2.5z"/><path d="M12 10v4.5M12 17.6h.01"/>'),
+  moon: I('<path d="M20 14.5A8.5 8.5 0 019.5 4a8.5 8.5 0 1010.5 10.5z"/>'),
+  type: I('<path d="M4 6.5V4.5h16v2M12 4.5V20M8.5 20h7"/>'),
+  palette: I('<path d="M12 3.2a8.8 8.8 0 000 17.6c1.1 0 1.9-.9 1.9-1.9 0-.5-.2-.9-.5-1.2-.3-.3-.5-.7-.5-1.2 0-1 .8-1.9 1.9-1.9h1.4A4.7 4.7 0 0021 9.7C21 6 17 3.2 12 3.2z"/><circle cx="7.5" cy="11.5" r="1.1" fill="currentColor" stroke="none"/><circle cx="10" cy="7.5" r="1.1" fill="currentColor" stroke="none"/><circle cx="15" cy="8" r="1.1" fill="currentColor" stroke="none"/>'),
+  cloud: I('<path d="M7 18.5A4.5 4.5 0 016.6 9.6a6 6 0 0111.5 1.5A3.9 3.9 0 0117.5 18.5z"/>'),
+  key: I('<circle cx="8" cy="12" r="4"/><path d="M12 12h9M17.5 12v3.5M20.5 12v2.5"/>'),
+  lang: I('<circle cx="12" cy="12" r="9"/><path d="M3.2 12h17.6M12 3a14 14 0 010 18A14 14 0 0112 3z"/>'),
+  pin: I('<path d="M12 21s7-5.6 7-11a7 7 0 10-14 0c0 5.4 7 11 7 11z"/><circle cx="12" cy="10" r="2.6"/>'),
+  briefcase: I('<rect x="3" y="7.5" width="18" height="12.5" rx="2.2"/><path d="M9 7.5V6a2 2 0 012-2h2a2 2 0 012 2v1.5M3 12.5h18"/>'),
+  shield: I('<path d="M12 3l7.5 3v5.5c0 4.5-3 8.4-7.5 9.8-4.5-1.4-7.5-5.3-7.5-9.8V6z"/><path d="M9 12l2.2 2.2L15.5 10"/>'),
+  star: I('<path d="M12 3.6l2.6 5.3 5.9.86-4.25 4.14 1 5.86L12 17l-5.25 2.76 1-5.86L3.5 9.76l5.9-.86z"/>'),
+  list: I('<path d="M8 6.5h12M8 12h12M8 17.5h12M4 6.5h.01M4 12h.01M4 17.5h.01"/>'),
+  clock: I('<circle cx="12" cy="12" r="8.5"/><path d="M12 7v5.3l3.4 2"/>'),
+  download: I('<path d="M12 3.5v11M7.5 10.5l4.5 4.5 4.5-4.5M4 18.5h16"/>'),
+  copy: I('<rect x="8.5" y="8.5" width="11" height="11" rx="2.2"/><path d="M15.5 8.5v-2a2.2 2.2 0 00-2.2-2.2H6.2A2.2 2.2 0 004 6.5v7.1A2.2 2.2 0 006.2 15.8h2"/>'),
+  edit: I('<path d="M4 20h4l10.5-10.5a2.1 2.1 0 00-3-3L5 17z"/><path d="M14.5 6.5l3 3"/>'),
+  branch: I('<circle cx="6.5" cy="6" r="2.5"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="17.5" cy="9.5" r="2.5"/><path d="M6.5 8.5v7M6.5 13.5c0-2.2 2-2.5 4-2.5h2.5"/>'),
+  history: I('<path d="M3.5 12a8.5 8.5 0 105-7.7L3.5 9"/><path d="M3 4.5V9h4.5M12 7.5V12l3.2 2"/>'),
+  power: I('<path d="M12 3.5v8M7.5 6.2a7 7 0 109 0"/>'),
+  bell: I('<path d="M18 9a6 6 0 10-12 0c0 5-2 6.5-2 6.5h16S18 14 18 9z"/><path d="M10.3 19a2 2 0 003.4 0"/>'),
+  flag: I('<path d="M5 21V4.5M5 5h9.5l-1.2 3.5 1.2 3.5H5"/>'),
+  inbox: I('<path d="M3 13.5h4l1.5 2.5h7l1.5-2.5h4M3 13.5L6 5.5h12l3 8v5a2 2 0 01-2 2H5a2 2 0 01-2-2z"/>'),
+  /* 与底部 Tab「聊天」同形，保持主导航与设置项图标语言一致 */
+  chat: F('<path d="M12 3c-4.97 0-9 3.36-9 7.5 0 2.3 1.25 4.4 3.2 5.75l-.86 3.1a.5.5 0 00.73.55l3.62-2.06c.4.05.85.08 1.31.08 4.97 0 9-3.36 9-7.42S16.97 3 12 3z"/>'),
+};
+</script>
+
+<script>
+/* ============================================================
+   MOCK DATA — 映射自 Desktop 真实结构
+   Agent 包名/ID 来自仓库实际 agent（com.acowork.* ）
+   ============================================================ */
+const ME = { id: "me", name: "Nicholas", color: "#3B82F6", role: "admin" };
+
+/* 节点实体（对齐 Desktop NodeInfo）。
+   Agent 只持有 node_id，显示名与在线状态都由 Node 侧决定 ——
+   Node 可以掉线而 Runtime 进程还挂着，这时 Agent 的「在线」仍是绿的，
+   只有 node.online 能暴露。所以圆点必须读 Node，不能拿 Agent 存活代理。 */
+const NODES = [
+  { node_id: "n-mac-studio", node_name: "Mac-Studio", hostname: "mac-studio.local", online: true,  os: "macOS 15", arch: "aarch64" },
+  { node_id: "n-ipad",       node_name: "Node-iPad",   hostname: "node-ipad.local",  online: false, os: "iPadOS 18", arch: "aarch64" },
+];
+
+/** 显示名兜底顺序，对齐 Desktop nodeDisplayName（ADR-075 D8）。 */
+function nodeById(nid) { return NODES.find(n => n.node_id === nid) || null; }
+function nodeLabel(n) {
+  const x = nodeById(n);
+  return x ? (x.node_name || x.hostname || x.node_id) : (n || "");
+}
+
+const AGENTS = [
+  { id: "com.acowork.software-architect", name: "架构师", pkg: "software-architect", color: "#3B82F6", alive: true,  busy: true,  node_id: "n-mac-studio", ver: "0.4.2", model: "gpt-5", sessions: 12, preview: "已完成 ADR-085 状态机评审，剩下生命周期回滚路径", time: "14:32", unread: 2 },
+  { id: "com.acowork.senior-engineer",  name: "高级工程师", pkg: "senior-engineer", color: "#34C759", alive: true,  busy: false, node_id: "n-mac-studio", ver: "1.2.0", model: "claude-sonnet-4", sessions: 34, preview: "cargo test 全绿，19 个新测试覆盖 crate 重命名", time: "13:05", unread: 0 },
+  { id: "com.acowork.product-manager", name: "产品经理", pkg: "product-manager", color: "#FF9500", alive: true,  busy: false, node_id: "n-mac-studio", ver: "0.9.1", model: "gpt-5-mini", sessions: 7, preview: "Mobile v1 PRD 已生成草稿", time: "昨天", unread: 0 },
+  { id: "com.acowork.project-manager", name: "项目经理", pkg: "project-manager", color: "#AF52DE", alive: true,  busy: false, node_id: "n-mac-studio", ver: "0.7.3", model: "gpt-5-mini", sessions: 5, preview: "T-42 已提交待审核", time: "昨天", unread: 1 },
+  { id: "com.acowork.quality-assurance", name: "测试工程师", pkg: "quality-assurance", color: "#5AC8FA", alive: true,  busy: false, node_id: "n-mac-studio", ver: "0.6.0", model: "gpt-5-mini", sessions: 3, preview: "Gateway 代理回归通过", time: "周一", unread: 0 },
+  { id: "com.acowork.document-manager", name: "文档管理员", pkg: "document-manager", color: "#FF2D55", alive: false, busy: false, node_id: "n-mac-studio", ver: "0.3.0", model: "—", sessions: 0, preview: "", time: "", unread: 0 },
+  { id: "com.acowork.system", name: "系统助手", pkg: "system", color: "#8E8E93", alive: true,  busy: false, node_id: "n-mac-studio", ver: "1.0.0", model: "gpt-5-mini", sessions: 2, preview: "已为 Node-iPad 恢复远程隧道", time: "周一", unread: 0 },
+  /* 以下三个部署在第二台机器上：多 node 场景下会话行才需要显示 node 标识。
+     单 node 时该标识自动隐藏（见 nodeTagHTML），避免给用户无意义的噪音。
+     注意 Rust 工程师 alive=true 但它的 Node-iPad 离线 —— 圆点必须是灰的。 */
+  { id: "com.acowork.rust-engineer", name: "Rust 工程师", pkg: "rust-engineer", color: "#FF9F0A", alive: true,  busy: false, node_id: "n-ipad", ver: "0.2.1", model: "claude-sonnet-4", sessions: 5, preview: "跨 crate 重命名完成，19 处 import 已修", time: "12:20", unread: 0 },
+  { id: "com.acowork.data-analyst", name: "数据分析师", pkg: "data-analyst", color: "#5E5CE6", alive: true,  busy: false, node_id: "n-ipad", ver: "0.1.3", model: "gpt-5-mini", sessions: 3, preview: "embedding 维度对比结果已出表", time: "10:05", unread: 0 },
+  { id: "com.acowork.devops", name: "运维助手", pkg: "devops", color: "#64D2FF", alive: false, busy: false, node_id: "n-ipad", ver: "0.4.0", model: "gpt-5", sessions: 8, preview: "", time: "", unread: 0 },
+];
+
+const USERS = [
+  { id: "u_alice",  name: "Alice（算法）", color: "#5856D6", role: "user", preview: "embedding 换了 4 个维度，检索召回有提升", time: "15:10", unread: 3, online: true },
+  { id: "u_bob",    name: "Bob（后端）",   color: "#8E8E93", role: "user", preview: "刚看了 ADR-083，取消逻辑我来改", time: "11:20", unread: 0, online: false },
+  { id: "u_carol",  name: "Carol（设计）", color: "#FF2D55", role: "user", preview: "移动端原型我标了一版交互意见", time: "09:47", unread: 0, online: true },
+  { id: "u_admin2", name: "系统管理员",     color: "#34C759", role: "admin", preview: "服务器已升级到 v1.4.2", time: "周二", unread: 0, online: false },
+];
+
+/* ============================================================
+   Session 模型 —— 对齐 Desktop 多会话 + ADR-076 权限
+   ------------------------------------------------------------
+   字段与 core/acowork-runtime/src/conversation.rs 的 SessionInfo
+   一一对应：`visibility`（public/private）+ `can_write`（后端唯一权威）。
+
+   关键：can_write 是后端算出来的，不是客户端从 visibility 推导的。
+   公开 = 所有人都能读，但通常只有 owner 能写。移动端必须原样消费
+   can_write，绝不能用"是否公开"反推能否输入 —— 参见 ADR-076 §决策 4。
+   ============================================================ */
+const SESSIONS = {
+  /* 架构师：多会话 + 混合权限 + 分页场景 */
+  "com.acowork.software-architect": [
+    { id: "s-arch-1",  title: "ADR-085 生命周期状态机评审", preview: "已完成 ADR-085 状态机评审，剩下生命周期回滚路径", time: "14:32", msgs: 24, can_write: true,  visibility: "public",  owner: "Nicholas", state: "active", mine: true },
+    { id: "s-arch-2",  title: "Relay 模式降级清单",           preview: "node-local 功能降级清单已整理成表格",               time: "11:08", msgs: 18, can_write: false, visibility: "public",  owner: "Alice",    state: "active", mine: false },
+    { id: "s-arch-3",  title: "ADR-084 用户独立进程",           preview: "ADR-084 已定稿，等待评审",                        time: "昨天 20:15", msgs: 41, can_write: true, visibility: "private", owner: "Nicholas", state: "closed", mine: true },
+    { id: "s-arch-4",  title: "ADR-073 实例身份拆分",           preview: "instance_id 由 Gateway 分配，pkg id 不再上线寻址",    time: "9月16日", msgs: 12, can_write: true, visibility: "public",  owner: "Nicholas", state: "closed", mine: true },
+    { id: "s-arch-5",  title: "ADR-080 advertise 变更",         preview: "改完 advertise 后 Node 心跳恢复",                    time: "9月14日", msgs: 9,  can_write: false, visibility: "public",  owner: "Bob",      state: "active", mine: false },
+    { id: "s-arch-6",  title: "Gateway 鉴权中间件回归",           preview: "x-user-id 透传链路 6 个用例全绿",                  time: "9月12日", msgs: 15, can_write: true,  visibility: "public",  owner: "Nicholas", state: "closed", mine: true },
+    { id: "s-arch-7",  title: "MQTT session 复用方案",            preview: "同一 Runtime 复用连接是否安全",                   time: "9月10日", msgs: 7,  can_write: true,  visibility: "private", owner: "Nicholas", state: "closed", mine: true },
+    { id: "s-arch-8",  title: "Vault 密钥轮转",                  preview: "轮转后旧 Runtime 需重启才能读新 key",             time: "9月8日",  msgs: 11, can_write: false, visibility: "public",  owner: "Alice",    state: "closed", mine: false },
+  ],
+  "com.acowork.senior-engineer": [
+    { id: "s-eng-1", title: "Gateway 代理回归", preview: "cargo test 全绿，19 个新测试覆盖 crate 重命名", time: "13:05", msgs: 33, can_write: true, visibility: "private", owner: "Nicholas", state: "active", mine: true },
+    { id: "s-eng-2", title: "bge-small-zh 吞吐优化", preview: "batch size 调到 32 后吞吐翻倍", time: "昨天", msgs: 7, can_write: true, visibility: "public", owner: "Nicholas", state: "closed", mine: true },
+  ],
+  "com.acowork.product-manager": [
+    { id: "s-pm-1", title: "Mobile v1 PRD", preview: "Mobile v1 PRD 已生成草稿", time: "昨天", msgs: 6, can_write: true, visibility: "public", owner: "Nicholas", state: "closed", mine: true },
+  ],
+  "com.acowork.project-manager": [
+    { id: "s-pj-1", title: "T-42 排期协调", preview: "T-42 已提交待审核", time: "昨天", msgs: 4, can_write: true, visibility: "public", owner: "Nicholas", state: "closed", mine: true },
+  ],
+  "com.acowork.quality-assurance": [
+    { id: "s-qa-1", title: "Gateway 代理回归通过", preview: "Gateway 代理回归通过", time: "周一", msgs: 5, can_write: true, visibility: "public", owner: "Nicholas", state: "closed", mine: true },
+  ],
+  "com.acowork.document-manager": [],
+  "com.acowork.system": [
+    { id: "s-sys-1", title: "远程隧道恢复", preview: "已为 Node-iPad 恢复远程隧道", time: "周一", msgs: 2, can_write: true, visibility: "private", owner: "Nicholas", state: "closed", mine: true },
+  ],
+};
+
+/** 加载页大小（对齐 Desktop agentStore.fetchSessions 分页），仅前 8 条已加载 */
+let SESSION_PAGE = 8;
+/** 会话总数（分页提示用） */
+const SESSION_TOTAL = { "com.acowork.software-architect": 12, "com.acowork.senior-engineer": 34 };
+
+/** 当前账号（mock）。真实实现读 authStore，admin 决定 can_write 语义 */
+const VIEWER = { id: "me", name: "Nicholas", isAdmin: true };
+
+/* ---- ADR-076 §决策 4 权限谓词（与 Rust 侧 is_readable_by / is_writable_by 同构）---- */
+function sessionReadable(s) {
+  if (VIEWER.isAdmin) return true;                       // admin：可读可写一切
+  if (s.owner === VIEWER.name) return true;              // owner
+  return s.visibility === "public";                      // 其他 user：仅 public 可读
+}
+/** 只读态只在 can_write === false 时成立；字段缺失按可写处理（降级而非锁死） */
+function sessionWritable(s) { return s.can_write !== false; }
+
+/** 已加载的会话（分页：真实实现来自 agentStore.fetchSessions(agentId, page)） */
+function sessionsOf(agentId) { return (SESSIONS[agentId] || []).slice(0, SESSION_PAGE); }
+function sessionById(sid) {
+  for (const list of Object.values(SESSIONS)) { const s = list.find(x => x.id === sid); if (s) return s; }
+  return null;
+}
+function activeSessionId(page) { return (page && page.sid) || null; }
+/** 聊天详情页当前会话（用户会话没有 session 概念，恒为 null） */
+function chatSession(page) {
+  if (!page || page.type !== "chat") return null;
+  const c = convById(page.id);
+  if (!c || c.kind !== "agent") return null;
+  const list = sessionsOf(page.id);
+  return list.find(s => s.id === page.sid) || list[0] || null;
+}
+
+const SETTINGS_TABS = [
+  { id: "profile",    label: "个人资料", icon: "user" },
+  { id: "general",    label: "通用",     icon: "gear" },
+  { id: "appearance", label: "外观",     icon: "palette" },
+  { id: "gateway",    label: "网关",     icon: "cloud" },
+];
+
+const PROJECTS = [
+  { id: "p1", title: "ACowork 平台", desc: "多端 Agent 运行时平台", total: 42, open: 11, members: ["user", "bot", "user", "user"],
+    tasks: [
+      { id: "t1", title: "ADR-085 生命周期状态机落地", type: "code", status: "submitted", pri: "P0", assignee: "高级工程师", due: "今天" },
+      { id: "t2", title: "Mobile App v1 信息架构评审", type: "design", status: "in_progress", pri: "P0", assignee: "架构师", due: "9月20日" },
+      { id: "t3", title: "Gateway fs 红线扫描补充 wasm 目录", type: "code", status: "pending", pri: "P1", assignee: null, due: "9月25日" },
+      { id: "t4", title: "relay 模式 node-local 功能降级清单", type: "research", status: "done", pri: "P1", assignee: "高级工程师", due: "9月12日" },
+      { id: "t5", title: "doc 协同编辑 Yjs 冲突重放", type: "code", status: "rejected", pri: "P2", assignee: "架构师", due: "—" },
+    ] },
+  { id: "p2", title: "Relay 服务商用化", desc: "ECS + Cloudflare 隧道交付", total: 18, open: 5, members: ["user", "bot", "user"],
+    tasks: [
+      { id: "t6", title: "Cloudflare 通配符证书自动续期", type: "code", status: "in_progress", pri: "P1", assignee: "高级工程师", due: "9月22日" },
+      { id: "t7", title: "部署 runbook 中英双语校对", type: "doc", status: "pending", pri: "P2", assignee: "文档管理员", due: "9月28日" },
+    ] },
+  { id: "p3", title: "Embedding 模型选型", desc: "ONNX Runtime + 向量后端", total: 9, open: 2, members: ["user", "user"],
+    tasks: [
+      { id: "t8", title: "bge-small-zh 吞吐基准", type: "research", status: "done", pri: "P1", assignee: "测试工程师", due: "9月10日" },
+    ] },
+];
+
+const DOCS = [
+  { id: "d1", name: "移动端 App 设计", type: "dir", children: [
+      { id: "d1a", name: "IM 形态信息架构", type: "doc", words: 1240, by: "架构师", time: "今天 14:02" },
+      { id: "d1b", name: "手势规范", type: "doc", words: 860, by: "Carol", time: "昨天" },
+      { id: "d1c", name: "组件规范", type: "doc", words: 2310, by: "Carol", time: "9月15日" },
+      { id: "d1d", name: "旧方案（归档）", type: "dir", children: [
+        { id: "d1d1", name: "三栏布局直译版", type: "doc", words: 420, by: "架构师", time: "8月30日" },
+      ]},
+  ]},
+  { id: "d2", name: "ADR 索引", type: "dir", children: [
+      { id: "d2a", name: "ADR-085 Agent 生命周期", type: "doc", words: 3420, by: "架构师", time: "今天 11:20" },
+      { id: "d2b", name: "ADR-084 用户独立进程", type: "doc", words: 2180, by: "架构师", time: "9月14日" },
+  ]},
+  { id: "d3", name: "发布检查清单", type: "doc", words: 640, by: "高级工程师", time: "9月16日" },
+];
+
+const REVIEW_QUEUE = [
+  { id: "r1", title: "移动端 App 设计 / IM 形态信息架构", by: "架构师", age: "2 小时前" },
+  { id: "r2", title: "ADR 索引 / ADR-085", by: "架构师", age: "5 小时前" },
+  { id: "r3", title: "组件规范", by: "Carol", age: "昨天" },
+];
+
+/* Workspace 文件树（Mobile 只做 Add to Chat） */
+const WORKSPACE = {
+  path: "core/acowork-gateway",
+  readonly: true,
+  tree: [
+    { name: "src", type: "dir", open: true, children: [
+        { name: "http", type: "dir", open: false, children: [
+            { name: "proxy.rs", type: "file", size: "12.4 KB" },
+            { name: "routes.rs", type: "file", size: "31.8 KB" },
+        ]},
+        { name: "mqtt", type: "dir", open: false, children: [
+            { name: "broker.rs", type: "file", size: "22.1 KB" },
+        ]},
+        { name: "lib.rs", type: "file", size: "4.2 KB" },
+        { name: "main.rs", type: "file", size: "6.8 KB" },
+    ]},
+    { name: "Cargo.toml", type: "file", size: "1.9 KB" },
+    { name: "README.md", type: "file", size: "3.4 KB" },
+  ],
+};
+
+/* Agent 设置抽屉各分区（映射 Desktop RightPanel tabs） */
+const DRAWER_TABS = [
+  { id: "status",    label: "状态",     icon: "gauge" },
+  { id: "workspace", label: "工作区",   icon: "folder" },
+  { id: "memory",    label: "记忆",     icon: "db" },
+  { id: "tools",     label: "工具",     icon: "wrench" },
+  { id: "setup",     label: "配置",     icon: "gear" },
+  { id: "sessions",  label: "会话",     icon: "history" },
+];
+</script>
+
+
+<script>
+/* ============================================================
+   CORE — 导航栈（每个 Tab 一条栈）+ 手势引擎
+   ------------------------------------------------------------
+   设计要点：
+   1. stack[0] 是该 Tab 的一级页；stack[i>0] 是详情页（iOS push 语义）。
+   2. 切 Tab 保留各自栈深（IM 语义：微信/企微退出聊天再进来仍在原会话）。
+   3. 只有"非一级页"才允许右滑返回；一级页右滑无动作。
+   4. 聊天页额外挂一个"左滑抽屉"overlay（不入栈）。
+   5. 层级渲染用 keyed diff，保证动画结束后 transform 归位。
+   ============================================================ */
+const $  = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+const host    = $("#screenHost");
+const tabbar  = $("#tabbar");
+const drawer  = $("#drawer");
+const dScrim  = $("#drawerScrim");
+
+/* ---------------- 导航状态 ---------------- */
+const NAV = { tab: "chat", stacks: { chat: [], projects: [], docs: [], settings: [] } };
+const curStack = () => NAV.stacks[NAV.tab];
+const curPage  = () => { const s = curStack(); return s[s.length - 1] || null; };
+
+function pageKey(p) { return p.id; }
+
+function switchTab(tab) {
+  if (tab === NAV.tab) { if (curStack().length > 1) popAll(); return; }
+  closeDrawer(true);
+  NAV.tab = tab;
+  render();
+}
+function push(page) {
+  const s = curStack();
+  s.push(page);
+  render({ dir: "push" });
+}
+function pop() {
+  const s = curStack();
+  if (s.length <= 1) return;
+  s.pop();
+  render({ dir: "pop" });
+}
+function popAll() {
+  const s = curStack();
+  s.length = 1;
+  render();
+}
+
+/* ---------------- 渲染 ---------------- */
+let busy = false;   // 动画锁，避免动画期间手势冲突
+
+function render(opts = {}) {
+  const stack = curStack();
+  const page  = curPage();
+
+  $$(".tab-item", tabbar).forEach(b => b.classList.toggle("active", b.dataset.tab === NAV.tab));
+
+  // TabBar 只在一级页显示：二级页 push 进来后滑出底部栏（iOS / 微信行为），
+  // 避免"详情页"与"一级页"同时有两套导航，用户不知道该点哪个返回。
+  const isRoot = stack.length <= 1;
+  tabbar.classList.toggle("tucked", !isRoot);
+
+  let stackEl = $("#stackRoot");
+  if (!stackEl) {
+    stackEl = document.createElement("div");
+    stackEl.className = "stack";
+    stackEl.id = "stackRoot";
+    host.appendChild(stackEl);
+  }
+  stackEl.classList.toggle("root", isRoot);
+
+  const isPush = opts.dir === "push";
+  const isPop  = opts.dir === "pop";
+
+  /* ---- 进入：append 顶层 ---- */
+  if (isPush) {
+    const node = buildLayer(page, true);
+    stackEl.appendChild(node);
+    layout();                                   // 先把下层推到视差位
+    forceReflow();
+    node.classList.add("anim");
+    node.style.transform = "translateX(0)";
+    // 底层加暗遮罩
+    const veil = buildVeil();
+    stackEl.appendChild(veil);
+    forceReflow();
+    veil.style.opacity = "1";
+    busy = true;
+    setTimeout(() => {
+      node.classList.remove("anim");
+      veil.remove();
+      layout();
+      busy = false;
+    }, 305);
+    wire(node);
+    return;
+  }
+
+  /* ---- 返回：移除顶层 ---- */
+  if (isPop) {
+    const layers = $$(":scope > .layer", stackEl);
+    const top = layers[layers.length - 1], below = layers[layers.length - 2];
+    const veil = stackEl.querySelector(":scope > .dim-veil");
+    if (below) { below.classList.add("anim"); below.style.transform = "translateX(0)"; }
+    if (veil) veil.style.opacity = "0";
+    if (top) { top.classList.add("anim"); top.style.transform = "translateX(100%)"; }
+    busy = true;
+    setTimeout(() => {
+      if (top) top.remove();
+      if (veil) veil.remove();
+      $$(".layer.anim", stackEl).forEach(n => n.classList.remove("anim"));
+      layout();
+      busy = false;
+    }, 305);
+    return;
+  }
+
+  /* ---- 全量重建（首帧 / 切 Tab / popAll）---- */
+  stackEl.innerHTML = "";
+  stack.forEach((p, i) => {
+    if (i === 0) stackEl.appendChild(buildLayer(p, true));
+    else stackEl.insertAdjacentHTML("beforeend", layerMarkup(p, false));
+  });
+  layout();
+  wire(stackEl);
+}
+
+function layerMarkup(page, isRoot) {
+  const el = document.createElement("div");
+  el.className = "layer" + (isRoot ? "" : " detail");
+  el.dataset.page = page.type;
+  el.innerHTML = PAGES[page.type](page);
+  return el.outerHTML;
+}
+
+function buildVeil() {
+  const v = document.createElement("div");
+  v.className = "dim-veil";
+  v.style.opacity = "0";
+  return v;
+}
+
+/** 层位布局：顶层 0，第二层 -22%（视差），其余屏外 */
+function layout() {
+  const stackEl = $("#stackRoot");
+  if (!stackEl) return;
+  const layers = $$(".layer", stackEl);
+  const n = layers.length;
+  layers.forEach((el, i) => {
+    const depth = n - 1 - i;
+    el.style.transform = depth === 0 ? "translateX(0)" : "translateX(-100%)";
+  });
+}
+
+function buildLayer(page, isRoot) {
+  const el = document.createElement("div");
+  el.className = "layer" + (isRoot ? "" : " detail");
+  el.dataset.page = page.type;
+  el.innerHTML = PAGES[page.type](page);
+  return el;
+}
+
+function forceReflow() { return void document.body.offsetHeight; }
+
+/* ---------------- 事件委托 ---------------- */
+const ACTIONS = {
+  "tab":     (el) => switchTab(el.dataset.tab),
+  "push":    (el) => push(newPage(el.dataset.page, el.dataset.id)),
+  "back":    ()   => pop(),
+  "popall":  ()   => popAll(),
+  "drawer":  (el) => openDrawer(el.dataset.agent),
+  "close-drawer": () => closeDrawer(),
+  "sheet":   (el) => openSheet(el.dataset.sheet, el.dataset.arg),
+  "close-sheet": () => closeSheet(),
+  "modal":   (el) => openModal(el.dataset.modal),
+  "close-modal": () => closeModal(),
+  "toast":   (el) => toast(el.dataset.toast),
+  "toggle":  (el) => {
+    const on = el.getAttribute("aria-checked") === "true";
+    el.setAttribute("aria-checked", String(!on));
+    if (el.dataset.msg) toast(el.dataset.msg);
+  },
+  "setpage": (el) => { render(); },
+};
+
+/* 事件委托：#stackRoot / #drawer 只挂一次（幂等） */
+function wire(root) {
+  if (!root || root.__wired) return;
+  root.__wired = true;
+  root.addEventListener("click", (e) => {
+    const el = e.target.closest("[data-act]");
+    if (!el) return;
+    const fn = ACTIONS[el.dataset.act];
+    if (!fn) return;
+    e.stopPropagation();
+    fn(el);
+  });
+}
+
+/* ---------------- 浮层 ---------------- */
+let drawerAgent = null;
+let drawerTab   = "status";
+
+function openDrawer(agentId, opts = {}) {
+  drawerAgent = AGENTS.find(a => a.id === agentId);
+  drawerTab = "status";
+  drawer.innerHTML = drawerHTML();
+  wire(drawer);
+  if (opts.keepPosition) return;      // 由手势驱动位置，不做入场动画
+  dScrim.style.pointerEvents = "auto";
+  drawer.style.transition = "none"; dScrim.style.transition = "none";
+  drawer.style.transform = "translateX(100%)"; dScrim.style.opacity = "0";
+  forceReflow();
+  drawer.style.transition = ""; dScrim.style.transition = "";
+  drawer.style.transform = "translateX(0)"; dScrim.style.opacity = "1";
+}
+/** 抽屉当前对应的 Agent（手势开抽屉时列表上下文） */
+function drawerAgentId() {
+  const p = curPage();
+  if (p && p.type === "chat" && AGENTS.some(a => a.id === p.id)) return p.id;
+  return "com.acowork.software-architect";
+}
+function closeDrawer(instant) {
+  if (!drawer.innerHTML) return;
+  if (instant) { drawer.style.transition = "none"; drawer.style.transform = "translateX(100%)"; dScrim.style.opacity = "0"; dScrim.style.pointerEvents = "none"; drawer.style.transition = ""; return; }
+  drawer.style.transform = "translateX(100%)";
+  dScrim.style.opacity = "0";
+  setTimeout(() => { dScrim.style.pointerEvents = "none"; drawer.innerHTML = ""; }, 320);
+}
+function rerenderDrawer() { if (drawerAgent) { drawer.innerHTML = drawerHTML(); wire(drawer); } }
+
+/* ---------------- Sheet（Action Sheet）---------------- */
+const sheet = $("#sheet"), sheetScrim = $("#sheetScrim");
+const SHEETS = {
+  "conv-actions": (arg) => {
+    const a = allConvs().find(x => x.id === arg);
+    const list = [];
+    if (a.kind === "agent") {
+      if (!a.alive) list.push({ label: a.busy ? "启动中…" : "启动 Agent", bold: true, fn: () => { setAgent(a, { alive: true }); toast("已启动 " + a.name); } });
+      else list.push({ label: "停止 Agent", fn: () => { setAgent(a, { alive: false, busy: false }); toast("已停止 " + a.name); } });
+      list.push({ label: "在设置中打开抽屉", fn: () => openDrawer(a.id) });
+      list.push({ label: "删除会话记录", danger: true, fn: () => toast("移动端不提供删除会话（仅桌面端）") });
+    } else {
+      list.push({ label: "清除未读", fn: () => { a.unread = 0; toast("已清除未读"); } });
+      list.push({ label: "查看资料", fn: () => toast("移动端 v1 不提供用户资料页") });
+    }
+    return {
+      title: a.name,
+      items: list,
+      cancel: "取消",
+    };
+  },
+  "tree-actions": (arg) => ({
+    title: arg,
+    items: [
+      { label: "添加到对话", bold: true, fn: () => { addCtx(arg); toast("已添加到对话：" + arg); } },
+      { label: "复制路径", fn: () => toast("已复制路径") },
+    ],
+    cancel: "取消",
+    desc: "移动端不提供文件预览（无 Monaco）",
+  }),
+  "task-actions": (arg) => {
+    const t = findTask(arg);
+    return {
+      title: t ? t.title : "任务",
+      items: [
+        { label: "标记为已完成", fn: () => { t.status = "done"; toast("已更新状态"); rerenderLayer(); } },
+        { label: "指派给我", fn: () => { t.assignee = "我"; toast("已指派"); rerenderLayer(); } },
+        { label: "删除任务", danger: true, fn: () => toast("移动端 v1 不提供删除（需桌面端）") },
+      ],
+      cancel: "取消",
+    };
+  },
+  "profile": (arg) => {
+    const a = allConvs().find(x => x.id === arg);
+    /* 聊天页「更多」。Agent 与联系人是两套能力：Agent 有生命周期/设置抽屉/
+       多会话，真人没有这些概念，不能共用一份菜单（否则会出现「启动 Agent」
+       指向一个联系人）。conv-actions（长按）已按 kind 分流，这里保持一致。 */
+    if (a.kind === "user") {
+      return {
+        title: a.name,
+        items: [
+          { label: a.unread ? "标记为已读" : "无未读消息", disabled: !a.unread, fn: () => {} },
+          { label: "查看资料", fn: () => toast("移动端 v1 不提供用户资料页") },
+        ],
+        cancel: "取消",
+      };
+    }
+    return {
+      title: a.name,
+      items: [
+        { label: a.alive ? "停止 Agent" : "启动 Agent", fn: () => { setAgent(a, { alive: !a.alive, busy: false }); toast(a.alive ? "已停止" : "已启动"); } },
+        { label: "打开设置抽屉", fn: () => openDrawer(arg) },
+        { label: "会话列表", fn: () => openSheet("sessions", arg) },
+        { label: "清空聊天记录", danger: true, fn: () => toast("仅桌面端可清空历史") },
+      ],
+      cancel: "取消",
+    };
+  },
+  "sessions": (arg) => {
+    /* 多会话切换器（Action Sheet）。
+       Desktop 用标签条并排 N 个 Session，移动端没有横向空间，改成 IM 式
+       「点标题 → 选会话」列表。每行携带 可见性(🌐/🔒) + 只读标记 + 选中态。 */
+    const list = sessionsOf(arg);
+    const cur = activeSessionId(curPage());
+    const total = SESSION_TOTAL[arg] || (SESSIONS[arg] || []).length;
+    /* 会话本身走 custom 富行（标题+摘要+🌐/🔒+只读+选中），
+       items 里只放"新建"这类动作，不重复渲染会话名。 */
+    return {
+      title: `${argName(arg)} · 会话（${list.length}/${total}）`,
+      desc: list.length < total ? `已加载最近 ${list.length} 条，列表可滚动加载更多` : undefined,
+      custom: sheetSessionsHTML(arg),
+      items: [
+        { label: "＋ 新建会话", bold: true, fn: () => newSession(arg) },
+        { label: "管理全部会话", fn: () => { closeSheet(); setTimeout(() => openDrawer(arg), 200); } },
+      ],
+      cancel: "取消",
+    };
+  },
+  "session-actions": (arg) => {
+    const [agentId, sid] = String(arg).split("::");
+    const s = sessionById(sid);
+    if (!s) return { title: "会话", items: [{ label: "会话不存在", fn: () => {} }], cancel: "取消" };
+    const ro = !sessionWritable(s);
+    const isPrivate = s.visibility === "private";
+    const items = [];
+    items.push({ label: "重命名", fn: () => toast("移动端 v1 未开放重命名（需桌面端）") });
+    /* 可见性切换：乐观更新 + 不做二次确认（可逆、低风险），对齐 SessionVisibilityToggle */
+    if (ro) {
+      items.push({ label: "设为公开 / 私有", disabled: true, hint: "只读 · 仅 owner 可改", fn: () => {} });
+    } else {
+      items.push({
+        label: isPrivate ? "设为公开" : "设为私有",
+        fn: () => { s.visibility = isPrivate ? "public" : "private"; toast(isPrivate ? "已设为公开" : "已设为私有"); rerenderLayer(); },
+      });
+    }
+    items.push({ label: "复制会话链接", fn: () => toast("已复制会话链接") });
+    items.push({ label: "删除会话", danger: true, disabled: ro, hint: ro ? "只读 · owner 才能删除" : null, fn: () => { if (!ro) delSession(agentId, sid); } });
+    return { title: s.title, desc: ro ? `来自 ${s.owner} 的共享会话，仅可查看` : undefined, items, cancel: "取消" };
+  },
+};
+function argName(id) { const c = convById(id); return c ? c.name : id; }
+
+/* 会话切换的原子迁移（对齐 chatStore.openSession：切 Tab + 打开 session + 载历史）。
+   移动端没有 Session Tab，所以「打开」= 改当前页的 sid + 重载气泡。 */
+function switchSession(agentId, sid, opts = {}) {
+  const p = curPage();
+  if (!p || p.type !== "chat") return;
+  if (p.sid === sid) return;
+  p.sid = sid;
+  p.ctx = [];
+  render({ dir: "reload" });
+  if (opts.silent) return;   // 调用方自己给反馈，避免叠两条 toast
+  const s = sessionById(sid);
+  toast(s ? (sessionWritable(s) ? "已切换会话" : "已进入只读会话") : "已切换会话");
+}
+function newSession(agentId) {
+  const p = curPage();
+  if (!p || p.type !== "chat") return;
+  const id = "s-new-" + Math.random().toString(36).slice(2, 7);
+  SESSIONS[agentId] = [{ id, title: "新会话", preview: "尚未发送消息", time: "刚刚", msgs: 0, can_write: true, visibility: "private", owner: VIEWER.name, state: "active", mine: true }, ...(SESSIONS[agentId] || [])];
+  SESSION_TOTAL[agentId] = (SESSION_TOTAL[agentId] || 0) + 1;
+  switchSession(agentId, id, { silent: true });
+  toast("已新建会话（默认私有）");
+}
+function delSession(agentId, sid) {
+  const s = sessionById(sid);
+  if (!s) return;
+  if (!sessionWritable(s)) { toast("只读会话不可删除"); return; }
+  SESSIONS[agentId] = (SESSIONS[agentId] || []).filter((x) => x.id !== sid);
+  SESSION_TOTAL[agentId] = Math.max(0, (SESSION_TOTAL[agentId] || 1) - 1);
+  const p = curPage();
+  if (p && p.type === "chat" && p.sid === sid) {
+    const next = sessionsOf(agentId)[0];
+    p.sid = next ? next.id : null;
+    p.ctx = [];
+  }
+  render({ dir: "reload" });
+  toast("已删除会话");
+}
+
+/* 会话切换器的富行（标题 + 摘要 + 可见性 + 只读 + 选中态） */
+function sheetSessionsHTML(agentId) {
+  const list = sessionsOf(agentId);
+  const cur = activeSessionId(curPage());
+  return `<div class="grp sess-grp">` + list.map((s) => {
+    const ro = !sessionWritable(s);
+    const on = s.id === cur;
+    return `<button class="sess-row${on ? " on" : ""}${ro ? " ro" : ""}" data-agent="${agentId}" data-sid="${s.id}">
+      <span class="s-main">
+        <span class="s-t">${esc(s.title)}</span>
+        <span class="s-p">${esc(s.preview)}</span>
+      </span>
+      <span class="s-side">
+        <span class="s-ico">${s.visibility === "private" ? ICON.lock : ICON.globe}</span>
+        ${ro ? `<span class="pill orange">只读</span>` : ""}
+        ${on ? `<span class="s-check">${ICON.check}</span>` : ""}
+      </span>
+    </button>`;
+  }).join("") + `</div>`;
+}
+
+function openSheet(name, arg) {
+  const spec = SHEETS[name](arg);
+  let html = "";
+  if (spec.title) html += `<div class="grp"><div class="it desc">${esc(spec.title)}</div></div>`;
+  if (spec.desc) html += `<div class="grp"><div class="it desc">${esc(spec.desc)}</div></div>`;
+  if (spec.custom) html += spec.custom;
+  if (spec.items && spec.items.length) {
+    html += `<div class="grp">` + spec.items.map((it, i) =>
+      `<button class="it ${it.danger ? "danger" : ""} ${it.bold ? "bold" : ""} ${it.disabled ? "disabled" : ""}"
+         ${it.disabled ? "disabled" : `data-si="${i}"`}>${esc(it.label)}${it.hint ? `<span class="hint">${esc(it.hint)}</span>` : ""}</button>`).join("") + `</div>`;
+  }
+  html += `<button class="cancel" data-act="close-sheet">${esc(spec.cancel || "取消")}</button>`;
+  sheet.innerHTML = html;
+  sheetScrim.style.pointerEvents = "auto";
+  sheet.style.transition = "none"; sheetScrim.style.transition = "none";
+  sheet.style.transform = "translateY(110%)"; sheetScrim.style.opacity = "0";
+  forceReflow();
+  sheet.style.transition = ""; sheetScrim.style.transition = "";
+  sheet.style.transform = "translateY(0)"; sheetScrim.style.opacity = "1";
+  /* 富行（会话列表）单独委托：整行点击 = 切换会话 */
+  $$(".sess-row", sheet).forEach((b) => b.addEventListener("click", () => {
+    closeSheet();
+    setTimeout(() => switchSession(b.dataset.agent, b.dataset.sid), 180);
+  }));
+  $$(".it[data-si]", sheet).forEach(b => b.addEventListener("click", () => {
+    const it = spec.items[+b.dataset.si];
+    closeSheet();
+    setTimeout(() => it.fn && it.fn(), 180);
+  }));
+}
+function closeSheet() {
+  sheet.style.transform = "translateY(110%)";
+  sheetScrim.style.opacity = "0";
+  setTimeout(() => { sheetScrim.style.pointerEvents = "none"; sheet.innerHTML = ""; }, 300);
+}
+
+/* ---------------- Modal ---------------- */
+const modal = $("#modalScrim");
+const MODALS = {
+  confirm: (arg) => ({ title: arg, desc: "此操作用于当前 Agent 的会话配置。", ok: "确定", cancel: "取消" }),
+};
+function openModal(name) {
+  const m = MODALS[name]("确认重置为默认值？");
+  modal.innerHTML = `<div class="modal"><div class="m-body"><div class="m-t">${esc(m.title)}</div><div class="m-d">${esc(m.desc)}</div></div><div class="m-acts"><button data-act="close-modal">${esc(m.cancel)}</button><button class="bold" data-act="close-modal" data-mok="1">${esc(m.ok)}</button></div></div>`;
+  modal.style.pointerEvents = "auto";
+  modal.style.transition = "none"; modal.style.opacity = "0";
+  forceReflow(); modal.style.transition = ""; modal.style.opacity = "1";
+}
+function closeModal() { modal.style.opacity = "0"; setTimeout(() => { modal.style.pointerEvents = "none"; modal.innerHTML = ""; }, 220); }
+
+/* ---------------- Toast ---------------- */
+function toast(msg) {
+  const w = $("#toastWrap");
+  const t = document.createElement("div");
+  t.className = "toast"; t.textContent = msg;
+  w.appendChild(t);
+  setTimeout(() => { t.style.transition = "opacity .25s"; t.style.opacity = "0"; setTimeout(() => t.remove(), 260); }, 1900);
+}
+
+/* ---------------- 手势引擎 ----------------
+   左滑（→ 打开抽屉）：仅聊天详情页
+   右滑（← 返回）：仅非一级页
+   水平滑动阈值 22% 屏宽，跟随手指，释放后按速度/位移决策
+   --------------------------------------------------------- */
+const G = { active: false, x0: 0, y0: 0, t0: 0, dir: null, target: null, w: 390 };
+
+function gestureTarget(e) {
+  if (e.target.closest("#drawer, #sheet, #modalScrim, .composer, textarea, input, select, .board-nav, .searchbar")) return null;
+  const layer = e.target.closest(".layer");
+  if (!layer) return null;
+  return layer;
+}
+
+phone.addEventListener("touchstart", (e) => {
+  if (busy) return;
+  const t = e.touches[0];
+  G.active = true; G.x0 = t.clientX; G.y0 = t.clientY; G.t0 = Date.now(); G.dir = null;
+  G.layer = gestureTarget(e);
+  // 顶部导航条 / 输入区 / 横向滚动条 交给点击，不接管手势
+  if (e.target.closest(".navbar, .composer, textarea, input, select, .board-nav, .searchbar")) { G.active = false; return; }
+  // 抽屉已打开：任意水平滑动都用来关抽屉
+  if (drawer.innerHTML) { G.mode = "close-drawer"; return; }
+  // 其余情况：方向在 touchmove 里按实际滑动方向再定
+  // （聊天页左滑=开抽屉；二级页右滑=返回。同页两个方向都有意义，
+  //   不能在 touchstart 就锁死 mode，否则右滑返回会被吞掉）
+  G.mode = "pending";
+}, { passive: true });
+
+/** 方向确定后，绑定手势语义 */
+function resolveMode(dx) {
+  const p = curPage();
+  if (G.mode === "close-drawer") return G.mode;
+  if (dx > 0) {
+    // 向右滑 = 返回：仅非一级页可用
+    if (p && curStack().length > 1 && G.layer) return "back";
+    return "none";
+  }
+  // 向左滑 = 打开上下文抽屉：仅聊天详情页
+  if (NAV.tab === "chat" && p && p.type === "chat" && G.layer) return "drawer";
+  return "none";
+}
+
+phone.addEventListener("touchmove", (e) => {
+  if (!G.active) return;
+  const t = e.touches[0];
+  const dx = t.clientX - G.x0, dy = t.clientY - G.y0;
+  if (!G.dir) {
+    if (Math.abs(dx) < 8 && Math.abs(dy) < 8) return;
+    G.dir = Math.abs(dx) > Math.abs(dy) * 1.3 ? "x" : "y";
+    if (G.dir === "y") { G.active = false; return; }   // 垂直 → 交给滚动
+    G.mode = resolveMode(dx);
+    if (G.mode === "none") { G.active = false; return; }
+    G.w = (phone.clientWidth || 390) - 22;
+  }
+  if (G.mode === "back") {
+    const layers = $$("#stackRoot > .layer");
+    const top = layers[layers.length - 1], under = layers[layers.length - 2];
+    if (!top) { G.active = false; return; }
+    const off = Math.max(0, Math.min(dx, G.w));
+    top.style.transition = "none";
+    top.style.transform = `translateX(${off}px)`;
+    if (under) { under.style.transition = "none"; under.style.transform = `translateX(${-22 + (22 * off) / G.w}%)`; }
+    G.dx = off;
+  } else if (G.mode === "drawer") {
+    const off = Math.max(0, Math.min(-dx, G.w));
+    drawer.style.transition = "none";
+    drawer.style.transform = `translateX(${G.w - off}px)`;
+    dScrim.style.opacity = String(1 - off / G.w);
+    G.dx = off;
+  }
+}, { passive: true });
+
+function endGesture() {
+  if (!G.active) { G.active = false; G.dir = null; return; }
+  if (!G.dir) { G.active = false; return; }   // 未判定为水平滑动 → 交给滚动
+  const dt = Date.now() - G.t0;
+  const v = Math.abs(G.dx) / Math.max(dt, 1);   // px/ms
+  // 位移阈值 38% 屏宽；速度阈值 0.45px/ms，但要求至少走过 72px，
+  // 否则手指的轻微抖动会被除以极短的 dt 放大成"快速轻扫"而误触发。
+  const commit = G.dx > G.w * 0.38 || (v > 0.45 && G.dx > 72);
+  if (G.mode === "back") {
+    const layers = $$("#stackRoot > .layer");
+    const top = layers[layers.length - 1], under = layers[layers.length - 2];
+    [top, under].forEach(n => n && (n.style.transition = ""));
+    if (commit) {
+      pop();                                     // 交回 render 的 pop 动画
+    } else {
+      if (top) top.style.transform = "translateX(0)";
+      if (under) under.style.transform = "translateX(-22%)";
+    }
+  } else if (G.mode === "drawer") {
+    drawer.style.transition = ""; dScrim.style.transition = "";
+    if (commit) {
+      // 手势直接开：补上 openDrawer 未做的渲染 + 事件绑定
+      if (!drawer.innerHTML) openDrawer(drawerAgentId(), { keepPosition: true });
+      drawer.style.transform = "translateX(0)";
+      dScrim.style.opacity = "1";
+      dScrim.style.pointerEvents = "auto";
+    } else {
+      drawer.style.transform = "translateX(100%)"; dScrim.style.opacity = "0";
+      setTimeout(() => { dScrim.style.pointerEvents = "none"; drawer.innerHTML = ""; }, 320);
+    }
+  } else if (G.mode === "close-drawer") {
+    drawer.style.transition = ""; dScrim.style.transition = "";
+    if (commit) closeDrawer();
+    else {
+      drawer.style.transform = "translateX(0)"; dScrim.style.opacity = "1";
+    }
+  }
+  G.active = false; G.dir = null;
+}
+phone.addEventListener("touchend", endGesture);
+phone.addEventListener("touchcancel", () => { G.active = false; G.dir = null; });
+
+/* 桌面端鼠标拖拽（便于在浏览器里演示，语义与触摸一致） */
+phone.addEventListener("mousedown", (e) => {
+  if (e.target.closest(".composer, textarea, input, select, .navbar, .board-nav, .searchbar")) return;
+  G.active = true; G.mode = drawer.innerHTML ? "close-drawer" : "pending";
+  G.dir = null; G.dx = 0; G.x0 = e.clientX; G.y0 = e.clientY; G.t0 = Date.now();
+  G.layer = gestureTarget(e);
+});
+window.addEventListener("mousemove", (e) => {
+  if (!G.active) return;
+  const dx = e.clientX - G.x0, dy = e.clientY - G.y0;
+  if (!G.dir) {
+    if (Math.abs(dx) < 6) return;
+    G.dir = Math.abs(dx) > Math.abs(dy) ? "x" : "y";
+    if (G.dir === "y") { G.active = false; return; }
+    if (G.mode === "pending") {
+      G.mode = resolveMode(dx);
+      if (G.mode === "none") { G.active = false; return; }
+    }
+    G.w = (phone.clientWidth || 390) - 22;
+  }
+  if (G.mode === "drawer" || G.mode === "close-drawer") {
+    const off = G.mode === "drawer" ? Math.max(0, Math.min(-dx, G.w)) : Math.max(0, G.dx);
+    drawer.style.transition = "none";
+    drawer.style.transform = `translateX(${G.w - off}px)`;
+    dScrim.style.opacity = String(1 - off / G.w);
+    G.dx = off;
+  } else if (G.mode === "back") {
+    const off = Math.max(0, Math.min(dx, G.w));
+    const layers = $$("#stackRoot > .layer");
+    const top = layers[layers.length - 1], under = layers[layers.length - 2];
+    if (top) { top.style.transition = "none"; top.style.transform = `translateX(${off}px)`; }
+    if (under) { under.style.transition = "none"; under.style.transform = `translateX(${-22 + (22 * off) / G.w}%)`; }
+    G.dx = off;
+  }
+});
+window.addEventListener("mouseup", endGesture);
+</script>
+
+<script>
+/* ============================================================
+   PAGE RENDERERS
+   ============================================================ */
+
+/* ---------- 通用片段 ---------- */
+function avatarHTML(o, size = "") {
+  const dot = o.kind === "agent" && o.alive && o.busy ? '<span class="dot busy"></span>'
+    : o.kind === "agent" && !o.alive ? '<span class="dot off"></span>'
+    : o.kind === "user" && o.online ? '<span class="dot busy" style="background:var(--green)"></span>' : "";
+  return `<div class="avatar ${size}" style="background:${o.color}">${esc(o.name.slice(0, o.kind === "agent" ? 2 : 1))}${dot}</div>`;
+}
+
+/* 会话行的 node 标识。只在 >1 个 node 时渲染 —— 单节点部署时"这台机器叫
+   Mac-Studio"是噪音，没有决策价值。圆点读 Node 的 online（Node 心跳），
+   不是 Agent 的 alive：Node 掉线而 Runtime 还挂着是真实存在的中间态，
+   那种情况下 Agent 的「在线」pill 仍是绿的，只有这个圆点能暴露。 */
+function nodeTagHTML(c) {
+  if (c.kind !== "agent" || !c.node_id) return "";
+  if (NODES.length < 2) return "";
+  const n = nodeById(c.node_id);
+  const label = n ? nodeLabel(c.node_id) : c.node_id;
+  /* ?? false 与 Desktop 一致（AgentList.tsx `group.node?.online ?? false`）：
+     Gateway 从没上报过这个 node，就当它不可达，而不是乐观地显示在线。 */
+  const online = n ? n.online : false;
+  if (!online) {
+    return `<span class="ntag off" title="${esc(label)} 已离线">
+      <span class="ndot off"></span>${esc(label)}</span>`;
+  }
+  return `<span class="ntag" title="运行节点：${esc(label)}">
+    <span class="ndot"></span>${esc(label)}</span>`;
+}
+
+function navHTML({ title, sub, left, right, large, titleNode, rightWide }) {
+  const t = titleNode || `<div class="nav-title">${esc(title)}${sub ? `<span class="sub">${esc(sub)}</span>` : ""}</div>`;
+  return `<div class="navbar${large ? " large" : ""}${rightWide ? " right-wide" : ""}">
+    <div>${left || ""}</div>
+    ${t}
+    <div class="nav-btn right">${right || ""}</div>
+  </div>`;
+}
+const iconBtn = (act, icon, attr = "", cls = "") => `<button class="nav-btn icon ${cls}" data-act="${act}" ${attr} aria-label="操作">${ICON[icon]}</button>`;
+
+/* ---------- 导航栈初始状态 ---------- */
+function initStacks() {
+  NAV.stacks.chat = [{ type: "convList" }];
+  NAV.stacks.projects = [{ type: "projectList" }];
+  NAV.stacks.docs = [{ type: "docList" }];
+  NAV.stacks.settings = [{ type: "settingsList" }];
+}
+
+/* ---------- 数据辅助 ---------- */
+/* 返回原始对象引用（不是展开副本），否则 SHEETS 里的动作就地改写
+   （清未读 a.unread = 0、启停 Agent）会写进临时副本、静默丢失。
+   kind 直接打在源对象上，避免每次调用都产生新对象。 */
+function allConvs() {
+  return [
+    ...AGENTS.map(a => (a.kind = "agent", a)),
+    ...USERS.map(u => (u.kind = "user", u)),
+  ];
+}
+function convById(id) { return allConvs().find(c => c.id === id); }
+function setAgent(a, patch) { Object.assign(a, patch); rerenderLayer(); }
+function findTask(tid) { for (const p of PROJECTS) { const t = (p.tasks || []).find(x => x.id === tid); if (t) return t; } return null; }
+function findProject(pid) { return PROJECTS.find(p => p.id === pid); }
+function findDoc(id) {
+  const walk = (arr) => { for (const n of arr) { if (n.id === id) return n; if (n.children) { const r = walk(n.children); if (r) return r; } } return null; };
+  return walk(DOCS);
+}
+function addCtx(name) {
+  const p = curPage();
+  if (p && p.type === "chat") p.ctx = p.ctx || [];
+  if (p && p.ctx && !p.ctx.includes(name)) p.ctx.push(name);
+}
+function rerenderLayer() { render(); }
+
+/* 通用「标签 + 值」行：icon / 标题 / 值 / 可选副标题 */
+function row(icon, title, value, _unused, sub) {
+  return `<div class="row static">
+    ${icon ? `<span class="lead">${ICON[icon] || ""}</span>` : ""}
+    <span class="grow"><span class="t">${esc(title)}</span>${sub ? `<span class="d">${esc(sub)}</span>` : ""}</span>
+    ${value != null ? `<span class="value">${esc(value)}</span>` : ""}
+  </div>`;
+}
+
+/* ============================================================
+   1. 聊天列表（一级）= Desktop AgentList + UserList 合并
+   ============================================================ */
+function pageConvList() {
+  const q = (window.__convQuery || "").trim().toLowerCase();
+  const convs = allConvs();
+  const agents = convs.filter(c => c.kind === "agent");
+  const users  = convs.filter(c => c.kind === "user");
+  const match = (c) => !q || c.name.toLowerCase().includes(q) || (c.preview || "").toLowerCase().includes(q);
+  const ag = agents.filter(match), us = users.filter(match);
+
+  const totalUnread = convs.reduce((n, c) => n + (c.unread || 0), 0);
+
+  const convRow = (c) => {
+    /* IM 语义：会话列表摘要 = 该 Agent「最近一次活动会话」的最后一条消息，
+       不再是 Agent 维度的固定文案。会话多起来后，列表行要能代表"哪个会话在动"。 */
+    const list = c.kind === "agent" ? sessionsOf(c.id) : [];
+    const s = list[0];
+    const preview = s ? s.preview : (c.preview || (c.kind === "agent" && !c.alive ? "已停止" : "暂无消息"));
+    const tm = s ? s.time : (c.time || "");
+    const nm = s ? s.msgs : c.sessions;
+    return `
+    <button class="conv-row" data-act="push" data-page="chat" data-id="${c.id}">
+      ${avatarHTML(c)}
+      <div class="mid">
+        <div class="line1">
+          <span class="nm">${esc(c.name)}</span>
+          ${c.kind === "agent" ? `<span class="pill ${c.alive ? "blue" : ""}">${c.alive ? "在线" : "离线"}</span>` : ""}
+          ${nodeTagHTML(c)}
+          <span class="tm">${esc(tm)}</span>
+        </div>
+        <div class="line2">
+          <span class="prev ${c.unread ? "unread" : ""}">${esc(preview)}</span>
+          ${c.unread ? `<span class="unread ${c.unread === -1 ? "dot-only" : ""}">${c.unread === -1 ? "" : c.unread}</span>` : ""}
+        </div>
+      </div>
+    </button>`;
+  };
+
+  return `
+    ${navHTML({
+      title: "ACowork",
+      left: `<button class="nav-btn icon" data-act="toast" data-toast="移动端 v1 不含 Harness / Extensions" aria-label="菜单">${ICON.list}</button>`,
+      right: `<button class="nav-btn icon" data-act="toast" data-toast="搜索：输入以过滤会话" aria-label="搜索">${ICON.search}</button>`,
+    })}
+    <div class="searchbar">
+      <div class="search-field">${ICON.search}
+        <input id="convSearch" placeholder="搜索 Agent 或联系人" value="${esc(q)}" />
+      </div>
+    </div>
+    <div class="screen-scroll">
+      ${ag.length ? `<div class="section-label">${ICON.bot} Agents (${ag.length})</div>` : ""}
+      ${ag.map(convRow).join("")}
+      ${us.length ? `<div class="section-label">${ICON.users} 联系人 (${us.length})</div>` : ""}
+      ${us.map(convRow).join("")}
+      ${(ag.length + us.length) === 0 ? `<div class="empty">${ICON.search}<div class="t">没有匹配的会话</div></div>` : ""}
+      <div style="height:20px"></div>
+    </div>
+    <div class="screen-body"></div>`;
+}
+
+/* ============================================================
+   2. 聊天详情（二级）= Desktop ChatPanel
+   ============================================================ */
+function pageChat(p) {
+  const c = convById(p.id);
+  if (!c) return `<div class="empty">${ICON.alert}<div class="t">会话不存在</div></div>`;
+  const isAgent = c.kind === "agent";
+  const stopped = isAgent && !c.alive;
+  const s = chatSession(p);
+  const ro = s ? !sessionWritable(s) : false;   // 只读态：后端 can_write === false
+
+  /* 导航栏标题区 = 会话切换器（多会话入口）。
+     移动端不搬 Desktop 的 SessionTabBar 标签条 —— 窄屏放不下 N 个标签，
+     也不符合 IM 习惯。改为「点标题 → Action Sheet 选会话 / 新建」。 */
+  const titleBtn = isAgent
+    ? `<button class="nav-title-btn" data-act="sheet" data-sheet="sessions" data-arg="${c.id}">
+         <span class="nav-title"><span class="t">${esc(s ? s.title : c.name)}</span><span class="sub">${esc(s ? `${c.model} · ${s.msgs} 条` : c.model)}</span></span>
+         <span class="nav-caret">${ICON.chevDown}</span>
+       </button>`
+    : `<div class="nav-title">${esc(c.name)}<span class="sub">${esc(c.online ? "在线" : "离线")}</span></div>`;
+
+  /* 「新建会话」是 Agent 会话的高频操作（一次任务一个会话），原先只藏在
+     标题 Action Sheet 和抽屉里，等于要两步才能创建。提到导航栏右上当一级入口。
+     只读会话不能创建；联系人会话没有 session 概念，都不给。 */
+  const newSessBtn = isAgent && !ro
+    ? `<button class="nav-btn icon" data-act="newsess" data-agent="${c.id}" aria-label="新建会话" title="新建会话">${ICON.plus}</button>`
+    : "";
+
+  return `
+    ${navHTML({
+      title: c.name,
+      sub: isAgent ? (stopped ? "已停止" : `${c.model} · ${nodeLabel(c.node_id)}`) : (c.online ? "在线" : "离线"),
+      left: `<button class="nav-btn icon" data-act="back" aria-label="返回">${ICON.back}</button>`,
+      right: newSessBtn + `<button class="nav-btn icon" data-act="sheet" data-sheet="profile" data-arg="${c.id}" aria-label="更多">${ICON.list}</button>`,
+      titleNode: titleBtn,
+      rightWide: !!newSessBtn,
+    })}
+    ${offlineBannerHTML()}
+    ${ro ? `
+      <div class="banner info ro-banner">${ICON.lock}<span>只读 · 来自 ${esc(s.owner)} 的共享会话，你不能发送消息</span></div>` : ""}
+    <div class="chat-scroll" id="chatScroll">
+      <div class="chat-day">${esc(s ? s.time : "今天 14:02")}</div>
+      ${chatBubbles(c, isAgent, ro)}
+      ${isAgent && c.busy && !ro ? approvalCardHTML() : ""}
+      ${isAgent && c.busy && !ro ? askQuestionHTML() : ""}
+      <div style="height:8px"></div>
+    </div>
+    ${stopped && !ro ? `
+      <div class="banner warn">${ICON.alert}<span>该 Agent 已停止，消息不会立即得到回复</span>
+        <button class="btn" data-act="sheet" data-sheet="profile" data-arg="${c.id}">启动</button>
+      </div>` : ""}
+    ${!isAgent ? `
+      <div class="banner info">${ICON.info}<span>与真人对话时，工具调用需对方在其桌面端确认</span></div>` : ""}
+    ${isAgent && !c.alive ? "" : composerHTML(p, ro)}
+  `;
+}
+
+function chatBubbles(c, isAgent) {
+  return `
+    <div class="msg me">
+      <div class="avatar sm" style="background:${ME.color}">N</div>
+      <div><div class="bubble">帮我看下 ADR-085 的生命周期状态机，rollback 那条路径还有歧义。</div>
+        <div class="meta">14:02</div></div>
+    </div>
+    ${isAgent ? `
+      <div class="toolcall">
+        <div class="tc-head">${ICON.terminal}<span class="nm">file_read</span><span class="st">412ms</span></div>
+        <div class="tc-body fade">docs/adr/zh/ADR-085-agent-lifecycle-state-machine.md</div>
+      </div>
+      <div class="toolcall">
+        <div class="tc-head">${ICON.terminal}<span class="nm">content_search</span><span class="st">1.2s</span></div>
+        <div class="tc-body fade">pattern: "rollback" → 7 matches</div>
+      </div>
+      <div class="msg">
+        <div class="avatar sm" style="background:${c.color}">${esc(c.name.slice(0, 2))}</div>
+        <div>
+          <div class="bubble">两处歧义：<br>1) <b>rollback</b> 在 STARTING 中断时回到 INITIAL 还是 READY，文档没定；<br>2) RESTARTING 是复用原 instance_id 还是新分配，这个决定了会话里的 MQTT 订阅要不要重连。</div>
+          <div class="meta">14:05 · 建议二选一后补进 §4 决策表</div>
+        </div>
+      </div>
+      <div class="msg">
+        <div class="avatar sm" style="background:${c.color}">${esc(c.name.slice(0, 2))}</div>
+        <div>
+          <div class="bubble">已把 ADR-085 的状态转移图补进 §3，你直接看 1.1 节。</div>
+          <div class="meta">14:31</div>
+        </div>
+      </div>
+      ${window.__demoStatus ? statusLineHTML(window.__demoStatus) : ""}
+      ${window.__demoFail ? failedMsgHTML() : ""}`
+    : `
+      <div class="msg">
+        <div class="avatar sm" style="background:${c.color}">${esc(c.name.slice(0, 1))}</div>
+        <div>
+          <div class="bubble">embedding 换成 768 维之后召回明显好了，我把参数发你文档里</div>
+          <div class="meta">15:11</div>
+        </div>
+      </div>`}`;
+}
+
+function approvalCardHTML() {
+  return `<div class="approval">
+    <div class="a-title">${ICON.alert} 需要确认：执行 shell 命令</div>
+    <div class="a-cmd">cargo test -p acowork-gateway --test proxy_e2e</div>
+    <div class="a-acts">
+      <button class="btn btn-secondary" data-act="toast" data-toast="已拒绝">拒绝</button>
+      <button class="btn btn-primary" data-act="toast" data-toast="已允许，本次会话内记住 10 分钟">允许</button>
+    </div>
+  </div>`;
+}
+function askQuestionHTML() {
+  return `<div class="askq">
+    <div class="q-text">Mobile v1 的功能边界，你倾向哪一档？</div>
+    <button class="opt sel" data-act="toast" data-toast="已选 A"><span class="rd"></span>A. 只做对话 + 审批（最轻）</button>
+    <button class="opt" data-act="toast" data-toast="已选 B"><span class="rd"></span>B. 对话 + 工作区 Add to Chat</button>
+    <button class="opt" data-act="toast" data-toast="已选 C"><span class="rd"></span>C. 再加 PM 只读看板</button>
+  </div>`;
+}
+function composerAgent() {
+  const p = curPage();
+  return (p && p.type === "chat" && AGENTS.some(a => a.id === p.id)) ? p.id : "com.acowork.software-architect";
+}
+function composerHTML(p, ro) {
+  const ctx = p.ctx || [];
+  const c = convById(p.id);
+  const s = chatSession(p);
+  const stopped = c && c.kind === "agent" && !c.alive;
+  const placeholder = ro ? "只读会话，无法发送" : stopped ? "该 Agent 已停止" : "发送消息";
+
+  /* ADR-076：可见性开关属于「读」侧设置，只读态下禁用而非隐藏 ——
+     观众仍需要知道自己看的是什么。锁定 = 私有。 */
+  const visBtn = s ? `<button class="icon-btn ${ro ? "disabled" : ""}" ${ro ? "disabled" : `data-act="vis" data-sid="${s.id}"`}
+      aria-label="会话可见性" title="${s.visibility === "private" ? "私有" : "公开"}">${s.visibility === "private" ? ICON.lock : ICON.globe}</button>` : "";
+
+  if (ro) {
+    return `<div class="composer ro">
+      <div class="ro-line">${ICON.lock}<span>共享自 ${esc(s.owner)} · 只读</span></div>
+    </div>`;
+  }
+
+  return `<div class="composer">
+    ${ctx.length ? `<div class="ctx-row">${ctx.map(c =>
+      `<span class="ctx-chip">${ICON.file.replace("<svg", '<svg width="13" height="13"')}<span class="nm">${esc(c)}</span>
+        <button class="x" aria-label="移除">${ICON.close}</button></span>`).join("")}
+      <button class="ctx-chip" data-act="drawer" data-agent="com.acowork.software-architect" style="color:var(--accent)">${ICON.plus.replace("<svg", '<svg width="13" height="13"')}<span class="nm">添加上下文</span></button>
+    </div>` : ""}
+    <div class="input-row">
+      <button class="icon-btn" data-act="drawer" data-agent="${composerAgent()}" aria-label="打开设置">${ICON.gear}</button>
+      <textarea class="ta" rows="1" placeholder="${placeholder}"></textarea>
+      ${visBtn}
+      <button class="send-btn" data-act="toast" data-toast="已发送（原型示意）" aria-label="发送">${ICON.send}</button>
+    </div>
+  </div>`;
+}
+
+/* ============================================================
+   1b. 启动与连接（v1.1 设计 §7）：连接 → 登录 → 进入主界面
+   原型演示入口：设置页「启动流程演示」
+   ============================================================ */
+const OB = {
+  saved: [
+    { url: "http://192.168.1.23:19876", name: "Studio · 局域网", ok: true },
+    { url: "http://10.20.30.4:19876", name: "办公室中转", ok: false },
+  ],
+  probe: "idle",           // idle | probing | ok | fail
+  probeResult: null,       // { mode, registration_open, requires_setup }
+  loginErr: "",
+  loginBusy: false,
+  offline: false,          // 断连 banner 演示开关
+};
+
+function pageConnect() {
+  const probing = OB.probe === "probing";
+  const fail = OB.probe === "fail";
+  return `
+  <div class="page" data-page="connect"><div class="page-body">
+    <div class="ob-wrap">
+      <div class="ob-hero">
+        <div class="ob-logo">A</div>
+        <div class="ob-title">连接 ACowork</div>
+        <div class="ob-sub">输入桌面端共享的网关地址。<br>移动端不运行本地网关。</div>
+      </div>
+      <div class="ob-field">
+        <label>网关地址</label>
+        <input class="ob-input${fail ? " err" : ""}" id="gwUrl" value="${esc(probing || OB.probe === "ok" ? "http://192.168.1.23:19876" : "")}"
+          placeholder="http://192.168.1.23:19876" ${probing ? "disabled" : ""}>
+        ${fail ? `<div class="ob-err">${ICON.alert}<span>无法连接：请确认桌面端已开启「允许局域网连接」，且两台设备在同一 Wi-Fi。</span></div>` : ""}
+        ${OB.probe === "ok" ? `<div class="ob-err" style="color:var(--green)">${ICON.check}<span>连接成功 · 多用户模式 · 需要登录</span></div>` : ""}
+      </div>
+      <button class="ob-btn" data-act="ob-probe" ${probing ? "disabled" : ""}>${probing ? `<span class="ob-spin"></span>检测中…` : "连接"}</button>
+      <div class="ob-saved">
+        <div class="ob-saved-title">已保存的地址</div>
+        ${OB.saved.map(sv => `
+          <div class="ob-saved-item" data-act="ob-saved" data-url="${esc(sv.url)}">
+            <span class="dot${sv.ok ? "" : " off"}"></span>
+            <span style="flex:1">${esc(sv.name)}<br><span style="font-size:12px;color:var(--label-3)">${esc(sv.url)}</span></span>
+          </div>`).join("")}
+      </div>
+      <div class="ob-hint">v1 不支持扫码配对与注册：没有账号请在桌面端创建。</div>
+    </div>
+  </div></div>`;
+}
+
+function pageLogin() {
+  return `
+  <div class="page" data-page="login"><div class="page-body">
+    <div class="ob-wrap">
+      <div class="ob-hero" style="padding-top:40px">
+        <div class="ob-title">登录</div>
+        <div class="ob-sub">http://192.168.1.23:19876<br>多用户模式 · 账号由桌面端管理</div>
+      </div>
+      <div class="ob-field">
+        <label>用户名</label>
+        <input class="ob-input" placeholder="用户名" value="nicholas">
+      </div>
+      <div class="ob-field">
+        <label>密码</label>
+        <input class="ob-input${OB.loginErr ? " err" : ""}" type="password" placeholder="密码">
+      </div>
+      ${OB.loginErr ? `<div class="ob-err">${ICON.alert}<span>${esc(OB.loginErr)}</span></div>` : ""}
+      <button class="ob-btn" data-act="ob-login" ${OB.loginBusy ? "disabled" : ""}>${OB.loginBusy ? `<span class="ob-spin"></span>登录中…` : "登录"}</button>
+      <button class="ob-btn secondary" data-act="ob-login-fail">演示：密码错误</button>
+      <div class="ob-hint">连续失败 5 次将临时锁定登录。<br>忘记密码请在桌面端重置。</div>
+    </div>
+  </div></div>`;
+}
+
+function pageDisconnected() {
+  return `
+  <div class="page" data-page="disconnected"><div class="page-body">
+    <div class="ob-wrap">
+      <div class="ob-disconnected">
+        <div class="ob-dis-icon">${ICON.wifiOff || ICON.alert}</div>
+        <div class="ob-title" style="font-size:20px">连接已断开</div>
+        <div class="ob-sub">无法访问 http://192.168.1.23:19876。<br>请检查桌面端是否在线、两台设备是否在同一网络。</div>
+        <button class="ob-btn" data-act="ob-reconnect" style="max-width:280px">重试</button>
+        <button class="ob-btn secondary" data-act="ob-change" style="max-width:280px">更换地址</button>
+      </div>
+    </div>
+  </div></div>`;
+}
+
+function pageRestricted() {
+  return `
+  <div class="page" data-page="restricted"><div class="page-body">
+    <div class="ob-wrap">
+      <div class="ob-disconnected">
+        <div class="ob-dis-icon" style="background:rgba(255,149,0,.14);color:var(--orange)">${ICON.info}</div>
+        <div class="ob-title" style="font-size:20px">受限模式</div>
+        <div class="ob-sub">网关尚未完成初始化设置（或注册未开放）。<br>请在桌面端完成设置后再使用移动端。</div>
+        <button class="ob-btn" data-act="ob-reconnect" style="max-width:280px">重新检测</button>
+      </div>
+    </div>
+  </div></div>`;
+}
+
+/* 断连 banner：挂在主导航页顶部（演示开关在设置页） */
+function offlineBannerHTML() {
+  return OB.offline ? `<div class="offline-banner">${ICON.refresh}<span>连接已断开，正在重试…</span><button class="retry" data-act="ob-banner-retry">立即重试</button></div>` : "";
+}
+
+/* 会话状态指示行（替代流式；v1 轮询 live_state.status） */
+function statusLineHTML(kind) {
+  const map = {
+    thinking: "正在思考…",
+    tool: "正在执行工具：file_read",
+    approval: "等待你在桌面端确认审批",
+    streaming: "正在生成回复…",
+  };
+  return `<div class="status-line"><span class="pulse"></span><span>${map[kind] || kind}</span></div>`;
+}
+
+/* 发送失败气泡（演示） */
+function failedMsgHTML() {
+  return `
+    <div class="msg me">
+      <div class="avatar sm" style="background:${ME.color}">N</div>
+      <div><div class="bubble fail">这条消息发送失败（网络中断）</div>
+        <div class="meta"><span class="fail-link" data-act="ob-resend">重试</span> · 已保留草稿</div></div>
+    </div>`;
+}
+</script>
+
+<script>
+/* ============================================================
+   3. 项目（PM）= Desktop ProjectsView：列表 → 看板 → 任务
+   ============================================================ */
+function pageProjectList() {
+  return `
+    ${navHTML({
+      title: "项目",
+      right: `<button class="nav-btn icon" data-act="toast" data-toast="移动端 v1 不提供新建项目" aria-label="新建">${ICON.plus}</button>`,
+    })}
+    <div class="screen-scroll">
+      ${PROJECTS.map(p => `
+        <button class="conv-row" data-act="push" data-page="board" data-id="${p.id}" style="padding:12px 16px">
+          <div class="avatar" style="background:linear-gradient(135deg,#3B82F6,#AF52DE)">${esc(p.title.slice(0, 1))}</div>
+          <div class="mid">
+            <div class="line1"><span class="nm">${esc(p.title)}</span><span class="tm">${p.open}/${p.total}</span></div>
+            <div class="line2"><span class="prev">${esc(p.desc || "无描述")}</span></div>
+            <div class="line2" style="margin-top:5px">
+              ${p.members.map((m, i) => `<span class="avatar xs" style="background:${["#5856D6","#34C759","#FF9500","#FF2D55"][i]};width:20px;height:20px;font-size:10px;display:inline-flex;margin-right:-5px;border:1.5px solid var(--bg)">${i === 0 ? "我" : "·"}</span>`).join("")}
+              <span class="pill" style="margin-left:8px">${p.open} 项进行中</span>
+            </div>
+          </div>
+        </button>`).join("")}
+      <div style="height:20px"></div>
+    </div>`;
+}
+
+const BOARD_COLS = [
+  { id: "pending",     label: "待处理" },
+  { id: "in_progress", label: "进行中" },
+  { id: "submitted",   label: "待审核" },
+  { id: "done",        label: "已完成" },
+  { id: "rejected",    label: "已拒绝" },
+];
+
+function pageBoard(p) {
+  const proj = findProject(p.id);
+  const col = p.col || "all";
+  const tasks = (proj.tasks || []).filter(t => col === "all" || t.status === col);
+  const count = (id) => (proj.tasks || []).filter(t => id === "all" || t.status === id).length;
+
+  const priCls = { P0: "red", P1: "orange", P2: "" };
+  const stCls = { pending: "", in_progress: "blue", submitted: "orange", done: "green", rejected: "red" };
+  const stLbl = { pending: "待处理", in_progress: "进行中", submitted: "待审核", done: "已完成", rejected: "已拒绝" };
+
+  return `
+    ${navHTML({
+      title: proj.title,
+      sub: `${proj.open} 项进行中 / 共 ${proj.total}`,
+      left: `<button class="nav-btn icon" data-act="back" aria-label="返回">${ICON.back}</button>`,
+      right: `<button class="nav-btn icon" data-act="toast" data-toast="移动端 v1 不提供成员管理" aria-label="成员">${ICON.users}</button>`,
+    })}
+    <div class="board-nav">
+      <button class="bc ${col === "all" ? "on" : ""}" data-act="col" data-col="all">全部 ${count("all")}</button>
+      ${BOARD_COLS.map(c => `<button class="bc ${col === c.id ? "on" : ""}" data-act="col" data-col="${c.id}">${c.label} ${count(c.id)}</button>`).join("")}
+    </div>
+    <div class="screen-scroll">
+      <div class="group" style="margin-top:10px">
+        <div class="group-card klist">
+          ${tasks.length ? tasks.map(t => `
+            <button class="kcard" data-act="push" data-page="task" data-id="${t.id}">
+              <div class="k-t">${esc(t.title)}</div>
+              <div class="k-m">
+                <span class="pill ${priCls[t.pri] || ""}">${t.pri}</span>
+                <span class="pill ${stCls[t.status]}">${stLbl[t.status]}</span>
+                ${t.assignee ? `<span class="who">${ICON.user.replace("<svg", '<svg width="12" height="12"')}${esc(t.assignee)}</span>` : `<span class="who">未指派</span>`}
+                <span class="who">${ICON.clock.replace("<svg", '<svg width="12" height="12"')}${esc(t.due)}</span>
+              </div>
+            </button>`).join("") : `<div class="empty" style="padding:40px 20px">${ICON.board}<div class="d">该列暂无任务</div></div>`}
+        </div>
+      </div>
+      <div class="group-note">移动端把看板列降级为横向 chip 筛选，避免横向拖拽在窄屏上不可用。</div>
+      <div style="height:20px"></div>
+    </div>`;
+}
+
+function pageTask(p) {
+  const t = findTask(p.id);
+  if (!t) return `<div class="empty">${ICON.alert}<div class="t">任务不存在</div></div>`;
+  const proj = PROJECTS.find(x => (x.tasks || []).some(y => y.id === t.id));
+  const stLbl = { pending: "待处理", in_progress: "进行中", submitted: "待审核", done: "已完成", rejected: "已拒绝" };
+
+  return `
+    ${navHTML({
+      title: t.title.length > 14 ? t.title.slice(0, 14) + "…" : t.title,
+      left: `<button class="nav-btn icon" data-act="back" aria-label="返回">${ICON.back}</button>`,
+      right: `<button class="nav-btn icon" data-act="sheet" data-sheet="task-actions" data-arg="${t.id}" aria-label="更多">${ICON.list}</button>`,
+    })}
+    <div class="screen-scroll">
+      <div class="group" style="margin-top:14px">
+        <div class="group-title">${esc(proj.title)} / ${esc(proj.id.toUpperCase())}</div>
+        <div class="group-card">
+          ${row("flag", "状态", stLbl[t.status], "rightPanel.status")}
+          ${row("star", "优先级", t.pri)}
+          ${row("user", "负责人", t.assignee || "未指派", null, t.assignee ? "" : "设置指派")}
+          ${row("clock", "截止", t.due)}
+          ${row("branch", "所属项目", proj.title, "board")}
+          ${row("type", "任务类型", { code: "开发", design: "设计", doc: "文档", research: "调研" }[t.type] || t.type)}
+        </div>
+      </div>
+      <div class="group">
+        <div class="group-title">操作</div>
+        <div class="group-card">
+          <button class="row" data-act="toast" data-toast="移动端 v1 只读，编辑需桌面端">
+            <span class="lead">${ICON.edit}</span><span class="grow"><span class="t">编辑任务</span></span><span class="chev">${ICON.chev}</span>
+          </button>
+          <button class="row" data-act="toast" data-toast="移动端 v1 只读，评审需桌面端">
+            <span class="lead">${ICON.check}</span><span class="grow"><span class="t">审核（Review）</span></span><span class="chev">${ICON.chev}</span>
+          </button>
+          <button class="row" data-act="push" data-page="chat" data-id="com.acowork.project-manager" style="display:none" id="askPm"></button>
+          <button class="row" data-act="toast" data-toast="已唤起项目经理 Agent 对话">
+            <span class="lead">${ICON.bot}</span><span class="grow"><span class="t">让 Agent 处理这个任务</span></span><span class="chev">${ICON.chev}</span>
+          </button>
+        </div>
+      </div>
+      <div class="group">
+        <div class="group-title">子任务</div>
+        <div class="group-card">
+          <div class="row static"><span class="grow"><span class="t" style="font-size:15px">补充状态转移图</span></span><span class="pill green">已完成</span></div>
+          <div class="row static"><span class="grow"><span class="t" style="font-size:15px">同步 module-design 文档</span></span><span class="pill orange">进行中</span></div>
+        </div>
+      </div>
+      <div style="height:24px"></div>
+    </div>`;
+}
+</script>
+
+<script>
+/* ============================================================
+   4. 文档 = Desktop DocsView：目录树 → 文档；审阅队列独立入口
+   ============================================================ */
+function pageDocList() {
+  return `
+    ${navHTML({
+      title: "文档",
+      right: `<button class="nav-btn icon" data-act="toast" data-toast="移动端 v1 只读，不提供新建/编辑" aria-label="新建">${ICON.plus}</button>`,
+    })}
+    <div class="screen-scroll">
+      <button class="row" data-act="push" data-page="review" data-id="q" style="border-radius:var(--r-card);background:var(--card);margin:12px 16px 0;width:calc(100% - 32px)">
+        <span class="lead" style="color:var(--orange)">${ICON.inbox}</span>
+        <span class="grow"><span class="t">审阅队列</span><span class="d">${REVIEW_QUEUE.length} 篇待审阅</span></span>
+        <span class="chev">${ICON.chev}</span>
+      </button>
+      <div class="section-label">${ICON.folder} 全部文档</div>
+      <div class="group" style="margin:0 16px">
+        <div class="group-card">${docTreeHTML(DOCS, 0, p_state.docsOpen || (p_state.docsOpen = new Set(["d1", "d1d"])))}</div>
+      </div>
+      <div style="height:20px"></div>
+    </div>`;
+}
+
+function docTreeHTML(nodes, depth, openSet) {
+  return nodes.map(n => {
+    if (n.type === "dir") {
+      const open = openSet.has(n.id);
+      return `<div>
+        <button class="tree-dir ${open ? "open" : ""}" style="padding-left:${16 + depth * 16}px" data-act="doc-toggle" data-id="${n.id}">
+          <span class="cv">${ICON.chev}</span>
+          <span style="color:var(--accent);display:flex">${ICON.folder.replace("<svg", '<svg width="17" height="17"')}</span>
+          <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(n.name)}</span>
+          <span class="pill">${(n.children || []).length}</span>
+        </button>
+        ${open ? docTreeHTML(n.children, depth + 1, openSet) : ""}
+      </div>`;
+    }
+    return `<button class="tree-file" style="padding-left:${30 + depth * 16}px" data-act="push" data-page="doc" data-id="${n.id}">
+      <span style="color:var(--label-2);display:flex">${ICON.file.replace("<svg", '<svg width="16" height="16"')}</span>
+      <span class="nm">${esc(n.name)}</span>
+      <span class="ext">${n.words} 字</span>
+    </button>`;
+  }).join("");
+}
+
+function pageDoc(p) {
+  const d = findDoc(p.id);
+  if (!d) return `<div class="empty">${ICON.alert}<div class="t">文档不存在</div></div>`;
+  return `
+    ${navHTML({
+      title: d.name,
+      sub: `${d.words} 字 · ${d.by} · ${d.time}`,
+      left: `<button class="nav-btn icon" data-act="back" aria-label="返回">${ICON.back}</button>`,
+      right: `<button class="nav-btn icon" data-act="sheet" data-sheet="tree-actions" data-arg="${d.name}" aria-label="更多">${ICON.list}</button>`,
+    })}
+    <div class="screen-scroll" style="padding:14px 18px 24px">
+      ${d.id === "d1a" ? `
+        <h1 style="font-size:23px;line-height:1.25;margin:4px 0 14px">IM 形态信息架构</h1>
+        <p style="font-size:15.5px;line-height:1.72;color:var(--label)">Mobile App 是 Desktop 的移动端子集，定位为<b>便携终端</b>。v1 只做基础对话控制，四个一级入口对应 Desktop 左侧导航栏的 Chat / Projects / Docs / Settings。</p>
+        <h2 style="font-size:18px;margin:22px 0 8px">导航模型</h2>
+        <ul style="font-size:15.5px;line-height:1.72;padding-left:20px;margin:0">
+          <li>底部 Tab Bar = Desktop 左导航栏</li>
+          <li>每个 Tab 维护独立导航栈，切换保留深度</li>
+          <li>二级页右滑返回；一级页右滑无动作</li>
+        </ul>
+        <h2 style="font-size:18px;margin:22px 0 8px">手势</h2>
+        <table style="width:100%;border-collapse:collapse;font-size:14.5px;margin-top:6px">
+          <tr style="background:var(--fill)"><th style="text-align:left;padding:8px 10px">手势</th><th style="text-align:left;padding:8px 10px">行为</th></tr>
+          <tr><td style="padding:8px 10px;border-top:0.5px solid var(--sep)">左滑（聊天页）</td><td style="padding:8px 10px;border-top:0.5px solid var(--sep)">打开 Agent 设置抽屉</td></tr>
+          <tr><td style="padding:8px 10px;border-top:0.5px solid var(--sep)">右滑（二级页）</td><td style="padding:8px 10px;border-top:0.5px solid var(--sep)">返回上一级</td></tr>
+          <tr><td style="padding:8px 10px;border-top:0.5px solid var(--sep)">长按列表行</td><td style="padding:8px 10px;border-top:0.5px solid var(--sep)">操作菜单</td></tr>
+        </table>
+        <blockquote style="margin:18px 0;padding:10px 14px;border-left:3px solid var(--accent);background:var(--fill);border-radius:0 8px 8px 0;font-size:15px;line-height:1.65">决策：Harness 与 Extensions 不上移动端。理由是它们本质是「管理面」，而移动端定位是「执行面」。</blockquote>
+      ` : `
+        <h1 style="font-size:23px;line-height:1.25;margin:4px 0 12px">${esc(d.name)}</h1>
+        <p style="font-size:15.5px;line-height:1.75;color:var(--label-2)">这是原型占位内容。真实实现里这里渲染 doc_reader 的 Markdown 结果，只读模式，不提供富文本编辑器（TipTap 在移动端 v1 不上线）。</p>
+        <p style="font-size:15.5px;line-height:1.75;color:var(--label-2);margin-top:12px">审阅动作（通过 / 驳回）保留在「审阅队列」页，因为它是 PM 流程的入口而非阅读动作。</p>
+      `}
+    </div>`;
+}
+
+function pageReview() {
+  return `
+    ${navHTML({
+      title: "审阅队列",
+      sub: `${REVIEW_QUEUE.length} 篇待处理`,
+      left: `<button class="nav-btn icon" data-act="back" aria-label="返回">${ICON.back}</button>`,
+    })}
+    <div class="screen-scroll">
+      <div class="group" style="margin-top:12px">
+        <div class="group-card">
+          ${REVIEW_QUEUE.map(r => `
+            <button class="row" data-act="push" data-page="doc" data-id="${r.id === "r1" ? "d1a" : r.id === "r2" ? "d2a" : "d1c"}" style="align-items:flex-start;padding:12px 16px">
+              <span class="lead" style="color:var(--orange);margin-top:1px">${ICON.inbox}</span>
+              <span class="grow"><span class="t" style="white-space:normal;font-size:15.5px">${esc(r.title)}</span><span class="d">${esc(r.by)} 提交 · ${esc(r.age)}</span></span>
+              <span class="chev" style="margin-top:3px">${ICON.chev}</span>
+            </button>`).join("")}
+        </div>
+      </div>
+      <div class="group-note">移动端仅做「通过 / 驳回」二元操作，驳回需填原因；富文本批注留在桌面端。</div>
+      <div style="height:20px"></div>
+    </div>`;
+}
+</script>
+
+<script>
+/* ============================================================
+   5. 设置 = Desktop SettingsPage（4 个一级 Tab → 二级页）
+   ============================================================ */
+const p_state = { theme: "system", fontScale: 1, opacity: 100, autoSplit: "auto", gatewayMode: "relay", docsOpen: null, notif: true, compact: true };
+
+function pageSettingsList() {
+  const rowDef = (icon, tint, title, desc, page, extra = "") => `
+    <button class="row" data-act="push" data-page="${page}" style="border-radius:var(--r-card);background:var(--card);margin:0 16px 10px;width:calc(100% - 32px)">
+      <span class="lead" style="color:${tint}">${ICON[icon]}</span>
+      <span class="grow"><span class="t">${esc(title)}</span>${desc ? `<span class="d">${esc(desc)}</span>` : ""}</span>
+      ${extra}
+      <span class="chev">${ICON.chev}</span>
+    </button>`;
+
+  return `
+    ${navHTML({ title: "设置" })}
+    <div class="screen-scroll" style="padding-top:12px">
+      ${rowDef("user", "#3B82F6", "个人资料", ME.name + " · 管理员", "settingsProfile", `<span class="avatar sm" style="background:${ME.color};width:34px;height:34px;font-size:13px">N</span>`)}
+      ${rowDef("gear", "#8E8E93", "通用", "语言、通知、日志", "settingsGeneral")}
+      ${rowDef("palette", "#AF52DE", "外观", "主题、字体、透明度", "settingsAppearance")}
+      ${rowDef("cloud", "#34C759", "网关", "relay · 已连接", "settingsGateway")}
+      ${rowDef("refresh", "#FF9500", "启动流程演示（v1.1）", "连接 → 登录 → 断连 → 受限模式", "connect")}
+      <button class="row" data-act="ob-demo-offline" style="border-radius:var(--r-card);background:var(--card);margin:0 16px 10px;width:calc(100% - 32px)">
+        <span class="lead" style="color:#FF9500">${ICON.wifi || ICON.alert}</span>
+        <span class="grow"><span class="t">模拟断连 banner</span><span class="d">聊天页顶部横幅 + 自动重连</span></span>
+        <span class="pill">${OB.offline ? "开" : "关"}</span>
+      </button>
+      <div class="group" style="margin-top:6px">
+        <div class="group-card">
+          <button class="row" data-act="toast" data-toast="移动端 v1 不含 Harness（Provider / MCP / Embedding）">
+            <span class="lead">${ICON.puzzleFallback || ""}${ICON.wrench}</span>
+            <span class="grow"><span class="t">Harness</span><span class="d">仅桌面端可用</span></span>
+            <span class="pill">桌面端</span><span class="chev">${ICON.chev}</span>
+          </button>
+          <button class="row" data-act="toast" data-toast="移动端 v1 不含 Extensions（MCP 安装 / 工具目录）">
+            <span class="lead">${ICON.gridFallback || ""}${ICON.star}</span>
+            <span class="grow"><span class="t">Extensions</span><span class="d">仅桌面端可用</span></span>
+            <span class="pill">桌面端</span><span class="chev">${ICON.chev}</span>
+          </button>
+        </div>
+      </div>
+      <div class="group">
+        <div class="group-title">账户</div>
+        <div class="group-card">
+          <button class="row" data-act="toast" data-toast="密码修改需桌面端确认">
+            <span class="lead">${ICON.key}</span><span class="grow"><span class="t">修改密码</span></span><span class="chev">${ICON.chev}</span>
+          </button>
+          <button class="row danger" data-act="toast" data-toast="已退出登录（原型示意）">
+            <span class="lead">${ICON.logout}</span><span class="grow"><span class="t">退出登录</span></span>
+          </button>
+        </div>
+      </div>
+      <div class="group">
+        <div class="group-title">关于</div>
+        <div class="group-card">
+          <div class="row static"><span class="grow"><span class="t">版本</span></span><span class="value">v0.1.0 (Mobile v1 设计稿)</span></div>
+          <div class="row static"><span class="grow"><span class="t">Gateway</span></span><span class="value">1.4.2</span></div>
+          <div class="row static"><span class="grow"><span class="t">本机节点</span></span><span class="value">Mac-Studio · 在线</span></div>
+        </div>
+        <div class="group-note">Mobile 是 Desktop 的子集：Harness、Extensions、DevMode 调试、文件编辑器、Git 状态条均不在 v1 范围内。</div>
+      </div>
+      <div style="height:24px"></div>
+    </div>`;
+}
+
+function pageSettingsProfile() {
+  return `
+    ${navHTML({ title: "个人资料", left: `<button class="nav-btn icon" data-act="back">${ICON.back}</button>` })}
+    <div class="screen-scroll">
+      <div style="display:flex;flex-direction:column;align-items:center;gap:10px;padding:20px 16px 8px">
+        <div class="avatar lg" style="background:${ME.color}">N</div>
+        <div style="font-size:19px;font-weight:600">${esc(ME.name)}</div>
+        <div class="pill blue">管理员</div>
+        <button class="btn btn-secondary" style="height:34px;padding:0 16px;border-radius:9px;border:0;font-size:14.5px;font-family:inherit" data-act="toast" data-toast="头像选择器 v1 不提供">更换头像</button>
+      </div>
+      <div class="group">
+        <div class="group-title">身份</div>
+        <div class="group-card">
+          <div class="row"><span class="grow"><span class="t">显示名称</span></span>
+            <span class="value" style="max-width:60%">${esc(ME.name)}</span></div>
+          <div class="row"><span class="grow"><span class="t">用户名</span></span><span class="value">nicholas</span></div>
+        </div>
+      </div>
+      <div class="group">
+        <div class="group-title">偏好</div>
+        <div class="group-card">
+          ${selectRow("lang", "语言", "language", [["zh-CN", "简体中文"], ["en", "English"], ["ja", "日本語"], ["ko", "한국어"]], "zh-CN")}
+          ${selectRow("pin", "时区", "timezone", [["Asia/Shanghai", "(GMT+8) 北京"], ["Asia/Tokyo", "(GMT+9) 东京"], ["UTC", "UTC"]], "Asia/Shanghai")}
+          <div class="row"><span class="grow"><span class="t">城市</span></span><span class="value">上海</span></div>
+          <div class="row"><span class="grow"><span class="t">职业</span></span><span class="value">软件架构师</span></div>
+        </div>
+      </div>
+      <div style="height:24px"></div>
+    </div>`;
+}
+
+function selectRow(icon, label, key, opts, cur) {
+  return `<div class="row static">
+    <span class="lead">${ICON[icon]}</span>
+    <span class="grow"><span class="t">${esc(label)}</span></span>
+    <span class="select-wrap"><select class="select-box" data-sel="${key}">
+      ${opts.map(([v, l]) => `<option ${v === cur ? "selected" : ""} value="${esc(v)}">${esc(l)}</option>`).join("")}
+    </select></span>
+  </div>`;
+}
+
+function pageSettingsGeneral() {
+  return `
+    ${navHTML({ title: "通用", left: `<button class="nav-btn icon" data-act="back">${ICON.back}</button>` })}
+    <div class="screen-scroll">
+      <div class="group">
+        <div class="group-card">
+          <div class="row"><span class="lead">${ICON.bell}</span><span class="grow"><span class="t">通知</span><span class="d">Agent 需要审批、任务提交时推送</span></span>
+            <button class="switch" role="switch" aria-checked="true" data-act="toggle" data-msg="通知已更新"></button></div>
+          <div class="row"><span class="lead">${ICON.chat}</span><span class="grow"><span class="t">仅在 App 前台提示</span></span>
+            <button class="switch" role="switch" aria-checked="false" data-act="toggle"></button></div>
+        </div>
+      </div>
+      <div class="group">
+        <div class="group-title">会话</div>
+        <div class="group-card">
+          <div class="row"><span class="grow"><span class="t">流式输出</span><span class="d">关闭则等待整条回复后显示</span></span>
+            <button class="switch" role="switch" aria-checked="true" data-act="toggle"></button></div>
+          <div class="row"><span class="grow"><span class="t">紧凑模式</span><span class="d">缩小消息气泡间距</span></span>
+            <button class="switch" role="switch" aria-checked="true" data-act="toggle"></button></div>
+          <div class="row static"><span class="grow"><span class="t">工具调用展示</span><span class="d">折叠为一行摘要，点击展开</span></span>
+            <div class="segmented" style="width:150px"><button class="on">折叠</button><button>展开</button><button>隐藏</button></div></div>
+        </div>
+      </div>
+      <div class="group">
+        <div class="group-title">日志（只读）</div>
+        <div class="group-card">
+          <div class="row static"><span class="grow"><span class="t">日志级别</span></span><span class="value">info</span></div>
+          <div class="row static"><span class="grow"><span class="t">日志文件大小</span></span><span class="value">20 MB</span></div>
+          <div class="row static"><span class="grow"><span class="t">最大日志文件数</span></span><span class="value">5</span></div>
+          <button class="row" data-act="toast" data-toast="日志清理需桌面端执行"><span class="lead" style="color:var(--red)">${ICON.trash}</span><span class="grow"><span class="t" style="color:var(--red)">删除所有日志</span></span></button>
+        </div>
+        <div class="group-note">日志文件位于 Gateway 主机，移动端不上传也不清理，仅展示当前配置。</div>
+      </div>
+      <div style="height:24px"></div>
+    </div>`;
+}
+
+function pageSettingsAppearance() {
+  const th = p_state.theme;
+  return `
+    ${navHTML({ title: "外观", left: `<button class="nav-btn icon" data-act="back">${ICON.back}</button>` })}
+    <div class="screen-scroll">
+      <div class="group">
+        <div class="group-title">主题</div>
+        <div class="group-card">
+          <div class="row static" style="display:block;padding:14px 16px">
+            <div class="segmented">
+              ${[["light", "浅色"], ["dark", "深色"], ["system", "跟随系统"]].map(([v, l]) =>
+                `<button class="${th === v ? "on" : ""}" data-act="theme" data-theme="${v}">${l}</button>`).join("")}
+            </div>
+          </div>
+          <div class="row static"><span class="lead">${ICON.palette}</span><span class="grow"><span class="t">高亮色</span></span>
+            <span style="display:flex;gap:8px;align-items:center">
+              ${["#3B82F6", "#34C759", "#AF52DE", "#FF9500", "#FF2D55"].map((c, i) =>
+                `<span data-act="accent" data-accent="${c}" style="width:26px;height:26px;border-radius:50%;background:${c};display:block;cursor:pointer;${i === 0 ? "box-shadow:0 0 0 2px var(--bg-elev),0 0 0 4px var(--label-3)" : ""}"></span>`).join("")}
+            </span></div>
+        </div>
+      </div>
+      <div class="group">
+        <div class="group-title">文字</div>
+        <div class="group-card">
+          <div class="row static"><span class="grow"><span class="t">字体大小</span></span>
+            <span class="stepper"><button data-act="toast" data-toast="已减小">−</button><span class="val">100%</span><button data-act="toast" data-toast="已增大">+</button></span></div>
+          <div class="row static"><span class="grow"><span class="t">内容宽度</span><span class="d">移动端固定为屏幕宽度，此项仅桌面端生效</span></span><span class="pill">桌面端</span></div>
+        </div>
+      </div>
+      <div class="group">
+        <div class="group-title">界面</div>
+        <div class="group-card">
+          <div class="row"><span class="grow"><span class="t">降低透明度</span><span class="d">提升 OLED 屏对比度</span></span>
+            <button class="switch" role="switch" aria-checked="false" data-act="toggle"></button></div>
+          <div class="row"><span class="grow"><span class="t">跟随系统字体缩放</span></span>
+            <button class="switch" role="switch" aria-checked="true" data-act="toggle"></button></div>
+        </div>
+      </div>
+      <div style="height:24px"></div>
+    </div>`;
+}
+
+function pageSettingsGateway() {
+  return `
+    ${navHTML({ title: "网关", left: `<button class="nav-btn icon" data-act="back">${ICON.back}</button>` })}
+    <div class="screen-scroll">
+      <div class="group" style="margin-top:12px">
+        <div class="group-card">
+          <div class="row static" style="display:block;padding:12px 16px">
+            <div style="font-size:13px;color:var(--label-2);margin-bottom:8px">网关模式</div>
+            <div class="segmented">
+              ${[["local", "本地"], ["remote", "局域网"], ["relay", "中继"]].map(([v, l]) =>
+                `<button class="${p_state.gatewayMode === v ? "on" : ""}" data-act="gwm" data-v="${v}">${l}</button>`).join("")}
+            </div>
+          </div>
+          <div class="row static"><span class="lead">${ICON.cloud}</span><span class="grow"><span class="t">状态</span></span>
+            <span class="pill green">已连接</span></div>
+          <div class="row static"><span class="lead">${ICON.gauge}</span><span class="grow"><span class="t">版本</span></span><span class="value">1.4.2</span></div>
+        </div>
+        <div class="group-note">移动端<b>没有</b>本地 Gateway 进程，因此「启动 / 停止 / 重启 Gateway」与本地模式在 v1 不可用（对应 Desktop settings.localGateway）。</div>
+      </div>
+      <div class="group">
+        <div class="group-title">连接</div>
+        <div class="group-card">
+          <div class="row static" style="display:block;padding:12px 16px">
+            <div style="font-size:13px;color:var(--label-2);margin-bottom:6px">Gateway 地址</div>
+            <div class="field"><input value="https://relay.acowork.dev" /></div>
+          </div>
+          <button class="row" data-act="toast" data-toast="连接测试通过（284ms）"><span class="lead">${ICON.refresh}</span><span class="grow"><span class="t">测试连接</span></span><span class="chev">${ICON.chev}</span></button>
+          <button class="row" data-act="toast" data-toast="地址已保存"><span class="lead">${ICON.check}</span><span class="grow"><span class="t">保存并应用</span></span></button>
+        </div>
+      </div>
+      <div class="group">
+        <div class="group-title">节点</div>
+        <div class="group-card">
+          <div class="row static"><span class="avatar sm" style="background:#34C759">M</span>
+            <span class="grow"><span class="t">Mac-Studio</span><span class="d">本机 · 16 核 · 在线</span></span><span class="pill green">在线</span></div>
+          <div class="row static"><span class="avatar sm" style="background:#8E8E93">I</span>
+            <span class="grow"><span class="t">iPad-node</span><span class="d">远端 · 在线</span></span><span class="pill green">在线</span></div>
+        </div>
+        <div class="group-note">节点与 Agent 归属在聊天列表中以分组标签呈现（Desktop AgentList 的 per-node 分组）。</div>
+      </div>
+      <div style="height:24px"></div>
+    </div>`;
+}
+</script>
+
+<script>
+/* ============================================================
+   6. Agent 设置抽屉 = Desktop RightPanel
+   左滑滑出。子分区用分段控件切换（桌面是竖排图标 tab）
+   ============================================================ */
+function drawerHTML() {
+  const a = drawerAgent;
+  if (!a) return "";
+  return `
+    ${navHTML({
+      title: a.name,
+      sub: `${a.pkg} · v${a.ver}`,
+      left: `<button class="nav-btn icon" data-act="close-drawer" aria-label="关闭">${ICON.close}</button>`,
+      right: `<button class="nav-btn icon" data-act="toast" data-toast="移动端 v1 不提供 Agent 创建/安装/克隆/发布" aria-label="更多">${ICON.list}</button>`,
+    })}
+    <div style="flex:0 0 auto;padding:0 12px 10px;background:var(--bg-elev);border-bottom:0.5px solid var(--sep)">
+      <div class="segmented" style="overflow-x:auto;scrollbar-width:none">
+        ${DRAWER_TABS.map(t => `<button class="${drawerTab === t.id ? "on" : ""}" data-act="dtab" data-tab="${t.id}" style="flex:0 0 auto;padding:6px 9px;font-size:12.5px">${t.label}</button>`).join("")}
+      </div>
+    </div>
+    <div class="screen-scroll" style="padding-bottom:calc(var(--safe-bottom) + 16px)">
+      ${drawerTabHTML(a)}
+    </div>`;
+}
+
+function drawerTabHTML(a) {
+  switch (drawerTab) {
+    case "status":    return dStatus(a);
+    case "workspace": return dWorkspace(a);
+    case "memory":    return dMemory(a);
+    case "tools":     return dTools(a);
+    case "setup":     return dSetup(a);
+    case "sessions":  return dSessions(a);
+  }
+  return "";
+}
+
+function dStatus(a) {
+  const rows = [
+    { icon: "gauge", t: "状态", v: a.alive ? "运行中" : "已停止", pill: a.alive ? "green" : "" },
+    { icon: "user",  t: "模型", v: a.model },
+    { icon: "briefcase", t: "所属节点", v: nodeLabel(a.node_id), pill: (nodeById(a.node_id) || {}).online === false ? "orange" : "" },
+    { icon: "history", t: "会话数", v: String(a.sessions) },
+  ];
+  return `
+    <div class="group" style="margin-top:12px">
+      <div class="group-title">Agent 状态</div>
+      <div class="group-card">
+        ${rows.map(r => `<div class="row static">
+          <span class="lead">${ICON[r.icon]}</span>
+          <span class="grow"><span class="t">${esc(r.t)}</span></span>
+          ${r.pill ? `<span class="pill ${r.pill}">${esc(r.v)}</span>` : `<span class="value">${esc(r.v)}</span>`}
+        </div>`).join("")}
+      </div>
+      <div class="group-card" style="margin-top:10px">
+        ${a.alive
+          ? `<button class="row" data-act="sheet" data-sheet="profile" data-arg="${a.id}"><span class="lead" style="color:var(--red)">${ICON.stop}</span><span class="grow"><span class="t" style="color:var(--red)">停止 Agent</span></span></button>`
+          : `<button class="row" data-act="sheet" data-sheet="profile" data-arg="${a.id}"><span class="lead" style="color:var(--green)">${ICON.play}</span><span class="grow"><span class="t" style="color:var(--green)">启动 Agent</span></span></button>`}
+      </div>
+    </div>
+    <div class="group">
+      <div class="group-title">上下文占用</div>
+      <div class="group-card" style="padding:14px 16px">
+        <div style="display:flex;justify-content:space-between;font-size:13.5px;color:var(--label-2);margin-bottom:7px">
+          <span>已用 18,432</span><span style="color:var(--accent)">42%</span>
+        </div>
+        <div style="height:7px;border-radius:4px;background:var(--fill);overflow:hidden">
+          <div style="height:100%;width:42%;background:var(--accent);border-radius:4px"></div>
+        </div>
+        <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--label-2);margin-top:6px">
+          <span>18.4K / 44K 可用</span><span>窗口 64K</span>
+        </div>
+      </div>
+    </div>
+    <div class="group">
+      <div class="group-title">Token 用量</div>
+      <div class="group-card">
+        ${[["输入", "1,204,882", ""], ["输出", "318,401", ""], ["缓存命中", "76.2%", "green"]].map(([k, v, c]) =>
+          `<div class="row static"><span class="grow"><span class="t" style="font-size:15.5px">${k}</span></span><span class="value" style="color:${c === "green" ? "var(--green)" : "var(--label)"}">${v}</span></div>`).join("")}
+      </div>
+    </div>`;
+}
+
+function dWorkspace(a) {
+  const node = (n, depth) => {
+    if (n.type === "file") {
+      return `<button class="tree-file" style="padding-left:${30 + depth * 14}px" data-act="sheet" data-sheet="tree-actions" data-arg="${n.name}">
+        <span style="color:var(--label-2);display:flex">${ICON.file.replace("<svg", '<svg width="15" height="15"')}</span>
+        <span class="nm">${esc(n.name)}</span><span class="ext">${n.size}</span>
+      </button>`;
+    }
+    const open = wOpen.has(n.name);
+    return `<div>
+      <button class="tree-dir ${open ? "open" : ""}" style="padding-left:${14 + depth * 14}px" data-act="wtoggle" data-name="${n.name}">
+        <span class="cv">${ICON.chev}</span>
+        <span style="color:var(--accent);display:flex">${ICON.folder.replace("<svg", '<svg width="16" height="16"')}</span>
+        <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(n.name)}</span>
+      </button>
+      ${open ? (n.children || []).map(c => node(c, depth + 1)).join("") : ""}
+    </div>`;
+  };
+  return `
+    <div class="group" style="margin-top:12px">
+      <div class="group-title">工作区</div>
+      <div class="group-card" style="padding:12px 16px">
+        <div style="font-family:ui-monospace,Menlo,monospace;font-size:13px;color:var(--label)">${esc(WORKSPACE.path)}</div>
+        <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">
+          <span class="pill orange">只读会话</span><span class="pill">Gateway 代理访问</span>
+        </div>
+      </div>
+    </div>
+    <div class="group">
+      <div class="group-card">${WORKSPACE.tree.map(n => node(n, 0)).join("")}</div>
+      <div class="group-note">移动端<b>不做文件预览</b>（无 Monaco）。点文件 → 仅「添加到对话」。文件内容由 Agent 在对话中读取，符合 Gateway 边界红线（ADR-009 §5）。</div>
+    </div>
+    <div class="group">
+      <div class="group-title">操作</div>
+      <div class="group-card">
+        <button class="row" data-act="toast" data-toast="已加入对话上下文"><span class="lead">${ICON.attach}</span><span class="grow"><span class="t">添加整个工作区到对话</span></span><span class="chev">${ICON.chev}</span></button>
+        <button class="row" data-act="toast" data-toast="远端浏览由 Gateway 代理，仅桌面端支持交互选择"><span class="lead">${ICON.folder}</span><span class="grow"><span class="t">更换工作区</span><span class="d">需桌面端（节点本地路径浏览）</span></span><span class="pill">桌面端</span></button>
+      </div>
+    </div>`;
+}
+
+function dMemory(a) {
+  return `
+    <div class="group" style="margin-top:12px">
+      <div class="group-title">统计</div>
+      <div class="group-card">
+        ${[["知识", "142", "blue"], ["情景", "389", "purple"], ["程序", "57", "teal"], ["自我", "23", "orange"]].map(([k, v, c]) =>
+          `<div class="row static"><span class="grow"><span class="t" style="font-size:15.5px">${k}记忆</span></span><span class="pill ${c}">${v} 条</span></div>`).join("")}
+        <div class="row static"><span class="grow"><span class="t" style="font-size:15.5px">索引状态</span></span><span class="pill green">已同步</span></div>
+      </div>
+    </div>
+    <div class="group">
+      <div class="group-title">蒸馏与遗忘</div>
+      <div class="group-card">
+        <div class="row"><span class="grow"><span class="t">自动蒸馏</span><span class="d">每 6 小时 · gpt-5-mini</span></span><button class="switch" role="switch" aria-checked="true" data-act="toggle"></button></div>
+        <div class="row"><span class="grow"><span class="t">自动遗忘</span><span class="d">闲置 90 天降权</span></span><button class="switch" role="switch" aria-checked="false" data-act="toggle"></button></div>
+        <div class="row static"><span class="grow"><span class="t">蒸馏触发阈值</span></span><span class="value">120 条</span></div>
+      </div>
+    </div>
+    <div class="group">
+      <div class="group-title">检索</div>
+      <div class="group-card">
+        <div class="row" data-act="toast" data-toast="记忆全文浏览仅桌面端">
+          <span class="lead">${ICON.search}</span><span class="grow"><span class="t">浏览记忆节点</span><span class="d">需桌面端（节点树 + 嵌入详情）</span></span><span class="pill">桌面端</span></div>
+        <button class="row" data-act="toast" data-toast="重建索引已排队"><span class="lead">${ICON.refresh}</span><span class="grow"><span class="t">重建索引</span></span></button>
+      </div>
+    </div>`;
+}
+
+function dTools(a) {
+  const builtin = [
+    { n: "file_read", on: true }, { n: "file_write", on: true }, { n: "content_search", on: true },
+    { n: "glob_search", on: true }, { n: "memory_recall", on: true }, { n: "memory_store", on: true },
+    { n: "todo_write", on: true }, { n: "ask_user_question", on: true }, { n: "http_request", on: false },
+    { n: "shell", on: false },
+  ];
+  return `
+    <div class="group" style="margin-top:12px">
+      <div class="group-title">内置工具</div>
+      <div class="group-card">
+        ${builtin.map(t => `<div class="row static">
+          <span class="lead" style="color:var(--label-2)">${ICON.wrench}</span>
+          <span class="grow"><span class="t" style="font-family:ui-monospace,Menlo,monospace;font-size:14px">${t.n}</span></span>
+          <button class="switch" role="switch" aria-checked="${t.on}" data-act="toggle" data-msg="${t.n} 已${t.on ? "关闭" : "开启"}"></button>
+        </div>`).join("")}
+      </div>
+    </div>
+    <div class="group">
+      <div class="group-title">MCP 服务</div>
+      <div class="group-card">
+        ${[["github", true], ["playwright", true], ["postgres", false]].map(([n, on]) => `
+          <div class="row static"><span class="avatar sm" style="background:${on ? "var(--accent)" : "var(--label-3)"};font-size:13px">${n[0].toUpperCase()}</span>
+            <span class="grow"><span class="t" style="font-size:15.5px">${n}</span></span>
+            <button class="switch" role="switch" aria-checked="${on}" data-act="toggle"></button></div>`).join("")}
+      </div>
+      <div class="group-note">MCP <b>安装 / 卸载</b> 属 Harness 能力，v1 不上移动端（Desktop navBar.extensions）。</div>
+    </div>`;
+}
+
+function dSetup(a) {
+  return `
+    <div class="group" style="margin-top:12px">
+      <div class="group-title">Agent 信息</div>
+      <div class="group-card">
+        <div class="row"><span class="grow"><span class="t">名称</span></span><span class="value">${esc(a.name)}</span></div>
+        <div class="row static"><span class="grow"><span class="t">包 ID</span></span><span class="value" style="font-family:ui-monospace,Menlo,monospace;font-size:12.5px">${esc(a.id)}</span></div>
+        <div class="row static"><span class="grow"><span class="t">版本</span></span><span class="value">${a.ver}</span></div>
+      </div>
+    </div>
+    <div class="group">
+      <div class="group-title">会话参数</div>
+      <div class="group-card">
+        ${selectRow("lang", "会话语言", "sessLang", [["", "跟随系统"], ["zh-CN", "简体中文"], ["en", "English"]], "zh-CN")}
+        <div class="row static"><span class="grow"><span class="t">最大迭代</span></span>
+          <span class="stepper"><button data-act="toast" data-toast="已减小">−</button><span class="val">25</span><button data-act="toast" data-toast="已增大">+</button></span></div>
+        <div class="row static"><span class="grow"><span class="t">最大会话数</span></span>
+          <span class="stepper"><button data-act="toast" data-toast="已减小">−</button><span class="val">10</span><button data-act="toast" data-toast="已增大">+</button></span></div>
+        <div class="row static"><span class="grow"><span class="t">命令审批等级</span></span>
+          <span class="select-wrap"><select class="select-box"><option>低（全部手动）</option><option selected>中（写操作需确认）</option><option>高（全部确认）</option><option>自动批准</option></select></span></div>
+        <div class="row static"><span class="grow"><span class="t">审批超时</span></span><span class="value">120 秒</span></div>
+      </div>
+    </div>
+    <div class="group">
+      <div class="group-title">模型参数</div>
+      <div class="group-card">
+        <div class="row static"><span class="grow"><span class="t">最大输出 token</span><span class="d">留空 = 用默认</span></span>
+          <span class="stepper"><button data-act="toast" data-toast="已减小">−</button><span class="val">16K</span><button data-act="toast" data-toast="已增大">+</button></span></div>
+        <div class="row static"><span class="grow"><span class="t">上下文窗口</span><span class="d">留空 = 用模型默认</span></span><span class="value">64K</span></div>
+        <div class="row static"><span class="grow"><span class="t">温度</span></span>
+          <span class="stepper"><button data-act="toast" data-toast="已减小">−</button><span class="val">0.7</span><button data-act="toast" data-toast="已增大">+</button></span></div>
+        <div class="row"><span class="grow"><span class="t">压缩比阈值</span></span>
+          <button class="switch" role="switch" aria-checked="true" data-act="toggle"></button></div>
+      </div>
+      <div class="group-card" style="margin-top:10px">
+        <button class="row danger" data-act="toast" data-toast="已恢复默认（原型示意）"><span class="lead">${ICON.refresh}</span><span class="grow"><span class="t">恢复默认配置</span></span></button>
+      </div>
+    </div>
+    <div class="group">
+      <div class="group-note">模型 / Provider / API Key 的<b>创建与编辑</b>在 Harness 中完成，移动端仅消费结果。</div>
+    </div>`;
+}
+
+function dSessions(a) {
+  /* 会话管理 = Desktop SessionPanel 的移动端形态。
+     多会话是业务事实（一个 Agent 可被多个终端/话题同时驱动），
+     移动端只是操作终端之一，因此必须完整支持 列表/新建/切换/删除/可见性。 */
+  const list = sessionsOf(a.id);
+  const cur = activeSessionId(curPage());
+  const total = SESSION_TOTAL[a.id] || list.length;
+  return `
+    <div class="group" style="margin-top:12px">
+      <div class="group-title">会话（${list.length}/${total}）</div>
+      <div class="group-card">
+        ${list.map((s) => {
+          const ro = !sessionWritable(s);
+          const on = s.id === cur;
+          return `<button class="row sess-row-line${on ? " on" : ""}" data-act="dsess" data-agent="${a.id}" data-sid="${s.id}">
+            <span class="lead">${s.visibility === "private" ? ICON.lock : ICON.globe}</span>
+            <span class="grow"><span class="t" style="font-size:15px;${on ? "color:var(--accent)" : ""}">${esc(s.title)}</span>
+              <span class="d">${esc(s.time)} · ${s.msgs} 条${ro ? " · 只读" : ""} · ${esc(s.owner)}</span></span>
+            ${on ? `<span class="pill blue">当前</span>` : ""}
+          </button>`;
+        }).join("")}
+        ${list.length < total ? `<button class="row" data-act="dmore" data-agent="${a.id}"><span class="lead">${ICON.chevDown}</span><span class="grow"><span class="t" style="color:var(--accent)">加载更多会话</span><span class="d">已加载 ${list.length} / ${total}</span></span></button>` : ""}
+        ${!list.length ? `<div class="row static"><span class="grow"><span class="d">该 Agent 暂无会话</span></span></div>` : ""}
+      </div>
+      <div class="group-note">多会话是业务事实：移动端是其中一个操作终端，支持在同一 Agent 下新建 / 切换 / 删除会话。与桌面端共用同一份会话列表（分页拉取）。</div>
+    </div>
+    <div class="group">
+      <div class="group-card">
+        <button class="row" data-act="dnewsess" data-agent="${a.id}"><span class="lead" style="color:var(--green)">${ICON.plus}</span><span class="grow"><span class="t" style="color:var(--green)">新建会话</span><span class="d">默认私有，仅自己可见</span></span></button>
+        <button class="row" data-act="toast" data-toast="会话 ID 可在桌面端复制"><span class="lead">${ICON.copy}</span><span class="grow"><span class="t">复制当前会话 ID</span></span></button>
+      </div>
+    </div>`;
+}
+const wOpen = new Set(["src"]);
+</script>
+
+<script>
+/* ============================================================
+   PAGE REGISTRY + 额外动作 + 启动
+   ============================================================ */
+const PAGES = {
+  connect:         pageConnect,
+  login:           pageLogin,
+  disconnected:    pageDisconnected,
+  restricted:      pageRestricted,
+  convList:        pageConvList,
+  chat:            (p) => pageChat(Object.assign({ id: p.id || "com.acowork.software-architect", ctx: [] }, p)),
+  projectList:     pageProjectList,
+  board:           (p) => pageBoard(Object.assign({ col: "all" }, p)),
+  task:            pageTask,
+  docList:         pageDocList,
+  doc:             pageDoc,
+  review:          pageReview,
+  settingsList:    pageSettingsList,
+  settingsProfile: pageSettingsProfile,
+  settingsGeneral: pageSettingsGeneral,
+  settingsAppearance: pageSettingsAppearance,
+  settingsGateway: pageSettingsGateway,
+  reg:             (page) => page,
+};
+
+/* push 时按 data-page + data-id 构造页面对象（带每页独立的 UI 状态） */
+const PAGE_DEFAULTS = {
+  connect: {}, login: {}, disconnected: {}, restricted: {},
+  chat:        { id: "com.acowork.software-architect", ctx: [] },
+  board:       { col: "all" },
+  doc:         {},
+  task:        {},
+  review:      {},
+  settingsProfile: {}, settingsGeneral: {}, settingsAppearance: {}, settingsGateway: {},
+};
+function newPage(type, id) {
+  const d = { type, ...(PAGE_DEFAULTS[type] || {}) };
+  if (id) d.id = id;
+  /* 进入 Agent 会话 = 自动打开「最近一个会话」（对齐 Desktop selectAgent →
+     openSession(latest)）。没有这一步，页面上就没有"当前会话"，切换器无法标出选中项。 */
+  if (type === "chat" && id && AGENTS.some((a) => a.id === id)) {
+    const list = sessionsOf(id);
+    d.sid = list.length ? list[0].id : null;
+  }
+  return d;
+}
+
+/* 补充的交互动作 */
+Object.assign(ACTIONS, {
+  /* ---- 启动流程演示 ---- */
+  "ob-probe": () => {
+    OB.probe = "probing"; render({ dir: "reload" });
+    setTimeout(() => { OB.probe = "ok"; render({ dir: "reload" }); }, 900);
+    setTimeout(() => { push(newPage("login")); }, 1500);
+  },
+  "ob-saved": (el) => {
+    const hit = OB.saved.find(x => x.url === el.dataset.url);
+    if (!hit || !hit.ok) { OB.probe = "fail"; render({ dir: "reload" }); return; }
+    OB.probe = "probing"; render({ dir: "reload" });
+    setTimeout(() => { OB.probe = "ok"; render({ dir: "reload" }); }, 700);
+    setTimeout(() => { push(newPage("login")); }, 1200);
+  },
+  "ob-login": () => {
+    OB.loginBusy = true; OB.loginErr = ""; render({ dir: "reload" });
+    setTimeout(() => {
+      OB.loginBusy = false;
+      toast("登录成功（原型：进入主界面）");
+      // 演示：直接回到主界面栈
+      NAV.tab = "chat"; NAV.stacks.chat = [{ type: "convList" }]; render({ dir: "pop" });
+    }, 900);
+  },
+  "ob-login-fail": () => { OB.loginErr = "用户名或密码错误"; render({ dir: "reload" }); },
+  "ob-reconnect": () => {
+    const b = document.querySelector("[data-act=ob-reconnect]");
+    if (b) { b.disabled = true; b.innerHTML = '<span class="ob-spin"></span>重试中…'; }
+    setTimeout(() => { toast("重试失败：网关不可达"); const bb = document.querySelector("[data-act=ob-reconnect]"); if (bb) { bb.disabled = false; bb.textContent = "重试"; } }, 1200);
+  },
+  "ob-change": () => { OB.probe = "idle"; pop(); push(newPage("connect")); },
+  "ob-banner-retry": () => { OB.offline = false; render({ dir: "reload" }); toast("已重连"); },
+  "ob-resend": () => { toast("重新发送（原型示意）"); },
+  "ob-demo-offline": () => { OB.offline = !OB.offline; render({ dir: "reload" }); toast(OB.offline ? "模拟断连：banner 已显示" : "模拟重连"); },
+  "ob-demo-fail": () => { window.__demoFail = !window.__demoFail; render({ dir: "reload" }); toast(window.__demoFail ? "演示：上一条消息发送失败" : "演示已关闭"); },
+  "ob-demo-status": (el) => { window.__demoStatus = el.dataset.kind; render({ dir: "reload" }); },
+  /* ---- 启动流程演示 ---- */
+  "dtab": (el) => { drawerTab = el.dataset.tab; rerenderDrawer(); },
+  "wtoggle": (el) => { const n = el.dataset.name; wOpen.has(n) ? wOpen.delete(n) : wOpen.add(n); rerenderDrawer(); },
+  "doc-toggle": (el) => { const n = el.dataset.id; p_state.docsOpen.has(n) ? p_state.docsOpen.delete(n) : p_state.docsOpen.add(n); render(); },
+  "col": (el) => { curPage().col = el.dataset.col; render(); },
+  "theme": (el) => { p_state.theme = el.dataset.theme; applyTheme(); render(); },
+  "accent": (el) => { document.documentElement.style.setProperty("--accent", el.dataset.accent); toast("高亮色已更新"); },
+  "gwm": (el) => { p_state.gatewayMode = el.dataset.v; render(); toast("网关模式：" + el.textContent); },
+  /* 多会话相关动作 */
+  "dsess":   (el) => openSheet("session-actions", `${el.dataset.agent}::${el.dataset.sid}`),
+  "dnewsess": (el) => { closeDrawer(); setTimeout(() => { newSession(el.dataset.agent); }, 200); },
+  /* 聊天页导航栏「新建会话」：一级入口，留在当前页不跳走 */
+  "newsess": (el) => newSession(el.dataset.agent),
+  "dmore":   (el) => {
+    /* 分页：真实实现调 agentStore.fetchSessions(agentId, page) 追加，
+       这里直接放开页大小来演示「加载更多」。 */
+    const id = el.dataset.agent;
+    SESSION_PAGE = (SESSIONS[id] || []).length;
+    rerenderDrawer();
+    toast(`已加载全部 ${SESSION_PAGE} 条会话`);
+  },
+  "vis":     (el) => {
+    /* 可见性开关：乐观更新 + 不做二次确认，对齐 Desktop SessionVisibilityToggle */
+    const s = sessionById(el.dataset.sid);
+    if (!s || !sessionWritable(s)) return;
+    s.visibility = s.visibility === "private" ? "public" : "private";
+    render({ dir: "reload" });
+    toast(s.visibility === "private" ? "已设为私有 · 仅你和管理员可见" : "已设为公开 · 所有账号可读");
+  },
+});
+
+function applyTheme() {
+  const t = p_state.theme;
+  const sysDark = window.matchMedia?.("(prefers-color-scheme: dark)").matches;
+  const dark = t === "dark" || (t === "system" && sysDark);
+  document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
+}
+
+/* 遮罩点击关闭 */
+$("#drawerScrim").addEventListener("click", () => closeDrawer());
+$("#sheetScrim").addEventListener("click", () => closeSheet());
+$("#modalScrim").addEventListener("click", (e) => { if (e.target.id === "modalScrim") closeModal(); });
+
+/* 底部 Tab */
+$$(".tab-item", tabbar).forEach(b => b.addEventListener("click", () => switchTab(b.dataset.tab)));
+
+/* 聊天列表搜索（输入即过滤，直接重渲染列表） */
+host.addEventListener("input", (e) => {
+  if (e.target.id === "convSearch") {
+    window.__convQuery = e.target.value;
+    const stackEl = $("#stackRoot");
+    const layers = $$(":scope > .layer", stackEl);
+    const top = layers[layers.length - 1];
+    if (top && !top.classList.contains("anim")) {
+      top.innerHTML = pageConvList();
+      const inp = $("#convSearch", top);
+      if (inp) { inp.focus(); inp.setSelectionRange(inp.value.length, inp.value.length); }
+    }
+  }
+});
+
+/* 键盘：Esc 关浮层 */
+window.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeModal(); closeSheet(); closeDrawer(); } });
+
+/* 时钟 */
+function tick() {
+  const d = new Date();
+  $("#sbTime").textContent = d.getHours() + ":" + String(d.getMinutes()).padStart(2, "0");
+}
+tick(); setInterval(tick, 20000);
+
+/* ---------- 启动 ---------- */
+applyTheme();
+initStacks();
+render();
+</script>
+</body>
+</html>

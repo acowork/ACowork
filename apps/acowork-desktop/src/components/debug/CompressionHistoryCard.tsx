@@ -168,13 +168,13 @@ export function CompressionHistoryCard({
                 onToggle={() => toggleExpanded(i)}
                 surface="inset"
                 title={
-                  <span className="font-mono text-[11px] text-text-tertiary ">
+                  <span className="font-mono text-11 text-text-tertiary ">
                     {time}
                   </span>
                 }
                 meta={<span className={cnLevel(m.level)}>Lv{m.level}</span>}
                 trailing={
-                  <span className="font-mono text-[11px] text-text-secondary ">
+                  <span className="font-mono text-11 text-text-secondary ">
                     {ratio}
                   </span>
                 }
@@ -209,10 +209,10 @@ export function CompressionHistoryCard({
  *  amber so an unexpected deep compaction stands out at a glance. */
 function cnLevel(level: number): string {
   if (level >= 8) {
-    return "rounded bg-amber-100 px-1 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-400";
+    return "rounded bg-amber-100 px-1 py-0.5 text-10 font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-400";
   }
   if (level >= 5) {
-    return "rounded bg-orange-50 px-1 py-0.5 text-[10px] font-medium text-orange-600 dark:bg-orange-900/20 dark:text-orange-400";
+    return "rounded bg-orange-50 px-1 py-0.5 text-10 font-medium text-orange-600 dark:bg-orange-900/20 dark:text-orange-400";
   }
-  return "rounded bg-zinc-100 px-1 py-0.5 text-[10px] font-medium text-text-secondary dark:bg-zinc-800 ";
+  return "rounded bg-zinc-100 px-1 py-0.5 text-10 font-medium text-text-secondary dark:bg-zinc-800 ";
 }

@@ -287,7 +287,7 @@ export function DocEditor() {
               const instanceId = doc.meta.import.instance_id;
               return (
                 <span
-                  className="inline-flex max-w-[45%] shrink items-center gap-1 truncate rounded-full bg-violet-50 px-1.5 py-0.5 text-[10px] text-violet-600 dark:bg-violet-900/30 dark:text-violet-300"
+                  className="inline-flex max-w-[45%] shrink items-center gap-1 truncate rounded-full bg-violet-50 px-1.5 py-0.5 text-10 text-violet-600 dark:bg-violet-900/30 dark:text-violet-300"
                   title={`${instanceId} · ${doc.meta.import.workspace_path}`}
                 >
                   <Sparkles className="h-2.5 w-2.5 shrink-0" aria-hidden />
@@ -296,7 +296,7 @@ export function DocEditor() {
               );
             })()}
           </div>
-          <div className="flex items-center gap-2 text-[10px] text-text-tertiary">
+          <div className="flex items-center gap-2 text-10 text-text-tertiary">
             <span className="truncate">{doc.path}</span>
             <span aria-label={t("doc.versionLabel")}>v{doc.meta.version}</span>
             {dirty && <span className="text-amber-500">{t("doc.unsaved")}</span>}
@@ -312,7 +312,7 @@ export function DocEditor() {
         {/* 编辑引擎切换（rich=Tiptap 富文本 / source=Monaco 源码；预览模式隐藏） */}
         {mode !== "preview" && (
           <div
-            className="flex shrink-0 items-center rounded-md border border-border-outer p-0.5 text-[11px]"
+            className="flex shrink-0 items-center rounded-md border border-border-outer p-0.5 text-11"
             role="group"
             aria-label={t("doc.engineLabel")}
           >
@@ -353,7 +353,7 @@ export function DocEditor() {
 
         {/* 模式切换（编辑/分栏/预览） */}
         <div
-          className="flex shrink-0 items-center rounded-md border border-border-outer p-0.5 text-[11px]"
+          className="flex shrink-0 items-center rounded-md border border-border-outer p-0.5 text-11"
           role="tablist"
           aria-label={t("doc.modeLabel")}
         >
@@ -367,7 +367,7 @@ export function DocEditor() {
           disabled={!dirty || saving || !healthy}
           onClick={() => void handleSave()}
           className={cn(
-            "flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium transition-colors disabled:opacity-40",
+            "flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-11 font-medium transition-colors disabled:opacity-40",
             dirty
               ? "bg-[var(--color-accent)] text-white hover:opacity-90"
               : "border border-zinc-200 text-text-tertiary dark:border-zinc-700",
@@ -380,7 +380,7 @@ export function DocEditor() {
 
       {/* ── 409 版本冲突 / 错误 banner ─────────────────────── */}
       {conflict && (
-        <div className="flex shrink-0 items-center gap-2 border-b border-amber-200 bg-amber-50 px-3 py-1.5 text-[11px] text-amber-800 dark:border-amber-800/40 dark:bg-amber-900/25 dark:text-amber-200">
+        <div className="flex shrink-0 items-center gap-2 border-b border-amber-200 bg-amber-50 px-3 py-1.5 text-11 text-amber-800 dark:border-amber-800/40 dark:bg-amber-900/25 dark:text-amber-200">
           <span className="flex-1">{t("doc.versionConflict")}</span>
           <button
             type="button"
@@ -393,7 +393,7 @@ export function DocEditor() {
         </div>
       )}
       {saveError && !conflict && (
-        <div className="flex shrink-0 items-center gap-2 border-b border-red-200 bg-red-50 px-3 py-1.5 text-[11px] text-red-700 dark:border-red-800/40 dark:bg-red-900/25 dark:text-red-200">
+        <div className="flex shrink-0 items-center gap-2 border-b border-red-200 bg-red-50 px-3 py-1.5 text-11 text-red-700 dark:border-red-800/40 dark:bg-red-900/25 dark:text-red-200">
           <span className="flex-1">{saveError}</span>
         </div>
       )}
@@ -406,7 +406,7 @@ export function DocEditor() {
 
       {/* rich 引擎加载失败 → 显式降级提示（ADR-079 §7：不静默回退） */}
       {mode !== "preview" && engine === "rich" && richFailed && (
-        <div className="flex shrink-0 items-center gap-2 border-b border-amber-200 bg-amber-50 px-3 py-1.5 text-[11px] text-amber-800 dark:border-amber-800/40 dark:bg-amber-900/25 dark:text-amber-200">
+        <div className="flex shrink-0 items-center gap-2 border-b border-amber-200 bg-amber-50 px-3 py-1.5 text-11 text-amber-800 dark:border-amber-800/40 dark:bg-amber-900/25 dark:text-amber-200">
           <span className="flex-1">{t("doc.richLoadFailed")}</span>
         </div>
       )}

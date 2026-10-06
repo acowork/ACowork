@@ -16,11 +16,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use rumqttc::{AsyncClient, Event, Incoming, MqttOptions, QoS};
+use rumqttc::{AsyncClient, Event, Incoming, MqttOptions, QoS, Transport};
 use tokio::sync::Mutex;
 
 use crate::config::{
-    FATAL_BACKOFF, FATAL_STREAK_LIMIT, KEEPALIVE_INTERVAL, MqttClientConfig, POLL_WATCHDOG_TIMEOUT,
+    FATAL_BACKOFF, FATAL_STREAK_LIMIT, KEEPALIVE_INTERVAL, MqttClientConfig, MqttTransport,
+    POLL_WATCHDOG_TIMEOUT,
 };
 use crate::err_class::{classify, ErrClass, ErrorDescriptor};
 use crate::force_restart::ForceRestart;
@@ -132,6 +133,54 @@ impl<B: MqttClientHandler> Clone for MqttClient<B> {
     }
 }
 
+/// Build rumqttc [`MqttOptions`] address + transport from the config.
+///
+/// rumqttc's address semantics are transport-dependent: for TCP the
+/// `MqttOptions` "host" slot carries the plain host (paired with
+/// `port`), while for Ws/Wss the slot must carry the FULL URL
+/// (`eventloop.rs` feeds it to `split_url` for the TCP connect and to
+/// `into_client_request` for the WS handshake — the path `/mqtt` is
+/// part of the handshake URL). This helper centralizes that mapping so
+/// every client gets it right without knowing rumqttc internals.
+///
+/// TLS for [`MqttTransport::Wss`] uses the platform root store
+/// (`Transport::wss_with_default_config`) — the relay serves a normal
+/// CA-signed certificate, so no custom trust anchors are needed.
+fn build_mqtt_options(config: &MqttClientConfig) -> MqttOptions {
+    match &config.transport {
+        MqttTransport::Tcp => {
+            MqttOptions::new(config.client_id.clone(), config.host.clone(), config.port)
+        }
+        MqttTransport::Wss { url } => {
+            // The port slot is unused for WSS (rumqttc derives the port
+            // from the URL, defaulting to 443 for the wss scheme); 443
+            // keeps `broker_address()` sensible for diagnostics.
+            let mut options = MqttOptions::new(config.client_id.clone(), url.clone(), 443);
+            ensure_crypto_provider();
+            options.set_transport(Transport::wss_with_default_config());
+            options
+        }
+    }
+}
+
+/// Install the process-level rustls CryptoProvider before rumqttc builds
+/// a WSS `ClientConfig`.
+///
+/// `Transport::wss_with_default_config()` resolves the provider via
+/// feature auto-detection, which fails (panic) whenever the build graph
+/// enables more than one provider feature — cargo feature unification
+/// across a workspace can do exactly that (e.g. a dependency pulling
+/// rustls `aws-lc-rs` next to the workspace's `ring`). Installing `ring`
+/// explicitly makes WSS setup deterministic regardless of how features
+/// unify downstream. Idempotent: a provider installed earlier by the
+/// host application wins (the error is deliberately ignored).
+fn ensure_crypto_provider() {
+    static INSTALL: std::sync::Once = std::sync::Once::new();
+    INSTALL.call_once(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
+
 impl<B: MqttClientHandler> MqttClient<B> {
     /// Connect to the broker and start the poll task.
     ///
@@ -147,7 +196,7 @@ impl<B: MqttClientHandler> MqttClient<B> {
         handler: B,
         on_state_change: Option<Arc<dyn Fn(SessionState) + Send + Sync>>,
     ) -> Result<Self, MqttClientError> {
-        let mut options = MqttOptions::new(config.client_id.clone(), config.host.clone(), config.port);
+        let mut options = build_mqtt_options(&config);
         options.set_keep_alive(KEEPALIVE_INTERVAL);
         options.set_clean_session(true);
         if let Some((username, password)) = &config.credentials {
@@ -286,7 +335,9 @@ impl<B: MqttClientHandler> MqttClient<B> {
                                          relying on next poll() to surface the socket error. \
                                          SessionState set to Reconnecting, on_disconnect callback fired."
                                     );
-                                    set_state(SessionState::Reconnecting);
+                                    set_state(SessionState::Reconnecting {
+                                        reason: "broker sent DISCONNECT".to_string(),
+                                    });
                                     let poll_client = task_shared_handle.lock().await.clone();
                                     task_handler_poll.on_disconnect(&poll_client).await;
                                 }
@@ -298,7 +349,9 @@ impl<B: MqttClientHandler> MqttClient<B> {
                                     task_handler_poll
                                         .on_error(&poll_client, class, &e.to_string())
                                         .await;
-                                    set_state(SessionState::Reconnecting);
+                                    set_state(SessionState::Reconnecting {
+                                        reason: format!("eventloop error: {e}"),
+                                    });
 
                                     if class.is_fatal() {
                                         // E2/E3/E4/E6: the EventLoop's
@@ -361,7 +414,12 @@ impl<B: MqttClientHandler> MqttClient<B> {
                                 timeout_s = POLL_WATCHDOG_TIMEOUT.as_secs(),
                                 "MQTT poll() watchdog timeout - forcing soft-restart (possible half-dead socket)"
                             );
-                            set_state(SessionState::Reconnecting);
+                            set_state(SessionState::Reconnecting {
+                                reason: format!(
+                                    "poll watchdog timeout ({}s of silence)",
+                                    POLL_WATCHDOG_TIMEOUT.as_secs()
+                                ),
+                            });
                             break;
                         }
                         // Fix-3 observability (shared, ADR-065 Step 4):
@@ -537,6 +595,32 @@ mod tests {
         // Sanity: the error type is constructible and Display-able.
         let e = MqttClientError::Publish("boom".into());
         assert!(e.to_string().contains("boom"));
+    }
+
+    /// TCP configs address the broker by the plain host:port pair.
+    #[test]
+    fn tcp_config_uses_host_port_verbatim() {
+        let cfg = MqttClientConfig::new("node:test", "127.0.0.1", 19875);
+        let options = build_mqtt_options(&cfg);
+        assert_eq!(options.broker_address(), ("127.0.0.1".to_string(), 19875));
+    }
+
+    /// WSS configs must land the FULL URL (scheme + authority + path)
+    /// in the rumqttc broker_addr slot — rumqttc parses it with
+    /// `split_url` for the TCP connect and uses it verbatim (including
+    /// the `/mqtt` path) for the WebSocket handshake. A plain host
+    /// here would connect to port 0 and fail the WS upgrade.
+    #[test]
+    fn wss_config_builds_url_addressed_options() {
+        let mut cfg = MqttClientConfig::new("user:u-1:desktop:42", "ignored", 0);
+        cfg.transport = MqttTransport::Wss {
+            url: "wss://gw-abc.relay.example.com/mqtt".into(),
+        };
+        let options = build_mqtt_options(&cfg);
+        assert_eq!(
+            options.broker_address(),
+            ("wss://gw-abc.relay.example.com/mqtt".to_string(), 443)
+        );
     }
 
     #[tokio::test]

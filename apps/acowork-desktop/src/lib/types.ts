@@ -1,6 +1,12 @@
 import type { ContextUsageSection } from "./contextUsageBreakdown";
-/** Gateway deployment mode */
-export type GatewayMode = "local" | "remote";
+/**
+ * Gateway deployment mode (design doc 24 §8.0 — three-topology model):
+ * - "local"  — Desktop spawns/adopts a Gateway on this machine
+ * - "remote" — LAN direct connect to a pre-existing Gateway
+ * - "relay"  — connect through the cloud relay over the public internet
+ *              (WSS MQTT + user access token, no local spawn)
+ */
+export type GatewayMode = "local" | "remote" | "relay";
 
 /** Local Gateway process state */
 export type LocalGatewayState = "idle" | "starting" | "running" | "stopped" | "error";
@@ -1046,6 +1052,17 @@ export interface MemoryStatsResponse {
    */
   nodes_with_embedding: number;
   /**
+   * Vectors stored at a width other than `stored_dim`, and therefore skipped
+   * silently by vector search. They are not missing, so no count of missing
+   * embeddings reports them; the panel shows its rebuild banner on this being
+   * non-zero.
+   *
+   * Optional because the panel and the runtime are built separately: an older
+   * runtime simply omits it, which must read as "nothing stale" rather than
+   * crash the banner.
+   */
+  vectors_of_other_dim?: number;
+  /**
    * Embedding dimension of the active embedding provider (model output).
    * 0 if no embedding provider is currently configured. Used together with
    * `stored_dim` to detect a dimension mismatch.
@@ -1095,6 +1112,32 @@ export interface DistillerLastRun {
   procedures_promoted: number;
   autobio_promoted: number;
   episodes_marked_consolidated: number;
+  /**
+   * Why the run produced what it produced. Without this an empty panel is
+   * ambiguous between "nothing to do", "everything deferred" and "the
+   * distiller died every hour" — all three render as `promoted: 0`.
+   * Optional: older runtimes do not return it.
+   */
+  error?: string | null;
+  funnel?: DistillerFunnel;
+}
+
+/** Per-verdict counters of one distiller run (ADR-068 2026-10 project+merge). */
+export interface DistillerFunnel {
+  scanned: number;
+  backlog_remaining: number;
+  llm_calls: number;
+  llm_calls_failed: number;
+  llm_calls_truncated: number;
+  below_importance: number;
+  candidates_recalled: number;
+  projected: number;
+  verdict_no_merge: number;
+  verdict_merged: number;
+  verdict_superseded: number;
+  episodes_consolidated: number;
+  episodes_deferred: number;
+  errors: string[];
 }
 
 /**

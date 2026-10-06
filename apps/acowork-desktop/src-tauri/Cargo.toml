@@ -32,7 +32,14 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 toml = "0.8"
 
 # MQTT (ADR-033 Phase 3): Desktop MQTT client for real-time events
-rumqttc = "0.25"
+# `default-features = false`: rumqttc's default `use-rustls` enables the
+# rustls `aws-lc-rs` provider, colliding with the workspace-wide `ring`
+# unification (design doc 24 M4 review, C1). The TLS provider is
+# guaranteed by acowork-mqtt-session (`ensure_crypto_provider`).
+rumqttc = { version = "0.25", default-features = false }
+# Relay remote mode: decode the `sub` claim out of the mirrored access
+# token (base64url JWT payload segment) for the MQTT client_id.
+base64 = "0.22"
 # Required for MQTT payload protobuf encoding
 prost = "0.13"
 

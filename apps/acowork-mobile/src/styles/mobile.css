@@ -1,0 +1,67 @@
+
+/* ── Projects (§9) ───────────────────────────────────────────────────── */
+
+.board-nav {
+  display: flex;
+  gap: var(--space-2);
+  overflow-x: auto;
+  padding: var(--space-2) var(--space-4);
+  border-bottom: 1px solid var(--color-border);
+  /* The chip row scrolls, the screen does not — a horizontally drifting
+     list under a thumb that meant to go back is the worst failure mode
+     on this surface. */
+  scrollbar-width: none;
+  flex: none;
+}
+.board-nav::-webkit-scrollbar { display: none; }
+.board-chip {
+  flex: none;
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  color: var(--color-text-dim);
+  border-radius: var(--radius-pill);
+  padding: 6px 12px;
+  font-size: var(--font-sm);
+  min-height: var(--touch-min);
+}
+.board-chip.is-active {
+  background: var(--color-tint);
+  border-color: var(--color-tint);
+  color: var(--color-on-tint);
+}
+.board-chip-n { opacity: 0.75; margin-left: 2px; }
+
+.task-title {
+  font-size: var(--font-lg);
+  font-weight: var(--weight-semibold);
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--color-border);
+}
+.task-desc {
+  padding: var(--space-3) var(--space-4);
+  font-size: var(--font-sm);
+  color: var(--color-text);
+  overflow-wrap: anywhere;
+}
+.task-indent { color: var(--color-text-dim); }
+
+.review-actions {
+  display: flex;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+}
+.review-btn {
+  flex: 1;
+  min-height: var(--touch-min);
+  border-radius: var(--radius-control);
+  font-size: var(--font-md);
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+}
+.review-btn.approve {
+  background: var(--color-success);
+  border-color: var(--color-success);
+  color: var(--color-on-accent);
+}
+.review-btn.reject { color: var(--color-danger); }
+.review-btn:disabled { opacity: 0.5; }

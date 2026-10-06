@@ -341,7 +341,13 @@ export function GitStatusPanel({ agentId, workspaceId }: GitStatusPanelProps) {
               key={c.path}
               onContextMenu={(e) => menu.openAt(e, c)}
               className={cn(
-                "file-tree-row flex cursor-pointer items-center gap-1.5 py-[0.2em] pr-3 pl-4 text-xs select-none",
+                // Font size comes from `.file-tree-row` in globals.css, the
+                // same rule FileTreeNode's rows carry — both lists sit
+                // stacked in one panel, so they scale from one declaration
+                // (12px at the default base, i.e. the app's `text-xs` step).
+                // Keep `py-[0.2em]` in sync with the tree row: the em padding
+                // is part of the height the tree's virtualizer derives.
+                "file-tree-row flex cursor-pointer items-center gap-1.5 py-[0.2em] pr-3 pl-4 select-none",
                 "hover:bg-zinc-100 dark:hover:bg-zinc-800",
               )}
               onDoubleClick={() => {
@@ -364,13 +370,17 @@ export function GitStatusPanel({ agentId, workspaceId }: GitStatusPanelProps) {
                 {c.path}
               </span>
               {c.oldPath && (
-                <span className="truncate text-[10px] text-text-tertiary ">
+                // `text-11`, not `text-10`: these meta bits resolve against the
+                // row's own 12px font-size (em-based tokens), so text-10 here
+                // would land at 8.6px — under the app's 9px floor. text-11
+                // renders 9.4px, i.e. the same visual step as before.
+                <span className="truncate text-11 text-text-tertiary ">
                   ← {c.oldPath}
                 </span>
               )}
               {c.staged && (
                 <span
-                  className="shrink-0 rounded bg-emerald-100 px-1 text-[10px] text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300"
+                  className="shrink-0 rounded bg-emerald-100 px-1 text-11 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300"
                   title={t("gitStatus.staged")}
                 >
                   {t("gitStatus.staged")}
@@ -385,7 +395,7 @@ export function GitStatusPanel({ agentId, workspaceId }: GitStatusPanelProps) {
           data-testid="git-status-pagination"
           className="flex shrink-0 items-center justify-between gap-2 border-t border-border-divider px-2 py-1"
         >
-          <span className="text-[10px] tabular-nums text-text-tertiary ">
+          <span className="text-10 tabular-nums text-text-tertiary ">
             {pageIndex * PAGE_SIZE + 1}–{Math.min((pageIndex + 1) * PAGE_SIZE, changes.length)} / {changes.length}
           </span>
           <div className="flex items-center gap-1">

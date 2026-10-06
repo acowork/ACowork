@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { useChatStore } from "../../stores/chatStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { useDebugStore } from "../../stores/debugStore";
+import { useSettingsStore } from "../../stores/settingsStore";
 import type { ChatMessage, ProviderAccount, SessionStatus } from "../../lib/types";
 import { getProcessingPhase } from "../../lib/types";
 import { cn, formatPercent } from "../../lib/utils";
@@ -57,6 +58,12 @@ const RIGHT_PANEL_TOP_SHADOW_THRESHOLD_PX = 4;
 export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTab, onTabChange }: RightPanelProps & { width: number }) {
   const { selectedAgentId } = useAgentStore();
   const selectedAgent = useAgentStore((s) => s.selectedAgentId ? s.agents[s.selectedAgentId]?.meta : undefined);
+  // Design doc 24 §8.2 (F7): the debug RPC tunnels through the Gateway
+  // `/api/debug/*` endpoints, which the relay's remote guard 404s on
+  // purpose. DevMode stays a same-machine / LAN feature — in relay mode
+  // the toggle is disabled so the user isn't invited to enable a
+  // session that could never attach.
+  const debugRemoteUnavailable = useSettingsStore((s) => s.gatewayMode === "relay");
   const activeSessionId = useChatStore((s) => selectedAgentId ? s.agentStates[selectedAgentId]?.activeSessionId ?? null : null);
   const tokenUsage = useChatStore((s) => {
     if (!selectedAgentId) return null;
@@ -429,8 +436,19 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
           -left-1), so it must stay outside this clipping box or it would be
           cut off and resizing would break. */}
       <div className={cn(CAPSULE_PANE_CN, "flex-1 bg-right-panel")}>
-      {/* Tab title header */}
-      <div className="border-b border-border-divider px-3 pt-[10px] pb-[7px] text-xs font-medium text-text-tertiary ">
+      {/* Tab title header.
+          Height MUST come from a fixed line box, not from px padding +
+          the text line box: `pt-[10px] pb-[7px]` + a `text-xs` line meant
+          the band grew with --ui-font-size (the line box scales), so this
+          `border-b` drifted down at font sizes 1/3/4/5 and stopped lining
+          up with the left column's header divider. `--tab-line-height`
+          is the app's existing "tab strip keeps its height, text scales"
+          contract (SessionTabBar / tab.tsx / FileEditorPanel tabs all
+          use it); --ui-list-header-h is the nav-column value the left
+          pane is pinned to. Belt and braces: both are px/rem, so the
+          rule sits on the same baseline as the left column at every
+          font size while the text itself still scales. */}
+      <div className="flex min-h-[var(--ui-list-header-h)] shrink-0 items-center border-b border-border-divider px-[var(--tab-px)] text-[length:var(--tab-font-size)] font-medium leading-[var(--tab-line-height)] text-text-tertiary ">
         {t(`rightPanel.${activeTab}`)}
       </div>
 
@@ -556,16 +574,18 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
                         }
                       }
                     }}
-                    disabled={enablingDebug || disablingDebug}
+                    disabled={enablingDebug || disablingDebug || debugRemoteUnavailable}
                     size="sm"
                     label={
-                      enablingDebug
-                        ? t("rightPanel.enteringDebug")
-                        : disablingDebug
-                          ? t("rightPanel.exitingDebug")
-                          : selectedAgent?.debug_state === "enabled"
-                            ? t("rightPanel.buttonExitDebug")
-                            : t("rightPanel.enterDebug")
+                      debugRemoteUnavailable
+                        ? t("rightPanel.debugRemoteUnavailable")
+                        : enablingDebug
+                          ? t("rightPanel.enteringDebug")
+                          : disablingDebug
+                            ? t("rightPanel.exitingDebug")
+                            : selectedAgent?.debug_state === "enabled"
+                              ? t("rightPanel.buttonExitDebug")
+                              : t("rightPanel.enterDebug")
                     }
                     labelPosition="right"
                   />
@@ -685,7 +705,7 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
                               >
                                 <ChevronLeft className="h-3.5 w-3.5" />
                               </button>
-                              <span className="min-w-[3ch] text-center font-mono text-[10px] tabular-nums text-text-tertiary ">
+                              <span className="min-w-[3ch] text-center font-mono text-10 tabular-nums text-text-tertiary ">
                                 {snapshotPage + 1}/{snapshotTotalPages}
                               </span>
                               <button

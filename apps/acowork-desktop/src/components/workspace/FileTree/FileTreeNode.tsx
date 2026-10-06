@@ -91,7 +91,7 @@ interface FileTreeNodeProps {
   onPointerDownTreeEntry?: (relPath: string, isDir: boolean, e: React.PointerEvent) => void;
   /** Virtualizer slot geometry for THIS row — the row div doubles as
    * the slot (see FileTree.tsx). `slotSize` is the exact float
-   * (`fontSize × 16 × 1.9`), not a rounded integer. */
+   * (`fontSize × 16 × 0.857 × 1.9`), not a rounded integer. */
   slotSize: number;
   slotStart: number;
   slotIndex: number;
@@ -483,7 +483,9 @@ export const FileTreeNode = memo(function FileTreeNode({
           height: `${slotSize}px`,
           transform: `translateY(${slotStart}px)`,
           paddingLeft: `${depth * 16 + 8}px`,
-          fontSize: "var(--ui-font-size, 0.875rem)",
+          // No font-size here: `.file-tree-row` in globals.css owns the row
+          // glyph size (12px at the default base) and is shared with
+          // GitStatusPanel's rows, so the two lists cannot drift apart.
         }}
         /* DnD identity: `data-rel-path` is how the parent's global
          * pointermove/pointerup handlers find this row via
@@ -533,7 +535,10 @@ export const FileTreeNode = memo(function FileTreeNode({
             onDoubleClick={(e) => e.stopPropagation()}
             onContextMenu={(e) => e.stopPropagation()}
             className="min-w-0 flex-1 rounded-sm border border-[var(--color-accent)] bg-modal-surface px-1 text-text-secondary outline-none dark:bg-zinc-900 "
-            style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}
+            // No font-size override: Preflight gives form controls
+            // `font-size: 100%`, so the field takes the row's own size. It
+            // replaces the label in place, and a 14px field inside a 12px row
+            // would push the row past the virtualizer's slot height.
           />
         ) : (
           <span className="whitespace-nowrap text-text-tertiary ">{entry.name}</span>
@@ -541,7 +546,7 @@ export const FileTreeNode = memo(function FileTreeNode({
 
         {/* Loading indicator for directories being fetched */}
         {isLoading && isDir && isExpanded && (
-          <span className="ml-auto text-text-tertiary" style={{ fontSize: "calc(var(--ui-font-size, 0.875rem) * 0.78)" }}>...</span>
+          <span className="ml-auto text-text-tertiary" style={{ fontSize: "calc(var(--ui-text-size) * 0.78)" }}>...</span>
         )}
 
         {/* Open-files dot indicator for directories (VS Code style) */}

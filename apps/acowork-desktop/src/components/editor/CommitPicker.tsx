@@ -254,7 +254,7 @@ export function CommitPicker({
                         />
                     </div>
                     {pagination && (
-                        <div className="text-[10px] text-text-tertiary  px-1">
+                        <div className="text-10 text-text-tertiary  px-1">
                             {(() => {
                                 const start = (pagination.currentPage - 1) * pagination.pageSize + 1;
                                 const end = Math.min(
@@ -295,7 +295,7 @@ export function CommitPicker({
                                 : "text-text-secondary hover:bg-zinc-100  dark:hover:bg-zinc-700")
                         }
                     >
-                        <span className="shrink-0 rounded bg-zinc-200 px-1 py-px font-mono text-[10px] text-text-secondary dark:bg-zinc-600 ">
+                        <span className="shrink-0 rounded bg-zinc-200 px-1 py-px font-mono text-10 text-text-secondary dark:bg-zinc-600 ">
                             WT
                         </span>
                         <span className="truncate">{t(WORKING_TREE_LABEL_KEY)}</span>
@@ -330,13 +330,13 @@ export function CommitPicker({
                                     : "hover:bg-zinc-100 dark:hover:bg-zinc-700",
                             )}
                         >
-                            <span className="shrink-0 rounded bg-zinc-200 px-1 py-px font-mono text-[10px] text-text-secondary dark:bg-zinc-600 ">
+                            <span className="shrink-0 rounded bg-zinc-200 px-1 py-px font-mono text-10 text-text-secondary dark:bg-zinc-600 ">
                                 {c.shortHash}
                             </span>
                             <span className="min-w-0 flex-1 truncate text-text-secondary ">
                                 {c.subject}
                             </span>
-                            <span className="shrink-0 text-[10px] text-text-tertiary ">
+                            <span className="shrink-0 text-10 text-text-tertiary ">
                                 {c.author}
                             </span>
                         </button>
@@ -359,7 +359,7 @@ export function CommitPicker({
                     >
                         <ChevronLeft className="h-3.5 w-3.5" />
                     </button>
-                    <span className="text-[11px] text-text-tertiary ">
+                    <span className="text-11 text-text-tertiary ">
                         {t("gitStatus.commitPickerPageOf", {
                             current: pagination.currentPage,
                             total: pagination.totalPages,

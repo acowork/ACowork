@@ -10,6 +10,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { cleanup, render, waitFor } from "@testing-library/react";
 import { AuthedImage } from "./AuthedImage";
+import { log } from "../../lib/logger";
 
 let originalFetch: typeof globalThis.fetch;
 let originalCreate: unknown;
@@ -59,7 +60,8 @@ describe("AuthedImage", () => {
     );
   });
 
-  it("renders the fallback when the fetch is rejected (the 401 path)", async () => {
+  it("renders the fallback AND warns on a non-2xx fetch (the 401 path)", async () => {
+    const warnSpy = vi.spyOn(log, "warn").mockImplementation(() => {});
     globalThis.fetch = vi.fn(async () => ({
       ok: false,
       status: 401,
@@ -72,6 +74,16 @@ describe("AuthedImage", () => {
 
     expect(getByText("builtin")).toBeTruthy();
     expect(container.querySelector("img")).toBeNull();
+    // A silent fallback is indistinguishable from "no avatar configured",
+    // which is how the 401 regression hid in the first place. The fetch
+    // is async, so wait for it — the old assertions above pass even when
+    // the failure path is completely silent.
+    await waitFor(() => {
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining("status=401"),
+      );
+    });
+    warnSpy.mockRestore();
   });
 
   it("renders the fallback for a falsy src without touching the network", () => {

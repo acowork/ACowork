@@ -15,6 +15,7 @@
 
 import { create } from "zustand";
 import { getGatewayUrl } from "../lib/config";
+import { jwtExpMs } from "../lib/jwt";
 import { log } from "../lib/logger";
 import {
   AuthApiError,
@@ -544,3 +545,118 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
     set({ viewAsUserId: userId });
   },
 }));
+
+// ── Proactive token rotation ──────────────────────────────────────────
+//
+// The access token lives 15 minutes (`acowork_core::auth::ACCESS_TTL_SECS`)
+// and, until this existed, it was only ever rotated *lazily* — by a 401
+// from an authenticated request. That is fine for HTTP (the request that
+// discovers the expiry replays with the new token) but NOT for relay-mode
+// MQTT: its CONNECT password IS the access token, and the strict remote
+// listener drops a bad credential WITHOUT CONNACK (rumqttd `InvalidAuth`).
+// The MQTT client therefore sees only "Connection closed by peer abruptly"
+// — indistinguishable from a network drop — and retries the same expired
+// password forever. Observed live: after a hotspot switch the relay tunnel
+// came back but MQTT stayed red for minutes, until an unrelated HTTP 401
+// happened to trigger a rotation.
+//
+// Rotating shortly BEFORE `exp` keeps the mirrored token valid, so every
+// (re)connect has a fresh password. The webview still owns the rotation —
+// this only decides when to call the existing single-flight
+// `refreshTokens()` (ADR-076 §决策 3: no second rotation source).
+
+/** How long before `exp` the rotation fires. Comfortably covers a slow
+ *  `/api/auth/refresh` round-trip plus clock skew, while staying well
+ *  inside the 15-minute TTL. */
+export const PROACTIVE_REFRESH_LEAD_MS = 120_000;
+
+/** Floor for the re-check delay. Prevents a spin if the issued token is
+ *  already inside the lead window (clock skew, short TTL). */
+export const PROACTIVE_REFRESH_MIN_DELAY_MS = 15_000;
+
+/**
+ * Consecutive rotations where the replacement token was already inside the
+ * lead window. After this many, stop scheduling and fall back to the lazy
+ * 401 path rather than hammering the Gateway.
+ */
+export const MAX_STALLED_ROTATIONS = 3;
+
+let proactiveRefreshHandle: ReturnType<typeof setTimeout> | null = null;
+let stalledRotations = 0;
+
+/** Cancel any pending proactive rotation and forget the stall count.
+ *  Exported for tests/teardown. Note this is the *full* reset — arming
+ *  clears only the timer, so consecutive stalled rotations can still be
+ *  counted. */
+export function disarmProactiveRefresh(): void {
+  if (proactiveRefreshHandle !== null) {
+    clearTimeout(proactiveRefreshHandle);
+    proactiveRefreshHandle = null;
+  }
+  stalledRotations = 0;
+}
+
+/** Clear only the pending timer (internal arming step). */
+function clearProactiveTimer(): void {
+  if (proactiveRefreshHandle !== null) {
+    clearTimeout(proactiveRefreshHandle);
+    proactiveRefreshHandle = null;
+  }
+}
+
+/**
+ * (Re)arm the proactive rotation for `token` — `null` disarms (logged out).
+ *
+ * Called from the store subscription below, so every path that lands a new
+ * token (init / login / first-login / refresh / logout) is covered without
+ * touching each call site.
+ */
+export function armProactiveRefresh(token: string | null): void {
+  clearProactiveTimer();
+  if (!token) {
+    // Logged out / session cleared: the counter starts fresh next login.
+    stalledRotations = 0;
+    return;
+  }
+
+  const expMs = jwtExpMs(token);
+  if (expMs === null) {
+    // Unreadable payload: keep the lazy 401 path as the safety net rather
+    // than scheduling against a guess.
+    log.warn("[authStore] token has no readable exp — proactive refresh off");
+    return;
+  }
+
+  const remainingMs = expMs - Date.now();
+  if (remainingMs <= PROACTIVE_REFRESH_LEAD_MS) {
+    stalledRotations += 1;
+    if (stalledRotations > MAX_STALLED_ROTATIONS) {
+      log.warn(
+        `[authStore] proactive refresh gave up after ${MAX_STALLED_ROTATIONS} rotations that ` +
+          "did not extend the token — relying on the 401 path",
+      );
+      return;
+    }
+  } else {
+    // A token with real headroom means the previous cycle worked.
+    stalledRotations = 0;
+  }
+
+  const delay = Math.max(
+    PROACTIVE_REFRESH_MIN_DELAY_MS,
+    remainingMs - PROACTIVE_REFRESH_LEAD_MS,
+  );
+  proactiveRefreshHandle = setTimeout(() => {
+    proactiveRefreshHandle = null;
+    log.debug(`[authStore] proactive token rotation (exp in ${Math.round(remainingMs / 1000)}s)`);
+    void useAuthStore.getState().refreshTokens();
+  }, delay);
+}
+
+// Armed from the token itself so no call site has to remember: a rotation
+// lands a new `accessToken`, which re-arms for the next cycle.
+useAuthStore.subscribe((state, prev) => {
+  if (state.accessToken !== prev.accessToken) {
+    armProactiveRefresh(state.accessToken);
+  }
+});

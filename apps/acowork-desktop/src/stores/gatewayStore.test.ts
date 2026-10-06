@@ -25,6 +25,9 @@
  *   - A superseded / cancelled probe exits silently — a stale question
  *     must never pollute a newer fact (this was the 21s-late response
  *     that clobbered a healed status).
+ *   - Three timeouts in a row DO act — they rebuild the MQTT connection
+ *     (a transport that answers nothing is half-dead, not merely slow),
+ *     and still write no verdict.
  *   - The classifier tick retries every 3s while MQTT is down and never
  *     preempts a probe already in flight.
  */
@@ -114,6 +117,24 @@ function stubChildAlive(running: boolean) {
         if (cmd === "stop_local_gateway") return Promise.resolve(undefined);
         return Promise.reject(new Error(`Unexpected invoke: ${cmd}`));
     });
+}
+
+/** One probe that runs out its 10 s budget (inconclusive). Needs fake timers. */
+async function hangingProbe() {
+    stubFetchHanging();
+    const p = useGatewayStore.getState().checkHealth();
+    await vi.advanceTimersByTimeAsync(10_001);
+    await p;
+    // Settle the streak accounting (dynamic import + invoke are both async).
+    await vi.advanceTimersByTimeAsync(1);
+}
+
+/** One probe that answers. Needs fake timers. */
+async function answerProbe() {
+    stubFetchOk();
+    const p = useGatewayStore.getState().checkHealth();
+    await vi.advanceTimersByTimeAsync(1);
+    await p;
 }
 
 beforeEach(() => {
@@ -312,6 +333,55 @@ describe("gatewayStore.gatewayAlive (single-authority liveness)", () => {
         const s = useGatewayStore.getState();
         expect(s.status).toBe("connecting");
         expect(s.gatewayAlive).toBe("unknown");
+    });
+
+    /**
+     * Half-dead transport (2026-10-04 relay incident): yamux ping/pong kept
+     * answering while the device stream stopped delivering, so every probe
+     * timed out forever — inconclusive by invariant 2, and nothing anywhere
+     * acted. Three timeouts in a row now rebuild the connection, which is
+     * still NOT a verdict about the Gateway.
+     */
+    it("three inconclusive probes in a row force a fresh connection", async () => {
+        vi.useFakeTimers();
+        mockInvoke.mockImplementation((cmd: string) =>
+            cmd === "force_reconnect_mqtt"
+                ? Promise.resolve(undefined)
+                : Promise.reject(new Error(`Unexpected invoke: ${cmd}`)),
+        );
+        // Normalise the module-level streak before counting: a probe that
+        // answered zeroes it (see the next test).
+        await answerProbe();
+        mockInvoke.mockClear();
+        for (let i = 0; i < 3; i++) {
+            await hangingProbe();
+        }
+        expect(mockInvoke).toHaveBeenCalledTimes(1);
+        expect(mockInvoke).toHaveBeenCalledWith("force_reconnect_mqtt");
+        // Rebuild, not convict: the streak never writes a liveness verdict.
+        const s = useGatewayStore.getState();
+        expect(s.gatewayAlive).not.toBe("dead");
+        expect(s.status).toBe("connected");
+    });
+
+    it("a probe that answered resets the inconclusive streak", async () => {
+        vi.useFakeTimers();
+        mockInvoke.mockImplementation((cmd: string) =>
+            cmd === "force_reconnect_mqtt"
+                ? Promise.resolve(undefined)
+                : Promise.reject(new Error(`Unexpected invoke: ${cmd}`)),
+        );
+        await answerProbe();
+        // Outlive any cooldown left behind by another test's forced reconnect.
+        await vi.advanceTimersByTimeAsync(61_000);
+        mockInvoke.mockClear();
+        // 2 + 2 timeouts split by a successful probe never reach the limit.
+        await hangingProbe();
+        await hangingProbe();
+        await answerProbe();
+        await hangingProbe();
+        await hangingProbe();
+        expect(mockInvoke).not.toHaveBeenCalled();
     });
 });
 

@@ -51,6 +51,25 @@ pub const FATAL_STREAK_LIMIT: u32 = 3;
 /// here because `acowork-mqtt-session` must not depend on `acowork-core`.
 pub const DEFAULT_MAX_PACKET_SIZE: usize = 10 * 1024 * 1024;
 
+/// MQTT network transport (relay remote mode, design doc 24 §8.0).
+///
+/// All local / LAN clients use [`MqttTransport::Tcp`] — the transport
+/// only diverges when a Desktop connects through the cloud relay, where
+/// the broker is reached as a WebSocket inside the relay's TLS stream.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum MqttTransport {
+    /// Plain TCP to `host:port` (default; every local client).
+    #[default]
+    Tcp,
+    /// Secure WebSocket. `url` is the FULL broker address including
+    /// scheme, authority and path — e.g. `wss://gw-abc.relay.example.com/mqtt`
+    /// — exactly as rumqttc expects it in the `MqttOptions` "host" slot
+    /// (`eventloop.rs` parses it with `split_url` for the TCP connect and
+    /// uses it verbatim for the WS handshake). The `host` / `port` fields
+    /// of [`MqttClientConfig`] are IGNORED for this transport.
+    Wss { url: String },
+}
+
 /// Entity-only MQTT client configuration (ADR-065 §5.6).
 ///
 /// Timing fields are deliberately NOT exposed — the single source of
@@ -59,11 +78,13 @@ pub const DEFAULT_MAX_PACKET_SIZE: usize = 10 * 1024 * 1024;
 pub struct MqttClientConfig {
     /// MQTT client identifier (protocol §8.5 colon convention).
     pub client_id: String,
-    /// Broker host.
+    /// Broker host. Used by [`MqttTransport::Tcp`] only; ignored by
+    /// [`MqttTransport::Wss`] (which carries its full URL internally).
     pub host: String,
-    /// Broker port.
+    /// Broker port. Used by [`MqttTransport::Tcp`] only.
     pub port: u16,
-    /// Optional CONNECT credentials `(username, password)`.
+    /// Network transport (TCP vs WSS-through-relay). Defaults to TCP.
+    pub transport: MqttTransport,    /// Optional CONNECT credentials `(username, password)`.
     pub credentials: Option<(String, String)>,
     /// Optional Last Will (broker publishes it if the client dies
     /// ungracefully).
@@ -81,6 +102,7 @@ impl MqttClientConfig {
             client_id: client_id.into(),
             host: host.into(),
             port,
+            transport: MqttTransport::Tcp,
             credentials: None,
             last_will: None,
             max_packet_size: DEFAULT_MAX_PACKET_SIZE,
@@ -111,10 +133,34 @@ mod tests {
         assert_eq!(cfg.client_id, "node:test");
         assert_eq!(cfg.host, "127.0.0.1");
         assert_eq!(cfg.port, 19875);
+        assert_eq!(cfg.transport, MqttTransport::Tcp);
         assert!(cfg.credentials.is_none());
         assert!(cfg.last_will.is_none());
         assert_eq!(cfg.max_packet_size, DEFAULT_MAX_PACKET_SIZE);
         assert_eq!(cfg.queue_capacity, 100);
+    }
+
+    #[test]
+    fn wss_transport_overrides_host_port_semantics() {
+        // Relay remote mode: the WSS URL is the single address — the
+        // host/port pair is inert for this transport. The constructor
+        // still defaults to TCP; WSS callers set the field explicitly.
+        let mut cfg = MqttClientConfig::new("user:u-1:desktop:42", "ignored", 0);
+        cfg.transport = MqttTransport::Wss {
+            url: "wss://gw-abc.relay.example.com/mqtt".into(),
+        };
+        assert_eq!(
+            cfg.transport,
+            MqttTransport::Wss {
+                url: "wss://gw-abc.relay.example.com/mqtt".into()
+            }
+        );
+        // Default remains TCP — existing local clients never change
+        // transport by accident.
+        assert_eq!(
+            MqttClientConfig::new("node:test", "127.0.0.1", 19875).transport,
+            MqttTransport::default()
+        );
     }
 
     #[test]

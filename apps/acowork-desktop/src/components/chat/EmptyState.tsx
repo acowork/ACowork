@@ -42,7 +42,7 @@ export function EmptyState(): React.ReactElement {
         // placeholder if the asset is ever swapped.
         style={{ maxWidth: "60%", height: "auto", opacity: 0.2 }}
       />
-      <p className="text-[10px] font-bold uppercase tracking-[0.25em] text-text-tertiary/40 ">
+      <p className="text-10 font-bold uppercase tracking-[0.25em] text-text-tertiary/40 ">
         Talk with your AI colleague
       </p>
     </div>

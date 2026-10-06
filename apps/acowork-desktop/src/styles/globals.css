@@ -216,6 +216,33 @@
   --radius-md: 6px;
   --radius-lg: 8px;
   --radius-xl: 12px;
+
+  /* Micro font steps — the dense card-header / list-meta sizes that used
+     to be spelled as arbitrary px (`text-[11px]`, `text-[10px]`,
+     `text-[9px]`) on ~430 elements.
+
+     WHY this exists: an arbitrary px value is dead to the font-size
+     setting. That knob only reaches elements whose size resolves to a
+     `--text-*` token, so every card title, badge and meta line
+     silently ignored it while the surrounding body text scaled — which
+     is exactly the "title font didn't follow the global size" report.
+
+     Declared here, NOT in the `:root` block below: Tailwind v4 only
+     generates a `text-*` utility from a `@theme` token. The `:root`
+     copies of `--text-xs…xl` above are cascade overrides of the same
+     custom properties, not declarations of new ones.
+
+     The em ratios are the historical M-default px ÷ the 14px base, so
+     nothing moves at the default setting — only the ratio is now
+     expressed instead of the frozen result. Do NOT reintroduce `rem`
+     here: it would freeze the scale AND drag every rem-based layout
+     offset with it (see the note above the `:root` copies).
+
+     `text-[8px]` deliberately stays arbitrary — both uses are fixed
+     16px badge boxes where a growing glyph overflows the box. */
+  --text-9: 0.643em;  /*  9px — ExpandableRow description line */
+  --text-10: 0.714em; /* 10px — list meta lines, empty states */
+  --text-11: 0.786em; /* 11px — card titles, card body rows */
 }
 
 /* Enable class-based dark mode for Tailwind v4 */
@@ -226,6 +253,33 @@
 
 /* Design Tokens — prd-ui-ux.md §2.1 */
 :root {
+  /* Global UI font size — the single knob behind Settings → Appearance →
+     font size. settingsStore overwrites this on :root at boot
+     (`applyFontSize`) and on every change; the value here is the
+     pre-JS / no-persisted-value default and MUST match
+     `DEFAULT_FONT_SIZE` in lib/defaults.ts (0.875).
+
+     Everything scales off it: the `--text-*` tokens in @theme are
+     `em` ratios of this, so the whole app's text moves together. */
+  --ui-font-size: 0.875rem;
+
+  /* The app's list / chrome text step — 12px at the default base, i.e. the
+     same size as `text-xs`. Used by list rows (file tree, git status), panel
+     tab titles, toolbars and form inputs.
+
+     Chat message text deliberately does NOT use this: it stays at
+     `--ui-font-size` (14px). Tried and rolled back — 12px read as too small
+     for paragraphs, and the in-bubble meta (CodeBlock 0.9, CompactionCard
+     0.9, ChatPanel 0.85) is scaled off the 14px base, so moving only the
+     body would have left code blocks larger than the prose around them.
+
+     It exists as an ABSOLUTE value (not the `em`-based `--text-xs`) for the
+     call sites that set `font-size` from an inline style, which nest: an `em`
+     ratio would resolve against an already-shrunk parent and compound.
+     Inline styles cannot read a Tailwind utility, so this var is the shared
+     source of truth; `--ui-font-size` stays the knob that scales it. */
+  --ui-text-size: calc(var(--ui-font-size, 0.875rem) * 0.857);
+
   /* Colors */
   --color-primary: hsl(222.2 47.4% 11.2%);
   --color-primary-foreground: hsl(210 40% 96.1%);
@@ -280,6 +334,17 @@
      on every divider-separated row so dialog chrome lines up
      vertically across all dialogs. Grow with content as needed. */
 
+  /* List-column header height — the band above a nav-surface list
+     capsule, whether it holds a search box (pm) or a section title
+     (harness / settings). Pinned to a token because the two spellings
+     drifted: pm rendered `py-2` + a 28px input ≈ 44px, while the
+     title variant was built as `py-1.5` + a 14px text line ≈ 27px, so
+     the same pane's header changed height depending on which style it
+     copied. Equal to --ui-dialog-zone-h by value, kept as its own
+     token so the list header can move without dragging dialogs. */
+  --ui-list-header-h: 2.75rem;
+
+
   /* Radio group tokens */
   --ui-radio-size: 1rem;
   /* 16px — radio circle diameter */
@@ -324,12 +389,50 @@
   --ui-scrollbar-size: 6px;
   /* width & height of the scrollbar track */
 
-  /* Font sizes */
-  --text-xs: 0.75rem;
-  --text-sm: 0.875rem;
-  --text-base: 1rem;
-  --text-lg: 1.125rem;
-  --text-xl: 1.25rem;
+  /* Font sizes — relative to --ui-font-size, NOT rem.
+     `--ui-font-size` is written by settingsStore (the "font size"
+     setting) and defaults to 0.875rem. Every size below is a ratio of
+     it, so the global font-size setting scales the whole app's text
+     instead of chat only.
+
+     `em` (not `rem`) is the load-bearing choice:
+       - It resolves against the *parent's* font-size, so a badge nested
+         inside a large heading does not compound-scale — it keeps the
+         0.75 : 0.875 : 1 ratio the design intends.
+       - Every icon in the app is sized in fixed units (`h-3.5 w-3.5`,
+         `h-6 w-6`) and every layout offset in rem / px, so scaling
+         text alone does not move the surrounding chrome. That is what
+         lets the NavBar (pure icons, no text) stay put while labelled
+         buttons, inputs, selects and list rows grow.
+     Keep the px comments in sync — they are the "M" default. */
+  --text-xs: 0.857em;   /* 12px @ 0.875rem base */
+  --text-sm: 1em;       /* 14px @ 0.875rem base */
+  --text-base: 1.143em; /* 16px @ 0.875rem base */
+  --text-lg: 1.286em;   /* 18px @ 0.875rem base */
+  --text-xl: 1.429em;   /* 20px @ 0.875rem base */
+
+  /* Reading-column caps — the card flows of harness / settings / the
+     right-panel tabs. Overrides Tailwind's frozen `--container-lg` /
+     `--container-2xl` (32rem / 42rem) so the column tracks the font-size
+     setting instead of wrapping harder at every step up: 512px of card
+     width cannot hold titles that grow with the font, so a bigger font
+     size reflowed every card into a taller stack.
+
+     `calc()` against `--ui-font-size`, NOT `em` (which every --text-* step
+     above uses) and NOT `rem`. This value is a LENGTH, not a font step:
+     `em` would resolve it against the local element's inherited
+     font-size, so a card column nested under a `text-xs` ancestor would
+     silently get a different cap than the same column elsewhere. Binding
+     the global knob directly is the only form that means one thing.
+
+     Multipliers are 36.6 / 48 = the historical 32rem / 42rem expressed
+     against the 0.875rem base, so the M default renders pixel-identical
+     and only the scale moves. Ceiling (ponytail): at XXL (1.25rem) these
+     resolve to 46rem / 60rem. If one card still wraps at XXL, widen it
+     on that call site — loosening the token would also drag the pm /
+     doc / extension views, which share the same scale. */
+  --container-lg: calc(var(--ui-font-size, 0.875rem) * 36.57);
+  --container-2xl: calc(var(--ui-font-size, 0.875rem) * 48);
 
   /* Border radius — 3-tier design tokens (mirrors @theme above) */
   --radius-sm: 4px;
@@ -352,7 +455,7 @@
   --shimmer-to: hsl(240 5% 26%);
 
   /* Tab bar layout — unified across SessionTabBar & RightPanel tabs */
-  --tab-font-size: 0.75rem;
+  --tab-font-size: 0.857em;
   --tab-line-height: 1rem;
   --tab-py: 0.375rem;
   /* py-1.5 = 6px */
@@ -598,7 +701,13 @@ body {
     "PingFang SC",
     Arial,
     sans-serif;
-  font-size: var(--text-base);
+  font-size: var(--ui-font-size, 0.875rem);
+  /* The global font-size knob scales the WHOLE app, so the base body
+     size tracks --ui-font-size rather than a fixed --text-base. This is
+     what makes un-classed text (rows that never wrote a `text-*`, the
+     pm project list among them) follow the setting too. Elements that
+     want a specific step use the --text-* tokens, which are `em` ratios
+     of this same value. */
   color: var(--color-text);
   background-color: transparent;
   overflow: hidden;
@@ -1508,7 +1617,8 @@ input[type="radio"]:checked {
   border-radius: var(--radius-sm);
   border: 1px solid #d4d4d8;
   padding: var(--ui-btn-py) 0.75rem;
-  font-size: 0.75rem;
+  font-size: 0.857em;
+  /* 12px @ default base — em so the option label tracks --ui-font-size */
   font-weight: 500;
   color: #71717a;
   background: transparent;
@@ -1842,6 +1952,30 @@ input[type="radio"]:checked {
   /* zinc-700 */
 }
 
+/* ── File tree / git status row typography ───────────────────────────────
+ *
+ * One declaration covers both lists that carry `.file-tree-row` — FileTreeNode's
+ * rows and GitStatusPanel's change rows — because they stack inside the same
+ * panel and must not drift apart (see the note in GitStatusPanel.tsx).
+ *
+ * 0.857 puts the row text on the app's `text-xs` step (12px at the default
+ * 14px base): the size the agent / user sidebars, the right-panel tab titles
+ * (`--tab-font-size`) and the workspace toolbar all already use. The file tree
+ * was the last list in the shell still rendering at the full `--ui-font-size`,
+ * which made it read a step larger than every panel around it.
+ *
+ * `FileTree.tsx` derives the virtualizer's row height from this same ratio
+ * (`fontSize * 16 * 0.857 * 1.9`). The two change together or not at all: a
+ * slot even 0.4px off the row's natural CSS height leaves an edge where
+ * `elementFromPoint(...).closest('[data-rel-path]')` returns null during
+ * drag & drop.
+ *
+ * Unlayered so it wins over row utilities, same as the variants below.
+ */
+.file-tree-row {
+  font-size: var(--ui-text-size);
+}
+
 /* ── File tree drag & drop state ────────────────────────────────────────
  *
  * Applied to `.file-tree-row` (FileTreeNode's row div).
@@ -1888,6 +2022,33 @@ input[type="radio"]:checked {
  * don't want the row to "go neutral" while the user is interacting with
  * it (e.g. drag-and-drop onto a selected row, or holding click).
  */
+/* Row hairline — the divider between list rows.
+ *
+ * Lives here rather than as `after:border-b` utilities because a `::after`
+ * box is only generated when `content` is set, and Tailwind v4.3 emits NO
+ * `after:content-*` utility at all (verified against the shipped build:
+ * `after:bottom-0` / `after:border-b` were emitted, `after:content-['']`
+ * and `after:content-none` were not). So every row divider written as
+ * `after:absolute after:bottom-0 … after:border-b` compiled to CSS that
+ * drew nothing — the hairlines in the pm / settings / harness / user /
+ * extensions sidebars had never rendered.
+ *
+ * Unlayered on purpose, same reasoning as `.file-tree-row-selected`:
+ * it must win over the row's own utilities.
+ */
+.row-divider-b::after {
+  content: "";
+  position: absolute;
+  left: 0.375rem;
+  right: 0.375rem;
+  bottom: 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--color-nav-divider) 40%, transparent);
+}
+
+.dark .row-divider-b::after {
+  border-bottom-color: color-mix(in srgb, #52525b 40%, transparent);
+}
+
 .file-tree-row-selected,
 .file-tree-row-selected:hover {
   background-color: color-mix(in srgb, var(--color-accent) 10%, transparent);

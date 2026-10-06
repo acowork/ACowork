@@ -67,11 +67,12 @@ export function AgentList({ width }: AgentListProps) {
   const agentsList = useMemo(() => Object.values(agentsMap).map((s) => s.meta), [agentsMap]);
 
   // ADR-073 §4: view mode is decided automatically by `gatewayMode`. In
-  // remote mode (multi-node Gateway) the sidebar groups agents by node and
-  // shows a collapsible 1/3-height header per node; in local mode the
-  // pre-existing flat list renders unchanged.
+  // an off-site mode (remote LAN or relay — multi-node Gateway) the
+  // sidebar groups agents by node and shows a collapsible 1/3-height
+  // header per node; in local mode the pre-existing flat list renders
+  // unchanged.
   const gatewayMode = useSettingsStore((s) => s.gatewayMode);
-  const isRemoteMode = gatewayMode === "remote";
+  const isRemoteMode = gatewayMode !== "local";
 
   // Node topology snapshot — owned by `agentStore` so the Gateway
   // connection lifecycle (drop → markNodesOffline, rise → fetchNodes)
@@ -501,12 +502,12 @@ export function AgentList({ width }: AgentListProps) {
       <div
         key={id}
         className={cn(
-          "relative flex cursor-pointer items-center rounded-md px-3 py-2.5 transition-colors duration-150",
+          "relative flex cursor-pointer items-center rounded-md px-3 py-1.5 transition-colors duration-150",
           isCollapsed ? "gap-0" : "gap-3",
           selectedAgentId === id
             ? "bg-[var(--color-accent)]/90 text-white"
             : "hover:bg-nav-item-hover",
-          index < total - 1 && (isCollapsed ? "after:absolute after:bottom-0 after:left-1 after:right-1 after:border-b after:border-nav-divider/40 dark:after:border-zinc-600/40" : "after:absolute after:bottom-0 after:left-1.5 after:right-1.5 after:border-b after:border-nav-divider/40 dark:after:border-zinc-600/40")
+          index < total - 1 && "row-divider-b"
         )}
         onClick={() => selectAgent(id)}
         onDoubleClick={() => {
@@ -561,17 +562,27 @@ export function AgentList({ width }: AgentListProps) {
             {/* Top row: name */}
             <div className="flex items-center justify-between gap-2">
               <div className="min-w-0 flex items-center gap-1.5">
-                <span className={cn("truncate font-medium", selectedAgentId === id ? "text-white" : agent.alive ? "text-text-secondary " : "text-text-tertiary ")} style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>{agent.display_name ?? agent.name}</span>
+                {/* `text-xs`, not an inline `var(--ui-font-size)`: every other
+                    sidebar list (pm / doc / harness / settings / extensions)
+                    renders its row name at `text-xs`, and the agent name was
+                    the lone 14px outlier, so the chat column read as a
+                    different scale from the rest of the nav. */}
+                <span className={cn("truncate font-medium text-xs", selectedAgentId === id ? "text-white" : agent.alive ? "text-text-secondary " : "text-text-tertiary ")}>{agent.display_name ?? agent.name}</span>
               </div>
             </div>
             {/* Bottom row: current session title.
-                * min-height + animate-pulse skeleton locks the row height so the agent
-                * name above does not jump when the async session title loads. */}
+                * `text-10` is the app's standard meta size (same as the pm
+                * sidebar's badge / footer lines) and replaces the old
+                * `calc(var(--ui-font-size) * 0.85)` magic number, which
+                * resolved to ~11.9px — a size nothing else used.
+                * min-height + animate-pulse skeleton locks the row height so
+                * the agent name above does not jump when the async session
+                * title loads. The min-height stays a calc() so it keeps
+                * tracking --ui-font-size through the em-based token. */}
             <div
-              className="mt-0.5 flex items-center"
+              className="mt-0.5 flex items-center text-10"
               style={{
                 minHeight: "calc(var(--ui-font-size, 0.875rem) * 0.85 * 1.5)",
-                fontSize: "calc(var(--ui-font-size, 0.875rem) * 0.85)",
               }}
             >
               {agent.alive ? (
@@ -643,7 +654,26 @@ export function AgentList({ width }: AgentListProps) {
       style={{ width: width ?? 240 }}
     >
       {/* Header — search input */}
-      <div className={cn(isCollapsed ? "px-1.5 py-2" : "px-3 py-2")}>
+      {/* Search band: `min-h-[var(--ui-list-header-h)]` + `items-center`
+          matches pm / extensions / doc / settings, whose search boxes sit in
+          the same token-sized band. The ad-hoc `px-3 py-2` made this
+          header taller than its siblings at the same global font size, so
+          the chat column's search box read as oversized next to pm's.
+          Collapsed keeps its own tighter padding (icon-only mode).
+          `text-xs` here is what actually closes the remaining gap: the pm /
+          extensions / doc panes set `text-xs` on the PANE root, and since
+          every `--text-*` token is em-based (relative to the parent), their
+          `StyledInput` — which is itself `text-xs` — computes 0.857 × 12 ≈
+          10.3px. This column cannot carry `text-xs` on its root (the
+          ConfirmDialog / PublishWizard it renders would shrink with it), so
+          the band takes the step locally and the box matches its siblings
+          byte for byte. Row names are unaffected — they already declare
+          `text-xs` against the 14px base, i.e. the same 12px pm's rows
+          inherit. */}
+      <div className={cn(
+        "flex min-h-[var(--ui-list-header-h)] items-center border-b border-border-divider text-xs",
+        isCollapsed ? "px-1.5" : "px-3",
+      )}>
         <div className="relative min-w-0 flex-1">
           <Search
             className="absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-text-tertiary "
@@ -733,7 +763,7 @@ export function AgentList({ width }: AgentListProps) {
           <div className="absolute bottom-full left-1 z-50 mb-1 w-max rounded-md border border-border-outer bg-modal-surface py-1 shadow-lg">
             {installNodes !== null ? (
               <>
-                <div className="px-3 py-1.5 text-[10px] font-medium uppercase tracking-wide text-text-tertiary">
+                <div className="px-3 py-1.5 text-10 font-medium uppercase tracking-wide text-text-tertiary">
                   {t("agentList.selectNode")}
                 </div>
                 {installNodes.map((node) => (
@@ -918,7 +948,14 @@ function NodeGroupHeader({
         // h-6 (24px) — a touch taller than a third of the agent row's
         // ~56px, so the node label has comfortable breathing room.
         "flex h-6 w-full items-center gap-1.5 px-3 text-left",
-        "text-[10px] font-medium uppercase tracking-wide",
+        // `text-xs` + normal case, matching the agent / user row names
+        // right below it. This header was `text-10 uppercase tracking-wide`
+        // — nominally a size SMALLER than the rows, but caps + letter
+        // spacing inflated its visual mass, so the group row read heavier
+        // than the names it introduces. A node name is also an identifier
+        // (`node-01`, host names), not a section label, so it must not be
+        // case-folded either.
+        "text-xs font-medium",
         "text-text-tertiary ",
         "hover:text-zinc-600 dark:hover:text-zinc-300",
         "transition-colors duration-150",
@@ -941,7 +978,7 @@ function NodeGroupHeader({
         aria-hidden
       />
       <span className="truncate">{nodeName}</span>
-      <span className="ml-auto text-[10px] font-normal opacity-60">
+      <span className="ml-auto text-xs font-normal opacity-60">
         {agentCount}
       </span>
     </button>

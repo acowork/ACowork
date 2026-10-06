@@ -1552,7 +1552,7 @@ export function FileEditorPanel({ width }: { width: number }) {
                                     core/acowork-runtime/src/usecases/
                                     git_query_impl.rs `diff`). grid-cols-2
                                     keeps each label visually under its pane. */}
-                                <div className="grid grid-cols-2 border-b border-right-panel-border bg-zinc-50 text-[11px] dark:bg-zinc-900/40">
+                                <div className="grid grid-cols-2 border-b border-right-panel-border bg-zinc-50 text-11 dark:bg-zinc-900/40">
                                     <button
                                         type="button"
                                         onClick={(e) => {

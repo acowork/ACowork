@@ -83,7 +83,7 @@ export function MemoryNodeList({
         >
           <ChevronLeft className="h-3.5 w-3.5" />
         </button>
-        <span className="text-[11px] text-text-tertiary ">
+        <span className="text-11 text-text-tertiary ">
           {t("memoryPanel.pagerOf", { current: page, total: totalPages })}
         </span>
         <button
@@ -124,15 +124,26 @@ export function MemoryNodeList({
                       onClick={() => onSelectNode(node.node_id)}
                     >
                       <div className="flex flex-col gap-1">
-                        {/* Top row: type + status */}
+                        {/* Top row: type + status, both on `text-11` — the
+                            card-title step. The shared Badge default is
+                            `text-9`, which reads as too small next to the
+                            12px content line, so this row opts up; it must
+                            never sit above the card title. No `uppercase` /
+                            `tracking-wider` on either badge and no bold on
+                            the status — same call as the sidebar node
+                            header, which had the same combination. */}
                         <div className="flex items-center gap-2">
-                          <Badge tone="accent" uppercase data-node-type={node.node_type}>
+                          <Badge
+                            tone="accent"
+                            className="text-11"
+                            data-node-type={node.node_type}
+                          >
                             {labelOf(node.node_type)}
                           </Badge>
                           {node.sub_type && (
                             <Badge
                               tone="neutral"
-                              uppercase
+                              className="text-11"
                               data-sub-type={node.sub_type}
                               title={node.sub_type}
                             >
@@ -141,7 +152,7 @@ export function MemoryNodeList({
                           )}
                           <span
                             className={cn(
-                              "text-[10px] font-medium",
+                              "text-11",
                               node.status === "active"
                                 ? accentText
                                 : "text-text-tertiary ",
@@ -161,7 +172,7 @@ export function MemoryNodeList({
                             `confidence`; the other three types carry `confidence`
                             (置信度) but no `importance`. Each is shown verbatim —
                             the backend never derives one from the other. */}
-                        <div className="flex items-center gap-2 text-[11px] text-text-tertiary ">
+                        <div className="flex items-center gap-2 text-11 text-text-tertiary ">
                           {node.node_type === "Episodic" ? (
                             <span>
                               {t("memoryNodeDetail.labelImportance")}:{" "}

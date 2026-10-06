@@ -36,7 +36,10 @@ pub mod tcp_filter;
 // Re-export key types
 pub use acl::{AclConfig, AclConfigError, AclPermission, AclRule};
 pub use bootstrap_publisher::{BootstrapPublisher, BootstrapPublisherHandle, BootstrapPublisherOptions, TOPIC_BOOTSTRAP};
-pub use broker::{start_broker, start_broker_with_auth, BrokerAuth, MqttBrokerError, MqttBrokerHandle};
+pub use broker::{
+    start_broker, start_broker_with_auth, BrokerAuth, MqttBrokerError, MqttBrokerHandle,
+    RemoteMqttAuth, RemoteMqttListener,
+};
 pub use client::{GatewayMqttClient, GatewayMqttClientError, MqttMessageCallback, MqttQoS};
 pub use global_resources_publisher::{MqttGlobalResourcesPublisher, MqttPublisherHandle, MqttPublisherTrigger};
 pub use inventory_notifier::{

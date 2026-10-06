@@ -183,7 +183,7 @@ export function SkillsPanel({ textHidden, readOnly }: { textHidden?: boolean; re
                             {skill.name}
                           </div>
                           {skill.description && (
-                            <div className="truncate text-[10px] text-text-tertiary ">
+                            <div className="truncate text-10 text-text-tertiary ">
                               {skill.description}
                             </div>
                           )}
@@ -192,7 +192,7 @@ export function SkillsPanel({ textHidden, readOnly }: { textHidden?: boolean; re
                           <Check className="h-3.5 w-3.5 shrink-0" style={{ color: "var(--color-accent)" }} />
                         )}
                         {!isActive && skill.triggers.length > 0 && (
-                          <span className="shrink-0 rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] text-text-tertiary dark:bg-zinc-700 ">
+                          <span className="shrink-0 rounded bg-zinc-100 px-1.5 py-0.5 text-10 text-text-tertiary dark:bg-zinc-700 ">
                             {skill.triggers.length}
                           </span>
                         )}

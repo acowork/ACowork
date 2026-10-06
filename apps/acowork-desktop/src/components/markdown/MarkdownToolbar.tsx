@@ -201,7 +201,7 @@ export function MarkdownToolbar({ editor, disabled }: MarkdownToolbarProps) {
         </button>
         {tableOpen && (
           <div className="absolute right-0 top-full z-30 mt-1 flex items-center gap-2 rounded-md border border-border-outer bg-white p-2 shadow-lg dark:bg-zinc-900">
-            <label className="flex items-center gap-1 text-[11px] text-text-tertiary ">
+            <label className="flex items-center gap-1 text-11 text-text-tertiary ">
               {t("doc.tbTableRows")}
               <input
                 type="number"
@@ -209,10 +209,10 @@ export function MarkdownToolbar({ editor, disabled }: MarkdownToolbarProps) {
                 max={20}
                 value={rows}
                 onChange={(e) => setRows(Math.max(1, Math.min(20, Number.parseInt(e.target.value, 10) || 1)))}
-                className="w-12 rounded border border-border-outer px-1 py-0.5 text-[11px]  dark:bg-zinc-800"
+                className="w-12 rounded border border-border-outer px-1 py-0.5 text-11  dark:bg-zinc-800"
               />
             </label>
-            <label className="flex items-center gap-1 text-[11px] text-text-tertiary ">
+            <label className="flex items-center gap-1 text-11 text-text-tertiary ">
               {t("doc.tbTableCols")}
               <input
                 type="number"
@@ -220,13 +220,13 @@ export function MarkdownToolbar({ editor, disabled }: MarkdownToolbarProps) {
                 max={12}
                 value={cols}
                 onChange={(e) => setCols(Math.max(1, Math.min(12, Number.parseInt(e.target.value, 10) || 1)))}
-                className="w-12 rounded border border-border-outer px-1 py-0.5 text-[11px]  dark:bg-zinc-800"
+                className="w-12 rounded border border-border-outer px-1 py-0.5 text-11  dark:bg-zinc-800"
               />
             </label>
             <button
               type="button"
               onClick={insertTable}
-              className="rounded bg-[var(--color-accent)] px-2 py-0.5 text-[11px] font-medium text-white hover:opacity-90"
+              className="rounded bg-[var(--color-accent)] px-2 py-0.5 text-11 font-medium text-white hover:opacity-90"
             >
               {t("doc.tbTableInsert")}
             </button>

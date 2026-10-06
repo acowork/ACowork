@@ -219,7 +219,7 @@ export function KanbanBoard({ projectId, onOpenTask }: KanbanBoardProps) {
             />
           ))}
         </div>
-        <p className="px-3 pb-2 text-[10px] text-text-tertiary ">
+        <p className="px-3 pb-2 text-10 text-text-tertiary ">
           {t("pm.board.dragHint")} · {projectId}
         </p>
       </div>

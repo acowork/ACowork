@@ -1,6 +1,6 @@
 # ADR-068:记忆两轴正交化与离线蒸馏器重构(Episodic-as-Source-of-Truth)
 
-**状态**:已实现(2026-09 经 [review #32](../../review/zh/32-adr-068-memory-layer-promotion-two-axis-orthogonal-review.md) 评审修复完成)
+**状态**:已实现(2026-09 经 [review #32](../../review/zh/32-adr-068-memory-layer-promotion-two-axis-orthogonal-review.md) 评审修复完成);2026-10 沉淀方式二次收敛为「投影 + 合并」,见下方 Revision(2026-10)
 **日期**:2026-09
 **决策者**:大鱼
 **前置**:
@@ -32,6 +32,47 @@
 - `ConsolidationBgTask` 循环只跑:EpisodicDistiller step(opt-in)+ offline Pending 生命周期 + episodic cleanup。
 
 **保留的规则用途仅限**:幂等/去重门槛、节点生命周期(retention/decay/Pending 状态机)、权威数据源导入(manifest bootstrap)、事件/时间门槛(History milestone、30 天协作)。
+
+---
+
+## Revision(2026-10):沉淀收敛为「投影 + 合并」,提取/聚类/判定四段式下线
+
+> 实施计划与实测数据见 [memory-consolidation-normalization-plan.md §8](../../plan/zh/memory-consolidation-normalization-plan.md)。提交 `d2745c21`、`5be91f91`。
+
+**背景**:上一版 Revision 之后,`EpisodicDistiller` 仍是「LLM 结构化提取 → embedding 聚簇 → LLM Judge → 晋升」四段式,带 5 个证据门槛与墓碑机制。线上 Ponytail 实例开了沉淀开关数周、269 条 episode、**0 条沉淀**。日志证明触发条件(周期/积压/空闲)每次都满足——问题在链路,不在触发。
+
+**决策**:沉淀的产生只保留两条动作,且都以「写时 LLM 已经做过判断」为前提:
+
+1. **投影(project)**——episode 召不回任何近邻语义节点时,直接把它承载的陈述落成语义节点。**零 LLM 调用**。写时模型已经决定这条经历值得记,离线再问一次「它有没有价值」是重复且不更可靠的判断。
+2. **合并(merge)**——召回到近邻时,让 LLM 在「1 条新陈述 + K 条候选」之间判 `merge / no_merge / contradicts`。这是全流程唯一需要模型的地方,输入规模与 store 大小无关。
+
+**废除**:
+
+- **结构化提取段**(triples/SPO 填充)。编程场景对话里提取三元组质量低,且没有结构消费者(无 `edges` 表、无图遍历),属纯成本。`KnowledgeNode` 的 `subject/predicate/object` 字段保留但由投影路径按陈述生成 slug 填充,不再假装是语义三元组。
+- **embedding 聚簇段**。聚簇把「相似」当「同一件事」,而是否同一件事是语义判断,只有模型能答。
+- **5 个晋升门槛 + 墓碑**。体积控制收敛到唯一旋钮 `min_importance`(默认 0.0,即全投影)。未投影的 episode 不留墓碑,每轮重新考虑——收紧后再放宽不丢数据。
+- **冲突消解旧分类**(`ConflictType` / `conflicts_evolution/correction/ambiguous` / `should_trigger_confirmation`)。上一版 Revision 声称「本次不动」,实际这些符号**早已零引用**,是死代码。`contradicts` 分支是重写时新写的。
+- `PromotionKind::AutobioLimitation` / `AutobioPreference`(随聚类段下线)。`AutobioRelationship`(30 天跨度规则)与 `AutobioHistory`(里程碑事件)保留——它们不依赖 episode 聚类。
+
+**新增字段**:`Episode.normalized`——写时 LLM 一并产出的、去掉对话语境后仍然成立的单句陈述。蒸馏器的主输入。`Episode::statement()` 是 normalized→content 回退的**唯一**实现处:写路径的 embedding 与蒸馏器的召回键都走它,两处各写一份回退会让「存进去的向量」和「查出来用的向量」不是同一个键,表现为「沉淀不再匹配」而不是报错。该回退同时就是存量数据的 backfill 路径——旧行没有 `normalized` 键,读出来直接投影。
+
+**保留不变**:两轴不变量(LLM 只写经历层)、`source_episode_ids` 幂等、`importance` 驱动衰减、episodic forgetting、事件/时间门槛。
+
+**行为边界**(排障时需要知道):
+
+- 召回到候选但**无模型**时 episode 停在「延后」,不猜。猜错两个方向都不可逆(误合并丢证据、漏合并造重复)。生产路径 `run_episodic_distiller_step` 始终传入模型,故仅在配置异常时出现;但面板上看会像卡住。
+- `batch_size=100`,数百条积压需多轮才清空。
+- 语义层密度由模型判断决定,不由代码决定:模型总答 `no_merge` 时 N 条 episode 产出 N 个节点。
+
+**实测**(真实 store 副本,`memory_lifecycle_e2e.rs::backfill_on_a_real_store_*`,`#[ignore]` 因涉及私有数据):
+
+```
+269 episode / 262 积压 / 沉淀 0
+  无模型:投影 33,延后 229,LLM 调用 0
+  有模型:3 轮清空积压,沉淀 knowledge=141 procedural=121
+```
+
+同一份数据零 token 即产出 33 条沉淀,证明原故障是链路而非数据。
 
 ---
 

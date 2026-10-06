@@ -299,7 +299,9 @@ export const UserList = forwardRef<UserListHandle>(function UserList(_props, ref
           data-testid="user-group-header"
           className={cn(
             "flex h-6 min-w-0 flex-1 items-center gap-1.5 px-3 text-left",
-            "text-[10px] font-medium uppercase tracking-wide text-text-tertiary",
+            // `text-xs` + normal case, matching the user row names below and
+            // the node header in the agent list — same sidebar, same role.
+            "text-xs font-medium text-text-tertiary",
             "transition-colors duration-150 hover:text-zinc-600 dark:hover:text-zinc-300",
           )}
         >
@@ -310,14 +312,14 @@ export const UserList = forwardRef<UserListHandle>(function UserList(_props, ref
             )}
           />
           <span className="truncate">{t("userList.title")}</span>
-          <span className="ml-auto text-[10px] font-normal opacity-60">{rows.length}</span>
+          <span className="ml-auto text-xs font-normal opacity-60">{rows.length}</span>
         </button>
       </div>
 
       {!collapsed && (
         <>
           {viewingName && (
-            <div className="flex items-center gap-1 px-3 py-1 text-[10px] text-text-tertiary">
+            <div className="flex items-center gap-1 px-3 py-1 text-10 text-text-tertiary">
               <span className="truncate">{t("userList.viewingAs", { name: viewingName })}</span>
               <button
                 type="button"
@@ -332,24 +334,25 @@ export const UserList = forwardRef<UserListHandle>(function UserList(_props, ref
           )}
 
           {actionError && (
-            <div role="alert" className="px-3 py-1 text-[10px] text-red-500">
+            <div role="alert" className="px-3 py-1 text-10 text-red-500">
               {actionError}
             </div>
           )}
 
-          {rows.map((account) => (
+          {rows.map((account, index) => (
             <UserRow
               key={account.user_id}
               account={account}
               isAdmin={isAdmin}
               isSelf={account.user_id === self?.user_id}
+              isLast={index === rows.length - 1}
               onOpen={() => openThread(account)}
               onContextMenu={(e) => menu.openAt(e, account)}
             />
           ))}
 
           {rows.length === 0 && (
-            <div className="px-3 py-2 text-[11px] text-text-tertiary">
+            <div className="px-3 py-2 text-11 text-text-tertiary">
               {loadFailed ? t("userList.loadFailed") : t("userList.empty")}
             </div>
           )}
@@ -444,12 +447,14 @@ function UserRow({
   account,
   isAdmin,
   isSelf,
+  isLast,
   onOpen,
   onContextMenu,
 }: {
   account: UserAccount;
   isAdmin: boolean;
   isSelf: boolean;
+  isLast: boolean;
   onOpen: () => void;
   onContextMenu: (e: MouseEvent) => void;
 }) {
@@ -478,10 +483,16 @@ function UserRow({
       data-testid={`user-row-${account.user_id}`}
       title={account.display_name}
       className={cn(
-        "relative flex items-center rounded-md px-3 py-2.5 transition-colors duration-150",
+        "relative flex items-center rounded-md px-3 py-1.5 transition-colors duration-150",
         "gap-3",
         !isSelf && "cursor-pointer hover:bg-nav-item-hover",
         active && "bg-[var(--color-accent)]/90 text-white hover:bg-[var(--color-accent)]",
+        // Same hairline the agent rows carry, so the two groups read as one
+        // list. `isLast` is passed in rather than derived here: the rows are
+        // flat (accounts are Gateway-wide, never partitioned by node), so
+        // the caller alone knows which row closes the group.
+        !isLast &&
+          "row-divider-b",
       )}
     >
       <UserAvatar
@@ -493,19 +504,21 @@ function UserRow({
 
       <div className="min-w-0 flex-1 overflow-hidden">
         <div className="flex items-center justify-between gap-2">
+          {/* `text-xs`, not an inline `var(--ui-font-size)`: matches the
+              agent list row name and every other sidebar list, all of which
+              inherit `text-xs` from the pane container. */}
           <span
             className={cn(
-              "truncate font-medium",
+              "truncate font-medium text-xs",
               active ? "text-white" : "text-text-secondary",
             )}
-            style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}
           >
             {account.display_name}
           </span>
           {unread > 0 && (
             <span
               className={cn(
-                "shrink-0 rounded-full px-1.5 text-[10px] font-medium",
+                "shrink-0 rounded-full px-1.5 text-10 font-medium",
                 active ? "bg-white/20 text-white" : "bg-[var(--color-accent)] text-white",
               )}
             >
@@ -516,7 +529,7 @@ function UserRow({
         <div className="flex items-center gap-1.5">
           <span
             className={cn(
-              "truncate text-[11px]",
+              "truncate text-11",
               active ? "text-white/80" : "text-text-tertiary",
             )}
           >
@@ -525,7 +538,7 @@ function UserRow({
           {isAdmin && account.role === "admin" && (
             <span
               className={cn(
-                "shrink-0 rounded px-1 text-[9px] font-medium uppercase tracking-wide",
+                "shrink-0 rounded px-1 text-9 font-medium uppercase tracking-wide",
                 active ? "bg-white/20 text-white" : "bg-nav-item-hover text-text-tertiary",
               )}
             >

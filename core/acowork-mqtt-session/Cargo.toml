@@ -18,6 +18,11 @@ default = []
 async-trait = { workspace = true }
 libc = { workspace = true }
 rumqttc = { workspace = true }
+# rustls with the `ring` provider (workspace-unified crypto backend,
+# design doc 24 M4): guarantees exactly one CryptoProvider is compiled
+# into every graph that hosts the MQTT client, and lets
+# `ensure_crypto_provider()` install it explicitly.
+rustls = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync", "time", "rt", "macros"] }
 tracing = { workspace = true }

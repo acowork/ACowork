@@ -191,6 +191,7 @@ impl MemoryE2e {
                 metadata: Default::default(),
                 importance: 0.5,
                 knowledge_subtype: None,
+                normalized: None,
             })
             .expect("store_episode ok")
     }

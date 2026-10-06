@@ -13,7 +13,7 @@
  * the editor area. With `top-3` the buttons sat at y=12..40px which
  * lands the upper half of each button on top of the banner — visually
  * it looked like the buttons were clipping the banner. 40px clears
- * the ~25-30px-tall banner (text-[11px] + py-1 + border-b) with a
+ * the ~25-30px-tall banner (text-11 + py-1 + border-b) with a
  * ~10-15px visual gap so the banner reads as a separate strip.
  *
  *   - **diff tabs** — three buttons, left-to-right: a diff-mode toggle

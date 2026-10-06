@@ -553,6 +553,19 @@ export async function fetchAgentLspEndpoint(
  *
  * Returns `null` if the relay is not available (or no agent id was
  * provided).
+ *
+ * Mode note: this deliberately does NOT short-circuit in relay mode,
+ * which it used to (57b3d73b, design doc 24 F7). That guard assumed the
+ * relay's node-local HTTP endpoint is unreachable through the cloud
+ * tunnel, and made the harness LSP panel report "relay not available"
+ * on every relay-mode connection. The premise does not hold: the
+ * editor's LSP WebSocket tunnels fine in relay mode (diagnostics pass,
+ * rust-analyzer reaches `ready`), and this function only serves the
+ * direct HTTP callers — the harness panel, project-root discovery and
+ * the install-script runner. Letting them resolve the endpoint is what
+ * makes the panel usable in relay mode; a genuinely absent relay still
+ * returns null via the endpoint's own `ready` flag, so the existing
+ * graceful-degrade path is unchanged.
  */
 export async function getLspRelayUrl(
   agentId?: string,

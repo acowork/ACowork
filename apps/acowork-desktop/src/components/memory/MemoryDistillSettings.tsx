@@ -197,8 +197,11 @@ export function MemoryDistillSettings({
   };
 
   // ── Render ────────────────────────────────────────────────────────────
+  // Tighter padding than StyledInput's default for the 3-column grid, but
+  // deliberately NO font-size override: the field text stays at StyledInput's
+  // `text-xs`, which is also what the model list above is timed to.
   const numInputCls =
-    "rounded-md border border-input-border bg-input-bg px-2 py-1 text-[11px] outline-none focus:border-[var(--color-accent)] ";
+    "rounded-md border border-input-border bg-input-bg px-2 py-1 outline-none focus:border-[var(--color-accent)] ";
 
   // Backlog / last-run hint lives INSIDE the expanded body — it is
   // status info about the runtime, not metadata about the card itself,
@@ -208,7 +211,7 @@ export function MemoryDistillSettings({
   // Nodes), which keep the title row to chevron + title + trailing.
   const runtimeHint =
     loaded && distillerStatus ? (
-      <p className="flex items-center gap-1.5 text-[10px] text-text-tertiary ">
+      <p className="flex items-center gap-1.5 text-10 text-text-tertiary ">
         <span>
           {t("memoryPanel.distillerBacklog", {
             count: distillerStatus.episode_backlog,
@@ -216,12 +219,39 @@ export function MemoryDistillSettings({
         </span>
         <span aria-hidden>·</span>
         {distillerStatus.last_run ? (
-          <span>
-            {t("memoryPanel.distillerLastRun", {
-              scanned: distillerStatus.last_run.episodes_scanned,
-              promoted: distillerStatus.last_run.total_promoted,
-            })}
-          </span>
+          <>
+            <span>
+              {t("memoryPanel.distillerLastRun", {
+                scanned: distillerStatus.last_run.episodes_scanned,
+                promoted: distillerStatus.last_run.total_promoted,
+              })}
+            </span>
+            {/* The three zero cases look identical without this: nothing to
+                do, everything deferred for want of a model, and the run
+                failing. Only the last one used to be distinguishable. */}
+            {distillerStatus.last_run.error ? (
+              <>
+                <span aria-hidden>·</span>
+                <span className="text-[var(--color-danger,#e5484d)]">
+                  {t("memoryPanel.distillerRunFailed", {
+                    error: distillerStatus.last_run.error,
+                  })}
+                </span>
+              </>
+            ) : (
+              distillerStatus.last_run.funnel &&
+              distillerStatus.last_run.funnel.episodes_deferred > 0 && (
+                <>
+                  <span aria-hidden>·</span>
+                  <span>
+                    {t("memoryPanel.distillerDeferred", {
+                      deferred: distillerStatus.last_run.funnel.episodes_deferred,
+                    })}
+                  </span>
+                </>
+              )
+            )}
+          </>
         ) : (
           <span>{t("memoryPanel.distillerNeverRun")}</span>
         )}
@@ -272,7 +302,7 @@ export function MemoryDistillSettings({
           <div className="flex flex-col gap-2">
             {runtimeHint}
             <label className="flex flex-col gap-1">
-              <span className="text-[10px] text-text-tertiary ">
+              <span className="text-10 text-text-tertiary ">
                 {t("memoryPanel.distillerModel")}
               </span>
               <ModelPriorityList
@@ -281,13 +311,13 @@ export function MemoryDistillSettings({
                 providerNameById={providerNames}
                 disabled={!running || !enabled || savingField === "distiller_models"}
                 onChange={handleModelsChange}
-                className="!text-[11px]"
+                className="text-xs"
               />
             </label>
 
             <div className="grid grid-cols-3 gap-2">
               <label className="flex flex-col gap-1">
-                <span className="text-[10px] text-text-tertiary ">
+                <span className="text-10 text-text-tertiary ">
                   {t("memoryPanel.distillerInterval")}
                 </span>
                 <StyledInput
@@ -308,7 +338,7 @@ export function MemoryDistillSettings({
                 />
               </label>
               <label className="flex flex-col gap-1">
-                <span className="text-[10px] text-text-tertiary ">
+                <span className="text-10 text-text-tertiary ">
                   {t("memoryPanel.distillerAccumulation")}
                 </span>
                 <StyledInput
@@ -329,7 +359,7 @@ export function MemoryDistillSettings({
                 />
               </label>
               <label className="flex flex-col gap-1">
-                <span className="text-[10px] text-text-tertiary ">
+                <span className="text-10 text-text-tertiary ">
                   {t("memoryPanel.distillerIdle")}
                 </span>
                 <StyledInput
@@ -348,7 +378,7 @@ export function MemoryDistillSettings({
             </div>
 
             {!enabled && (
-              <p className="text-[10px] text-text-tertiary ">
+              <p className="text-10 text-text-tertiary ">
                 {t("memoryPanel.distillerDisabledHint")}
               </p>
             )}

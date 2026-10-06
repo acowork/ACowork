@@ -18,11 +18,13 @@ use tauri::Manager;
 /// Payload for [`set_gateway_config`].
 #[derive(Debug, Deserialize)]
 pub struct GatewayConfigInput {
-    /// `"local"` or `"remote"` (anything else falls back to `local`)
+    /// `"local"`, `"remote"` or `"relay"` (anything else falls back to `local`)
     pub mode: String,
-    /// User-configured Gateway URL. Used in BOTH modes (single-topology:
+    /// User-configured Gateway URL. Used in ALL modes (single-topology:
     /// local mode defaults to `http://127.0.0.1:19876` but accepts any
-    /// URL; the mode only controls whether Desktop spawns the Gateway).
+    /// URL; the mode only controls whether Desktop spawns the Gateway.
+    /// Relay mode points at the relay's device domain,
+    /// e.g. `https://gw-abc.relay.example.com`).
     #[serde(default)]
     pub url: String,
 }
@@ -81,10 +83,11 @@ pub struct GatewayBootResult {
 /// point it anywhere (including a LAN IP — in which case other machines
 /// may connect to that Gateway exactly as if it were a "remote" one).
 ///
-/// If the mode changes from local→remote while a local Gateway is running,
-/// the running local process is stopped to avoid leaving an orphan on the
-/// shared port. The reverse (remote→local) does NOT auto-spawn; the
-/// frontend must call [`init_local_gateway`] to start a new local instance.
+/// If the mode changes from local→remote/relay while a local Gateway is
+/// running, the running local process is stopped to avoid leaving an
+/// orphan on the shared port. The reverse (remote/relay→local) does NOT
+/// auto-spawn; the frontend must call [`init_local_gateway`] to start a
+/// new local instance.
 #[tauri::command]
 pub async fn set_gateway_config(
     state: tauri::State<'_, AppState>,
@@ -118,12 +121,16 @@ pub async fn set_gateway_config(
         *m = mode;
     }
 
-    // If switching to remote, stop any locally-spawned Gateway to free the port
-    if mode == GatewayMode::Remote {
+    // If switching away from local (to remote OR relay), stop any
+    // locally-spawned Gateway to free the port — neither remote nor
+    // relay mode ever uses the child, and an orphan on the shared port
+    // would shadow a user-configured remote/relay Gateway.
+    if mode != GatewayMode::Local {
         let mut proc = state.gateway_process.lock().await;
         if let Some(mut child) = proc.take() {
             tracing::info!(
-                "[CFG] Switching to remote: stopping local Gateway (pid: {:?})",
+                "[CFG] Switching to {}: stopping local Gateway (pid: {:?})",
+                mode.as_str(),
                 child.id()
             );
             let _ = child.kill();

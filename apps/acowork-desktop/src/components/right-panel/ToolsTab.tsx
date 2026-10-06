@@ -147,11 +147,11 @@ function McpServerCard({
               />
             }
           >
-            <span className="block truncate font-mono text-[11px] font-medium text-text-secondary ">
+            <span className="block truncate font-mono text-11 font-medium text-text-secondary ">
               {tool.name}
             </span>
             {tool.description && (
-              <span className="block truncate text-[9px] leading-tight text-text-tertiary ">
+              <span className="block truncate text-9 leading-tight text-text-tertiary ">
                 {tool.description}
               </span>
             )}
@@ -464,7 +464,7 @@ export function ToolsTab() {
                       />
                     }
                   >
-                    <span className="truncate text-[11px] font-medium text-text-secondary ">
+                    <span className="truncate text-11 font-medium text-text-secondary ">
                       {entry.name}
                     </span>
                   </ListRow>
@@ -473,7 +473,7 @@ export function ToolsTab() {
             )}
           </ExpandableRow>
         </ListBox>
-        <p className="mt-1 text-[9px] text-text-tertiary ">
+        <p className="mt-1 text-9 text-text-tertiary ">
           {t("agentSetup.builtinToolsDesc")}
         </p>
       </div>
@@ -529,7 +529,7 @@ export function ToolsTab() {
             )}
           </ExpandableRow>
         </ListBox>
-        <p className="mt-1 text-[9px] text-text-tertiary ">
+        <p className="mt-1 text-9 text-text-tertiary ">
           {t("agentSetup.mcpToggleDesc")}
         </p>
         {/* Surface MCP PUT errors that the store would otherwise swallow.
@@ -540,7 +540,7 @@ export function ToolsTab() {
         {mcpError && (
           <div
             role="alert"
-            className="mt-1 flex items-start gap-1.5 rounded-md border border-[var(--color-destructive)]/30 bg-[var(--color-destructive)]/10 px-2 py-1 text-[10px] text-[var(--color-destructive)] dark:border-[var(--color-destructive)]/40 dark:bg-[var(--color-destructive)]/15"
+            className="mt-1 flex items-start gap-1.5 rounded-md border border-[var(--color-destructive)]/30 bg-[var(--color-destructive)]/10 px-2 py-1 text-10 text-[var(--color-destructive)] dark:border-[var(--color-destructive)]/40 dark:bg-[var(--color-destructive)]/15"
           >
             <span className="flex-1 break-words">
               {t("agentSetup.mcpToggleError", { error: mcpError })}
@@ -548,7 +548,7 @@ export function ToolsTab() {
             <button
               type="button"
               onClick={() => useMcpStore.setState({ error: null })}
-              className="shrink-0 text-[10px] underline hover:no-underline"
+              className="shrink-0 text-10 underline hover:no-underline"
               aria-label="Dismiss error"
             >
               ×

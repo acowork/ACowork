@@ -513,7 +513,7 @@ export const VirtualMessageList = React.forwardRef<
       {adapter.isLoading && (
         <div className="flex items-center justify-center py-2">
           <span className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-zinc-300 border-t-zinc-600 dark:border-zinc-600 dark:border-t-zinc-300" />
-          <span className="ml-1.5 text-[10px] text-text-tertiary ">Loading more...</span>
+          <span className="ml-1.5 text-10 text-text-tertiary ">Loading more...</span>
         </div>
       )}
 
@@ -604,7 +604,7 @@ export const VirtualMessageList = React.forwardRef<
                         {agentDisplayName}
                       </span>
                       {selectedAgent?.role && (
-                        <span className="text-[10px] leading-tight text-text-tertiary ">
+                        <span className="text-10 leading-tight text-text-tertiary ">
                           {selectedAgent.role}
                         </span>
                       )}
@@ -719,7 +719,7 @@ export const VirtualMessageList = React.forwardRef<
                         {agentDisplayName}
                       </span>
                       {selectedAgent?.role && (
-                        <span className="text-[10px] leading-tight text-text-tertiary ">
+                        <span className="text-10 leading-tight text-text-tertiary ">
                           {selectedAgent.role}
                         </span>
                       )}

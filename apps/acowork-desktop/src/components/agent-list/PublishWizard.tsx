@@ -608,7 +608,7 @@ function AvatarPickerSubForm({
         <h3 className="text-xs font-medium text-text-secondary ">
           Default Avatar
         </h3>
-        <span className="text-[10px] text-text-tertiary">
+        <span className="text-10 text-text-tertiary">
           baked into manifest.toml at build time
         </span>
       </div>
@@ -684,7 +684,7 @@ function AvatarPickerSubForm({
             <div className="font-mono text-text-secondary ">
               {value.relativePath}
             </div>
-            <div className="text-[10px] text-text-tertiary">
+            <div className="text-10 text-text-tertiary">
               ship as part of the .agent package
             </div>
           </div>
@@ -693,7 +693,7 @@ function AvatarPickerSubForm({
               type="button"
               onClick={handlePickFile}
               disabled={disabled}
-              className="rounded-md px-2 py-1 text-[10px] text-text-tertiary hover:bg-zinc-100 hover:text-zinc-800 disabled:opacity-50 dark:hover:bg-zinc-700 dark:hover:text-zinc-200"
+              className="rounded-md px-2 py-1 text-10 text-text-tertiary hover:bg-zinc-100 hover:text-zinc-800 disabled:opacity-50 dark:hover:bg-zinc-700 dark:hover:text-zinc-200"
             >
               Replace
             </button>
@@ -701,7 +701,7 @@ function AvatarPickerSubForm({
               type="button"
               onClick={handleClearPackaged}
               disabled={disabled}
-              className="rounded-md px-2 py-1 text-[10px] text-text-tertiary hover:bg-zinc-100 hover:text-red-600 disabled:opacity-50 dark:hover:bg-zinc-700"
+              className="rounded-md px-2 py-1 text-10 text-text-tertiary hover:bg-zinc-100 hover:text-red-600 disabled:opacity-50 dark:hover:bg-zinc-700"
               aria-label={t("publishWizard.ariaLabelRemoveAvatar")}
             >
               <XIcon className="h-3.5 w-3.5" />
@@ -712,7 +712,7 @@ function AvatarPickerSubForm({
 
       {/* None — random fallback note */}
       {value.kind === "none" && (
-        <p className="rounded-md border border-dashed border-border-outer px-3 py-2 text-[11px] text-text-tertiary">
+        <p className="rounded-md border border-dashed border-border-outer px-3 py-2 text-11 text-text-tertiary">
           The client will assign a random builtin icon on first install.
         </p>
       )}
@@ -776,7 +776,7 @@ function AvatarPreview({ selection, agentId }: { selection: AvatarSelection; age
           <div className="text-xs font-medium text-text-secondary ">
             Builtin icon: <span className="font-mono">{selection.iconId}</span>
           </div>
-          <div className="text-[10px] text-text-tertiary">
+          <div className="text-10 text-text-tertiary">
             stored as <span className="font-mono">builtin_avatar</span> in manifest.toml
           </div>
         </div>
@@ -802,7 +802,7 @@ function AvatarPreview({ selection, agentId }: { selection: AvatarSelection; age
           <div className="text-xs font-medium text-text-secondary ">
             Local image: <span className="font-mono">{selection.relativePath}</span>
           </div>
-          <div className="text-[10px] text-text-tertiary">
+          <div className="text-10 text-text-tertiary">
             stored as <span className="font-mono">avatar</span> in manifest.toml
           </div>
         </div>
@@ -818,7 +818,7 @@ function AvatarPreview({ selection, agentId }: { selection: AvatarSelection; age
         <div className="text-xs font-medium text-text-secondary ">
           No avatar selected
         </div>
-        <div className="text-[10px] text-text-tertiary">
+        <div className="text-10 text-text-tertiary">
           clients will fall back to a random builtin icon at install time
         </div>
       </div>

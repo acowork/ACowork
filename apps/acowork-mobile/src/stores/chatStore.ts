@@ -1,0 +1,473 @@
+/**
+ * Per-agent VIEW state. The session list itself is owned by `agentStore` —
+ * see the note there on why a second copy would break the `can_write` gate.
+ *
+ * The invariant this file exists to protect: a session switch is a
+ * THREE-STEP ATOMIC MIGRATION, never a local page swap. Selecting a session
+ * must (1) move the UI, (2) tell the Runtime `open_session` so it
+ * re-points its active session on the wire, and (3) reload history over
+ * HTTP. Skipping (2) leaves the Runtime streaming into the previous
+ * session while the user reads the new one.
+ *
+ * Read-only sessions deliberately skip (2): `open_session` flips the
+ * session's global Active/Closed lifecycle state, and a viewer has no
+ * business opening someone else's session platform-wide. See ADR-086.
+ */
+
+import { create } from 'zustand'
+import { useAgentStore } from './agentStore'
+import { markSeen } from '../lib/unread'
+import type { ChatMessage, LiveStatus, SessionInfo, SessionSnapshot } from '../lib/types'
+import {
+  startWatching, stopWatching, setRealtimeDeps, pollNetworkState, POLL_INTERVAL_MS,
+} from '../lib/realtime'
+import type { RealtimeEvent } from '../lib/proto-wire'
+
+export type { RealtimeEvent }
+export { pollNetworkState, POLL_INTERVAL_MS }
+
+export interface AgentViewState {
+  /** The session the user is looking at. May be a read-only view. */
+  activeSessionId: string | null
+  messages: ChatMessage[]
+  /** True while history is loading, to keep the bubble list stable. */
+  loading: boolean
+  /** False once a load failed; the UI must not pretend a session is empty. */
+  loaded: boolean
+  /** v1.2 §8: last known status of the foreground session (null = idle/unknown). */
+  status: LiveStatus | null
+  /** Server `message_count` at the moment the current `messages` were
+   *  loaded; null until the first snapshot primes it. Drives reloads. */
+  loadedCount: number | null
+  /** True while a send is in flight or failed; carries the draft for retry. */
+  pendingSend: { content: string; state: 'sending' | 'failed' } | null
+  /** Which realtime channel is currently feeding this view (§8.0). */
+  channel: 'ws' | 'polling' | null
+  /** AskQuestion card — WS-channel only (polling cannot see the question). */
+  question: { requestId: string; question: string; options: string[] } | null
+  /** Tool details for the approval card (WS-channel enrichment). */
+  approvalDetail: { requestId: string; toolName: string; action: string; riskLevel: string } | null
+}
+
+/** Statuses where the agent is doing work — the poll loop keeps running
+ *  and the UI shows a status line instead of streaming (v1.1 §8). */
+export function isActiveStatus(s: LiveStatus | null): boolean {
+  if (!s) return false
+  switch (s.status) {
+    case 'llm_awaiting_first_chunk':
+    case 'thinking':
+    case 'llm_streaming':
+    case 'tool_executing':
+    case 'waiting_approval':
+    case 'paused':
+      return true
+    default:
+      return false
+  }
+}
+
+interface ChatStore {
+  agentStates: Record<string, AgentViewState>
+  /** The agent whose conversation detail is on screen; null = the IM list. */
+  selectedAgentId: string | null
+
+  selectAgent: (agentId: string | null) => void
+
+  /**
+   * The only supported way to change session. Returns ok=false on failure
+   * so the caller can revert the UI instead of leaving it lying.
+   */
+  openSession: (agentId: string, sessionId: string) => Promise<boolean>
+
+  /** Create a session and open it. Defaults to Private (ADR-076). */
+  createSession: (agentId: string, title?: string) => Promise<string | null>
+
+  deleteSession: (agentId: string, sessionId: string) => Promise<boolean>
+
+  /** v1.2 §8: foreground watch — start when a session is on screen. */
+  startWatching: (agentId: string, sessionId: string) => void
+  stopWatching: () => void
+
+  /** Send (or retry the failed draft). `retry` reuses the pending content. */
+  sendMessage: (agentId: string, sessionId: string, content?: string) => Promise<boolean>
+
+  /** Approve/deny the tool the session is waiting on (generic v1 card). */
+  decideApproval: (agentId: string, sessionId: string, requestId: string, approved: boolean) => Promise<void>
+
+  /** Answer an AskQuestion card (WS channel only, §8.3). */
+  answerQuestion: (agentId: string, sessionId: string, requestId: string, answer: string) => Promise<boolean>
+}
+
+const emptyView = (): AgentViewState => ({
+  activeSessionId: null,
+  messages: [],
+  loading: false,
+  loaded: false,
+  status: null,
+  loadedCount: null,
+  pendingSend: null,
+  channel: null,
+  question: null,
+  approvalDetail: null,
+})
+
+/** Injected by `lib/api.ts`; kept out of the store so tests stay pure. */
+export interface ChatTransport {
+  openSession(agentId: string, sessionId: string): Promise<void>
+  fetchMessages(agentId: string, sessionId: string): Promise<ChatMessage[]>
+  fetchSessions(agentId: string, page: number): Promise<{ items: SessionInfo[]; hasMore: boolean }>
+  createSession(agentId: string, title?: string): Promise<SessionInfo>
+  deleteSession(agentId: string, sessionId: string): Promise<void>
+  /** v1.1 §8: the poll primitive — live status + authoritative message
+   *  count of ONE foreground session. The count (not a status transition)
+   *  drives history reloads, so a turn that starts and finishes between
+   *  two ticks still lands. */
+  fetchSnapshot(agentId: string, sessionId: string): Promise<SessionSnapshot>
+  /** Send a user message; resolves with the client message id. */
+  send(agentId: string, sessionId: string, content: string): Promise<string>
+  /** v1 approval decision (generic card; tool details ride the WS channel). */
+  approval(agentId: string, sessionId: string, requestId: string, approved: boolean): Promise<void>
+  /** AskQuestion answer (§8.3): POST .../answer with the card's request id. */
+  answer(agentId: string, sessionId: string, requestId: string, answer: string): Promise<void>
+}
+
+let transport: ChatTransport | null = null
+
+/** Wire the real HTTP transport once, at app boot. */
+export function setChatTransport(t: ChatTransport): void {
+  transport = t
+  // The polling-fallback primitive travels with the transport, so a test
+  // that swaps transports never polls through a stale one.
+  setRealtimeDeps({
+    snapshot: (agentId, sessionId) => t.fetchSnapshot(agentId, sessionId),
+  })
+}
+
+export const useChatStore = create<ChatStore>((set, get) => ({
+  agentStates: {},
+  selectedAgentId: null,
+
+  selectAgent: (agentId) => set({ selectedAgentId: agentId }),
+
+  openSession: async (agentId, sessionId) => {
+    if (!transport) return false
+    const prev = get().agentStates[agentId] ?? emptyView()
+    // Read the row from the ONE owner of the session list, so the read-only
+    // decision below uses the same `can_write` the UI renders.
+    const target = useAgentStore.getState().getSession(agentId, sessionId)
+    const readOnly = target?.can_write === false
+
+    // Step 1: move the UI. Optimistic — reverted below if the load fails.
+    // The polled status, cards and pending draft belong to the PREVIOUS
+    // session; carrying them over would show a stale "thinking…" line or a
+    // dead approval card.
+    set((s) => ({
+      agentStates: {
+        ...s.agentStates,
+        [agentId]: {
+          ...prev, activeSessionId: sessionId, loading: true,
+          status: null, loadedCount: null, pendingSend: null,
+          question: null, approvalDetail: null,
+        },
+      },
+    }))
+
+    try {
+      // Step 2: tell the Runtime, skipped for read-only sessions.
+      if (!readOnly) await transport.openSession(agentId, sessionId)
+      // Step 3: reload history.
+      const messages = await transport.fetchMessages(agentId, sessionId)
+      // Looking at it is reading it: the dot for THIS session goes away, and
+      // the baseline is the count the list carried, not the count now.
+      markSeen(agentId, sessionId, target?.message_count)
+      set((s) => ({
+        agentStates: {
+          ...s.agentStates,
+          // Merge onto step 1 (not the stale `prev`): the cleared status and
+          // pending draft belong to THIS session's view, not the old one.
+          // `loadedCount: null` re-arms the freshness baseline — the first
+          // tick after this load primes it from the server's count.
+          [agentId]: { ...(s.agentStates[agentId] ?? emptyView()), messages, loading: false, loaded: true, loadedCount: null },
+        },
+      }))
+      return true
+    } catch {
+      // Revert to the previous session rather than showing a half-open state.
+      // The revert must restore the PREVIOUS session id too: leaving the new
+      // id active with the old messages would let the poll loop reload the
+      // wrong session and paint over the failure.
+      set((s) => ({
+        agentStates: { ...s.agentStates, [agentId]: { ...prev, loading: false } } ,
+      }))
+      return false
+    }
+  },
+
+  createSession: async (agentId, title) => {
+    if (!transport) return null
+    const created = await transport.createSession(agentId, title)
+    useAgentStore.getState().mergeSessions(agentId, [created])
+    await get().openSession(agentId, created.session_id)
+    return created.session_id
+  },
+
+  deleteSession: async (agentId, sessionId) => {
+    if (!transport) return false
+    await transport.deleteSession(agentId, sessionId)
+    const remaining = useAgentStore.getState().removeSession(agentId, sessionId)
+    set((s) => {
+      const prev = s.agentStates[agentId] ?? emptyView()
+      // Deleting the session the user is looking at must not leave a dangling
+      // active id pointing at history that is gone.
+      const wasActive = prev.activeSessionId === sessionId
+      return {
+        agentStates: {
+          ...s.agentStates,
+          [agentId]: {
+            ...prev,
+            ...(wasActive
+              ? { activeSessionId: remaining[0]?.session_id ?? null, messages: [], loaded: false }
+              : {}),
+          },
+        },
+      }
+    })
+    return true
+  },
+
+  /* ---------------- v1.2 §8: foreground watch ----------------
+   *
+   * The channel lives in `lib/realtime` (WS on relay, polling elsewhere);
+   * this store owns only the RELOAD RULE: history is reloaded whenever the
+   * authoritative `message_count` differs from the count the current view
+   * was loaded at, or on an active → idle transition. Events from the WS
+   * channel carry what polling cannot see — approval details and the
+   * AskQuestion card (§8.1/§8.3).
+   */
+
+  startWatching: (agentId, sessionId) => {
+    startWatching(agentId, sessionId, {
+      onSnapshot: (snap) => applySnapshot(get, set, agentId, sessionId, snap),
+      onEvent: (ev) => handleEvent(get, set, agentId, sessionId, ev),
+      onChannel: (ch) => {
+        set((s) => ({
+          agentStates: {
+            ...s.agentStates,
+            [agentId]: { ...(s.agentStates[agentId] ?? emptyView()), channel: ch },
+          },
+        }))
+      },
+    })
+  },
+
+  stopWatching: () => {
+    stopWatching()
+  },
+
+  sendMessage: async (agentId, sessionId, content) => {
+    if (!transport) return false
+    const view = get().agentStates[agentId] ?? emptyView()
+    const text = (content ?? view.pendingSend?.content ?? '').trim()
+    if (!text) return false
+    set((s) => ({
+      agentStates: {
+        ...s.agentStates,
+        [agentId]: { ...(s.agentStates[agentId] ?? emptyView()), pendingSend: { content: text, state: 'sending' } },
+      },
+    }))
+    try {
+      await transport.send(agentId, sessionId, text)
+      // Optimistic bubble: the authoritative copy arrives with the idle
+      // reload and replaces the whole list; this keeps the echo instant.
+      set((s) => {
+        const v = s.agentStates[agentId] ?? emptyView()
+        return {
+          agentStates: {
+            ...s.agentStates,
+            [agentId]: {
+              ...v,
+              pendingSend: null,
+              messages: [
+                ...v.messages,
+                { id: `local-${Date.now()}`, role: 'user', content: text, created_at: Date.now(), kind: 'text' },
+              ],
+            },
+          },
+        }
+      })
+      // The turn may already be over by the time we get here; watch at least
+      // once so the status line and the final reload are correct.
+      get().startWatching(agentId, sessionId)
+      return true
+    } catch {
+      set((s) => ({
+        agentStates: {
+          ...s.agentStates,
+          [agentId]: { ...(s.agentStates[agentId] ?? emptyView()), pendingSend: { content: text, state: 'failed' } },
+        },
+      }))
+      return false
+    }
+  },
+
+  decideApproval: async (agentId, sessionId, requestId, approved) => {
+    if (!transport) return
+    await transport.approval(agentId, sessionId, requestId, approved)
+    // The card is dismissed by the status leaving waiting_approval; clear the
+    // WS-side detail immediately so a redelivered retained event cannot
+    // re-arm a decided card.
+    set((s) => ({
+      agentStates: {
+        ...s.agentStates,
+        [agentId]: { ...(s.agentStates[agentId] ?? emptyView()), approvalDetail: null },
+      },
+    }))
+  },
+
+  answerQuestion: async (agentId, sessionId, requestId, answer) => {
+    if (!transport) return false
+    try {
+      await transport.answer(agentId, sessionId, requestId, answer)
+      set((s) => ({
+        agentStates: {
+          ...s.agentStates,
+          [agentId]: { ...(s.agentStates[agentId] ?? emptyView()), question: null },
+        },
+      }))
+      return true
+    } catch {
+      return false
+    }
+  },
+}))
+
+/* ---------------- realtime handler internals (v1.2 §8) ---------------- */
+
+type Get = () => ChatStore
+type Set = (fn: (s: ChatStore) => Partial<ChatStore>) => void
+
+/**
+ * Apply one snapshot (from either channel). The §8 reload rule:
+ * the history is reloaded whenever the authoritative `message_count`
+ * differs from the count the current view was loaded at, or when the
+ * session transitions active → idle. The count check is stateless — a turn
+ * that starts and finishes between two observations still changes it —
+ * which closes the fast-reply race a transition-only rule had.
+ */
+async function applySnapshot(
+  get: Get, set: Set,
+  agentId: string, sessionId: string,
+  snap: SessionSnapshot,
+): Promise<void> {
+  if (!transport) return
+  const view = get().agentStates[agentId]
+  if (!view || view.activeSessionId !== sessionId) return
+  const status = snap.status
+  const was = isActiveStatus(view.status)
+  const now = isActiveStatus(status)
+  const countChanged =
+    snap.messageCount !== null && view.loadedCount !== null && snap.messageCount !== view.loadedCount
+  const erroredNew = status?.status === 'errored' && view.status?.status !== 'errored'
+  if ((was && !now) || countChanged || erroredNew) {
+    try {
+      const messages = await transport.fetchMessages(agentId, sessionId)
+      set((s) => ({
+        agentStates: {
+          ...s.agentStates,
+          [agentId]: { ...(s.agentStates[agentId] ?? emptyView()), status, messages, loadedCount: snap.messageCount },
+        },
+      }))
+    } catch {
+      /* a failed reload retries on the next observation */
+    }
+  } else {
+    // Prime the count baseline on the first snapshot after a history load, so
+    // the next change is detectable without trusting a transition.
+    set((s) => ({
+      agentStates: {
+        ...s.agentStates,
+        [agentId]: {
+          ...(s.agentStates[agentId] ?? emptyView()),
+          status,
+          loadedCount: view.loadedCount === null ? snap.messageCount : view.loadedCount,
+        },
+      },
+    }))
+  }
+}
+
+/**
+ * WS-channel events (§8.1). Turn-end signals force the same reload the count
+ * rule would do; card events carry details polling cannot see.
+ */
+async function handleEvent(
+  get: Get, set: Set,
+  agentId: string, sessionId: string,
+  ev: RealtimeEvent,
+): Promise<void> {
+  if (!transport) return
+  const view = get().agentStates[agentId]
+  if (!view || view.activeSessionId !== sessionId) return
+  switch (ev.kind) {
+    case 'done':
+    case 'stopped':
+    case 'error': {
+      try {
+        const [messages, snap] = await Promise.all([
+          transport.fetchMessages(agentId, sessionId),
+          transport.fetchSnapshot(agentId, sessionId),
+        ])
+        set((s) => ({
+          agentStates: {
+            ...s.agentStates,
+            [agentId]: { ...(s.agentStates[agentId] ?? emptyView()), messages, loadedCount: snap.messageCount, status: snap.status },
+          },
+        }))
+      } catch {
+        /* the count rule on the next observation retries */
+      }
+      break
+    }
+    case 'tool_approval_needed': {
+      set((s) => ({
+        agentStates: {
+          ...s.agentStates,
+          [agentId]: {
+            ...(s.agentStates[agentId] ?? emptyView()),
+            status: { status: 'waiting_approval', detail: { request_id: ev.requestId } },
+            approvalDetail: { requestId: ev.requestId, toolName: ev.toolName, action: ev.action, riskLevel: ev.riskLevel },
+          },
+        },
+      }))
+      break
+    }
+    case 'ask_question': {
+      const card = parseQuestion(ev.questionJson)
+      set((s) => ({
+        agentStates: {
+          ...s.agentStates,
+          [agentId]: {
+            ...(s.agentStates[agentId] ?? emptyView()),
+            question: { requestId: ev.requestId, question: card.question, options: card.options },
+          },
+        },
+      }))
+      break
+    }
+    default:
+      break
+  }
+}
+
+/** AskQuestionPayload.question_json: `{question, options?}` — tolerant parse. */
+export function parseQuestion(json: string): { question: string; options: string[] } {
+  try {
+    const o = JSON.parse(json) as Record<string, unknown>
+    const q = typeof o.question === 'string' ? o.question : typeof o.text === 'string' ? o.text : ''
+    const opts = Array.isArray(o.options) ? o.options.map(String) : []
+    return { question: q || json, options: opts }
+  } catch {
+    return { question: json, options: [] }
+  }
+}
+

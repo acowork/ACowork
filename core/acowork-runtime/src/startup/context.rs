@@ -143,17 +143,11 @@ pub(crate) struct AgentBootContext {
     /// `EpisodicDistiller` owns its own internal prompts.
     pub abstention_prompt: Option<String>,
 
-    /// ADR-071 D7/D9: override for the offline distiller Step 2a
-    /// extraction system prompt (package file: `prompts/distiller-extraction.md`).
-    /// `None` → the built-in `EXTRACTION_SYSTEM_PROMPT` in
+    /// ADR-071 D7/D9: override for the offline distiller's merge-decision
+    /// system prompt (package file: `prompts/distiller-merge.md`).
+    /// `None` → the built-in `MERGE_SYSTEM_PROMPT` in
     /// `acowork_memory::consolidation::distiller` is used.
-    pub distiller_extraction_prompt: Option<String>,
-
-    /// ADR-071 D7/D9: override for the offline distiller Step 4 judge
-    /// system prompt (package file: `prompts/distiller-judge.md`).
-    /// `None` → the built-in `JUDGE_SYSTEM_PROMPT` in
-    /// `acowork_memory::consolidation::distiller` is used.
-    pub distiller_judge_prompt: Option<String>,
+    pub distiller_merge_prompt: Option<String>,
 
     // Shared handles
     pub memory_session: Arc<crate::memory::MemorySessionHandle>,
@@ -222,14 +216,6 @@ pub(crate) struct AgentBootContext {
     /// dimension-mismatch detection.
     ///
     /// The HTTP server already holds a clone of the same `Arc` passed
-    /// to [`crate::http::RuntimeHttpServer::start`]; this slot in
-    /// `AgentBootContext` exists for symmetry with
-    /// [`Self::memory_store_shared`] and is reserved for any future
-    /// post-Phase-A consumer (e.g. memory diagnostics in the gateway
-    /// loop). Phase B does not currently read it.
-    #[allow(dead_code)]
-    pub embed_dim_shared: crate::http::SharedEmbedDimension,
-
     /// Late-bind slot for the Runtime's MQTT client. Same lifecycle as
     /// `mqtt_client: Option<RuntimeMqttClient>` above, but the slot is
     /// the handle the HTTP server holds and that Phase C's DevMode

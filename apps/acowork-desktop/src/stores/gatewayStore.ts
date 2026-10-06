@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { getGatewayUrl } from "../lib/config";
-import type { HealthResponse, GatewayStatus, LocalGatewayState, GatewayOwnership, GatewayBootResult, AgentMigrationProgress } from "../lib/types";
+import type { HealthResponse, GatewayStatus, LocalGatewayState, GatewayOwnership, GatewayBootResult, AgentMigrationProgress, MigrationAgentEntry } from "../lib/types";
 import { fetchMigrationProgress } from "../lib/gateway-api";
 import { log } from "../lib/logger";
 
@@ -54,7 +54,7 @@ type ProbeOutcome =
  *                    flight; used by the death-classifier tick so it
  *                    never cancels someone else's probe.
  */
-async function probeHealthOnce(preempt: boolean): Promise<ProbeOutcome> {
+async function probeHealthRoundtrip(preempt: boolean): Promise<ProbeOutcome> {
   if (_inFlightHealth) {
     if (!preempt) return { kind: "aborted" };
     _inFlightHealth.abort("superseded");
@@ -83,6 +83,60 @@ async function probeHealthOnce(preempt: boolean): Promise<ProbeOutcome> {
     clearTimeout(timer);
     if (_inFlightHealth === ctrl) _inFlightHealth = null;
   }
+}
+
+/**
+ * Consecutive inconclusive probes.
+ *
+ * One timeout is never death evidence (invariant 2) and that stays true:
+ * nothing here writes `status` or `gatewayAlive`. But a path that answers
+ * nothing three times in a row is not "slow" — it is a half-dead transport.
+ * Observed live on the relay tunnel: yamux ping/pong kept answering, the
+ * device stream stopped delivering, every request queued behind it, and the
+ * UI spun with no error anywhere. The one client-side action that fixes
+ * that is rebuilding the connection, so that is all this does.
+ */
+const INCONCLUSIVE_STREAK_LIMIT = 3;
+/** Minimum gap between two forced reconnects, whatever the streak does. */
+const FORCE_RECONNECT_COOLDOWN_MS = 60_000;
+let _inconclusiveStreak = 0;
+let _lastForcedReconnectAt = 0;
+
+async function noteInconclusiveProbe(): Promise<void> {
+  _inconclusiveStreak += 1;
+  if (_inconclusiveStreak < INCONCLUSIVE_STREAK_LIMIT) return;
+  _inconclusiveStreak = 0;
+  const now = Date.now();
+  if (now - _lastForcedReconnectAt < FORCE_RECONNECT_COOLDOWN_MS) return;
+  _lastForcedReconnectAt = now;
+  log.warn(
+    `[gateway-health] ${INCONCLUSIVE_STREAK_LIMIT} probes in a row with no answer — ` +
+      "transport is half-dead, forcing a fresh MQTT connection",
+  );
+  try {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("force_reconnect_mqtt");
+  } catch (err) {
+    // No live MQTT client yet (boot, or already torn down) — nothing to rebuild.
+    log.debug("[gateway-health] force_reconnect_mqtt skipped:", err);
+  }
+}
+
+/**
+ * The liveness probe every caller uses. Streak accounting lives here
+ * because this is the single choke point both the manual `checkHealth()`
+ * and the death-classifier tick pass through.
+ */
+async function probeHealthOnce(preempt: boolean): Promise<ProbeOutcome> {
+  const outcome = await probeHealthRoundtrip(preempt);
+  if (outcome.kind === "timeout") {
+    void noteInconclusiveProbe();
+  } else if (outcome.kind !== "aborted") {
+    // Any real verdict — OK, HTTP error, fast refusal — means bytes moved.
+    // An aborted probe asked nothing worth answering (invariant 1).
+    _inconclusiveStreak = 0;
+  }
+  return outcome;
 }
 
 /**
@@ -193,6 +247,31 @@ interface GatewayStore {
   /** Migration progress for all agents (polled from Gateway) */
   migrationProgress: Record<string, AgentMigrationProgress>;
   /**
+   * The active migration session — the agents being re-embedded, whether the
+   * rebuild has actually started, and which model it is rebuilding for.
+   *
+   * This lives in the store, not in EmbeddingModelTab's `useState`, because a
+   * migration outlives the component that began it. The tab unmounts whenever
+   * the user visits the chat, and with the session held locally the progress
+   * list simply vanished mid-rebuild and never came back — the job kept
+   * running on the Gateway with no way to watch or stop it. A store slice
+   * survives the unmount, so the panel reappears exactly as it was.
+   *
+   * `started` is the difference between "we know these agents need
+   * re-embedding" (the pre-flight list, dismissible) and "the Gateway is
+   * rebuilding them right now" (the live list, which must not be dismissible
+   * and must not vanish).
+   */
+  migrationSession: MigrationSession | null;
+  /** Begin a migration session (pre-flight: agents awaiting confirmation). */
+  beginMigrationSession: (session: MigrationSession) => void;
+  /** Mark the session as actually started on the Gateway. */
+  markMigrationStarted: () => void;
+  /** Replace the selected agent set (pre-flight checkbox toggles). */
+  setMigrationSelection: (instanceIds: Set<string>) => void;
+  /** Dismiss the session — pre-flight cancel, or close a finished rebuild. */
+  clearMigrationSession: () => void;
+  /**
    * Reachable gateway URLs discovered by SplashScreen's 5s fallback probe.
    * Populated only when the persisted URL fails to respond; cleared once
    * the user picks one (or the normal boot completes). Stays empty during
@@ -215,6 +294,26 @@ interface GatewayStore {
   clearCandidates: () => void;
 }
 
+/**
+ * An embedding-dimension migration in flight (or awaiting confirmation).
+ * Owned by the store so it outlives the tab that started it.
+ */
+export interface MigrationSession {
+  /** Model the agents are being rebuilt onto. */
+  modelId: string;
+  /** Old → new vector width, for the "why" line. Null when unknown. */
+  oldDimension: number | null;
+  newDimension: number;
+  /** Backend's explanation of why a rebuild is required. */
+  message: string;
+  /** Agents in the session; a progress poll updates each entry's status. */
+  agents: MigrationAgentEntry[];
+  /** Agents the user has ticked (pre-flight only). */
+  selected: Set<string>;
+  /** False until the Gateway confirms the rebuild is running. */
+  started: boolean;
+}
+
 export const useGatewayStore = create<GatewayStore>((set, get) => ({
   // ADR-051 + ADR-052 (lifecycle ownership):
   //   `SplashScreen` is the SOLE owner of startup-time health probing.
@@ -232,7 +331,27 @@ export const useGatewayStore = create<GatewayStore>((set, get) => ({
   localState: "idle",
   localOwnership: "none",
   migrationProgress: {},
+  migrationSession: null,
   candidates: [],
+
+  beginMigrationSession: (session) => set({ migrationSession: session }),
+
+  markMigrationStarted: () =>
+    set((s) =>
+      s.migrationSession
+        ? { migrationSession: { ...s.migrationSession, started: true } }
+        : s,
+    ),
+
+  setMigrationSelection: (instanceIds) =>
+    set((s) =>
+      s.migrationSession
+        ? { migrationSession: { ...s.migrationSession, selected: instanceIds } }
+        : s,
+    ),
+
+  clearMigrationSession: () =>
+    set({ migrationSession: null, migrationProgress: {} }),
 
   checkHealth: async () => {
     const prev = get().status;

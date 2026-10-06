@@ -101,7 +101,7 @@ export function DebugPausedBanner() {
           <button
             type="button"
             onClick={handleResume}
-            className="flex items-center gap-1 rounded bg-[var(--color-accent)] px-2 py-0.5 text-[11px] font-medium text-white transition-colors hover:brightness-90"
+            className="flex items-center gap-1 rounded bg-[var(--color-accent)] px-2 py-0.5 text-11 font-medium text-white transition-colors hover:brightness-90"
           >
             <Play className="h-3 w-3" fill="currentColor" />
             <span>{t("debugPausedBanner.resume")}</span>
@@ -110,7 +110,7 @@ export function DebugPausedBanner() {
           <button
             type="button"
             onClick={handleStep}
-            className="flex items-center gap-1 rounded bg-[var(--color-accent)] px-2 py-0.5 text-[11px] font-medium text-white transition-colors hover:brightness-90"
+            className="flex items-center gap-1 rounded bg-[var(--color-accent)] px-2 py-0.5 text-11 font-medium text-white transition-colors hover:brightness-90"
           >
             <StepForward className="h-3 w-3" />
             <span>{t("debugPausedBanner.step")}</span>
@@ -124,7 +124,7 @@ export function DebugPausedBanner() {
 
 function KbdHint({ children }: { children: React.ReactNode }) {
   return (
-    <kbd className="ml-0.5 rounded bg-black/15 px-1 py-px font-mono text-[9px] font-semibold leading-none dark:bg-white/15">
+    <kbd className="ml-0.5 rounded bg-black/15 px-1 py-px font-mono text-9 font-semibold leading-none dark:bg-white/15">
       {children}
     </kbd>
   );

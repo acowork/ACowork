@@ -246,19 +246,17 @@ pub struct AgentCore {
     // LLM→memory boundary was rewritten to be Episode-only; ADR-071
     // re-adds two distiller overrides because the offline
     // `EpisodicDistiller` pipeline now needs per-agent prompt control
-    // (independent of the compaction/title prompts). Consumers
-    // are the offline distiller Steps 2a / 4 — resolved via
-    // `distiller_scheduler_config()` which projects these slots onto
-    // `DistillerConfig.{extraction_prompt_override,judge_prompt_override}`.
-    /// Override for the built-in `EXTRACTION_SYSTEM_PROMPT` in
-    /// `acowork-memory` (distiller Step 2a, `prompts/distiller-extraction.md`).
+    // (independent of the compaction/title prompts). Resolved via
+    // `distiller_scheduler_config()`, which projects this slot onto
+    // `DistillerConfig.merge_prompt_override`.
+    /// Override for the built-in `MERGE_SYSTEM_PROMPT` in `acowork-memory`
+    /// (the distiller's merge decision, `prompts/distiller-merge.md`).
     /// Inner `None` = use the built-in constant.
-    pub(crate) distiller_extraction_prompt: Arc<std::sync::RwLock<Option<String>>>,
-
-    /// Override for the built-in `JUDGE_SYSTEM_PROMPT` in
-    /// `acowork-memory` (distiller Step 4, `prompts/distiller-judge.md`).
-    /// Inner `None` = use the built-in constant.
-    pub(crate) distiller_judge_prompt: Arc<std::sync::RwLock<Option<String>>>,
+    ///
+    /// ADR-071 D7 defined two slots (extraction + judge); the projection +
+    /// merge rewrite collapsed both pipelines into one LLM call, so one slot
+    /// remains.
+    pub(crate) distiller_merge_prompt: Arc<std::sync::RwLock<Option<String>>>,
 
     /// Memory store (SQLite, shared across all sessions of this agent).
     /// ADR-051 P4: Primary field is `memory_provider` (trait object).
@@ -323,7 +321,16 @@ pub struct AgentCore {
     /// Memory session handle — shared between agent loop and memory tools.
     pub(crate) memory_session: Option<Arc<crate::memory::MemorySessionHandle>>,
     /// Embedding provider for vector-based memory retrieval.
+    ///
+    /// This field is the *private* view of the provider. Anything outside this
+    /// clone must read [`Self::embedding_provider_shared`] instead, because
+    /// `AgentCore` is `Clone` and the runtime publishes an `Arc<AgentCore>`
+    /// snapshot for the conversation indexer and the HTTP layer: a write here
+    /// never reaches those readers.
     pub(crate) embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
+    /// The provider as one shared cell, identical across every clone of this
+    /// core. See [`crate::embedding::SharedEmbedProvider`].
+    pub(crate) embedding_provider_shared: crate::embedding::SharedEmbedProvider,
     /// P3-1: Retrieval quality metrics aggregator (shared across sessions).
     /// ADR-051 C3: Replaced grafeo MetricsAggregator with Runtime-internal
     /// RetrievalMetricsAggregator (data from acowork_memory::RetrievalMetrics).
@@ -417,32 +424,12 @@ fn manifest_distiller_to_config(
     let base = acowork_memory::consolidation::DistillerConfig::default();
     Some(acowork_memory::consolidation::DistillerConfig {
         batch_size: manifest.batch_size.unwrap_or(base.batch_size),
-        cluster_threshold: manifest.cluster_threshold.unwrap_or(base.cluster_threshold),
-        fact_min_evidence: manifest.fact_min_evidence.unwrap_or(base.fact_min_evidence),
-        preference_min_evidence: manifest
-            .preference_min_evidence
-            .unwrap_or(base.preference_min_evidence),
-        relation_min_evidence: manifest
-            .relation_min_evidence
-            .unwrap_or(base.relation_min_evidence),
-        procedure_min_evidence: manifest
-            .procedure_min_evidence
-            .unwrap_or(base.procedure_min_evidence),
-        autobio_min_evidence: manifest
-            .autobio_min_evidence
-            .unwrap_or(base.autobio_min_evidence),
-        autobio_min_span_days: manifest
-            .autobio_min_span_days
-            .unwrap_or(base.autobio_min_span_days),
-        promotion_confidence_threshold: manifest
-            .promotion_confidence_threshold
-            .unwrap_or(base.promotion_confidence_threshold),
-        max_cluster_size: base.max_cluster_size,
-        // ADR-071 D7: prompt overrides are layered on top of the
-        // manifest-derived config in `distiller_scheduler_config()`
-        // (AgentCore slots → DistillerConfig), so they stay `None` here.
-        extraction_prompt_override: None,
-        judge_prompt_override: None,
+        min_importance: manifest.min_importance.unwrap_or(base.min_importance),
+        // Recall width and threshold are not manifest-exposed: they are tuned
+        // against the store's own similarity distribution, not per agent.
+        // ADR-071 D7: the prompt override slot is layered on top of this
+        // manifest-derived config at the AgentCore slots, so it stays `None`.
+        ..base
     })
 }
 
@@ -490,19 +477,13 @@ impl AgentCore {
         self.abstention_prompt.read().unwrap().clone()
     }
 
-    /// ADR-071 D7/D9: override accessor — `prompts/distiller-extraction.md`.
+    /// ADR-071 D7/D9: override accessor — `prompts/distiller-merge.md`.
     /// Consumed by `distiller_scheduler_config()` when assembling the
-    /// `DistillerConfig` handed to the grafeo EpisodicDistiller Step 2a.
-    pub fn distiller_extraction_prompt(&self) -> Option<String> {
-        self.distiller_extraction_prompt.read().unwrap().clone()
+    /// `DistillerConfig` handed to the grafeo EpisodicDistiller.
+    pub fn distiller_merge_prompt(&self) -> Option<String> {
+        self.distiller_merge_prompt.read().unwrap().clone()
     }
 
-    /// ADR-071 D7/D9: override accessor — `prompts/distiller-judge.md`.
-    /// Consumed by `distiller_scheduler_config()` when assembling the
-    /// `DistillerConfig` handed to the grafeo EpisodicDistiller Step 4.
-    pub fn distiller_judge_prompt(&self) -> Option<String> {
-        self.distiller_judge_prompt.read().unwrap().clone()
-    }
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new_with_observer(
         config: RuntimeConfig,
@@ -574,8 +555,7 @@ impl AgentCore {
             // ADR-071 D7: distiller prompt overrides — same lazy-fill
             // pattern, populated in Phase B / cli.rs standalone path and
             // hot-reloadable via `reload_prompts_into_core`.
-            distiller_extraction_prompt: Arc::new(std::sync::RwLock::new(None)),
-            distiller_judge_prompt: Arc::new(std::sync::RwLock::new(None)),
+            distiller_merge_prompt: Arc::new(std::sync::RwLock::new(None)),
             memory_provider: None,
             memory_admin: None,
             sqlite_store: None,
@@ -593,6 +573,7 @@ impl AgentCore {
             // slot and the workspace resolver are both available.
             git_nudge: None,
             embedding_provider: None,
+            embedding_provider_shared: Arc::new(std::sync::RwLock::new(None)),
             metrics_aggregator: Arc::new(std::sync::Mutex::new(
                 crate::memory::RetrievalMetricsAggregator::with_defaults(1.0),
             )),
@@ -864,12 +845,29 @@ impl AgentCore {
             .unwrap_or("none")
             .to_string();
         let new_name = new_provider.name().to_string();
+        let new_dim = new_provider.dimension();
+        if let Ok(mut cell) = self.embedding_provider_shared.write() {
+            *cell = Some(new_provider.clone());
+        }
         self.embedding_provider = Some(new_provider);
         tracing::info!(
             old_provider = %old_name,
             new_provider = %new_name,
-            "Embedding provider updated at runtime via SidecarEndpointUpdate"
+            new_dimension = new_dim,
+            "Embedding provider updated"
         );
+    }
+
+    /// The provider every clone of this core currently agrees on.
+    ///
+    /// Readers that outlive a single clone - the conversation indexer, the HTTP
+    /// stats endpoint - must go through this rather than the
+    /// [`Self::embedding_provider`] field, which is per-clone.
+    pub(crate) fn live_embedding_provider(&self) -> Option<Arc<dyn EmbeddingProvider>> {
+        self.embedding_provider_shared
+            .read()
+            .ok()
+            .and_then(|cell| cell.clone())
     }
 
     /// Clear the embedding provider (set to `None`).
@@ -885,6 +883,9 @@ impl AgentCore {
             .map(|p| p.name())
             .unwrap_or("none")
             .to_string();
+        if let Ok(mut cell) = self.embedding_provider_shared.write() {
+            *cell = None;
+        }
         self.embedding_provider = None;
         tracing::info!(
             old_provider = %old_name,
@@ -1337,20 +1338,16 @@ impl AgentCore {
         // Minutes → seconds (SchedulerConfig uses seconds internally).
         let minutes_to_secs = |v: Option<u64>| v.map(|m| m.saturating_mul(60));
         let default = SchedulerConfig::default();
-        // ADR-071 D7: the manifest-derived DistillerConfig carries the
-        // evidence thresholds; the two per-agent prompt overrides
-        // (distiller-extraction.md / distiller-judge.md) are layered on
-        // top. A package without the `[memory.distiller]` section still
-        // gets a `Some(config)` when an override file exists, so the
-        // distiller never silently uses built-in prompts the package
-        // author explicitly replaced.
+        // ADR-071 D7: the per-agent prompt override (distiller-merge.md) is
+        // layered on top of the manifest-derived DistillerConfig. A package
+        // without the `[memory.distiller]` section still gets a
+        // `Some(config)` when an override file exists, so the distiller never
+        // silently uses built-in prompts the package author replaced.
         let mut distiller_config = self.distiller_config();
-        let extraction_override = self.distiller_extraction_prompt();
-        let judge_override = self.distiller_judge_prompt();
-        if extraction_override.is_some() || judge_override.is_some() {
+        let merge_override = self.distiller_merge_prompt();
+        if merge_override.is_some() {
             let mut cfg = distiller_config.take().unwrap_or_default();
-            cfg.extraction_prompt_override = extraction_override;
-            cfg.judge_prompt_override = judge_override;
+            cfg.merge_prompt_override = merge_override;
             distiller_config = Some(cfg);
         }
         SchedulerConfig {
@@ -1578,7 +1575,7 @@ impl AgentCore {
         &self,
     ) -> Result<Option<acowork_memory::consolidation::DistillerResult>, String> {
         use crate::memory::consolidation_bg::run_episodic_distiller_step_once;
-        use acowork_memory::consolidation::{SchedulerConfig, TripleExtractorLlm};
+        use acowork_memory::consolidation::{SchedulerConfig, ConsolidationLlm};
 
         if !self.distiller_scheduler_config().distiller_enabled {
             return Err(
@@ -1594,7 +1591,7 @@ impl AgentCore {
             .embedding_provider
             .clone()
             .ok_or_else(|| "embedding provider not initialized".to_string())?;
-        let llm: Arc<dyn TripleExtractorLlm> = self.build_distiller_llm();
+        let llm: Arc<dyn ConsolidationLlm> = self.build_distiller_llm();
         // Manual run uses the effective runtime-over-manifest distiller
         // parameters when present; defaults otherwise. Enabled is forced
         // true (the gate above already checked the effective switch).
@@ -1616,7 +1613,20 @@ impl AgentCore {
                     );
                     timer.record_distill_result(&record).await;
                 }
-                None => timer.mark_distill_run().await,
+                None => {
+                    // Record the failure, not just the timestamp: a run that
+                    // died must be distinguishable from a run that had
+                    // nothing to do.
+                    timer
+                        .record_distill_result(
+                            &crate::memory::consolidation_bg::DistillRunRecord::from_error(
+                                chrono::Utc::now(),
+                                "distiller run failed (see logs)",
+                                Default::default(),
+                            ),
+                        )
+                        .await;
+                }
             }
         }
         Ok(result)
@@ -1953,8 +1963,7 @@ impl Clone for AgentCore {
             compact_template: Arc::clone(&self.compact_template),
             title_prompt: Arc::clone(&self.title_prompt),
             abstention_prompt: Arc::clone(&self.abstention_prompt),
-            distiller_extraction_prompt: Arc::clone(&self.distiller_extraction_prompt),
-            distiller_judge_prompt: Arc::clone(&self.distiller_judge_prompt),
+            distiller_merge_prompt: Arc::clone(&self.distiller_merge_prompt),
             memory_provider: self.memory_provider.clone(),
             memory_admin: self.memory_admin.clone(),
             sqlite_store: self.sqlite_store.clone(),
@@ -1974,6 +1983,10 @@ impl Clone for AgentCore {
             // so a nudge from one session is published exactly once.
             git_nudge: self.git_nudge.clone(),
             embedding_provider: self.embedding_provider.clone(),
+            // Deliberately `Arc::clone`, not a fresh cell: the published
+            // snapshot and the session's working copy must see one provider,
+            // or an adopted model reaches only one of them.
+            embedding_provider_shared: Arc::clone(&self.embedding_provider_shared),
             metrics_aggregator: self.metrics_aggregator.clone(),
             consolidation_bg_task: None, // sessions don't own bg task
             consolidation_timer: self.consolidation_timer.clone(), // shared timer for idle reset
@@ -2596,33 +2609,30 @@ mod tests {
 
     // ── ADR-071 D7: distiller prompt override projection ─────────────
 
-    /// D7a: per-agent prompt overrides (AgentCore slots) are layered on
-    /// top of the manifest-derived `DistillerConfig` — manifest fields
-    /// survive the overlay.
+    /// D7a: the per-agent prompt override (AgentCore slot) is layered on top
+    /// of the manifest-derived `DistillerConfig` — manifest fields survive
+    /// the overlay.
     #[test]
     fn test_distiller_scheduler_config_projects_prompt_overrides() {
         let core =
-            make_core_with_memory_toml("[memory.distiller]\nenabled = true\nbatch_size = 20\n");
-        // Without override files the slots are `None` → manifest values.
+            make_core_with_memory_toml("[memory.distiller]
+enabled = true
+batch_size = 20
+");
+        // Without an override file the slot is `None` -> manifest values.
         let cfg = core.distiller_scheduler_config();
         assert!(cfg.distiller_enabled);
         let dc = cfg.distiller_config.expect("manifest section present");
         assert_eq!(dc.batch_size, 20);
-        assert!(dc.extraction_prompt_override.is_none());
-        assert!(dc.judge_prompt_override.is_none());
+        assert!(dc.merge_prompt_override.is_none());
 
-        // Write the two distiller prompt overrides (as
-        // `reload_prompts_into_core` would after a Debug panel save).
-        *core.distiller_extraction_prompt.write().unwrap() = Some("EX_OVERRIDE".to_string());
-        *core.distiller_judge_prompt.write().unwrap() = Some("JU_OVERRIDE".to_string());
+        // Write the distiller prompt override (as `reload_prompts_into_core`
+        // would after a Debug panel save).
+        *core.distiller_merge_prompt.write().unwrap() = Some("MG_OVERRIDE".to_string());
 
         let cfg2 = core.distiller_scheduler_config();
         let dc2 = cfg2.distiller_config.expect("manifest section present");
-        assert_eq!(
-            dc2.extraction_prompt_override.as_deref(),
-            Some("EX_OVERRIDE")
-        );
-        assert_eq!(dc2.judge_prompt_override.as_deref(), Some("JU_OVERRIDE"));
+        assert_eq!(dc2.merge_prompt_override.as_deref(), Some("MG_OVERRIDE"));
         assert_eq!(
             dc2.batch_size, 20,
             "manifest-derived fields must survive the prompt overlay"
@@ -2630,27 +2640,23 @@ mod tests {
     }
 
     /// D7b: even without a `[memory.distiller]` manifest section, a
-    /// package that ships distiller prompt overrides must still surface a
-    /// `Some(DistillerConfig)` (so the overrides reach the distiller) —
+    /// package that ships the distiller prompt override must still surface a
+    /// `Some(DistillerConfig)` (so the override reaches the distiller) —
     /// while the opt-in `distiller_enabled` stays OFF.
     #[test]
     fn test_distiller_scheduler_config_override_without_manifest_section() {
         let core = make_core_with_memory_toml("");
         assert!(!core.manifest.memory.distiller_enabled());
 
-        *core.distiller_extraction_prompt.write().unwrap() = Some("EX_OVERRIDE".to_string());
+        *core.distiller_merge_prompt.write().unwrap() = Some("MG_OVERRIDE".to_string());
 
         let cfg = core.distiller_scheduler_config();
         assert!(!cfg.distiller_enabled, "opt-in invariant must hold");
         let dc = cfg
             .distiller_config
             .expect("override must force Some(config)");
-        assert_eq!(
-            dc.extraction_prompt_override.as_deref(),
-            Some("EX_OVERRIDE")
-        );
-        assert!(dc.judge_prompt_override.is_none());
-        // No manifest fields → defaults for the rest.
+        assert_eq!(dc.merge_prompt_override.as_deref(), Some("MG_OVERRIDE"));
+        // No manifest fields -> defaults for the rest.
         assert_eq!(
             dc.batch_size,
             acowork_memory::consolidation::DistillerConfig::default().batch_size
@@ -3420,5 +3426,69 @@ mod tests {
         template.merge_token_totals((Some(50_000_000), None, None, None));
         assert_eq!(session_a.agent_token_totals().0, 50_000_000);
         assert_eq!(session_b.agent_token_totals().0, 50_000_000);
+    }
+
+    /// A provider adopted at runtime must be visible to every clone.
+    ///
+    /// The bug this pins: switching embedding model reached the session's own
+    /// `AgentCore` but not the `Arc<AgentCore>` snapshot published for the
+    /// conversation indexer and the HTTP layer, because `AgentCore` is `Clone`
+    /// and the provider was a plain per-clone field. The symptom was silent:
+    /// the indexer kept embedding with the previous model against a store that
+    /// had already been re-embedded, its dimension guard deferred the sweep
+    /// forever, and the memory panel reported a dimension the process no longer
+    /// used.
+    #[test]
+    fn adopted_provider_is_visible_through_every_clone() {
+        struct Switchable(usize);
+        #[async_trait::async_trait]
+        impl EmbeddingProvider for Switchable {
+            fn name(&self) -> &str {
+                "switchable-test"
+            }
+            async fn embed(&self, _t: &str) -> Result<Vec<f32>, acowork_core::embedding::EmbeddingError> {
+                Ok(vec![0.0; self.0])
+            }
+            async fn embed_batch(&self, ts: &[&str]) -> Result<Vec<Vec<f32>>, acowork_core::embedding::EmbeddingError> {
+                Ok(ts.iter().map(|_| vec![0.0; self.0]).collect())
+            }
+            fn dimension(&self) -> usize {
+                self.0
+            }
+            async fn is_available(&self) -> bool {
+                true
+            }
+        }
+
+        let core = make_minimal_core();
+        // The three real roles: the published snapshot, the session's working
+        // copy, and any other clone derived before the switch.
+        let published = Arc::new(core.clone());
+        let mut session = core.clone();
+
+        session.update_embedding_provider(Arc::new(Switchable(768)));
+        assert_eq!(
+            published.live_embedding_provider().map(|p| p.dimension()),
+            Some(768),
+            "readers of the published snapshot must see the adopted provider"
+        );
+
+        session.clear_embedding_provider();
+        assert_eq!(
+            published.live_embedding_provider().map(|p| p.dimension()),
+            None,
+            "clearing must propagate too, or the indexer embeds into a store              whose model is gone"
+        );
+
+        // The per-clone field is the trap the cell exists to avoid: it says
+        // nothing to anybody else. Asserting it stays per-clone documents why
+        // `live_embedding_provider` must be the read path for shared readers.
+        let mut first = core.clone();
+        let second = core.clone();
+        first.update_embedding_provider(Arc::new(Switchable(512)));
+        assert!(
+            first.embedding_provider.is_some() && second.embedding_provider.is_none(),
+            "the plain field is per-clone; shared readers must not use it"
+        );
     }
 }

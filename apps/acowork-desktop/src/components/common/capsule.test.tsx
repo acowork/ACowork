@@ -122,11 +122,25 @@ describe("pm / docs / extensions join the capsule layout", () => {
     expect(src).not.toMatch(/rounded-xl bg-page-bg/);
   });
 
-  it("AppLayout keeps settings / harness on their solid page", () => {
+  it("AppLayout keeps every view wrapper transparent", () => {
     const src = read("components/layout/AppLayout.tsx");
-    // settings + harness are modal-surface card flows — a deliberate
-    // different language, so their solid plane must stay.
-    expect(src.match(/rounded-xl bg-page-bg/g)?.length).toBe(2);
+    // settings + harness used to keep a solid `bg-page-bg` plane (a
+    // deliberate second visual language). They now wear the same
+    // two-column capsule layout as pm / docs / extensions, so no view
+    // wrapper may paint a solid plane any more.
+    expect(src).not.toMatch(/rounded-xl bg-page-bg/);
+  });
+
+  it("settings / harness join the two-column capsule layout", () => {
+    for (const rel of [
+      "components/settings/SettingsPage.tsx",
+      "components/harness/HarnessPage.tsx",
+    ]) {
+      // The page delegates its frame to the shared shell — the four
+      // sections become list items instead of an inline tab strip.
+      expect(read(rel)).toContain("<SectionPane");
+      expect(read(rel)).not.toContain("<TabButton");
+    }
   });
 
   it("each view root fills its wrapper", () => {

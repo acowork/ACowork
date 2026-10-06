@@ -79,7 +79,11 @@ impl MemoryStoreTool {
                 recognised offline by the distiller's server-side LLM). \
                 Describe what to remember in \
                 'content' (natural language). Estimate your confidence \
-                (0.0-1.0). Optionally provide keywords."
+                (0.0-1.0). Optionally provide keywords. Also provide \
+                'normalized': a one-sentence, de-contextualised restatement of \
+                the durable claim — this is what offline consolidation merges \
+                on, so a memory without it can only ever be carried forward \
+                verbatim."
                 .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
@@ -110,6 +114,10 @@ impl MemoryStoreTool {
                         "type": "array",
                         "items": { "type": "string" },
                         "description": "Optional keywords to help retrieval. Provide short lowercase tokens (≤30 chars), avoid duplicates and common stopwords (e.g. ['beijing', 'location', 'home'])"
+                    },
+                    "normalized": {
+                        "type": "string",
+                        "description": "One sentence restating the durable claim in this memory, written so it still reads correctly years from now and outside the conversation that produced it. Third person, no deictic references (this/that/it/today/here), no task framing, no justification. Where 'content' may record what happened around the observation, 'normalized' states only what is now true. Example — content: 'User asked me to summarize and said 3 sentences was enough, so I kept it short' -> normalized: 'User wants summaries capped at three sentences.' Omit only when there is no durable claim to restate."
                     }
                 },
                 "required": ["content", "category"]
@@ -236,6 +244,16 @@ impl Tool for MemoryStoreTool {
             .get("importance")
             .and_then(|v| v.as_f64())
             .map(|c| c.clamp(0.0, 1.0) as f32);
+        // Optional de-contextualised restatement. Trimmed and blanked to None
+        // so an empty string from a hesitant model does not become a
+        // meaningless normalized value that the distiller would prefer over
+        // the real content.
+        let normalized = params
+            .get("normalized")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string);
 
         // --- Resolve MemoryProvider via late-binding handle ---
         // The provider may be None if AgentCore::init_memory_provider hasn't
@@ -257,28 +275,6 @@ impl Tool for MemoryStoreTool {
                 // node).
                 let knowledge_subtype = category.knowledge_subtype();
                 let category_display = category.display();
-
-                // Bugfix (MEM): the handle already holds the embedding
-                // provider (set once at construction) but it was never
-                // wired into the write path, so every Knowledge node was
-                // stored without a vector (text-only). Generate the
-                // content embedding here so embedding-based dedup and
-                // vector indexing actually work. Degrade gracefully to
-                // text-only when no provider is available or embedding fails.
-                let content_embedding: Option<Vec<f32>> =
-                    match self.handle.as_ref().and_then(|h| h.embedding()) {
-                        Some(ep) => match ep.embed(&content).await {
-                            Ok(vec) => Some(vec),
-                            Err(e) => {
-                                tracing::warn!(
-                                    error = %e,
-                                    "memory_store: failed to embed content, storing text-only"
-                                );
-                                None
-                            }
-                        },
-                        None => None,
-                    };
 
                 // ADR-068: emit a normalized Episode into the episodic
                 // store. The distiller (background consolidation step)
@@ -329,18 +325,43 @@ impl Tool for MemoryStoreTool {
                     );
                 }
 
-                let episode = Episode {
+                let mut episode = Episode {
                     session_id: self.agent_id.clone(),
                     turn_index: 0,
                     role: "assistant".to_string(),
                     content: content.clone(),
-                    embedding: content_embedding.clone(),
+                    embedding: None,
                     timestamp: now,
                     consolidated: false,
                     metadata,
                     importance: importance.unwrap_or(0.5),
                     knowledge_subtype: Some(knowledge_subtype.clone()),
+                    normalized: normalized.clone(),
                 };
+
+                // Bugfix (MEM): the handle already holds the embedding
+                // provider (set once at construction) but it was never
+                // wired into the write path, so every node was stored
+                // without a vector (text-only). Degrade gracefully to
+                // text-only when no provider is available or embedding
+                // fails.
+                //
+                // The vector is keyed on `statement()`, not `content`: the
+                // distiller recalls and merges on the same string, so
+                // embedding anything else makes the write path and the
+                // consolidation path disagree about which episodes are
+                // near-duplicates.
+                if let Some(ep) = self.handle.as_ref().and_then(|h| h.embedding()) {
+                    match ep.embed(episode.statement()).await {
+                        Ok(vec) => episode.embedding = Some(vec),
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                "memory_store: failed to embed statement, storing text-only"
+                            );
+                        }
+                    }
+                }
 
                 match provider.store_episode(&episode) {
                     Ok(_episode_id) => {

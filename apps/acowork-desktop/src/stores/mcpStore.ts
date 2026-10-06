@@ -32,6 +32,23 @@ export interface McpInstallRunResponse {
 }
 
 /**
+ * Coarse stage of a running install — mirrors `InstallStage` in the
+ * Gateway (`GET /api/mcp-catalog/install/{name}/status`). The pipeline is
+ * runtime probe → install command → MCP handshake, so the stage is what
+ * turns "a spinner" into "it is pulling dependencies right now".
+ */
+export type McpInstallStage = "checking_runtime" | "installing" | "verifying";
+
+/** Last terminal outcome of an install attempt, per server name. */
+export interface McpInstallOutcome {
+  success: boolean;
+  /** Human-readable failure reason (stderr or health-check error). */
+  error?: string;
+  /** Raw installer stdout, shown behind a "show output" toggle. */
+  stdout?: string;
+}
+
+/**
  * Per-agent in-flight `PUT /mcp-servers` controllers.
  *
  * A newer toggle aborts the previous request so a slow response cannot
@@ -66,13 +83,47 @@ interface McpCatalogActions {
   /**
    * ADR-072: install a preset MCP server via the Gateway install pipeline
    * (runtime check → install → health check → write catalog). Resolves with
-   * the run response; caller surfaces stdout/stderr in the install dialog.
+   * the run response; caller surfaces stdout/stderr in the row.
    */
   installMcp: (
     name: string,
     install: McpInstallSpec,
     env?: Record<string, string>,
   ) => Promise<McpInstallRunResponse>;
+}
+
+/**
+ * ADR-072 install progress, keyed by server name.
+ *
+ * The install is a single long HTTP request (a first `npx`/`uvx` resolve
+ * can run for minutes), so the row has to render its own state instead of
+ * blocking on a modal — a modal can be dismissed, and dismissing it used to
+ * leave the list looking untouched while the install kept running.
+ */
+interface McpInstallProgressState {
+  /** Server names with an install in flight (row renders the busy state). */
+  installing: string[];
+  /** Last stage reported by the Gateway per running server. */
+  installStages: Record<string, McpInstallStage | undefined>;
+  /** Wall-clock ms since the install started, per running server. */
+  installElapsed: Record<string, number>;
+  /** Terminal outcome of the most recent attempt per server. */
+  installOutcomes: Record<string, McpInstallOutcome | undefined>;
+}
+
+interface McpInstallProgressActions {
+  /** Record an install as started (called before the request fires). */
+  beginInstall: (name: string) => void;
+  /** Record a terminal install outcome and clear the busy state. */
+  endInstall: (name: string, outcome: McpInstallOutcome) => void;
+  /** Drop a terminal outcome once the user has read it. */
+  clearInstallOutcome: (name: string) => void;
+  /**
+   * Poll one running install's stage + elapsed time. Best-effort: a Gateway
+   * without the status endpoint (404) leaves the row on a plain elapsed
+   * counter rather than erroring — the install itself still works.
+   */
+  pollInstallStatus: (name: string) => Promise<void>;
 }
 
 // ── Per-agent activation types ───────────────────────────────────────
@@ -135,7 +186,9 @@ export type McpStore = McpCatalogState &
   McpActivationState &
   McpActivationActions &
   McpHealthState &
-  McpHealthActions;
+  McpHealthActions &
+  McpInstallProgressState &
+  McpInstallProgressActions;
 
 export const useMcpStore = create<McpStore>((set, get) => ({
   // ── Catalog state ──
@@ -152,6 +205,61 @@ export const useMcpStore = create<McpStore>((set, get) => ({
   healthStatus: {},
   healthErrors: {},
   healthToolCounts: {},
+
+  // ── Install progress state ──
+  installing: [],
+  installStages: {},
+  installElapsed: {},
+  installOutcomes: {},
+
+  // ── Install progress actions ──
+
+  beginInstall: (name) =>
+    set((s) => ({
+      installing: s.installing.includes(name) ? s.installing : [...s.installing, name],
+      installStages: { ...s.installStages, [name]: undefined },
+      installElapsed: { ...s.installElapsed, [name]: 0 },
+      installOutcomes: { ...s.installOutcomes, [name]: undefined },
+    })),
+
+  endInstall: (name, outcome) =>
+    set((s) => {
+      const stages = { ...s.installStages };
+      const elapsed = { ...s.installElapsed };
+      delete stages[name];
+      delete elapsed[name];
+      return {
+        installing: s.installing.filter((n) => n !== name),
+        installStages: stages,
+        installElapsed: elapsed,
+        installOutcomes: { ...s.installOutcomes, [name]: outcome },
+      };
+    }),
+
+  clearInstallOutcome: (name) =>
+    set((s) => ({ installOutcomes: { ...s.installOutcomes, [name]: undefined } })),
+
+  pollInstallStatus: async (name) => {
+    try {
+      const resp = await fetch(
+        `${getGatewayUrl()}/api/mcp-catalog/install/${encodeURIComponent(name)}/status`,
+      );
+      // 404 = Gateway predates the status endpoint. The install is still
+      // running; the row just keeps a plain elapsed counter.
+      if (!resp.ok) return;
+      const data = (await resp.json()) as {
+        running: boolean;
+        stage?: McpInstallStage;
+        elapsed_ms?: number;
+      };
+      set((s) => ({
+        installStages: { ...s.installStages, [name]: data.stage },
+        installElapsed: { ...s.installElapsed, [name]: data.elapsed_ms ?? 0 },
+      }));
+    } catch {
+      // Network hiccup on a 2s poll — the next tick recovers.
+    }
+  },
 
   // ── Catalog actions ──
 
@@ -261,7 +369,9 @@ export const useMcpStore = create<McpStore>((set, get) => ({
   // ── Install actions (ADR-072) ──
 
   installMcp: async (name: string, install: McpInstallSpec, env = {}) => {
-    set({ loading: true, error: null });
+    set({ error: null });
+    get().beginInstall(name);
+    const finish = (outcome: McpInstallOutcome) => get().endInstall(name, outcome);
     try {
       const resp = await fetch(`${getGatewayUrl()}/api/mcp-catalog/install`, {
         method: "POST",
@@ -269,8 +379,9 @@ export const useMcpStore = create<McpStore>((set, get) => ({
         body: JSON.stringify({ name, install, env }),
       });
       if (!resp.ok) {
-        // 409 from the runtime check carries the structured guidance
-        // ("Missing runtime 'uvx' ...") — surface it verbatim.
+        // Two 409s land here: a missing runtime ("Missing runtime 'uvx' …")
+        // and the duplicate-install guard. Both carry structured guidance —
+        // surface it verbatim on the row.
         const err = await resp.json().catch(() => ({ error: `HTTP ${resp.status}` }));
         throw new Error(err.error || `HTTP ${resp.status}`);
       }
@@ -281,11 +392,18 @@ export const useMcpStore = create<McpStore>((set, get) => ({
         await get().loadCatalog();
         emitAgentConfigRefresh();
       }
-      set({ loading: false });
+      finish({
+        success: data.success,
+        error: data.success
+          ? undefined
+          : data.health_error || data.stderr || "install failed",
+        stdout: data.stdout,
+      });
       return data;
     } catch (e: unknown) {
       const message = e instanceof Error ? e.message : String(e);
-      set({ error: message, loading: false });
+      set({ error: message });
+      finish({ success: false, error: message });
       return {
         name,
         success: false,

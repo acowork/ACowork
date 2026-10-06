@@ -150,7 +150,7 @@ export function GlobalCompactModelCard({
         bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset p-3"
       >
         <div className="space-y-2">
-          <p className="text-[11px] text-text-tertiary ">
+          <p className="text-11 text-text-tertiary ">
             {t("harness.globalCompactModel.description")}
           </p>
           <ModelPriorityList

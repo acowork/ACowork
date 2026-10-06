@@ -122,7 +122,7 @@ function SessionListDropdown({ agentId, activeSessionId, onClose }: SessionListD
       className="absolute right-0 top-full mt-1 w-72 rounded-md border border-border-outer bg-modal-surface shadow-lg z-50"
     >
       {/* Header with total count */}
-      <div className="flex items-center justify-between border-b border-border-divider px-3 py-1.5 text-[11px] text-text-tertiary">
+      <div className="flex items-center justify-between border-b border-border-divider px-3 py-1.5 text-11 text-text-tertiary">
         <span>
           {totalCount > 0 ? (
             <>{t("sessionTabBar.sidebarShowing", { start, end, total: totalCount })}</>
@@ -205,7 +205,7 @@ function SessionListDropdown({ agentId, activeSessionId, onClose }: SessionListD
                     <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--color-accent)]" />
                   )}
                 </div>
-                <div className="ml-5.5 flex items-center gap-2 text-[10px] text-text-tertiary ">
+                <div className="ml-5.5 flex items-center gap-2 text-10 text-text-tertiary ">
                   <span>{formatRelativeTime(session.created_at, t)}</span>
                   <span>·</span>
                   <span>{session.message_count} msg</span>
@@ -257,7 +257,7 @@ function SessionListDropdown({ agentId, activeSessionId, onClose }: SessionListD
           >
             <ChevronLeft className="h-3.5 w-3.5" />
           </button>
-          <span className="text-[11px] text-text-tertiary ">
+          <span className="text-11 text-text-tertiary ">
             Page {currentPage} of {totalPages}
           </span>
           <button

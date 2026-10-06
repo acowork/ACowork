@@ -86,14 +86,14 @@ export function AskQuestionCard({ event, agentId, sessionId, onAnswer }: AskQues
         {/* Countdown badge — mirrors approval-flow timer in ExploreBlock */}
         {countdownLabel && countdownLabel !== "expired" && (
           <span
-            className="text-[10px] font-mono text-amber-600 dark:text-amber-400 shrink-0 min-w-[2.5rem] text-right mt-0.5"
+            className="text-10 font-mono text-amber-600 dark:text-amber-400 shrink-0 min-w-[2.5rem] text-right mt-0.5"
             aria-label={t("askQuestionCard.expiresIn")}
           >
             {countdownLabel}
           </span>
         )}
         {countdownLabel === "expired" && (
-          <span className="text-[10px] font-mono text-text-tertiary  shrink-0 mt-0.5">
+          <span className="text-10 font-mono text-text-tertiary  shrink-0 mt-0.5">
             {t("askQuestionCard.expired")}
           </span>
         )}
@@ -168,7 +168,7 @@ export function AskQuestionCard({ event, agentId, sessionId, onAnswer }: AskQues
           {submitted ? t("askQuestionCard.submitted") : t("askQuestionCard.submit")}
         </button>
         {submitted && (
-          <span className="text-[10px] text-text-tertiary ">
+          <span className="text-10 text-text-tertiary ">
             Answer sent
           </span>
         )}

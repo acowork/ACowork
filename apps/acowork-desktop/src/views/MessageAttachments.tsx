@@ -183,7 +183,7 @@ export function MessageRow({
               </div>
             </div>
           )}
-          <span className="mt-1 text-[10px] text-text-tertiary opacity-0 transition-opacity group-hover:opacity-100">
+          <span className="mt-1 text-10 text-text-tertiary opacity-0 transition-opacity group-hover:opacity-100">
             {ts}
           </span>
         </div>
@@ -412,9 +412,9 @@ function FileAttachment({
           className="mb-1 overflow-hidden rounded bg-black/10 px-1.5 py-1"
         >
           {/* A shape hint, not something to read in full — the chip click
-              opens the real thing in Monaco. `text-[10px]` in a monospace
+              opens the real thing in Monaco. `text-10` in a monospace
               stack; the service already capped it at 8 non-blank lines. */}
-          <pre className="line-clamp-8 max-h-24 overflow-hidden whitespace-pre-wrap break-words font-mono text-[10px] leading-[1.35] opacity-80">
+          <pre className="line-clamp-8 max-h-24 overflow-hidden whitespace-pre-wrap break-words font-mono text-10 leading-[1.35] opacity-80">
             {thumbText}
           </pre>
         </div>
@@ -439,7 +439,7 @@ function FileAttachment({
         >
           <span className="flex items-center gap-1.5">
             <FileText className="h-3.5 w-3.5 shrink-0" />
-            <span className="min-w-0 flex-1 truncate text-[11px]">{attachment.filename}</span>
+            <span className="min-w-0 flex-1 truncate text-11">{attachment.filename}</span>
             {/* Non-previewable chips have no bolt, so the trailing glyph
                 stays the download affordance it always was. */}
             {!previewable &&
@@ -447,7 +447,7 @@ function FileAttachment({
                 ? <Loader2 className="h-3 w-3 shrink-0 animate-spin opacity-70" />
                 : <Download className="h-3 w-3 shrink-0 opacity-70" />)}
           </span>
-          <span className="block text-[9px] opacity-70">
+          <span className="block text-9 opacity-70">
             {received === null
               ? formatAttachmentSize(total)
               : percent === null

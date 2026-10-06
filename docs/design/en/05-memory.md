@@ -406,22 +406,32 @@ Consolidation pipeline is the information refinement process from Experiential t
 
 Instant extraction is implemented via **Tool Call mechanism** — `memory_store` as one of Agent's built-in tools, LLM autonomously judges whether to call when generating replies. No extra LLM calls, async pipelines, or prefilter rules needed.
 
-**Instant Extraction Output Definition (v3.7 clarification)**:
+**Instant Extraction Output Definition (ADR-068 2026-09 revision)**:
 
-Instant extraction phase produces **PendingKnowledgeNode**, clearly distinguished from formal KnowledgeNode:
+`memory_store` is a **thin writer for the experiential layer** — the LLM entry point writes only `Episode` (with a `knowledge_subtype` routing hint) and never writes a consolidated-layer node directly:
 
 ```
-PendingKnowledgeNode:
-  confidence = 0.7 (default value)
-  status = Pending (immediately retrievable but marked "to be confirmed")
-  Participates in regular hybrid_search, but results labeled [pending confirmation]
-  Doesn't participate in graph_expand (pending nodes don't do associative diffusion)
+Episode:
+  content              natural language (not split into triples)
+  normalized           optional — the same claim restated without the
+                       conversation around it (ADR-068 2026-10). Primary input
+                       for the distiller, and the key used for both embedding
+                       and recall. When absent, Episode::statement() falls back
+                       to content, so pre-existing rows need no migration.
+  knowledge_subtype    Fact | Preference | Relation | Procedure
+  confidence           LLM self-rated (high/medium/low -> 0.85/0.7/0.5, optional)
+  keywords             into metadata after the ADR-062 sanitize gate (optional)
+  privacy / importance optional
 
-High confidence direct effect:
-  If instant extraction confidence >= 0.85 (i.e. LLM outputs confidence="high"),
-  Directly create formal KnowledgeNode (status = Active), no offline confirmation needed
-  → Applies to facts user explicitly expresses (e.g. "I live in Beijing"), avoids high-certainty info being unnecessarily marked pending
+Retired: PendingKnowledgeNode / status=Pending / confidence>=0.85 direct write to
+KnowledgeNode — removed wholesale in ADR-068 M5/M6. Promoting to the consolidated
+layer is EpisodicDistiller's sole responsibility.
 ```
+
+> Why `normalized` comes from the writing model: "what does this claim say once the
+> context is gone" is a semantic judgement, and the writing model holds the whole
+> conversation while an offline re-reader does not. Re-extracting offline means
+> letting the better-informed judgement be overwritten by the worse-informed one.
 
 **Design Decision: Tool Call vs Separate Call**
 
@@ -486,6 +496,64 @@ Core reason for choosing Tool Call: Instant extraction's goal is "usable" rather
 > **⚠ Note**: When `category=autobiographical`, `aspect` is required. Tool schema declares this constraint via JSON Schema's `allOf` conditional branch (`if category=autobiographical then aspect required`), helping LLM clients complete validation before calling; Runtime side does a backup validation in `MemoryStoreTool` (missing or invalid `aspect` returns `invalid_aspect` error), double insurance ensures autobiographical writes don't land in wrong layer.
 
 **Interface Simplification Design Rationale**:
+
+### 4.2 Offline Consolidation (EpisodicDistiller)
+
+> Condensed from the zh source. See
+> [ADR-068 Revision(2026-10)](../../adr/zh/ADR-068-memory-layer-promotion-two-axis-orthogonal.md)
+> and [ADR-071](../../adr/zh/ADR-071-distiller-runtime-config-and-trigger.md) for the decisions.
+
+Consolidation is **project + merge** — two actions, both resting on the fact that
+the writing model already judged this episode worth keeping:
+
+```
+input : Episode with consolidated=false and a knowledge_subtype
+statement text = Episode::statement()   (normalized, else content)
+
+per episode:
+  1. scan backlog (subtype filter, batch_size cap, newest-first)
+  2. recall existing semantic nodes by statement(), >= merge_recall_threshold
+     - no candidate  -> PROJECT: statement() becomes a semantic node. Zero LLM calls.
+     - 1..K candidates -> MERGE: one LLM call decides merge | no_merge | contradicts,
+       over "1 new statement + K candidates", so the request size is independent of
+       store size.
+  3. mark consolidated (only on success; failures stay unconsolidated and are
+     reconsidered next run - there is no tombstone)
+```
+
+Removed with this revision: the LLM structured-extraction stage (no SPO consumer
+exists), embedding clustering (similarity is not identity - that is a semantic
+judgement), the five `min_evidence` promotion gates, and the tombstone mechanism.
+Volume control is now the single knob `min_importance` (default 0.0 = project
+everything); unprojected episodes are never discarded, so tightening and later
+loosing it loses no history.
+
+`Episode::statement()` is the only implementation of the normalized->content
+fallback. The write path embeds through it and the distiller recalls through it;
+two copies would drift, and a drift means an episode is stored under one vector
+and looked up by another - which surfaces as "consolidation stopped matching",
+not as an error.
+
+**Behaviour worth knowing when triaging an empty panel:**
+
+- Candidates recalled but **no model available** -> the episode defers rather than
+  guessing. Wrong in both directions: a false merge destroys evidence, a missed
+  merge leaves a duplicate node nothing will ever reunite. Production always passes
+  a model, so this only appears under a broken model config - but it looks like a
+  stall from the outside.
+- `batch_size` is 100; a multi-hundred backlog drains over several runs.
+- Semantic-layer density is set by the model's judgement, not by code: a model that
+  always answers `no_merge` turns N episodes into N nodes.
+
+Measured on a real store copy (`memory_lifecycle_e2e.rs`, `#[ignore]`d because it
+needs a private database): 269 episodes / 262 pending / **0 sediment** after weeks
+with the switch on. With no model the new pipeline projects 33 at zero token cost;
+with one it clears the backlog in 3 runs, leaving 141 knowledge + 121 procedural
+nodes. The old failure was the pipeline, not the data and not the trigger.
+
+Forgetting never touches this layer: `run_episodic_decay_scan` selects
+`WHERE label = 'Episodic'`, so semantic labels are not in the candidate set at all.
+
 
 [continues with detailed content for sections 4.2-4.6, 5, 6, 7, 8, 9, 10, 11]
 
