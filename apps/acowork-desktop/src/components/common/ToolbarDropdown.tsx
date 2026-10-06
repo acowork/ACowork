@@ -5,6 +5,18 @@ import { toolbarButton } from "../../lib/ui-styles";
 import { Tooltip } from "./Tooltip";
 
 /**
+ * Trigger-label font size. Tracks the global `--ui-font-size` setting
+ * (settingsStore) at the app's standard UI-small ratio: 14px × 0.85 ≈
+ * the old fixed 0.75rem, so the default look is unchanged while the
+ * model / workspace / skill / effort labels now follow Ctrl+= / Ctrl+-.
+ *
+ * ponytail: `max-w-[120px]` below still caps the label, so at the largest
+ * font step long model ids collapse to an ellipsis a bit earlier — the
+ * ResizeObserver icon-fold handles the width, just with a shorter label.
+ */
+const LABEL_FONT_SIZE = "calc(var(--ui-font-size, 0.875rem) * 0.85)";
+
+/**
  * Shared toolbar dropdown trigger — icon + text + chevron + hover tooltip.
  *
  * Text/chevron collapse can be driven two ways:
@@ -77,7 +89,7 @@ export function ToolbarDropdownTrigger({
                     <span
                         data-toolbar-text=""
                         className={cn(collapseClass, "min-w-0 max-w-[120px] truncate")}
-                        style={{ fontSize: "0.75rem", display: textHidden ? "none" : undefined }}
+                        style={{ fontSize: LABEL_FONT_SIZE, display: textHidden ? "none" : undefined }}
                     >{label}</span>
                     <ChevronDown
                         data-toolbar-chevron=""
