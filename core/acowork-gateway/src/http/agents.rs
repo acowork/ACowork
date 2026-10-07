@@ -1700,22 +1700,35 @@ fn timestamp_nanos() -> u128 {
         .unwrap_or(0)
 }
 
-/// Clone mode: skeleton or full
+/// Clone mode: package content only, or plus the instance's own state.
+///
+/// The boundary itself is defined in `docs/design/zh/10-debug-protocol.md`
+/// §7.2.1 (en §9.3) and implemented node-side in
+/// `acowork_node::package::clone`; this enum only carries the choice
+/// across the wire.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CloneModeParam {
+    /// All package-level files; no conversation history or memory.
     Skeleton,
+    /// Skeleton plus the conversation history and the private store.
     Full,
 }
 
 /// Clone request body
 #[derive(Debug, Deserialize)]
 pub struct CloneRequest {
-    /// New agent ID for the cloned agent
+    /// Package id for the clone (reverse-domain, e.g.
+    /// `com.example.weather-dev`). May equal the source package id —
+    /// uniqueness is on the instance, not the package (ADR-073).
     pub new_agent_id: String,
     /// Clone mode: "skeleton" or "full"
     #[serde(default = "default_clone_mode")]
     pub mode: CloneModeParam,
+    /// Human-readable name for the clone. Optional; empty (or absent)
+    /// keeps the source name suffixed "(clone)". Names are not unique.
+    #[serde(default)]
+    pub new_name: String,
 }
 
 fn default_clone_mode() -> CloneModeParam {
@@ -1729,25 +1742,20 @@ pub struct CloneResponse {
     pub install_path: String,
 }
 
-/// `POST /api/agents/:id/clone` — clone an agent
+/// `POST /api/agents/:id/clone` — clone an agent. `:id` is the source
+/// INSTANCE (ADR-073); the body carries the new PACKAGE id.
 pub async fn clone_agent(
     State(state): State<AppState>,
     auth: Option<Extension<AuthContext>>,
     Path(agent_id): Path<String>,
     Json(req): Json<CloneRequest>,
 ) -> Result<(StatusCode, Json<CloneResponse>), ApiError> {
-    // Validate new_agent_id is different from source
-    if req.new_agent_id == agent_id {
-        return Err(ApiError::bad_request(
-            "new_agent_id must be different from source agent_id",
-        ));
-    }
-
-    // Route to the node hosting the source agent (ADR-055 §6.6 L2-5 —
-    // clone is a node-local operation on the source's node).
-    // ADR-073: the route variable is the INSTANCE identity (UUIDv4);
-    // resolve to the canonical instance key. A non-UUID input returns
-    // 404 from `resolve_agent_identity`.
+    // ADR-073: the route variable is the INSTANCE identity; `new_agent_id`
+    // is a PACKAGE id. They are deliberately NOT required to differ:
+    // several instances of one package are a legal state, so cloning onto
+    // the source's own package id is a first-class operation (two agents
+    // from one package, distinguished only by instance). Uniqueness lives
+    // on the instance id, which the node mints.
     let (instance_id, resolved_agent_id) =
         resolve_agent_identity(&state, &agent_id).await?;
     let node_id = {
@@ -1782,6 +1790,7 @@ pub async fn clone_agent(
             &resolved_agent_id,
             &req.new_agent_id,
             mode,
+            &req.new_name,
         )
         .await
         .map_err(|e| ApiError::internal(&format!("Clone failed: {}", e)))?;

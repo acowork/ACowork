@@ -12,7 +12,6 @@
 //! truthful.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 
 use crate::error::{NodeError, Result};
 use crate::process::spawn::{
@@ -98,8 +97,8 @@ impl ProcessManager {
                 .clone()
         };
 
-        // Determine workspace directory
-        let workspace = PathBuf::from(&info.install_path).join("workspace");
+        // Determine workspace directory (the Runtime's work dir)
+        let workspace = acowork_core::workspace::workspace_dir(&info.install_path);
 
         // ADR-055 §6.4: the Node allocates a concrete loopback HTTP
         // port so its reverse proxy has a stable `{id} → port` mapping.
@@ -292,7 +291,7 @@ impl ProcessManager {
             let key = c.instance_id.clone();
             let workspace = installed
                 .get(&key)
-                .map(|info| PathBuf::from(&info.install_path).join("workspace"))
+                .map(|info| acowork_core::workspace::workspace_dir(&info.install_path))
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_default();
             state.write().await.add_agent(AgentSlot {

@@ -640,9 +640,7 @@ fn tail_logs(
                 "instance '{instance_id}' not installed (run `agents list` to see installed instances)"
             ))
         })?;
-    let log_dir = PathBuf::from(&info.install_path)
-        .join("workspace")
-        .join("logs");
+    let log_dir = acowork_core::workspace::workspace_dir(&info.install_path).join("logs");
 
     /// List the `.log` files sorted by name (timestamped, newest last).
     fn latest_log(log_dir: &Path) -> Option<PathBuf> {

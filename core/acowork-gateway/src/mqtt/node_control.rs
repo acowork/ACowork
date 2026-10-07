@@ -299,6 +299,11 @@ impl NodeControlClient {
 
     /// Clone an installed agent to a new agent ID on the source agent's
     /// node (ADR-055 §6.6 L2-5, node-local operation).
+    ///
+    /// `new_agent_id` may equal `agent_id` — one package can have several
+    /// instances (ADR-073). `new_name` empty keeps the source name
+    /// suffixed "(clone)".
+    #[allow(clippy::too_many_arguments)]
     pub async fn clone_agent(
         &self,
         node_id: &str,
@@ -306,6 +311,7 @@ impl NodeControlClient {
         agent_id: &str,
         new_agent_id: &str,
         mode: &str,
+        new_name: &str,
     ) -> Result<NodeEvent, NodeControlError> {
         self.send(
             node_id,
@@ -319,6 +325,7 @@ impl NodeControlClient {
                         new_agent_id: new_agent_id.to_string(),
                         mode: mode.to_string(),
                         instance_id: instance_id.to_string(),
+                        new_name: new_name.to_string(),
                     },
                 )),
             },

@@ -305,19 +305,26 @@ Desktop App 的 Agent 列表右键菜单提供"克隆"选项（开发者模式�
        │
        ▼
 弹出克隆对话框:
-  ├─ 源 Agent: com.example.weather
+  ├─ 源 Agent: com.example.weather (com.example.weather)
   ├─ 克隆模式:
-  │   ○ 骨架克隆（仅 manifest + prompts + config）
-  │   ● 完整克隆（+ skills + data + SQLite 记忆层 快照）
-  ├─ 新 Agent ID: [com.example.weather-dev    ]
+  │   ○ 骨架克隆（全部包文件——manifest、prompts、skills、assets 及任何包内目录）
+  │   ● 完整克隆（+ workspace/config + 对话记录 + SQLite 记忆库；
+  │     files/ 和 logs/ 不复制）
+  ├─ 新 Agent ID: [com.example.weather    ]  ← 默认与源相同；包名可重复
+  │    （唯一性在 instance_id 上，ADR-073）
+  ├─ 新 Agent 名称: [留空则用「名称 (克隆)」]
   └─ [取消]  [克隆]
        │
        ▼
-调用 Gateway /api/agents/clone
+调用 Gateway /api/agents/:instance_id/clone
+  body: { new_agent_id, new_name, mode }
        │
        ▼
 Agent 列表刷新，新 Agent 出现并标记为 dev: true
 ```
+
+骨架 / 完整的边界只在 [10-debug-protocol.md §7.3](./10-debug-protocol.md) 定义一次；
+对话框只负责提供两个选项，不重复描述各自包含什么。
 
 ### 5.2 从零创建
 
@@ -554,7 +561,7 @@ pub enum HttpRoute {
     Get("/api/agents") -> AgentListResponse,
     Post("/api/agents/install") -> AgentInstallResponse,         // body: .agent 文件路径
     Delete("/api/agents/:id") -> AgentUninstallResponse,
-    Post("/api/agents/:id/clone") -> AgentCloneResponse,         // body: { mode, new_id }
+    Post("/api/agents/:instance_id/clone") -> AgentCloneResponse, // body: { mode, new_agent_id }
     Post("/api/agents/:id/start") -> AgentStartResponse,
     Post("/api/agents/:id/stop") -> AgentStopResponse,
     Get("/api/agents/:id") -> AgentDetailResponse,

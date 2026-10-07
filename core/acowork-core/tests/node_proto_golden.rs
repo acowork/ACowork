@@ -254,6 +254,7 @@ fn node_clone_upgrade_publish_command_wire_shape() {
                 new_agent_id: "com.example.clone".to_string(),
                 mode: "full".to_string(),
                 instance_id: "3f8c2a1b-4d5e-6f7a-8b9c-0d1e2f3a4b5c".to_string(),
+                new_name: "Example Clone".to_string(),
             },
         )),
     };
@@ -270,6 +271,7 @@ fn node_clone_upgrade_publish_command_wire_shape() {
     assert_eq!(clone.agent_id, "com.example");
     assert_eq!(clone.new_agent_id, "com.example.clone");
     assert_eq!(clone.mode, "full");
+    assert_eq!(clone.new_name, "Example Clone");
 
     let upgrade = NodeControlCommand {
         node_id: "gpu-1".to_string(),

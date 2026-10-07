@@ -305,20 +305,26 @@ Desktop App's Agent list right-click menu provides "Clone" option (visible in de
 User right-click Agent A → Clone
        │
        ▼
-Clone dialog pops up:
-  ├─ Source Agent: com.example.weather
+Clone dialog:
+  ├─ Source agent: com.example.weather (com.example.weather)
   ├─ Clone mode:
-  │   ○ Skeleton clone (manifest + prompts + config only)
-  │   ● Full clone (+ skills + data + SQLite memory layer snapshot)
-  ├─ New Agent ID: [com.example.weather-dev    ]
+  │   ○ Skeleton (every package file — manifest, prompts, skills,
+  │     assets and any other package directory)
+  │   ● Full (+ workspace/config + conversation history + SQLite memory;
+  │     files/ and logs/ stay behind)
+  ├─ New Agent ID: [com.example.weather    ]  ← defaults to the source;
+  │    package ids may repeat — uniqueness is on instance_id (ADR-073)
+  ├─ New agent name: [blank = "Name (clone)"]
   └─ [Cancel]  [Clone]
        │
        ▼
-Call Gateway /api/agents/clone
+Call Gateway /api/agents/:instance_id/clone
+  body: { new_agent_id, new_name, mode }
        │
        ▼
-Agent list refreshes, new Agent appears marked dev: true
+Agent list refreshes; the new agent appears marked dev: true
 ```
+
 
 ### 5.2 Create from Scratch
 
@@ -556,7 +562,7 @@ pub enum HttpRoute {
     Get("/api/agents") -> AgentListResponse,
     Post("/api/agents/install") -> AgentInstallResponse,         // body: .agent file path
     Delete("/api/agents/:id") -> AgentUninstallResponse,
-    Post("/api/agents/:id/clone") -> AgentCloneResponse,         // body: { mode, new_id }
+    
     Post("/api/agents/:id/start") -> AgentStartResponse,
     Post("/api/agents/:id/stop") -> AgentStopResponse,
     Get("/api/agents/:id") -> AgentDetailResponse,

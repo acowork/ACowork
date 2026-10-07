@@ -770,10 +770,13 @@ impl GatewayClient {
         &self,
         agent_id: &str,
         new_agent_id: &str,
+        new_name: &str,
         mode: &str,
     ) -> Result<CloneResponse> {
         let body = serde_json::json!({
             "new_agent_id": new_agent_id,
+            // Empty = keep the source name; the node suffixes "(clone)".
+            "new_name": new_name,
             "mode": mode,
         });
         let resp = self

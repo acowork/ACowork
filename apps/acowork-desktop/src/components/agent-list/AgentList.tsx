@@ -145,7 +145,7 @@ export function AgentList({ width }: AgentListProps) {
   const [permTarget, setPermTarget] = useState<PermissionTarget | null>(null);
 
   // Clone dialog state
-  const [cloneSource, setCloneSource] = useState<{ agentId: string; agentName: string } | null>(null);
+  const [cloneSource, setCloneSource] = useState<{ agentId: string; packageId: string; agentName: string } | null>(null);
 
   // Publish wizard state
   const [publishTarget, setPublishTarget] = useState<{ agentId: string; agentName: string } | null>(null);
@@ -477,8 +477,10 @@ export function AgentList({ width }: AgentListProps) {
           // ADR-073: clone source is instance-scoped — the Gateway route
           // resolves through the installed table, so use the row's instance
           // key (aid) and never the package `agent_id` (ambiguous in
-          // multi-instance deployments).
+          // multi-instance deployments). The package id travels alongside
+          // for naming/display only.
           agentId: aid,
+          packageId: contextAgent.agent_id,
           agentName: contextAgent.display_name ?? contextAgent.name,
         });
       },
@@ -973,6 +975,7 @@ export function AgentList({ width }: AgentListProps) {
       <CloneDialog
         open={!!cloneSource}
         agentId={cloneSource?.agentId ?? ""}
+        packageId={cloneSource?.packageId ?? ""}
         agentName={cloneSource?.agentName ?? ""}
         onCloned={(result: CloneResponse) => {
           setCloneSource(null);

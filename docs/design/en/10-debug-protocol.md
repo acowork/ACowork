@@ -638,7 +638,68 @@ When replaying, Runtime:
 - A/B test different Agent behavior on same input
 - Demo / training material generation
 
-## 9. Publish Wizard Integration
+## 9. Agent Clone
+
+Clone runs through the Gateway HTTP API (invoked by Desktop App), not through the Debug Protocol.
+
+### 9.1 Clone Request
+
+```http
+POST /api/agents/{instance_id}/clone
+Content-Type: application/json
+
+{
+  "mode": "skeleton" | "full",
+  "new_agent_id": "com.example.weather-dev"
+}
+```
+
+`{instance_id}` is the source **instance** (ADR-073); `new_agent_id` is a **package** id (reverse-domain). The two identities are distinct and are never compared against each other.
+
+### 9.2 Clone Flow
+
+```
+Desktop App → Gateway POST /api/agents/{instance_id}/clone
+       │
+       ▼
+Gateway → Node control plane (clone is node-local, ADR-055 §6.6 L2-5):
+  ├─ Read source install dir {packages_dir}/{agent_id}/{instance_id}/
+  ├─ Copy per mode (see §9.3 for the boundary definition):
+  │   ├─ skeleton: every package-level file
+  │   │           (manifest.toml with agent_id rewritten, prompts/,
+  │   │            skills/, assets/, …)
+  │   │
+  │   └─ full: skeleton + the instance's workspace state:
+  │       conversations/ (current session JSONL snapshot)
+  │       memory/private.sqlite (snapshot, incl. -wal/-shm sidecars)
+  │
+  ├─ Write to {packages_dir}/{new_agent_id}/{new_instance_id}/
+  ├─ Mark the clone dev: true
+  └─ Return the clone result
+```
+
+### 9.3 Skeleton / Full Boundary
+
+One criterion decides: **package static content vs. per-instance runtime state.**
+
+| Mode | Contents | Rationale |
+|---|---|---|
+| **skeleton** | Every **package-level file** — `manifest.toml` (with `agent_id` rewritten), `prompts/`, `skills/`, `assets/`, `tools/`, `resources/`… | Present at install time; independent of the user |
+| **full** | skeleton **+ instance state under `workspace/`**: `workspace/config/` (user-curated model picks, MCP servers, custom workspace dirs in `agent_workspaces.json`), `workspace/conversations/`, `workspace/memory/` (incl. `-wal`/`-shm`) | Produced by running; the trace of what this agent has seen |
+
+Two constraints:
+
+1. **Neither list is hard-coded.** Package-level exclusion is driven by `PACKAGE_ALWAYS_EXCLUDE_DIRS` (`memory`/`workspace`/`runtime`); workspace-level exclusion is driven by `WORKSPACE_LOCAL_DIRS` (`files`/`logs`). Every other entry is copied. An allowlist rots as the format evolves — an earlier `["prompts","config","tools","resources"]` package list dropped `skills/`/`assets/` from skeleton, and an earlier `(conversations, memory)` workspace list dropped `config/` from full.
+2. **Instance state lives under `workspace/`, not at package level.** They are siblings, not parent/child: `{instance}/prompts/` is package content while `{instance}/workspace/conversations/` is state. Conflating them makes full mode copy from a path that never exists — silently shipping an agent with no history.
+
+`workspace/files/` (host-specific attachments) and `workspace/logs/` (runtime artefacts) stay behind even in `full` — they are machine-local. `workspace/config/` ships with `full` because the user spent the afternoon setting it up and a clone should not force them to redo it.
+
+### 9.4 Clone Constraints
+
+- The clone is independent of its source; later source updates do not sync.
+- A full clone's SQLite snapshot is a point-in-time copy; afterwards the two evolve separately.
+
+## 10. Publish Wizard Integration
 
 Developer Mode's Publish Wizard uses Debug Protocol to validate Agent before publishing:
 
@@ -661,7 +722,7 @@ Step 5: Distribute — local install / export / upload
   └─ Upload: POST to repository
 ```
 
-## 10. Cross-references
+## 11. Cross-references
 
 | Document | Relationship |
 |----------|-------------|

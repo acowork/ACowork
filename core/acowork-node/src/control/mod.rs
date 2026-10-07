@@ -442,6 +442,7 @@ async fn handle_command(
                     &cmd.instance_id,
                     &cmd.agent_id,
                     &cmd.new_agent_id,
+                    &cmd.new_name,
                     mode,
                     &install_dir,
                     &mut node,
@@ -2533,6 +2534,7 @@ mod tests {
                     new_agent_id: "com.example.clone".to_string(),
                     mode: "skeleton".to_string(),
                     instance_id: TEST_INSTANCE_ID.to_string(),
+                    new_name: String::new(),
                 },
             )),
         };

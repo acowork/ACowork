@@ -455,6 +455,7 @@ pub async fn clone_agent(
     state: State<'_, AppState>,
     agent_id: String,
     new_agent_id: String,
+    new_name: Option<String>,
     mode: Option<String>,
 ) -> Result<CloneResponse, String> {
     let client = state.gateway.read().await;
@@ -462,6 +463,7 @@ pub async fn clone_agent(
         .clone_agent(
             &agent_id,
             &new_agent_id,
+            new_name.as_deref().unwrap_or(""),
             &mode.unwrap_or_else(|| "skeleton".to_string()),
         )
         .await

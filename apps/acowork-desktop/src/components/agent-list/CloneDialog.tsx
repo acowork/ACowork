@@ -9,8 +9,20 @@ import { Copy, Info } from "lucide-react";
 
 interface CloneDialogProps {
   open: boolean;
-  /** Source agent ID to clone from */
+  /**
+   * Source agent INSTANCE id — the route variable. ADR-073: the Gateway
+   * clone route resolves through the installed table, so this is the
+   * instance key, never the package id.
+   */
   agentId: string;
+  /**
+   * Source agent PACKAGE id (`meta.agent_id`) — display identity and the
+   * base for the suggested new id. A distinct prop from `agentId`
+   * because the two answer different questions: routing vs. naming. Using
+   * the instance here is what produced UUID-shaped "package" ids like
+   * `8f7be9a6-….cloned-261007`.
+   */
+  packageId: string;
   /** Source agent display name */
   agentName: string;
   /** Called when cloning succeeds */
@@ -21,12 +33,14 @@ interface CloneDialogProps {
 export function CloneDialog({
   open,
   agentId,
+  packageId,
   agentName,
   onCloned,
   onClose,
 }: CloneDialogProps) {
   const { t } = useTranslation();
   const [newAgentId, setNewAgentId] = useState("");
+  const [newName, setNewName] = useState("");
   const [mode, setMode] = useState<CloneMode>("skeleton");
   const [cloning, setCloning] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -43,16 +57,18 @@ export function CloneDialog({
     },
   };
 
-  // Auto-generate suggestion based on source agent name
+  // A clone is a new INSTANCE of the same package (ADR-073): the unique
+  // identity is `instance_id`, so the package id is free to repeat. The
+  // only thing that must differ is the display name, which the backend
+  // falls back to "<source name> (clone)" when left blank.
   useEffect(() => {
     if (open) {
-      const timestamp = new Date().toISOString().slice(2, 10).replace(/-/g, "");
-      const suffix = agentId.includes(".") ? "" : ".cloned";
-      setNewAgentId(`${agentId}${suffix}-${timestamp}`);
+      setNewAgentId(packageId);
+      setNewName("");
       setError(null);
       setTimeout(() => inputRef.current?.focus(), 50);
     }
-  }, [open, agentId]);
+  }, [open, packageId]);
 
   // Close on Escape
   useEffect(() => {
@@ -70,16 +86,13 @@ export function CloneDialog({
       setError(t("cloneDialog.errorEmptyId"));
       return;
     }
-    if (trimmed === agentId) {
-      setError(t("cloneDialog.errorSameAsSource"));
-      return;
-    }
     setCloning(true);
     setError(null);
     try {
       const result = await invoke<CloneResponse>("clone_agent", {
         agentId,
         newAgentId: trimmed,
+        newName: newName.trim(),
         mode,
       });
       onCloned(result);
@@ -120,7 +133,7 @@ export function CloneDialog({
             <span className="font-medium text-text-secondary ">
               {agentName}
             </span>
-            <span className="text-xs text-text-tertiary">({agentId})</span>
+            <span className="text-xs text-text-tertiary">({packageId})</span>
           </div>
 
           {/* New agent ID */}
@@ -140,6 +153,30 @@ export function CloneDialog({
                 if (e.key === "Enter") void handleClone();
               }}
               placeholder={t("cloneDialog.newAgentIdPlaceholder")}
+              className=""
+            />
+            <p className="mt-1.5 text-xs text-text-quaternary">
+              {t("cloneDialog.newAgentIdHint")}
+            </p>
+          </div>
+
+          {/* New agent name — the only field that must differ from the
+              source. Blank means "<source name> (clone)". */}
+          <div>
+            <label className="mb-1.5 block text-xs font-medium text-text-tertiary ">
+              {t("cloneDialog.newNameLabel")}
+            </label>
+            <StyledInput
+              type="text"
+              value={newName}
+              onChange={(e) => {
+                setNewName(e.target.value);
+                setError(null);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") void handleClone();
+              }}
+              placeholder={t("cloneDialog.newNamePlaceholder")}
               className=""
             />
           </div>

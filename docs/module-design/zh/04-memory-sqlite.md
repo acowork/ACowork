@@ -273,8 +273,8 @@ pub enum Error {
 | ---------------------- | --- | ------------------------------------------------------------------------------------- |
 | Runtime ↔ emulator   | ↔   | Runtime 仅持 `Arc<dyn MemoryProvider>`，从不 `use acowork_sqlite::*`                 |
 | Runtime ↔ Emedding    |     | Runtime 通过 `EmbeddingProvider` trait 生成向量，Store 不持有                          |
-| Storage ↔ Workspace   |     | Store 写 `<install_path>/memory/private.sqlite`（含 WAL/SHM），Gateway 不直访         |
-| Cloning                |     | `acowork-sign::clone` 拷贝 `private.sqlite` + `*.wal` + `*.shm` 三件套（ADR-082 D5） |
+| Storage ↔ Workspace   |     | Store 写 `<install_path>/workspace/memory/private.sqlite`（含 WAL/SHM），Gateway 不直访         |
+| Cloning                |     | `acowork-node` 的 clone 拷贝 `private.sqlite` + `*.wal` + `*.shm` 三件套（ADR-082 D5） |
 | InboxAgent 测试         | ↔   | 集成测试用 `SqliteStore::open_in_memory()`，与生产代码同 trait、同路径                  |
 
 ---

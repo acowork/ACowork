@@ -274,8 +274,8 @@ pub enum Error {
 | -------------------- | --------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
 | Runtime ↔ storage    | ↔                                                                                                         | Runtime holds only `Arc<dyn MemoryProvider>`, never `use acowork_sqlite::*`           |
 | Runtime ↔ embedding  | ↔                                                                                                         | Runtime generates vectors via `EmbeddingProvider` trait; Store never holds the provider |
-| Storage ↔ workspace  | ↔                                                                                                         | Store writes `<install_path>/memory/private.sqlite` (+ WAL/SHM); Gateway does not access directly |
-| Cloning              | ↔                                                                                                         | `acowork-sign::clone` copies `private.sqlite` + `*.wal` + `*.shm` triplet (ADR-082 D5) |
+| Storage ↔ workspace  | ↔                                                                                                         | Store writes `<install_path>/workspace/memory/private.sqlite` (+ WAL/SHM); Gateway does not access directly |
+| Cloning              | ↔                                                                                                         | the `acowork-node` clone path copies `private.sqlite` + `*.wal` + `*.shm` triplet (ADR-082 D5) |
 | InboxAgent tests     | ↔                                                                                                         | Integration tests use `SqliteStore::open_in_memory()`, same trait / same path as production |
 
 ---

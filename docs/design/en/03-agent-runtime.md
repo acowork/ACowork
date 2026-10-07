@@ -66,7 +66,7 @@ User identity information (name, city, language etc.) **is NOT passed via comman
 
 ```
 Agent Runtime binary
-├── Package Loader      # Parse .agent ZIP, load manifest + prompts + config
+├── Package Loader      # Parse .agent ZIP, load manifest + prompts + skills (config lives in workspace/config, not at package level)
 ├── AgentCore (Arc)     # Cross-Session shared state
 │   ├── Provider       # LLM Provider (direct LLM API connection)
 │   ├── Tool Registry  # Tool registry

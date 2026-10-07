@@ -1368,10 +1368,19 @@ message NodeSkillsImport {
 /// is a separate concern.
 message NodeClone {
   string agent_id = 1;      // source package identity
-  string new_agent_id = 2;  // target package identity
-  string mode = 3;          // "skeleton" | "full"
+  // Target package identity. May EQUAL the source package id: several
+  // instances of one package are legal (ADR-073), so uniqueness lives on
+  // instance_id, never on the package id.
+  string new_agent_id = 2;
+  // "skeleton" = all package-level files; "full" = skeleton plus the
+  // instance's conversation history and private SQLite store. Boundary
+  // defined in docs/design/zh/10-debug-protocol.md §7.2.1 (en §9.3).
+  string mode = 3;
   /// ADR-073: instance identity of the source instance being cloned.
   string instance_id = 4;
+  /// Human-readable name for the clone. Empty = keep the source name
+  /// suffixed "(clone)". Names are not unique; instance ids are.
+  string new_name = 5;
 }
 
 /// Upgrade an installed agent to a new package version (async: the node

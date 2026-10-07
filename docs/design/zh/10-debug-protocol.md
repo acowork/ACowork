@@ -640,14 +640,17 @@ Agent 克隆通过 Gateway HTTP API 执行（Desktop App 调用，Gateway 执行
 ### 7.1 克隆请求
 
 ```http
-POST /api/agents/:id/clone
+POST /api/agents/{instance_id}/clone
 Content-Type: application/json
 
 {
   "mode": "skeleton" | "full",
-  "new_id": "com.example.weather-dev"
+  "new_agent_id": "com.example.weather-dev"
 }
 ```
+
+`{instance_id}` 是源 **实例**（ADR-073），`new_agent_id` 是**包** id（反域名）。
+两个身份互不比较，也不互相代替。
 
 ### 7.2 克隆流程
 
@@ -655,30 +658,33 @@ Content-Type: application/json
 Desktop App → Gateway POST /api/agents/:id/clone
        │
        ▼
-Gateway:
-  ├─ 读取源 Agent 工作区
-  ├─ 按模式复制文件:
-  │   ├─ skeleton: manifest.toml (清除 agent_id, 置为 new_id)
-  │   │             prompts/ (完整复制)
-  │   │             config/ (完整复制)
-  │   │             tools/ (完整复制)
-  │   │             resources/ (完整复制)
-  │   │
-  │   └─ full 额外复制:
-  │       skills/ (完整复制)
-  │       data/ (完整复制)
-  │       conversations/ (当前 session JSONL 快照)
-  │       memory/private.SQLite 记忆层 (复制快照)
-  │
-  ├─ 写入新 Agent 工作区:
-  │   ~/.local/share/agent-gateway/agents/<new_id>/
-  │
-  ├─ 新 Agent 标记为 dev: true
-  │
-  └─ 返回克隆结果
+
+
+### 7.2 克隆流程
+
+```
+Desktop App → Gateway POST /api/agents/:id/clone
+       │
+       ▼
 ```
 
-### 7.3 克隆限制
+### 7.3 骨架 / 完整 边界
+
+一条标准划分：**包级静态内容 vs. 实例运行时状态**。
+
+| 模式 | 包含 | 说明 |
+|---|---|---|
+| **skeleton** | **包级全部文件** —— `manifest.toml`（`agent_id` 已改写）、`prompts/`、`skills/`、`assets/`、`tools/`、`resources/`…… | 安装时即存在，与用户无关 |
+| **full** | skeleton **+ workspace 下的实例状态**：`workspace/config/`（用户改的模型、MCP、自定义目录——`agent_workspaces.json`）、`workspace/conversations/`、`workspace/memory/`（含 `-wal`/`-shm`） | 运行中产生，是该实例见过什么的痕迹 |
+
+两条约束：
+
+1. **两份清单都不写死。** 包级排除由 `PACKAGE_ALWAYS_EXCLUDE_DIRS`（`memory`/`workspace`/`runtime`）驱动；workspace 级排除由 `WORKSPACE_LOCAL_DIRS`（`files`/`logs`）驱动。其余条目一律复制。早先包级 `["prompts","config","tools","resources"]` 白名单把 `skills/`/`assets/` 从 skeleton 里漏掉；workspace 级 `(conversations, memory)` 白名单把 `config/` 从 full 里漏掉。
+2. **实例状态在 `workspace/` 下，不是包级。** 两者是兄弟，不是父子：`{instance}/prompts/` 是包内容，`{instance}/workspace/conversations/` 是状态。把它们混在一起会让 full 模式从一条根本不存在的路径去拷——结果就是静悄悄给克隆体打个无历史空壳。
+
+`workspace/files/`（宿主机相关的附件）和 `workspace/logs/`（运行时产物）即使在 full 模式也不复制——它们是机器本地的。`workspace/config/` 在 full 模式里随克隆体一起走——用户花了一下午配置的东西不应该重做。
+
+### 7.4 克隆限制
 
 - 克隆体与源 Agent 独立，后续源 Agent 更新不会同步
 - 完整克隆的 SQLite 记忆层 快照是克隆时刻的副本，之后双方各自演化

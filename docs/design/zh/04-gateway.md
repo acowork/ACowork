@@ -218,7 +218,7 @@ pub fn http_routes() -> Router<GatewayState> {
         .route("/api/agents/:id", get(get_agent_detail))
         .route("/api/agents/install", post(install_agent))
         .route("/api/agents/:id", delete(uninstall_agent))
-        .route("/api/agents/:id/clone", post(clone_agent))
+        .route("/api/agents/:id/clone", post(clone_agent))   // :id = INSTANCE id (ADR-073)
         .route("/api/agents/:id/start", post(start_agent))
         .route("/api/agents/:id/stop", post(stop_agent))
 
@@ -310,10 +310,14 @@ pub fn http_routes() -> Router<GatewayState> {
 // → 400 { "error": "invalid package" }
 // → 409 { "error": "already installed" }
 
-// POST /api/agents/:id/clone
-// Request: { "mode": "skeleton" | "full", "new_id": "com.example.weather-dev" }
-// → 200 { "agent_id": "com.example.weather-dev", "workspace": "/path/to/workspace" }
-// → 400 { "error": "cannot clone system agent" }
+// POST /api/agents/{instance_id}/clone
+// Request: { "mode": "skeleton" | "full", "new_agent_id": "com.example.weather",
+//            "new_name": "天气副本" }      // new_name 可选，"" = "<名称> (克隆)"
+// → 201 { "agent_id": "com.example.weather", "install_path": "{packages_dir}/{new_agent_id}/{new_instance_id}" }
+//
+// {instance_id} 是源实例（ADR-073）；new_agent_id 是包名，可以与源相同 ——
+// 同一个包可以挂多个实例，唯一性在 node 生成的 instance id 上。
+// 模式语义见 10-debug-protocol.md §7.2.1。
 ```
 
 #### 9.4.2 对话
