@@ -365,6 +365,65 @@ pub(crate) async fn delete_session(
     Ok(Json(serde_json::json!({ "session_id": sid, "deleted": true })))
 }
 
+/// Which session ids a `DELETE /sessions` may remove for `scope`.
+///
+/// Split out of [`clear_sessions`] so the ownership filter is testable
+/// without a live `SessionManager`.
+fn clearable_session_ids(rows: &[(String, SessionMeta)], scope: &SessionScope) -> Vec<String> {
+    rows.iter()
+        .filter(|(_, meta)| meta.is_writable_by(scope))
+        .map(|(sid, _)| sid.clone())
+        .collect()
+}
+
+/// `DELETE /sessions` — remove every session the caller may write to.
+///
+/// Bulk form of [`delete_session`]: each session goes through the same
+/// `SessionManager::delete_session` path (task close, session-meta row in
+/// SQLite, the `{sid}.jsonl` conversation file, latest-session recompute),
+/// so a cleared agent leaves no orphaned rows or files behind. The
+/// conversation full-text index is purged lazily by its own sweep once the
+/// JSONL files are gone — the same contract single-session delete relies on.
+pub(crate) async fn clear_sessions(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let scope = scope_from_headers(&headers);
+    let conversations_dir = state.work_dir.join("conversations");
+
+    // Enumerate from the session-meta store (SQLite), not memory: most
+    // sessions are idle-evicted. `is_writable_by` is the same authorization
+    // predicate `authorize_write` applies to a single-session DELETE.
+    let ids = clearable_session_ids(
+        &crate::conversation::scan_sessions_from_meta(&conversations_dir),
+        &scope,
+    );
+
+    let sm = session_manager(&state).await?;
+    for sid in &ids {
+        sm.lock().await.delete_session(sid).await;
+    }
+
+    // One lifecycle event per deleted session, mirroring `delete_session`.
+    for sid in &ids {
+        publish_lifecycle(
+            &state,
+            "deleted",
+            acowork_core::mqtt_proto::data_envelope::Payload::SessionDeleted(
+                acowork_core::mqtt_proto::SessionDeleted {
+                    agent_id: state.agent_id.clone(),
+                    session_id: sid.clone(),
+                    deleted_at: chrono::Utc::now().to_rfc3339(),
+                },
+            ),
+        )
+        .await;
+    }
+
+    tracing::info!(count = ids.len(), "HTTP: cleared all sessions");
+    Ok(Json(serde_json::json!({ "deleted": ids.len() })))
+}
+
 /// `PUT /sessions/{sid}/visibility` — share or unshare a session.
 ///
 /// Owner-only (`is_writable_by`): handing out read access is a write.
@@ -769,6 +828,31 @@ mod tests {
         assert!(
             may_change_visibility(&meta(None), &SessionScope::Unfiltered),
             "admin / local mode is never blocked"
+        );
+    }
+
+    /// `DELETE /sessions` (clear-all) must only remove sessions the caller
+    /// may write to — the same predicate single-session DELETE enforces.
+    #[test]
+    fn clear_all_only_targets_writable_sessions() {
+        let rows: Vec<(String, SessionMeta)> = [
+            ("mine", Some("u-alice")),
+            ("theirs", Some("u-bob")),
+            ("unowned", None),
+        ]
+        .into_iter()
+        .map(|(sid, owner)| (sid.to_string(), meta(owner)))
+        .collect();
+
+        let alice = SessionScope::User("u-alice".into());
+        let mut ids = clearable_session_ids(&rows, &alice);
+        ids.sort();
+        assert_eq!(ids, vec!["mine", "unowned"], "own + unclaimed, not other users'");
+
+        // Admin / local mode clears everything.
+        assert_eq!(
+            clearable_session_ids(&rows, &SessionScope::Unfiltered).len(),
+            rows.len()
         );
     }
 }

@@ -174,7 +174,9 @@ pub fn proxy_routes() -> Router<AppState> {
         // Runtime from the `x-user-id` header this layer injects.
         .route(
             "/api/agents/{id}/sessions",
-            get(proxy_list_sessions).post(proxy_create_session),
+            get(proxy_list_sessions)
+                .post(proxy_create_session)
+                .delete(proxy_clear_sessions),
         )
         .route(
             "/api/agents/{id}/sessions/{sid}/open",
@@ -688,6 +690,25 @@ async fn proxy_create_session(
         "",
         reqwest::Method::POST,
         payload,
+        &headers,
+    )
+    .await
+}
+
+/// Reverse-proxy `DELETE /api/agents/{id}/sessions` to Runtime's
+/// `DELETE /sessions` — clear every session the caller owns.
+async fn proxy_clear_sessions(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    proxy_to_runtime_with_method(
+        &state,
+        &id,
+        "/sessions",
+        "",
+        reqwest::Method::DELETE,
+        None,
         &headers,
     )
     .await

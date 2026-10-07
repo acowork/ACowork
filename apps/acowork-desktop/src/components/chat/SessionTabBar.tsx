@@ -57,12 +57,18 @@ function SessionListDropdown({ agentId, activeSessionId, onClose }: SessionListD
   const pageSize = agentStorage?.pagination.pageSize ?? 20;
   const fetchSessions = useAgentStore((s) => s.fetchSessions);
   const deleteSession = useAgentStore((s) => s.deleteSession);
+  const clearAllSessions = useAgentStore((s) => s.clearAllSessions);
   const openSessionIds = useChatStore((s) => s.agentStates[agentId]?.openSessionIds ?? EMPTY_ARRAY);
   // ADR-076: sessions shared *with* us are read-only — delete is owner-only
   // and would 404. The row still opens for reading.
   const readOnlyIds = useReadOnlySessionIds(agentId);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  // Clear-all: the dropdown header's trash button opens a confirmation
+  // modal (destructive bulk action — same pattern as the looping-session
+  // close dialog in SessionTabBar).
+  const [confirmClearAll, setConfirmClearAll] = useState(false);
+  const [clearing, setClearing] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
   const ref = useRef<HTMLDivElement>(null);
 
@@ -108,6 +114,20 @@ function SessionListDropdown({ agentId, activeSessionId, onClose }: SessionListD
     void fetchSessions(agentId, page);
   };
 
+  const handleClearAll = async () => {
+    if (clearing) return;
+    setClearing(true);
+    try {
+      await clearAllSessions(agentId);
+      setConfirmClearAll(false);
+    } catch {
+      // agentStore already logs the failure; keep the modal open so the
+      // user sees it did not go through.
+    } finally {
+      setClearing(false);
+    }
+  };
+
   const start = (currentPage - 1) * pageSize + 1;
   const end = Math.min(currentPage * pageSize, totalCount);
 
@@ -130,6 +150,16 @@ function SessionListDropdown({ agentId, activeSessionId, onClose }: SessionListD
             <>{t("sessionTabBar.sidebarNoSessions")}</>
           )}
         </span>
+        {totalCount > 0 && (
+          <Tooltip content={t("sessionTabBar.clearAll")} variant="plain">
+            <button
+              onClick={() => setConfirmClearAll(true)}
+              className="rounded p-1 transition-colors hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300"
+            >
+              <Trash2 className="h-3 w-3" />
+            </button>
+          </Tooltip>
+        )}
       </div>
 
       {/* Search input */}
@@ -267,6 +297,51 @@ function SessionListDropdown({ agentId, activeSessionId, onClose }: SessionListD
           >
             <ChevronRight className="h-3.5 w-3.5" />
           </button>
+        </div>
+      )}
+
+      {/* Clear-all confirmation dialog. Rendered inside the dropdown's
+          ref div so clicks in the modal do not trip the outside-click
+          close handler. */}
+      {confirmClearAll && (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-modal-overlay"
+          onClick={() => !clearing && setConfirmClearAll(false)}
+        >
+          <div
+            className="mx-4 w-full max-w-sm rounded-md border border-border-outer bg-modal-surface p-5 shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start gap-3">
+              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-red-100 dark:bg-red-900/30">
+                <TriangleAlert className="h-5 w-5 text-red-600 dark:text-red-400" />
+              </div>
+              <div className="flex-1">
+                <h3 className="text-sm font-medium text-text ">
+                  {t("sessionTabBar.clearAllConfirmTitle")}
+                </h3>
+                <p className="mt-1 text-xs text-text-tertiary">
+                  {t("sessionTabBar.clearAllConfirmWarning", { count: totalCount })}
+                </p>
+              </div>
+            </div>
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                onClick={() => setConfirmClearAll(false)}
+                disabled={clearing}
+                className="rounded btn-solid px-3 py-1.5 text-xs disabled:opacity-50"
+              >
+                {t("sessionTabBar.cancel")}
+              </button>
+              <button
+                onClick={() => void handleClearAll()}
+                disabled={clearing}
+                className="rounded bg-red-600 px-3 py-1.5 text-xs text-white transition-colors hover:bg-red-700 disabled:opacity-50"
+              >
+                {clearing ? t("sessionTabBar.clearing") : t("sessionTabBar.clearAllConfirm")}
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

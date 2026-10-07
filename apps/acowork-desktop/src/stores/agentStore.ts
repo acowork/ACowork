@@ -401,6 +401,12 @@ interface AgentStoreState {
   saveSessionForAgent: (agentId: string, sessionId: string) => void;
   createSession: (agentId: string) => Promise<void>;
   deleteSession: (agentId: string, sessionId: string) => Promise<void>;
+  /**
+   * Clear every conversation of this agent the caller owns: the Runtime
+   * drops each session's SQLite meta row and its conversation JSONL file.
+   * Sessions merely shared (read-only) with the caller are left untouched.
+   */
+  clearAllSessions: (agentId: string) => Promise<void>;
   closeSession: (agentId: string, sessionId: string) => Promise<void>;
   /** Rename a session: optimistic local update + MQTT `update_session_title`. */
   renameSession: (agentId: string, sessionId: string, title: string) => Promise<void>;
@@ -1270,6 +1276,43 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       set((state) => patchAgent(state, agentId, { sessionTitle: undefined }));
     } catch (e) {
       log.error("[AgentStore] Failed to delete session:", e);
+    }
+  },
+
+  clearAllSessions: async (agentId: string) => {
+    try {
+      // Close open tabs first (sessions still exist, so the per-tab
+      // `close_session` inside `closeTab` succeeds instead of 404ing
+      // against already-deleted rows), then bulk-delete on the backend.
+      const openIds = useChatStore.getState().getOpenSessionIds(agentId);
+      for (const sid of openIds) {
+        await useChatStore.getState().closeTab(agentId, sid);
+      }
+
+      await sessionControl.clearSessions(agentId);
+
+      // The backend dropped every owned session (SQLite meta row + JSONL
+      // file). Mirror that locally: drop session states and empty the
+      // list. Read-only shared sessions survive the clear server-side,
+      // so re-fetch instead of assuming zero rows.
+      const storage = get().agents[agentId];
+      if (storage) {
+        for (const s of storage.sessions) {
+          useChatStore.getState().removeSessionState(agentId, s.session_id);
+        }
+      }
+      useChatStore.getState().clearMessages(agentId);
+      set((state) =>
+        patchAgent(state, agentId, {
+          sessions: [],
+          sessionTitle: undefined,
+          pagination: { ...DEFAULT_PAGINATION },
+        }),
+      );
+      void get().fetchSessions(agentId, 1);
+    } catch (e) {
+      log.error("[AgentStore] Failed to clear all sessions:", e);
+      throw e;
     }
   },
 

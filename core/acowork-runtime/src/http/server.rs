@@ -645,7 +645,9 @@ impl RuntimeHttpServer {
             .route("/health", get(health))
             .route(
                 "/sessions",
-                get(list_sessions).post(crate::http::session_control::post_create_session),
+                get(list_sessions)
+                    .post(crate::http::session_control::post_create_session)
+                    .delete(crate::http::session_control::clear_sessions),
             )
             .route(
                 "/sessions/{sid}/open",

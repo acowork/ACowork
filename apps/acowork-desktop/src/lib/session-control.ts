@@ -123,6 +123,15 @@ export function deleteSession(agentId: string, sessionId: string): Promise<void>
 }
 
 /**
+ * `DELETE /api/agents/{id}/sessions` — clear every session the caller owns.
+ * The Runtime removes each session's meta row (SQLite) and its conversation
+ * JSONL file; sessions merely shared with the caller (read-only) survive.
+ */
+export function clearSessions(agentId: string): Promise<void> {
+  return controlRequest("DELETE", `/api/agents/${agentId}/sessions`);
+}
+
+/**
  * `PUT /api/agents/{id}/sessions/{sid}/workspace` — switch the session's
  * workspace.
  *
