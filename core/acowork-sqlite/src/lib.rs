@@ -264,6 +264,44 @@ impl SqliteStore {
         Ok(deleted > 0)
     }
 
+    /// Drop every conversation-related row from this store.
+    ///
+    /// Called by the package-clone `Full` mode after copying the source
+    /// agent's `memory/private.sqlite`: a clone starts a new dialogue, not
+    /// a continuation, so the index rows (`ConversationMessage` nodes + their
+    /// vectors + `fts_conversation`) and the `sessions` / `fts_sessions`
+    /// meta rows would otherwise dangle — pointing at JSONL files the clone
+    /// deliberately did not copy.
+    ///
+    /// Memory nodes (`Episodic`, `Knowledge`, `Procedural`,
+    /// `Autobiographical`) are kept; the user spent the afternoon curating
+    /// them and a clone should not force them to redo it. Returns the number
+    /// of session-meta rows removed (the conversation-index row count is
+    /// derivable but not separately reported).
+    pub fn purge_conversation_state(&self) -> Result<usize> {
+        let conn = self.lock();
+        // Conversation index: drop every `ConversationMessage` node in one
+        // statement. The FK from `vectors.node_id` cascades; `fts_conversation`
+        // is the contentless companion and has no row-level FK to `nodes`,
+        // so it must be cleared explicitly.
+        let conv = conn.execute(
+            "DELETE FROM nodes WHERE label = ?1",
+            params![crate::conversation::LABEL],
+        )?;
+        conn.execute("DELETE FROM fts_conversation", [])?;
+        // Session meta lives alongside memory per ADR-082 §4 step 3. A
+        // clone that keeps the memory file would otherwise surface ghost
+        // sessions whose JSONL has not been copied.
+        let sessions = conn.execute("DELETE FROM sessions", [])?;
+        conn.execute("DELETE FROM fts_sessions", [])?;
+        tracing::info!(
+            conversation_nodes = conv,
+            session_rows = sessions,
+            "purged conversation state from cloned memory store"
+        );
+        Ok(sessions)
+    }
+
     /// Total number of memory nodes.
     pub fn node_count(&self) -> Result<u64> {
         let conn = self.lock();

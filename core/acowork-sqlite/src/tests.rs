@@ -1866,3 +1866,90 @@ fn admin_embedding_migration_does_not_claim_a_width_the_store_does_not_have() {
         .expect("second migrate");
     assert_eq!(store.embedding_dim(), 2);
 }
+
+#[test]
+fn purge_conversation_state_drops_sessions_and_conversation_nodes_keeps_memory() {
+    use acowork_memory::session_meta::{SessionMeta, SessionMetaStore};
+    use acowork_memory::types::Episode;
+
+    let store = store();
+    let store_arc = std::sync::Arc::new(store);
+    let meta_store = SqliteSessionMetaStore::new(store_arc.clone());
+    let conv_store = conversation::ConversationStore::from_store(store_arc.clone())
+        .expect("conv store");
+
+    // Three sessions + four indexed messages.
+    for sid in ["s1", "s2", "s3"] {
+        meta_store
+            .upsert(&SessionMeta {
+                version: 1,
+                session_id: sid.to_string(),
+                agent_id: "com.test.x".to_string(),
+                created_at: "2025-01-01T00:00:00.000Z".to_string(),
+                user_id: None,
+                visibility: None,
+                title: Some("x".to_string()),
+                workspace_id: None,
+                model: None,
+                provider: None,
+                account_id: None,
+                reasoning_effort: None,
+                temperature: None,
+                context_window: None,
+                todos: None,
+                message_count: 0,
+                llm_call_counter: None,
+                model_ratio: None,
+                last_compaction_offset: None,
+                last_active_at: "2025-01-01T00:00:00.000Z".to_string(),
+                tokens: None,
+                corrupted: false,
+            })
+            .unwrap();
+    }
+    for (sid, idx) in [("s1", 0usize), ("s1", 1), ("s2", 0), ("s3", 0)] {
+        conv_store
+            .index_message(sid, idx, "user", "hello", &[0.0; DIM])
+            .unwrap();
+    }
+    // Memory node the user curated — must survive.
+    store_arc
+        .store_episode(&Episode {
+            session_id: "s1".to_string(),
+            turn_index: 0,
+            role: "user".to_string(),
+            content: "remembered fact".to_string(),
+            embedding: None,
+            timestamp: chrono::Utc::now(),
+            consolidated: false,
+            metadata: Default::default(),
+            importance: 0.5,
+            knowledge_subtype: None,
+            normalized: None,
+        })
+        .unwrap();
+
+    let purged = store_arc.purge_conversation_state().unwrap();
+    assert_eq!(purged, 3, "purge must report the deleted session count");
+
+    // Sessions gone.
+    assert_eq!(meta_store.list_recent(usize::MAX).unwrap().len(), 0);
+    // Conversation-index nodes gone.
+    assert_eq!(
+        store_arc.node_count_by_label(conversation::LABEL).unwrap(),
+        0
+    );
+    // Memory node preserved.
+    assert_eq!(store_arc.node_count_by_label("Episodic").unwrap(), 1);
+}
+
+#[test]
+fn purge_conversation_state_is_a_noop_on_an_empty_store() {
+    // The fresh-clone path (no conversation history yet) calls
+    // `purge_conversation_state` unconditionally; an empty store must not
+    // error or surface rows that were never there.
+    let store = store();
+    let purged = store.purge_conversation_state().unwrap();
+    assert_eq!(purged, 0);
+    assert_eq!(store.node_count_by_label(conversation::LABEL).unwrap(), 0);
+}

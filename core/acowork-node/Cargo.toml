@@ -13,6 +13,11 @@ rust-version.workspace = true
 acowork-core = { workspace = true }
 acowork-mqtt-session = { workspace = true }
 acowork-sign = { workspace = true }
+# Clone `Full` mode copies the agent's `private.sqlite` and then strips the
+# session-meta + conversation-index rows out of it (a clone starts a fresh
+# dialogue, not a continuation). The runtime that boots the cloned agent
+# owns the same file; the node just prepares it.
+acowork-sqlite = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }
@@ -45,5 +50,9 @@ libc = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# Used by the clone-purge test to seed real session-meta / conversation-index
+# rows before the clone runs. Runtime pulls the same crate transitively; the
+# node needs it directly only in tests.
+acowork-memory = { workspace = true }
 # Router oneshot tests (proxy auth gate).
 tower = { workspace = true }

@@ -33,8 +33,12 @@ pub enum CloneMode {
     Skeleton,
     /// Copy every package file PLUS the per-instance state living under
     /// `workspace/` — `config/` (model picks, MCP servers, custom
-    /// workspace dirs), `conversations/`, and `memory/`. `files/` and
-    /// `logs/` stay behind — see [`acowork_core::workspace::WORKSPACE_LOCAL_DIRS`].
+    /// workspace dirs) and `memory/` (the user's curated memory nodes).
+    /// Session history is NOT inherited: `conversations/` is in
+    /// `WORKSPACE_LOCAL_DIRS` and the session-meta + conversation-index
+    /// rows inside the SQLite store are wiped in lock-step. `files/` and
+    /// `logs/` stay behind — see
+    /// [`acowork_core::workspace::WORKSPACE_LOCAL_DIRS`].
     Full,
 }
 
@@ -154,15 +158,23 @@ pub fn clone_agent(
 
     // 6. Copy full-mode only state: skeleton already has every package
     //    file. Full mode adds the per-instance state living in the
-    //    workspace — conversation history, the SQLite memory store, and
-    //    the user's `config/` (model picks, MCP servers, custom
-    //    workspace dirs in `agent_workspaces.json`).
+    //    workspace — the SQLite memory store (memory nodes, but NOT
+    //    session history) and the user's `config/` (model picks, MCP
+    //    servers, custom workspace dirs in `agent_workspaces.json`).
     //
     //    Iterate every workspace subdir and skip the machine-local /
-    //    runtime-artifact ones (`files/`, `logs/`), the same shape as
-    //    the package-files step that uses PACKAGE_ALWAYS_EXCLUDE_DIRS.
-    //    The earlier "only conversations + memory" allowlist silently
-    //    dropped `config/` — this iteration is the regression guard.
+    //    runtime-artifact ones (`files/`, `logs/`, `conversations/`),
+    //    the same shape as the package-files step that uses
+    //    PACKAGE_ALWAYS_EXCLUDE_DIRS. The earlier "only conversations +
+    //    memory" allowlist silently dropped `config/` — this iteration
+    //    is the regression guard.
+    //
+    //    `conversations/` (the JSONL history) is in WORKSPACE_LOCAL_DIRS
+    //    because a clone starts a fresh dialogue, not a continuation.
+    //    The session-meta rows + conversation-index rows co-located in
+    //    `memory/private.sqlite` (ADR-082) are wiped in lock-step —
+    //    otherwise the session list would surface ghost sessions whose
+    //    JSONL files the clone deliberately skipped.
     if mode == CloneMode::Full {
         let src_workspace = acowork_core::workspace::workspace_dir(source_path);
         let target_workspace = acowork_core::workspace::workspace_dir(&target_path);
@@ -211,6 +223,36 @@ pub fn clone_agent(
                                 e
                             ))
                         })?;
+                    }
+
+                    // Strip session meta + conversation-index rows from
+                    // the freshly-copied SQLite. `purge_conversation_state`
+                    // keeps the `Episodic` / `Knowledge` / `Procedural`
+                    // / `Autobiographical` memory nodes — those are the
+                    // user's curated knowledge, not per-instance chat
+                    // state. A corrupt or non-SQLite file (unlikely but
+                    // possible on a hand-edited install) logs and
+                    // continues rather than aborting the clone.
+                    let copied_db = target_memory.join(acowork_core::workspace::STORE_FILE);
+                    match acowork_sqlite::SqliteStore::open_dim_agnostic(&copied_db) {
+                        Ok(store) => {
+                            if let Err(e) = store.purge_conversation_state() {
+                                tracing::warn!(
+                                    error = %e,
+                                    db = %copied_db.display(),
+                                    "Failed to purge conversation state from cloned memory store; \
+                                     clone may surface ghost sessions on first boot"
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                db = %copied_db.display(),
+                                "Could not open cloned memory file as SQLite; \
+                                     skipping conversation-state purge"
+                            );
+                        }
                     }
                 }
             } else {
@@ -407,18 +449,16 @@ mod tests {
             r#"{"role":"user","content":"hello"}"#,
         )
         .unwrap();
-        std::fs::write(
+        // Real (empty) SQLite — clone now opens the freshly-copied file
+        // to wipe session/conversation rows, and the previous fake-bytes
+        // fixture corrupted the `-wal` sidecar through SQLite's
+        // "file is not a database" handling. A real, write-less store
+        // is the only thing that survives the open-and-purge step.
+        let _ = acowork_sqlite::SqliteStore::open(
             memory_dir.join(acowork_core::workspace::STORE_FILE),
-            b"sqlite-data",
+            4,
         )
-        .unwrap();
-        // A `-wal` left behind is un-replayed WAL content: copying the db
-        // without it silently loses recent writes.
-        std::fs::write(
-            memory_dir.join(format!("{}-wal", acowork_core::workspace::STORE_FILE)),
-            b"wal-data",
-        )
-        .unwrap();
+        .expect("seed source SQLite");
         // files/ and logs/ live in WORKSPACE_LOCAL_DIRS — they exist on a
         // real install but must NOT survive a clone (host-specific paths,
         // runtime artefacts).
@@ -619,13 +659,16 @@ mod tests {
         // assertions below are the regression guard for the flat-layout
         // bug: they fail if the copy reads the install dir directly.
         let target_workspace = acowork_core::workspace::workspace_dir(&target);
+        // A full clone starts a fresh dialogue — the source's past
+        // exchanges must not come along. `conversations/` lives in
+        // WORKSPACE_LOCAL_DIRS and is skipped; assert both sides of that.
         assert!(
-            target_workspace.join("conversations").exists(),
-            "conversations should be copied under workspace/"
+            !target_workspace.join("conversations").exists(),
+            "conversations/ must NOT be cloned — a clone is a fresh dialogue, not a continuation"
         );
         assert!(
             !target.join("conversations").exists(),
-            "conversations must not land beside the package files"
+            "conversations must not land beside the package files either"
         );
         assert!(
             target_workspace
@@ -637,13 +680,6 @@ mod tests {
         assert!(
             !target.join(acowork_core::workspace::MEMORY_DIR).exists(),
             "the store must not land beside the package files"
-        );
-        assert!(
-            target_workspace
-                .join(acowork_core::workspace::MEMORY_DIR)
-                .join(format!("{}-wal", acowork_core::workspace::STORE_FILE))
-                .exists(),
-            "the store sidecar must be copied too"
         );
         // The full-mode regression that prompted this iteration: a
         // hand-curated config/ (the user picked a model, wired MCP
@@ -741,5 +777,160 @@ mod tests {
         assert!(!is_valid_agent_id("no-dots"));
         assert!(!is_valid_agent_id("com..empty"));
         assert!(!is_valid_agent_id("com.invalid!char"));
+    }
+
+    /// `Full`-mode clone of an agent with real session-meta +
+    /// conversation-index rows must wipe those rows in lock-step with
+    /// the `conversations/` directory being skipped, AND keep the
+    /// user's curated memory nodes intact.
+    ///
+    /// The unit test of the strip itself lives next to
+    /// `purge_conversation_state` in `acowork-sqlite`; this test only
+    /// proves the clone pipeline actually does the cleanup at the right
+    /// moment (after the file copy, before the cloned agent boots).
+    #[test]
+    fn full_clone_strips_session_and_conversation_rows_but_keeps_memory_nodes() {
+        use acowork_memory::session_meta::{SessionMeta, SessionMetaStore};
+        use acowork_memory::types::Episode;
+        use acowork_sqlite::{SqliteSessionMetaStore, SqliteStore};
+
+        let temp_dir = std::env::temp_dir()
+            .join(format!("acowork-test-clone-purge-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let source_dir = temp_dir.join("source");
+        let install_dir = temp_dir.join("installed");
+        setup_test_agent(&source_dir, "com.test.weather");
+
+        // Replace the fake `b"sqlite-data"` written by `setup_test_agent`
+        // with a real SQLite populated with the rows a long-lived agent
+        // would actually have.
+        let workspace = acowork_core::workspace::workspace_dir(&source_dir);
+        let db_path = workspace
+            .join(acowork_core::workspace::MEMORY_DIR)
+            .join(acowork_core::workspace::STORE_FILE);
+        std::fs::remove_file(&db_path).unwrap();
+        let store = SqliteStore::open(&db_path, 4).unwrap();
+
+        // Session-meta rows — three sessions that would otherwise
+        // dangle in the cloned SQLite and surface in the session list
+        // despite their JSONL files having been deliberately skipped.
+        let store_arc = std::sync::Arc::new(store);
+        let meta_store = SqliteSessionMetaStore::new(store_arc.clone());
+        for sid in ["s1", "s2", "s3"] {
+            meta_store
+                .upsert(&SessionMeta {
+                    version: 1,
+                    session_id: sid.to_string(),
+                    agent_id: "com.test.weather".to_string(),
+                    created_at: chrono::Utc::now().to_rfc3339(),
+                    user_id: None,
+                    visibility: None,
+                    title: Some("Test session".to_string()),
+                    workspace_id: None,
+                    model: None,
+                    provider: None,
+                    account_id: None,
+                    reasoning_effort: None,
+                    temperature: None,
+                    context_window: None,
+                    todos: None,
+                    message_count: 0,
+                    llm_call_counter: None,
+                    model_ratio: None,
+                    last_compaction_offset: None,
+                    last_active_at: chrono::Utc::now().to_rfc3339(),
+                    tokens: None,
+                    corrupted: false,
+                })
+                .unwrap();
+        }
+
+        // Conversation-index rows — one `ConversationMessage` node per
+        // session so the FK cascade and `fts_conversation` clear are
+        // both exercised.
+        let conv_store = acowork_sqlite::conversation::ConversationStore::from_store(
+            store_arc.clone(),
+        )
+        .unwrap();
+        for (sid, idx) in [("s1", 0usize), ("s1", 1), ("s2", 0), ("s3", 0)] {
+            conv_store
+                .index_message(sid, idx, "user", "hello", &[0.0; 4])
+                .unwrap();
+        }
+
+        // Memory node the user spent the afternoon curating — must
+        // survive the purge.
+        store_arc
+            .store_episode(&Episode {
+                session_id: "s1".to_string(),
+                turn_index: 0,
+                role: "user".to_string(),
+                content: "remembered fact".to_string(),
+                embedding: None,
+                timestamp: chrono::Utc::now(),
+                consolidated: false,
+                metadata: Default::default(),
+                importance: 0.5,
+                knowledge_subtype: None,
+                normalized: None,
+            })
+            .unwrap();
+        drop(conv_store);
+        drop(meta_store);
+        drop(store_arc);
+
+        let mut state = NodeState::new(16);
+        add_agent_to_state(&mut state, "com.test.weather", &source_dir.to_string_lossy());
+
+        let result = clone_agent(
+            "inst-com.test.weather",
+            "com.test.weather",
+            "com.test.weather-purge",
+            "",
+            CloneMode::Full,
+            &install_dir,
+            &mut state,
+        );
+        assert!(result.is_ok(), "Full clone failed: {:?}", result.err());
+        let info = result.unwrap();
+
+        let target = install_dir
+            .join("com.test.weather-purge")
+            .join(&info.instance_id);
+        let target_workspace = acowork_core::workspace::workspace_dir(&target);
+        let cloned_db = target_workspace
+            .join(acowork_core::workspace::MEMORY_DIR)
+            .join(acowork_core::workspace::STORE_FILE);
+
+        let cloned = SqliteStore::open(&cloned_db, 4).unwrap();
+
+        // The purge: every session_meta row gone, every
+        // ConversationMessage node + its fts_conversation row gone.
+        let cloned_arc = std::sync::Arc::new(cloned);
+        assert_eq!(
+            SqliteSessionMetaStore::new(cloned_arc.clone())
+                .list_recent(usize::MAX)
+                .unwrap()
+                .len(),
+            0,
+            "session_meta rows must not survive a clone"
+        );
+        assert_eq!(
+            cloned_arc
+                .node_count_by_label(acowork_sqlite::conversation::LABEL)
+                .unwrap(),
+            0,
+            "conversation-index nodes must not survive a clone"
+        );
+
+        // The preservation: the user's curated memory is intact.
+        assert!(
+            cloned_arc.node_count_by_label("Episodic").unwrap() >= 1,
+            "Episodic memory nodes must survive a clone — the purge is conversation-only"
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

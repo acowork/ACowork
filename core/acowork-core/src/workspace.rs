@@ -69,11 +69,18 @@ pub fn store_files(work_dir: impl AsRef<Path>) -> Vec<PathBuf> {
 /// are also machine-local — re-uploading is faster and saner than copying
 /// a path that may not exist on the target host.
 ///
+/// `conversations/` is the per-instance session history (JSONL + meta):
+/// a clone is meant to start a fresh dialogue, not inherit the source's
+/// past exchanges. Session meta + the conversation index that lives in
+/// `memory/private.sqlite` are wiped in lock-step — see
+/// `acowork_sqlite::SqliteStore::purge_conversation_state`.
+///
 /// [`CloneMode::Full`]: crate::CloneMode::Full
 /// [`PACKAGE_ALWAYS_EXCLUDE_DIRS`]: crate::packaging::PACKAGE_ALWAYS_EXCLUDE_DIRS
 pub const WORKSPACE_LOCAL_DIRS: &[&str] = &[
-    "files", // user-uploaded attachments — host-specific paths
-    "logs",  // runtime log files — reset on the target
+    "files",         // user-uploaded attachments — host-specific paths
+    "logs",          // runtime log files — reset on the target
+    "conversations", // per-instance session history — clone starts fresh
 ];
 
 #[cfg(test)]
