@@ -1,5 +1,6 @@
 {
   "titleBar": {
+    "globalSearch": "Global Search (Ctrl+Shift+F)",
     "collapseRightPanel": "Collapse Right Panel",
     "expandRightPanel": "Expand Right Panel"
   },

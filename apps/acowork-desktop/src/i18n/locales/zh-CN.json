@@ -99,6 +99,7 @@
     }
   },
   "titleBar": {
+    "globalSearch": "全局搜索 (Ctrl+Shift+F)",
     "collapseRightPanel": "折叠右侧面板",
     "expandRightPanel": "展开右侧面板"
   },

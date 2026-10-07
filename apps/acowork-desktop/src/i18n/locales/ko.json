@@ -99,6 +99,7 @@
     }
   },
   "titleBar": {
+    "globalSearch": "전역 검색 (Ctrl+Shift+F)",
     "collapseRightPanel": "Collapse Right Panel",
     "expandRightPanel": "Expand Right Panel"
   },
