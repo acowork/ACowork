@@ -13,9 +13,9 @@ All public docs are organized by **topic** (architecture, design, module spec, A
 ```
 docs/
 ├── AGENTS.md                # This file (index)
-├── design/{zh,en}/          # 架构设计（zh: 19 篇；en: 待翻译占位）
+├── design/{zh,en}/          # 架构设计（zh: 23 篇；en: 17 篇，随翻译进度增量）
 ├── module-design/{zh,en}/   # Rust crate 规格（zh: 8 篇；en: AGENTS.md 占位）
-├── adr/{zh,en}/             # 架构决策记录（zh: 76；en: 2）
+├── adr/{zh,en}/             # 架构决策记录（zh: 81；en: 84）
 ├── prd/{zh,en}/             # 平台 PRD + Desktop UI/UX（zh: 2；en: 占位）
 ├── protocols/{zh,en}/       # API 协议参考（zh: HTTP / MQTT / RAG 集成；en: 占位）
 ├── mcp-server-research/{zh,en}/   # MCP Server 集成调研（en: 1；zh: 占位）
@@ -40,6 +40,8 @@ docs/
 | MQTT 事件总线 | [`protocols/zh/mqtt.md`](./protocols/zh/mqtt.md) |
 | RAG 集成协议 | [`protocols/zh/RAG-protocol-guide.md`](./protocols/zh/RAG-protocol-guide.md) |
 | MCP Server 集成 | [`mcp-server-research/en/mcp-server-research.md`](./mcp-server-research/en/mcp-server-research.md) |
+| 远程访问：Cloud Hub（托管档，应用层消息中枢） | [`design/zh/26-cloud-sync-hub.md`](./design/zh/26-cloud-sync-hub.md) |
+| 远程访问：瘦中继（自托管 BYO 档，协议冻结） | [`design/zh/24-cloud-relay-remote-access.md`](./design/zh/24-cloud-relay-remote-access.md) |
 | 架构决策记录 | [`adr/zh/`](./adr/zh/) |
 | 包级 LLM prompt 覆盖约定（`prompts/<file>.md`） | [`adr/zh/ADR-063-package-level-prompt-override.md`](./adr/zh/ADR-063-package-level-prompt-override.md) |
 | Runtime 内硬编码 prompt 清单 | [`prompt-audit/zh/runtime-prompts-summary.md`](./prompt-audit/zh/runtime-prompts-summary.md) |

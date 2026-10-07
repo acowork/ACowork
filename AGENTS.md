@@ -43,7 +43,7 @@ npm run tauri dev
 ## Project Structure
 
 ```
-core/                  # Rust workspace (16 crates; source of truth: core/Cargo.toml [workspace] members)
+core/                  # Rust workspace (17 crates; source of truth: core/Cargo.toml [workspace] members)
   acowork-core/        # Shared types, errors, config, MQTT proto
   acowork-embed/       # ONNX-Runtime embedding model runner
   acowork-gateway/     # HTTP API, embedded MQTT broker, reverse proxy, lifecycle, package mgr
@@ -55,6 +55,7 @@ core/                  # Rust workspace (16 crates; source of truth: core/Cargo.
   acowork-node/        # Node Agent (ADR-055) — per-machine daemon hosting Runtime processes
   acowork-doc/         # Online document library service (REST API + MCP tools)
   acowork-user/        # User domain service (ADR-084) — accounts, credentials, roles, profiles/avatars, user chat
+  acowork-relay/       # Cloud thin relay: SNI-routed byte pipe + yamux tunnel (design 24; BYO self-hosted tier, protocol frozen per ADR-088). Not bundled into Desktop builds.
   acowork-runtime/     # Agent runtime (main loop, tools, providers, sessions)
   acowork-sign/        # Package signing & verification
   acowork-sqlite/      # SQLite storage backend — memory + session meta + conversation index (ADR-082)
