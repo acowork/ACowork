@@ -648,6 +648,76 @@ impl AgentLoop {
             }
         }
 
+        // ── Empty-response retry (single attempt) ──
+        //
+        // A stream can end "cleanly" — a `Finished` event or a plain EOF —
+        // with zero content AND zero tool calls. The upstream loop would
+        // treat that as the model's final answer and silently end the turn.
+        // Observed on MiniMax-M3.1-Flash-Preview (2026-10-07): a mid-task
+        // run ended with 0 chars while the API still billed 128 output
+        // tokens, and the user got no reply until manually re-prompting.
+        // That is not an intended completion — replay the same request once
+        // so a transient upstream truncation recovers transparently.
+        //
+        // `length` is excluded on purpose: that signature (output budget
+        // burned on reasoning) feeds `handle_output_budget_exhausted`,
+        // which must reach the model with a nudge instead of re-sending the
+        // identical request. Gated on `retry_on_overflow` (i.e. the
+        // top-level call) so the compaction retry, which passes `None`,
+        // cannot re-enter this branch — the retry is single-shot by
+        // construction.
+        if accumulated_content.is_empty()
+            && tool_calls.is_none()
+            && finish_reason.as_deref() != Some("length")
+            && retry_on_overflow
+        {
+            let first_completion_tokens = usage
+                .as_ref()
+                .map(|u| u.completion_tokens)
+                .unwrap_or(0);
+            tracing::warn!(
+                finish_reason = ?finish_reason,
+                completion_tokens = first_completion_tokens,
+                "Empty response (no content, no tool calls) — retrying the request once"
+            );
+
+            let retry_response = self.call_llm_streaming_no_retry(chat_request).await?;
+            if retry_response.finish_reason.as_deref() == Some("stopped") {
+                // The user stopped (or debug-paused) during the retry — the
+                // stopped response already flushed partial content and the
+                // UI got its `Stopped` chunk. Nothing more to do.
+                tracing::info!("Empty-response retry interrupted by stop/pause");
+            } else if retry_response.content.is_empty() && retry_response.tool_calls.is_none() {
+                tracing::error!(
+                    finish_reason = ?retry_response.finish_reason,
+                    "Empty response persisted after retry — ending the turn with \
+                     an empty reply and a user-visible error"
+                );
+                // User-visible fallback: a normal error chunk (same mechanism
+                // as `handle_output_budget_exhausted`), so a silently empty
+                // turn surfaces in the UI instead of a bare Idle.
+                let _ = self.session_core.try_send_chunk(ChunkEvent::Error {
+                    user_message: "The model returned an empty response twice in a row \
+(no text, no tool calls). The turn was ended without a reply — please retry; \
+if this keeps happening the upstream provider may be truncating responses."
+                        .to_string(),
+                    detail: format!(
+                        "empty_response_after_retry finish_reason={:?}",
+                        retry_response.finish_reason
+                    ),
+                    error_type: "EmptyResponseAfterRetry".to_string(),
+                    message_id: format!("empty-response-{}", Utc::now().timestamp_millis()),
+                });
+            } else {
+                tracing::info!(
+                    content_len = retry_response.content.len(),
+                    has_tool_calls = retry_response.tool_calls.is_some(),
+                    "Empty-response retry succeeded"
+                );
+            }
+            return Ok(retry_response);
+        }
+
         Ok(ChatResponse {
             content: accumulated_content,
             reasoning_content: if accumulated_reasoning_content.is_empty() {

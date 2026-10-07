@@ -1209,6 +1209,19 @@ fn parse_anthropic_sse_line(
             // Carries stop_reason, output tokens, and — on some
             // Anthropic-compatible providers — the prompt accounting that
             // native Anthropic puts on `message_start`.
+            //
+            // DIAG (2026-10-07): surface the server-reported stop reason on
+            // the Finished response. It used to be dropped here, so every
+            // streamed `finish_reason` stayed None and "model chose to end"
+            // was indistinguishable from "server truncated the response".
+            // Two MiniMax-M3.1-Flash-Preview runs ended mid-task exactly
+            // this way (0 chars while billing 128 output tokens; another
+            // cut at 43 chars mid-sentence) and looked identical in logs.
+            let stop_reason = event
+                .delta
+                .as_ref()
+                .and_then(|d| d.stop_reason.as_deref())
+                .map(normalize_stop_reason);
             if let Some(usage) = event.usage {
                 merge_prompt_usage(
                     &usage,
@@ -1240,6 +1253,7 @@ fn parse_anthropic_sse_line(
                         cache_write_tokens: cache_write,
                         reasoning_tokens: 0,
                     }),
+                    finish_reason: stop_reason,
                     ..Default::default()
                 }));
             }
@@ -1806,6 +1820,10 @@ mod tests {
         assert_eq!(usage.cache_read_tokens, 32020);
         assert_eq!(usage.completion_tokens, 524);
         assert_eq!(usage.total_tokens, 32648 + 524);
+        // The delta's stop_reason must survive into finish_reason — it was
+        // previously dropped, leaving streamed responses indistinguishable
+        // from truncated ones in post-mortem logs.
+        assert_eq!(resp.finish_reason.as_deref(), Some("end_turn"));
     }
 
     #[test]
@@ -1849,6 +1867,48 @@ mod tests {
         assert_eq!(usage.cache_read_tokens, 10);
         assert_eq!(usage.cache_write_tokens, 5);
         assert_eq!(usage.completion_tokens, 42);
+    }
+
+    #[test]
+    fn test_parse_sse_message_delta_normalizes_stop_reason() {
+        // The stop_reason carried by `message_delta` must reach
+        // `ChatResponse.finish_reason` in the OpenAI vocabulary
+        // (`tool_calls` / `length`, everything else passthrough), so
+        // downstream logic — budget-exhaustion nudges, truncation
+        // diagnostics — can rely on it.
+        let mut tool_id = None;
+        let mut tool_name = None;
+        let mut input_tokens = 0u64;
+        let mut cache_read_tokens = 0u64;
+        let mut cache_write_tokens = 0u64;
+        let mut block_index_map: HashMap<u64, u64> = HashMap::new();
+
+        for (stop_reason, expected) in [
+            ("tool_use", "tool_calls"),
+            ("max_tokens", "length"),
+            ("end_turn", "end_turn"),
+        ] {
+            let line = format!(
+                r#"data: {{"type":"message_delta","delta":{{"stop_reason":"{stop_reason}"}},"usage":{{"input_tokens":10,"output_tokens":2}}}}"#
+            );
+            let event = parse_anthropic_sse_line(
+                &line,
+                &mut tool_id,
+                &mut tool_name,
+                &mut input_tokens,
+                &mut cache_read_tokens,
+                &mut cache_write_tokens,
+                &mut block_index_map,
+            );
+            let Some(StreamEvent::Finished(resp)) = event else {
+                panic!("expected a Finished event for stop_reason={stop_reason}");
+            };
+            assert_eq!(
+                resp.finish_reason.as_deref(),
+                Some(expected),
+                "stop_reason={stop_reason} must normalize to {expected}"
+            );
+        }
     }
 
     #[test]

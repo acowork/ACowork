@@ -45,6 +45,32 @@ pub(crate) fn is_output_budget_exhausted(response: &ChatResponse) -> bool {
         && response.tool_calls.is_none()
 }
 
+/// Heuristic for "this text response looks cut off mid-sentence".
+///
+/// WARN-only diagnostic — never changes control flow. Two signatures, both
+/// observed when MiniMax-M3.1-Flash-Preview's Anthropic-compatible endpoint
+/// ended a stream early (2026-10-07: a 43-char reply that stopped right
+/// after a lead-in colon, and the run silently went Idle mid-task):
+///
+/// - Short text (fewer than `SHORT_RESPONSE_MAX_CHARS`) that still ends on
+///   a lead-in colon (`:` / `：`) — the model was introducing something
+///   that never arrived.
+/// - An unclosed ``` code fence (odd count) in short text — a code block
+///   was opened and the stream ended before it was closed.
+///
+/// Deliberately conservative: bounded to short responses so long, complete
+/// replies that happen to end on a colon are not flagged.
+fn is_suspiciously_truncated_text(content: &str) -> bool {
+    const SHORT_RESPONSE_MAX_CHARS: usize = 250;
+    if content.chars().count() >= SHORT_RESPONSE_MAX_CHARS {
+        return false;
+    }
+    let trimmed = content.trim_end();
+    let ends_with_lead_in = trimmed.ends_with(':') || trimmed.ends_with('：');
+    let unclosed_code_fence = content.matches("```").count() % 2 == 1;
+    ends_with_lead_in || unclosed_code_fence
+}
+
 /// Count internal nudges injected since the last genuine user turn.
 ///
 /// Stateless on purpose: counting from history avoids a per-turn counter that
@@ -427,6 +453,31 @@ impl super::loop_::AgentLoop {
                 finish_reason = ?response.finish_reason,
                 "Agent returned text response"
             );
+
+            // DIAG (2026-10-07): flag text that looks like a truncated
+            // stream rather than a finished answer. MiniMax-M3.1-Flash-
+            // Preview has been seen ending a response mid-sentence —
+            // "Now dedupe `canClaim` against the new flag:" (43 chars,
+            // nothing after the colon) — and the loop treated it as the
+            // final answer, silently Idling a half-done task. WARN-only;
+            // the heuristic never changes control flow.
+            if is_suspiciously_truncated_text(&content) {
+                let tail: String = {
+                    let chars: Vec<char> = content.chars().collect();
+                    let start = chars.len().saturating_sub(80);
+                    chars[start..].iter().collect()
+                };
+                tracing::warn!(
+                    iteration,
+                    content_len = content.len(),
+                    reasoning_len,
+                    finish_reason = ?response.finish_reason,
+                    tail = %tail,
+                    "Text response looks truncated — short text ending mid-sentence \
+                     (possibly a cut-off stream); the turn ends here, verify the \
+                     provider behaved"
+                );
+            }
         }
 
         // ADR-022: Persist response to JSONL.
@@ -934,5 +985,51 @@ mod tests {
         history.push(nudge());
         // Budget spent — the handler now surfaces the failure instead of nudging.
         assert!(count_output_budget_nudges(&history) >= MAX_OUTPUT_BUDGET_NUDGES);
+    }
+
+    // ── Truncated-text heuristic ────────────────────────────────────────
+
+    #[test]
+    fn truncated_text_flags_short_trailing_colon() {
+        // The exact 2026-10-07 MiniMax-M3.1 shape: 43 chars ending on a
+        // lead-in colon, nothing after it.
+        assert!(is_suspiciously_truncated_text(
+            "Now dedupe `canClaim` against the new flag:"
+        ));
+    }
+
+    #[test]
+    fn truncated_text_flags_chinese_trailing_colon() {
+        assert!(is_suspiciously_truncated_text("接下来看渲染层："));
+    }
+
+    #[test]
+    fn truncated_text_flags_unclosed_code_fence() {
+        assert!(is_suspiciously_truncated_text(
+            "改完了，先看代码：\n```ts\nconst a = 1;"
+        ));
+    }
+
+    #[test]
+    fn truncated_text_false_for_complete_sentence() {
+        assert!(!is_suspiciously_truncated_text("任务已完成，测试全部通过。"));
+        assert!(!is_suspiciously_truncated_text(
+            "Fixed the render and ran vitest."
+        ));
+    }
+
+    #[test]
+    fn truncated_text_false_for_closed_code_fence() {
+        assert!(!is_suspiciously_truncated_text(
+            "示例：\n```ts\nconst a = 1;\n```\n已完成。"
+        ));
+    }
+
+    #[test]
+    fn truncated_text_false_for_long_reply() {
+        // The heuristic is bounded to short responses: a long reply that
+        // happens to end on a colon is not flagged, to keep noise low.
+        let long = format!("{}收尾说明：", "步骤说明 ".repeat(80));
+        assert!(!is_suspiciously_truncated_text(&long));
     }
 }

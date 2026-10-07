@@ -2254,19 +2254,95 @@ mod tests {
 
     #[tokio::test]
     async fn test_stream_empty_content() {
-        let provider = Arc::new(MockProvider::single_text(""));
+        // A clean empty reply triggers the single empty-response retry
+        // (loop_llm.rs). The second canned response is non-empty, so the
+        // run must recover with it instead of ending the turn empty.
+        let provider = Arc::new(MockProvider::new(vec![
+            MockResponse::Text {
+                content: String::new(),
+            },
+            MockResponse::Text {
+                content: "Recovered after retry".to_string(),
+            },
+        ]));
         let config = RuntimeConfig::default();
         let manifest = test_manifest();
         let budget = test_budget();
         let tools = entries(vec![]);
-        let (mut agent_loop, _) =
-            AgentLoop::new(config, manifest, provider, tools, budget, None, None);
+        let (mut agent_loop, _) = AgentLoop::new(
+            config,
+            manifest,
+            provider.clone(),
+            tools,
+            budget,
+            None,
+            None,
+        );
+        let mut context_builder = ContextBuilder::new("System".to_string());
+        let result = agent_loop
+            .run("Hi", &mut context_builder, None, None, None, None)
+            .await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "Recovered after retry");
+        assert_eq!(
+            provider.call_count(),
+            2,
+            "empty first response must trigger exactly one retry"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_stream_empty_content_after_retry_surfaces_error() {
+        // Both the original call and the retry return empty: the turn still
+        // ends empty, but an `EmptyResponseAfterRetry` error chunk must
+        // reach the UI so the user does not stare at a silently Idle
+        // session (the 2026-10-07 MiniMax incident).
+        let provider = Arc::new(MockProvider::new(vec![
+            MockResponse::Text {
+                content: String::new(),
+            },
+            MockResponse::Text {
+                content: String::new(),
+            },
+        ]));
+        let config = RuntimeConfig::default();
+        let manifest = test_manifest();
+        let budget = test_budget();
+        let tools = entries(vec![]);
+        let (chunk_tx, mut chunk_rx) = mpsc::channel::<SessionChunkEvent>(64);
+        let (mut agent_loop, _) = AgentLoop::new(
+            config,
+            manifest,
+            provider.clone(),
+            tools,
+            budget,
+            Some(chunk_tx),
+            None,
+        );
         let mut context_builder = ContextBuilder::new("System".to_string());
         let result = agent_loop
             .run("Hi", &mut context_builder, None, None, None, None)
             .await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "");
+        assert_eq!(
+            provider.call_count(),
+            2,
+            "the retry must not loop beyond a single attempt"
+        );
+
+        let mut saw_empty_error = false;
+        while let Ok(evt) = chunk_rx.try_recv() {
+            if let ChunkEvent::Error { error_type, .. } = evt.event
+                && error_type == "EmptyResponseAfterRetry"
+            {
+                saw_empty_error = true;
+            }
+        }
+        assert!(
+            saw_empty_error,
+            "EmptyResponseAfterRetry error chunk must reach the UI"
+        );
     }
 
     #[tokio::test]
