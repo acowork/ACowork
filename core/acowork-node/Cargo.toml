@@ -18,6 +18,9 @@ tokio = { workspace = true }
 clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# ADR-087: hidden password prompt for the headless `acowork-node start`
+# credential exchange (same crate the Gateway's admin-setup uses).
+rpassword = "7"
 serde_yaml = { workspace = true }
 uuid = { workspace = true }
 thiserror = { workspace = true }

@@ -100,6 +100,15 @@ pub enum Command {
         #[arg(long)]
         check: bool,
     },
+    /// Print the earliest-created active admin's `user_id`, then exit.
+    ///
+    /// ADR-087: the Gateway shells out to this to resolve the default owner
+    /// for resources with no interactive owner (server-started local node,
+    /// CLI-issued enrollment tokens) — reading `accounts.json` directly
+    /// would make the Gateway a second party with account-store knowledge
+    /// (ADR-084). Read-only: never seeds, never creates the auth dir.
+    /// Exit `0` = found (user_id on stdout), `1` = no admin account exists.
+    FirstAdmin,
 }
 
 /// Apply the CLI overrides onto a config, validating `--auth-mode`.

@@ -69,6 +69,14 @@ pub enum Command {
         /// Enrollment token (Phase 5a — accepted, not yet validated).
         #[arg(long, env = "ACOWORK_NODE_TOKEN")]
         token: Option<String>,
+        /// Gateway HTTP base URL for the first-boot credential exchange
+        /// (ADR-087): `acowork-node start` with no token and no enrolled
+        /// identity prompts for the operator's account and mints a
+        /// one-time enrollment token bound to that user. Default:
+        /// `http://{gateway-host}:{mqtt-port + 1}` (the shipped defaults
+        /// 19875/19876); pass this when the Gateway HTTP port differs.
+        #[arg(long, value_name = "URL", env = "ACOWORK_GATEWAY_HTTP")]
+        gateway_http: Option<String>,
         /// Maximum concurrent Runtime processes (§6.18).
         #[arg(long, env = "ACOWORK_NODE_MAX_AGENTS", default_value = "16")]
         max_agents: u32,
@@ -206,6 +214,84 @@ fn split_gateway(s: &str) -> Result<(String, u16), NodeError> {
     Ok((hp.host, hp.port))
 }
 
+/// ADR-087: exchange the operator's account credentials for a one-time
+/// enrollment token bound to that user (headless `start` on a fresh
+/// machine).
+///
+/// The token is a runtime-layer artifact: it never appears in argv,
+/// config files, or logs. Returns `None` when the flow must not run —
+/// stdin is not a TTY (service / pipe startup keeps the credential-less
+/// behavior; the Gateway's default-owner fallback attributes the node) —
+/// so the caller can fall through to the normal start path.
+async fn interactive_enrollment_token(gateway_http: &str) -> Result<Option<String>, NodeError> {
+    use std::io::{IsTerminal, Write};
+
+    if !std::io::stdin().is_terminal() {
+        return Ok(None);
+    }
+    eprintln!("This machine is not enrolled with the Gateway yet — sign in with your account.");
+    eprint!("Username: ");
+    let _ = std::io::stderr().flush();
+    let mut username = String::new();
+    if std::io::stdin().read_line(&mut username).unwrap_or(0) == 0 {
+        return Ok(None);
+    }
+    let username = username.trim_end_matches(['\n', '\r']).to_string();
+    let mut password = rpassword::prompt_password("Password: ")?;
+
+    let client = reqwest::Client::new();
+    let hint = |e: reqwest::Error| {
+        NodeError::Config(format!(
+            "Gateway HTTP request to {gateway_http} failed: {e} \
+             (wrong HTTP port? pass --gateway-http URL)"
+        ))
+    };
+    let login = client
+        .post(format!("{gateway_http}/api/auth/login"))
+        .json(&serde_json::json!({ "username": username, "password": password }))
+        .send()
+        .await
+        .map_err(hint)?;
+    zeroize_password(&mut password);
+    if !login.status().is_success() {
+        let code = login.status();
+        return Err(NodeError::Config(format!("login failed: HTTP {code}")));
+    }
+    let pair: serde_json::Value = login.json().await.map_err(hint)?;
+    let access = pair
+        .get("access_token")
+        .and_then(|t| t.as_str())
+        .ok_or_else(|| NodeError::Config("login response has no access_token".to_string()))?;
+    let resp = client
+        .post(format!("{gateway_http}/api/nodes/enrollment-tokens"))
+        .bearer_auth(access)
+        .json(&serde_json::json!({ "ttl_seconds": 3600 }))
+        .send()
+        .await
+        .map_err(hint)?;
+    if !resp.status().is_success() {
+        let code = resp.status();
+        return Err(NodeError::Config(format!(
+            "enrollment token request failed: HTTP {code}"
+        )));
+    }
+    let body: serde_json::Value = resp.json().await.map_err(hint)?;
+    let token = body
+        .get("token")
+        .and_then(|t| t.as_str())
+        .ok_or_else(|| NodeError::Config("token response has no `token` field".to_string()))?
+        .to_string();
+    tracing::info!("enrollment token obtained for the signed-in user");
+    Ok(Some(token))
+}
+
+/// Best-effort clear of the plaintext password buffer (no `zeroize`
+/// crate in this binary; the value is short-lived and never cloned
+/// onward).
+fn zeroize_password(p: &mut String) {
+    p.clear();
+}
+
 /// Parse the optional `--addr HOST:PORT` (this node's proxy address).
 fn split_addr(s: &str) -> Result<(String, u16), NodeError> {
     let hp = acowork_core::addr::parse_host_port(s, acowork_core::node::NODE_PROXY_PORT)
@@ -224,6 +310,7 @@ impl Cli {
                 home,
                 packages_dir,
                 token,
+                gateway_http,
                 max_agents,
                 lsp_relay_port,
                 gateway_managed,
@@ -259,7 +346,7 @@ impl Cli {
                     ),
                 };
                 let proxy_port = proxy_port_override.unwrap_or(default_proxy_port);
-                let config = NodeConfig {
+                let mut config = NodeConfig {
                     home: resolve_home(home.as_deref()),
                     packages_dir,
                     gateway_host,
@@ -279,7 +366,26 @@ impl Cli {
                     .enable_all()
                     .build()
                     .map_err(|e| NodeError::Config(format!("tokio runtime: {e}")))?;
-                rt.block_on(NodeControlPlane::run(config))
+                rt.block_on(async move {
+                    // ADR-087: an unenrolled machine started from the CLI
+                    // exchanges the operator's account credentials for a
+                    // one-time enrollment token bound to that user — the
+                    // owner binding happens at the interaction layer, the
+                    // token never surfaces in argv / config / logs.
+                    if config.token.is_none() {
+                        let enrolled = NodeIdentity::load(&config.home)?
+                            .is_some_and(|i| i.node_token.is_some());
+                        if !enrolled {
+                            let http = gateway_http.unwrap_or_else(|| {
+                                format!("http://{}:{}", config.gateway_host, config.gateway_mqtt_port + 1)
+                            });
+                            if let Some(token) = interactive_enrollment_token(&http).await? {
+                                config.token = Some(token);
+                            }
+                        }
+                    }
+                    NodeControlPlane::run(config).await
+                })
             }
             Some(Command::Enroll {
                 gateway,

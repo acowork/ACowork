@@ -200,6 +200,15 @@ pub struct DispatchContext {
     pub pending_installs: Option<crate::gateway::ownership::SharedPendingInstalls>,
     /// Whether enrollment-token validation is enforced (ADR-055 Phase 5a).
     pub auth_enabled: bool,
+    /// ADR-087: default owner for resources with no interactive owner —
+    /// the earliest-created admin (server scenario: whoever can start the
+    /// Gateway on that machine is the admin). `None` in local mode (no
+    /// account system; ownerless = "the machine is the owner") and while
+    /// no admin account exists yet. The two convergence points (enroll
+    /// accept, first inventory landing) fall back to this so bypass
+    /// paths (CLI-issued tokens, CLI installs) stop minting ownerless
+    /// rows.
+    pub default_owner: Option<String>,
     /// Subsystem readiness registry — receives `node.{id}` readiness
     /// transitions from `acowork/nodes/+/ready` (ADR-059 §7.2).
     pub bootstrap_registry: Option<SharedSubsystemReadinessRegistry>,
@@ -234,6 +243,7 @@ impl Default for DispatchContext {
             agent_owners: None,
             pending_installs: None,
             auth_enabled: false,
+            default_owner: None,
             bootstrap_registry: None,
             inventory_trigger: None,
             operation_store: None,
@@ -649,6 +659,7 @@ pub fn handle_plaintext_message(topic: &str, payload: &[u8], ctx: &DispatchConte
         let enroll_store = ctx.enrollment_tokens.clone();
         let node_store = ctx.node_tokens.clone();
         let node_owners_store = ctx.node_owners.clone();
+        let default_owner = ctx.default_owner.clone();
         // `auth_enabled` is a Copy bool — hoist it out of the context
         // before the `'static` spawn so the task does not borrow `ctx`.
         let auth_enabled = ctx.auth_enabled;
@@ -663,6 +674,7 @@ pub fn handle_plaintext_message(topic: &str, payload: &[u8], ctx: &DispatchConte
                 node_store,
                 node_owners_store,
                 auth_enabled,
+                default_owner,
             )
             .await;
         });
@@ -783,6 +795,11 @@ pub fn handle_plaintext_message(topic: &str, payload: &[u8], ctx: &DispatchConte
         // first inventory sighting still commits the staged owner row.
         let pending_installs_installed = ctx.pending_installs.clone();
         let agent_owners_installed = ctx.agent_owners.clone();
+        // ADR-087 convergence point: instances that land with no staged
+        // row (CLI install, direct MQTT dispatch — paths that bypass the
+        // HTTP staging) are attributed to the default owner instead of
+        // staying ownerless.
+        let default_owner_installed = ctx.default_owner.clone();
         // Inventory-change signal: every mutation to installed_agents
         // (install complete / retained replay / empty-payload clear)
         // must wake the publisher so subscribers (Desktop) refresh.
@@ -830,6 +847,33 @@ pub fn handle_plaintext_message(topic: &str, payload: &[u8], ctx: &DispatchConte
                                 owners,
                                 &info.instance_id,
                             );
+                        }
+
+                        // ADR-087: no staged row was committed (CLI /
+                        // bypass install) and no owner row exists — mint
+                        // one for the default owner so the instance is
+                        // never ownerless in a deployment that has an
+                        // admin. Mirrors `build_owner_record`: hosting
+                        // node denormalized, shared-by-default package
+                        // stays shared.
+                        if is_new
+                            && let (Some(owner), Some(owners)) = (
+                                default_owner_installed.as_ref(),
+                                agent_owners_installed.as_ref(),
+                            )
+                        {
+                            let mut rec = crate::gateway::ownership::OwnerRecord::new(Some(
+                                owner.clone(),
+                            ))
+                            .with_node(Some(node_id_owned.clone()));
+                            if info.agent_id == crate::http::permission::DEFAULT_SHARED_AGENT_PACKAGE
+                            {
+                                rec.visibility = crate::gateway::ownership::Visibility::Shared;
+                            }
+                            let mut store = owners.lock().unwrap_or_else(|e| e.into_inner());
+                            if store.get(&info.instance_id).is_none() {
+                                store.put_if_absent(&info.instance_id, rec);
+                            }
                         }
 
                         // ADR-055 §3.2 / S3.3: register the manifest-declared
@@ -1289,6 +1333,7 @@ async fn process_enroll_message(
     node_tokens: Option<SharedNodeTokenStore>,
     node_owners: Option<crate::gateway::ownership::SharedOwnershipStore>,
     auth_enabled: bool,
+    default_owner: Option<String>,
 ) {
     let enrollment_token = match parse_enroll_payload(&payload, &node_id) {
         Ok(ok) => ok,
@@ -1365,18 +1410,23 @@ async fn process_enroll_message(
 
             // ADR-087 D2: bind the enrollment token's creator as the
             // node owner (first enrollment wins — `put_if_absent` keeps
-            // a re-enroll from changing the owner; CLI-issued tokens
-            // have no owner, so the node stays ownerless = admin-only).
+            // a re-enroll from changing the owner). Tokens with no
+            // creator (CLI-issued, Gateway-spawned local node before an
+            // admin existed) fall back to the default owner, so no
+            // enroll path mints an ownerless node when an admin exists.
             if consume_enrollment_token
                 && let (Some(token), Some(owners)) =
                     (enrollment_token.as_deref(), node_owners.as_ref())
             {
-                let owner = enrollment_tokens.as_ref().and_then(|store| {
-                    store
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .token_owner(token)
-                });
+                let owner = enrollment_tokens
+                    .as_ref()
+                    .and_then(|store| {
+                        store
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .token_owner(token)
+                    })
+                    .or_else(|| default_owner.clone());
                 if let Some(owner) = owner {
                     owners
                         .lock()
@@ -3313,5 +3363,134 @@ mod tests {
         }
 
         listener.abort();
+    }
+
+    // ── ADR-087 (revised): default-owner convergence points ───────────
+
+    #[tokio::test]
+    async fn enroll_with_ownerless_token_falls_back_to_default_owner() {
+        // A CLI-issued (or pre-admin) enrollment token carries no owner.
+        // The enroll accept path must attribute the node to the default
+        // owner instead of leaving it ownerless.
+        let dir = temp_test_dir("enroll-default-owner");
+        let tokens = crate::mqtt::new_shared_enrollment_store(&dir);
+        let node_tokens = crate::mqtt::new_shared_node_token_store(&dir);
+        let owners = crate::gateway::ownership::new_shared_node_owners(&dir);
+        let token = tokens
+            .lock()
+            .unwrap()
+            .create_token(std::time::Duration::from_secs(60), None);
+        process_enroll_message(
+            enroll_payload("gpu-9", Some(&token)),
+            "gpu-9".to_string(),
+            crate::mqtt::node_registry::new_shared_registry(),
+            None,
+            Some(tokens),
+            Some(node_tokens),
+            Some(owners.clone()),
+            true,
+            Some("admin-1".to_string()),
+        )
+        .await;
+        let rec = owners.lock().unwrap().get("gpu-9").cloned();
+        assert_eq!(
+            rec.and_then(|r| r.owner_user_id).as_deref(),
+            Some("admin-1"),
+            "ownerless token + default owner ⇒ bound node row"
+        );
+    }
+
+    #[tokio::test]
+    async fn installed_landing_without_staged_row_gets_default_owner() {
+        // A CLI install bypasses the HTTP staging (no pending row). The
+        // first inventory sighting must still mint an owner row for the
+        // default owner, with the hosting node denormalized.
+        let registry = crate::bootstrap::SubsystemReadinessRegistry::new_shared();
+        let mut ctx = ctx_with_registry(registry);
+        let dir = temp_test_dir("landing-default-owner");
+        ctx.agent_owners = Some(crate::gateway::ownership::new_shared_agent_owners(&dir));
+        ctx.default_owner = Some("admin-1".to_string());
+        let info = acowork_core::mqtt_proto::InstalledAgentInfo {
+            agent_id: "com.acowork.test".to_string(),
+            version: "1.0.0".to_string(),
+            name: "Test".to_string(),
+            install_path: "/tmp/pkg/abc".to_string(),
+            manifest_toml: "agent_id = \"com.acowork.test\"\nversion = \"1.0.0\"\n\
+                name = \"Test\"\ndescription = \"\"\nauthor = \"\"\nruntime_version = \"0.1.0\""
+                .to_string(),
+            instance_id: "1a1a1a1a-0000-4000-8000-0000000000ab".to_string(),
+            overrides_json: String::new(),
+        };
+        let envelope = acowork_core::mqtt_proto::DataEnvelope {
+            version: 1,
+            payload: Some(
+                acowork_core::mqtt_proto::data_envelope::Payload::InstalledAgentInfo(info),
+            ),
+        };
+        let payload = prost::Message::encode_to_vec(&envelope);
+        let topic = acowork_core::node::node_agent_installed_topic(
+            "node-landing",
+            "1a1a1a1a-0000-4000-8000-0000000000ab",
+        );
+        handle_message(&topic, &payload, &ctx);
+        let store = ctx.agent_owners.clone().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            {
+                let guard = store.lock().unwrap();
+                if let Some(rec) = guard.get("1a1a1a1a-0000-4000-8000-0000000000ab") {
+                    assert_eq!(rec.owner_user_id.as_deref(), Some("admin-1"));
+                    assert_eq!(rec.node_id.as_deref(), Some("node-landing"));
+                    return;
+                }
+            }
+            if std::time::Instant::now() > deadline {
+                panic!("landing backstop did not mint an owner row within 2s");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn installed_landing_without_default_owner_stays_rowless() {
+        // Local mode (default_owner None): no row is minted — ownerless
+        // remains the correct "machine is the owner" semantics.
+        let registry = crate::bootstrap::SubsystemReadinessRegistry::new_shared();
+        let ctx = ctx_with_registry(registry);
+        let dir = temp_test_dir("landing-no-default-owner");
+        let owners = crate::gateway::ownership::new_shared_agent_owners(&dir);
+        // ctx is not mutated after construction in this harness; wire
+        // the store by rebuilding the context fields directly.
+        let mut ctx = ctx;
+        ctx.agent_owners = Some(owners.clone());
+        let info = acowork_core::mqtt_proto::InstalledAgentInfo {
+            agent_id: "com.acowork.test".to_string(),
+            version: "1.0.0".to_string(),
+            name: "Test".to_string(),
+            install_path: "/tmp/pkg/abc".to_string(),
+            manifest_toml: "agent_id = \"com.acowork.test\"\nversion = \"1.0.0\"\n\
+                name = \"Test\"\ndescription = \"\"\nauthor = \"\"\nruntime_version = \"0.1.0\""
+                .to_string(),
+            instance_id: "1a1a1a1a-0000-4000-8000-0000000000cd".to_string(),
+            overrides_json: String::new(),
+        };
+        let envelope = acowork_core::mqtt_proto::DataEnvelope {
+            version: 1,
+            payload: Some(
+                acowork_core::mqtt_proto::data_envelope::Payload::InstalledAgentInfo(info),
+            ),
+        };
+        let payload = prost::Message::encode_to_vec(&envelope);
+        let topic = acowork_core::node::node_agent_installed_topic(
+            "node-rowless",
+            "1a1a1a1a-0000-4000-8000-0000000000cd",
+        );
+        handle_message(&topic, &payload, &ctx);
+        // Give the spawned task time to run, then assert no row appeared.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(
+            owners.lock().unwrap().get("1a1a1a1a-0000-4000-8000-0000000000cd").is_none(),
+            "no default owner ⇒ no minted row"
+        );
     }
 }

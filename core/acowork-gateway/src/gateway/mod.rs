@@ -790,6 +790,58 @@ impl Gateway {
         // ADR-087 D7 / review M4: staged installs (memory-only ledger,
         // same Arc shared between HTTP staging and MQTT commit/drop).
         let pending_installs = crate::gateway::ownership::new_shared_pending_installs();
+        // ADR-087: default owner — the earliest-created admin account,
+        // resolved via the owning process (ADR-084: the Gateway never
+        // opens `accounts.json` itself). `None` in local mode (ownerless
+        // is the correct semantics there — the machine is the owner) and
+        // on a first boot before any admin exists.
+        let default_owner: Option<String> = if mqtt_config.auth_enabled {
+            crate::cli::user_first_admin(self.config.user.data_dir.as_deref())
+        } else {
+            None
+        };
+        {
+            // One-shot adoption, marker-gated: resources created while no
+            // admin was resolvable (first-boot local node, CLI installs)
+            // and pre-ADR-087 rows (the local→multi_user migration) are
+            // attributed to the admin exactly once. The marker keeps a
+            // deliberately released row (owner=None via PATCH) from being
+            // silently re-adopted on the next restart.
+            let marker = data_dir_path.join("owner_adoption.done");
+            if mqtt_config.auth_enabled
+                && !marker.exists()
+                && let Some(admin) = default_owner.as_deref()
+            {
+                let adopted =
+                    crate::gateway::ownership::adopt_ownerless(&node_owners, &agent_owners, admin);
+                if adopted > 0 {
+                    tracing::info!(
+                        adopted,
+                        admin_user = %admin,
+                        "ADR-087: adopted ownerless node/agent rows into the admin account"
+                    );
+                }
+                // Write the marker even for a zero-row adoption: the
+                // point is that adoption ran, not that it found work.
+                let _ = std::fs::write(&marker, admin.as_bytes());
+            }
+            // Surface anything still ownerless (adoption skipped because
+            // no admin existed yet) so the operator knows the claim
+            // endpoints are the manual fallback.
+            if mqtt_config.auth_enabled {
+                let (ownerless_nodes, ownerless_agents) =
+                    crate::gateway::ownership::count_ownerless(&node_owners, &agent_owners);
+                if ownerless_nodes + ownerless_agents > 0 {
+                    tracing::warn!(
+                        ownerless_nodes,
+                        ownerless_agents,
+                        "ownerless resources remain — claim via POST /api/nodes/{{id}}/claim \
+                         or POST /api/agents/{{id}}/claim (admin: any resource; other users: \
+                         the local node and the agents on it)"
+                    );
+                }
+            }
+        }
         // `publisher_token` was generated before the user/doc supervisors
         // started — they already forwarded it to their services
         // (ADR-084 §决策 4b).
@@ -1003,6 +1055,9 @@ impl Gateway {
             let agent_owners_for_dispatch = agent_owners.clone();
             let pending_installs_for_dispatch = pending_installs.clone();
             let auth_enabled_for_dispatch = mqtt_config.auth_enabled;
+            // ADR-087: default owner for the enroll/inventory convergence
+            // points — cloned per message like the stores above.
+            let default_owner_for_dispatch = default_owner.clone();
             // ADR-059 §7.2: NodeReady dispatch drives `node.{id}`
             // readiness on the bootstrap registry.
             let bootstrap_registry_for_dispatch = bootstrap_registry.clone();
@@ -1037,6 +1092,7 @@ impl Gateway {
                 let operation_store_for_cb = operation_store_for_dispatch.clone();
                 let node_replay_guard_for_cb = node_replay_guard_for_cb.clone();
                 let inventory_trigger_for_cb = inventory_trigger_for_cb.clone();
+                let default_owner_for_cb = default_owner_for_dispatch.clone();
                 tokio::spawn(async move {
                     let client = slot.lock().await.clone();
                     let node_control = node_control_slot.lock().await.clone();
@@ -1059,6 +1115,7 @@ impl Gateway {
                         agent_owners: Some(agent_owners_for_cb),
                         pending_installs: Some(pending_installs_for_cb),
                         auth_enabled: auth_enabled_for_dispatch,
+                        default_owner: default_owner_for_cb,
                         bootstrap_registry: Some(bootstrap_registry_for_cb),
                         operation_store: Some(operation_store_for_cb),
                         node_replay_guard: node_replay_guard_for_cb,
@@ -1406,12 +1463,17 @@ impl Gateway {
         // connect). When MQTT auth is enabled, hand the child a one-time
         // enrollment token as its boot credential — it is swapped for
         // the persisted node_token at enroll time.
+        // ADR-087: the token carries the default owner (earliest-created
+        // admin — the operator who can start a Gateway on this machine IS
+        // the admin), so the Gateway-spawned local node never lands
+        // ownerless. `None` before any admin exists: the enroll-time
+        // fallback and the one-shot adoption cover that window.
         let local_node_token = if mqtt_config.auth_enabled {
             Some(
                 enrollment_tokens
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .create_token(std::time::Duration::from_secs(3600), None),
+                    .create_token(std::time::Duration::from_secs(3600), default_owner.clone()),
             )
         } else {
             None

@@ -13,9 +13,10 @@ import { AgentAvatar } from "../common/AgentAvatar";
 import { Tooltip } from "../common/Tooltip";
 import { useTranslation } from "../../i18n/useTranslation";
 import { cn } from "../../lib/utils";
-import { Play, Square, Trash2, Info, Copy, Plus, Search, Package, Sparkles, Bug, ChevronRight, UserCog, Settings } from "lucide-react";
+import { Play, Square, Trash2, Info, Copy, Plus, Search, Package, Sparkles, Bug, ChevronRight, UserCog, Settings, Server } from "lucide-react";
 import { StyledInput } from "../common/StyledInput";
 import { open } from "@tauri-apps/plugin-dialog";
+import { invoke } from "@tauri-apps/api/core";
 import { isProcessing, instanceIdOf, type AgentInfo, type CloneResponse, type NodeInfo } from "../../lib/types";
 import { startAgentAndSyncUI } from "../../lib/agent-start";
 import { fetchNodes } from "../../lib/gateway-api";
@@ -294,6 +295,33 @@ export function AgentList({ width }: AgentListProps) {
     }
     setAddMenuOpen(false);
     await doInstall(onlineNodes.length === 1 ? onlineNodes[0].node_id : undefined);
+  };
+
+  // ADR-087: "Create local Node" — spawns the bundled acowork-node on this
+  // machine, bound to the signed-in account. The enrollment token is minted
+  // and consumed inside the command; it never surfaces in the UI.
+  const [creatingNode, setCreatingNode] = useState(false);
+  const handleCreateLocalNode = async () => {
+    setAddMenuOpen(false);
+    setCreatingNode(true);
+    try {
+      const res = await invoke<{ pid?: number; was_enrolled?: boolean; already_running?: boolean }>(
+        "create_local_node",
+      );
+      if (res.already_running) {
+        addToast({ type: "info", message: t("agentList.localNodeAlreadyRunning") });
+        return;
+      }
+      addToast({
+        type: "success",
+        message: res.was_enrolled ? t("agentList.localNodeStarted") : t("agentList.localNodeCreated"),
+      });
+      await useAgentStore.getState().fetchNodes();
+    } catch (e) {
+      addToast({ type: "error", message: t("agentList.errorCreateLocalNode", { error: String(e) }) });
+    } finally {
+      setCreatingNode(false);
+    }
   };
 
   const handleStart = async (agentId: string) => {
@@ -872,6 +900,21 @@ export function AgentList({ width }: AgentListProps) {
                   <Plus className="h-3.5 w-3.5" />
                   {t("agentList.installAgent")}
                 </button>
+                {/* ADR-087: only meaningful in multi-user mode — in local
+                    mode the Gateway already auto-spawns the local node and
+                    there is no account to bind an owner to. */}
+                {selfAccount && (
+                  <button
+                    onClick={() => {
+                      void handleCreateLocalNode();
+                    }}
+                    disabled={creatingNode}
+                    className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-text-secondary transition-colors hover:bg-zinc-50  dark:hover:bg-zinc-700/50"
+                  >
+                    <Server className="h-3.5 w-3.5" />
+                    {t("agentList.createLocalNode")}
+                  </button>
+                )}
                 {canInviteUser && (
                   <button
                     onClick={() => {

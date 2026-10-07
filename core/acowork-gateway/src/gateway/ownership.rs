@@ -460,6 +460,50 @@ pub fn lock(store: &SharedOwnershipStore) -> std::sync::MutexGuard<'_, Ownership
     store.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// ADR-087: one-shot adoption of ownerless rows by the default owner.
+///
+/// Covers the windows where the enroll/inventory convergence points could
+/// not know an owner yet: first boot (the admin account did not exist when
+/// the Gateway spawned its local node) and the local→multi_user migration
+/// (pre-switch rows are ownerless by design). The Gateway gates this on a
+/// marker file so a deliberately released row (`PATCH owner=null`) is not
+/// silently re-adopted on the next restart. Returns the adopted count.
+pub fn adopt_ownerless(
+    node_owners: &SharedOwnershipStore,
+    agent_owners: &SharedOwnershipStore,
+    admin_user_id: &str,
+) -> usize {
+    let mut adopted = 0;
+    for store in [&node_owners, &agent_owners] {
+        let mut guard = lock(store);
+        let ownerless: Vec<String> = guard
+            .iter()
+            .filter(|(_, rec)| rec.owner_user_id.is_none())
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in ownerless {
+            if guard.update(&id, |rec| rec.owner_user_id = Some(admin_user_id.to_string())) {
+                adopted += 1;
+            }
+        }
+    }
+    adopted
+}
+
+/// ADR-087: ownerless row counts per table, for the startup WARN.
+pub fn count_ownerless(
+    node_owners: &SharedOwnershipStore,
+    agent_owners: &SharedOwnershipStore,
+) -> (usize, usize) {
+    let count = |store: &SharedOwnershipStore| {
+        lock(store)
+            .iter()
+            .filter(|(_, rec)| rec.owner_user_id.is_none())
+            .count()
+    };
+    (count(node_owners), count(agent_owners))
+}
+
 /// Same for the optional handle carried on `AppState` — `None` (feature
 /// disabled / tests) yields an empty guard-equivalent `None` view.
 pub fn lock_shared(
@@ -620,5 +664,43 @@ mod tests {
         reloaded.remove("n1");
         reloaded.remove("n1");
         assert!(reloaded.get("n1").is_none());
+    }
+
+    #[test]
+    fn adopt_ownerless_binds_only_ownerless_rows() {
+        // ADR-087 one-shot adoption: ownerless rows go to the admin,
+        // owned rows are untouched. (Restart protection against
+        // re-adopting a deliberately released row is the marker file in
+        // `gateway/mod.rs`, not the store's job.)
+        let dir = std::env::temp_dir().join(format!(
+            "acowork-test-adopt-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let nodes = new_shared_node_owners(&dir);
+        let agents = new_shared_agent_owners(&dir);
+        lock(&nodes).put("n-owned", OwnerRecord::new(Some("alice".into())));
+        lock(&nodes).put("n-free", OwnerRecord::new(None));
+        lock(&agents).put("a-free", OwnerRecord::new(None));
+        let adopted = adopt_ownerless(&nodes, &agents, "admin-1");
+        assert_eq!(adopted, 2);
+        assert_eq!(
+            lock(&nodes).get("n-owned").unwrap().owner_user_id.as_deref(),
+            Some("alice"),
+            "an owned row is never re-bound"
+        );
+        assert_eq!(
+            lock(&nodes).get("n-free").unwrap().owner_user_id.as_deref(),
+            Some("admin-1")
+        );
+        assert_eq!(
+            lock(&agents).get("a-free").unwrap().owner_user_id.as_deref(),
+            Some("admin-1")
+        );
+        let (n, a) = count_ownerless(&nodes, &agents);
+        assert_eq!((n, a), (0, 0));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

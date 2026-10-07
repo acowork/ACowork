@@ -71,6 +71,7 @@ pub fn agent_routes() -> Router<AppState> {
         .route("/api/agents/{id}/visibility", patch(patch_agent_visibility))
         .route("/api/agents/{id}/guests", patch(patch_agent_guests))
         .route("/api/agents/{id}/owner", patch(patch_agent_owner))
+        .route("/api/agents/{id}/claim", post(claim_agent))
         // ADR-034: `PUT /api/agents/{id}/config` is a pure reverse-proxy to
         // Runtime's `PUT /agents/{id}/config`.  The route itself is
         // registered in `proxy::proxy_routes` so all Runtime endpoints
@@ -978,6 +979,77 @@ async fn patch_agent_owner(
     edit_agent_owner(&state, &id, |rec| rec.owner_user_id = new_owner.clone())
         .await?;
     Ok(Json(serde_json::json!({ "owner_user_id": new_owner })))
+}
+
+/// `POST /api/agents/{id}/claim` — take ownership of an ownerless agent
+/// instance (ADR-087 D7, revised). Mirrors `POST /api/nodes/{id}/claim`:
+/// - only ownerless instances are claimable — already-owned answers 409;
+/// - admins may claim any ownerless instance; any other logged-in user
+///   may claim only instances hosted on the Gateway's own machine;
+/// - no `AuthContext` (local mode / machine actor): 400.
+async fn claim_agent(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    auth: Option<Extension<AuthContext>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let ctx = auth
+        .map(|e| e.0)
+        .ok_or_else(|| ApiError::bad_request("claim requires a logged-in user"))?;
+    // Existence gate: `{id}` must resolve to a live inventory instance
+    // (same normalization as `edit_agent_owner` — package-id aliases
+    // cannot create ghost rows).
+    let instance_id = {
+        let gw = state.gateway_state.read().await;
+        gw.resolve_installed_key(&id)
+    }
+    .ok_or_else(|| ApiError::not_found(&format!("no such agent instance: {id}")))?;
+    if !ctx.is_admin() {
+        // Hosting node: the denormalized row first, else the live
+        // inventory. Awaited before the store lock so no guard crosses
+        // an await point.
+        let hosting = {
+            let rec_node = ownership::lock_shared(&state.agent_owners)
+                .and_then(|s| s.get(&instance_id).and_then(|r| r.node_id.clone()));
+            match rec_node {
+                Some(n) => Some(n),
+                None => {
+                    let gw = state.gateway_state.read().await;
+                    gw.installed(&instance_id).map(|i| i.node_id.clone())
+                }
+            }
+        };
+        let local = match state.node_registry.as_ref() {
+            Some(reg) => crate::mqtt::node_registry::local_node_id(reg).await,
+            None => None,
+        };
+        if hosting.is_none() || hosting != local {
+            return Err(ApiError::forbidden(
+                "only admins may claim agents on remote nodes; \
+                 other users may claim agents hosted on the local node",
+            ));
+        }
+    }
+    let mut store = ownership::lock_shared(&state.agent_owners)
+        .ok_or_else(|| ApiError::internal("ownership store unavailable"))?;
+    if store
+        .get(&instance_id)
+        .and_then(|r| r.owner_user_id.as_ref())
+        .is_some()
+    {
+        return Err(ApiError::conflict("agent already has an owner"));
+    }
+    let owner = ctx.user_id.clone();
+    store.upsert_with(
+        &instance_id,
+        || OwnerRecord::new(Some(owner.clone())),
+        |rec| {
+            if rec.owner_user_id.is_none() {
+                rec.owner_user_id = Some(owner.clone());
+            }
+        },
+    );
+    tracing::info!(instance_id = %instance_id, owner = %ctx.user_id, "ADR-087: ownerless agent claimed");
+    Ok(Json(serde_json::json!({ "owner_user_id": ctx.user_id })))
 }
 
 /// Load an agent's ownership row, apply `f`, persist. The `{id}` path

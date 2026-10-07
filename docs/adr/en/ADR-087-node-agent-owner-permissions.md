@@ -430,3 +430,61 @@ ADR-087 deliberately leaves to the deployer.
 `permissions_reports_an_owned_row_as_publishable` (server data state),
 `disables the visibility switch instead of offering a write that 409s` /
 `keeps an owned resource's switch enabled` / `claims ownership without also changing visibility` (UI).
+
+## Appendix B: Revision — ownerless resources are no longer produced by construction (2026-11)
+
+**Trigger**: Appendix A fixed *recovery* for rows that already lack an owner, but new ownerless
+rows kept being manufactured. Seven production paths were identified:
+
+| Path | Scenario | Prior behavior |
+|---|---|---|
+| N1 | Gateway auto-spawns the local node at startup | `create_token(3600, None)` → ownerless node |
+| N2 | CLI `nodes token create` | no user context → ownerless token → ownerless node |
+| N3 | bare enroll with `mqtt.auth_enabled=false` | no token to resolve → ownerless |
+| N4 | re-enroll via `put_if_absent` | stays ownerless forever (frozen) |
+| A1 | CLI `install` dispatched over MQTT | bypasses owner writing entirely |
+| A2 | Local-mode install/ensure/clone | `ctx=None` (**correct**, see below) |
+| A3 | onboarding default agent installed before login | no caller → ownerless |
+
+**Principle**: owner binding happens at the **user-interaction layer**. An enrollment token is a
+runtime-internal artifact — users must never fish it out of logs or config files and paste it
+into a command line. Except for the one unavoidable scenario (starting the Gateway from a CLI on
+a server — the operator is necessarily an admin), every other scenario closes the loop inside
+the Desktop app.
+
+**New rules** (revising D2 item 4 and D7 row 1):
+
+1. **Two convergence points guard the backstop**: when an enroll is accepted, and when an agent
+   first lands in the inventory (`commit_pending`), an unresolvable owner falls back to
+   `default_owner` — the earliest-created admin `user_id`, resolved by the Gateway at startup via
+   the user service (`acowork-user first-admin`). One guard covers every bypass.
+2. **N1**: the enrollment token for the Gateway-spawned local node is bound to admin directly
+   (server scenario — reasonable).
+3. **N2/A1**: CLI `nodes token create` / `install` default to admin under multi_user.
+4. **Joining a new machine (replacing token-fishing)**:
+   - Desktop: the agent-list `+` menu gains "Create Local Node" → the Tauri command internally
+     calls `POST /api/nodes/enrollment-tokens` (Bearer = signed-in user, so owner = that user),
+     then spawns the bundled `acowork-node` (detached). The token never surfaces in any
+     user-visible place. Idempotent: an already-enrolled machine skips the token step — the
+     action degrades to plain "start".
+   - Headless CLI: `acowork-node start` without identity and without `--token` prompts for
+     username/password, calls `POST /api/auth/login` → `POST /api/nodes/enrollment-tokens` itself,
+     and enrolls with the bound token.
+5. **Claim endpoints**: `POST /api/nodes/{id}/claim`, `POST /api/agents/{id}/claim` — only
+   ownerless rows can be claimed; the local node is relaxed to any signed-in user (the person is
+   physically at the machine), remote nodes/agents stay admin-only.
+6. **Legacy adopt**: at startup, if an admin resolves, all ownerless rows are adopted once
+   (marker-gated, runs once); any ownerless rows still left afterwards produce a summarized
+   startup WARN (node/agent counted separately).
+
+**Local mode unchanged** (A2 is not a bug): single-machine loopback → `resolve_auth_mode` = Local,
+the account system is off entirely, `owner=None` is the correct semantics — "the machine is the
+owner" (D8 no-op). The local → multi_user transition is handed over by rule 6.
+
+**D7 after revision**: ownerless narrows from "a possible birth state" to a **transient state** —
+produced only when an owner account is disabled/deleted; every construction path binds an owner.
+
+**Regression tests**: `enroll_with_ownerless_token_falls_back_to_default_owner`,
+`installed_landing_without_staged_row_gets_default_owner` (convergence-point backstop),
+`adopt_ownerless_binds_all_null_rows` (legacy handover), plus four claim-endpoint cases
+(ownerless claimable / owned 409 / local relaxation / remote admin-only). Full Gateway suite: 619 passed.

@@ -493,7 +493,17 @@ impl Cli {
                 let mut store = crate::mqtt::enrollment::EnrollmentTokenStore::load(
                     std::path::Path::new(&data_dir),
                 );
-                let plaintext = store.create_token(ttl, None);
+                // ADR-087: a CLI-issued token has no interactive owner —
+                // the operator running this on the Gateway machine IS the
+                // admin, so bind the earliest-created admin as the node
+                // owner up front. Local mode (no accounts) keeps None:
+                // ownerless = the machine is the owner.
+                let owner = if admin_setup_auth_mode.is_multi_user() {
+                    user_first_admin(user_data_dir.as_deref())
+                } else {
+                    None
+                };
+                let plaintext = store.create_token(ttl, owner);
                 println!("Enrollment token created (one-time, TTL {}m):", ttl.as_secs() / 60);
                 println!("{plaintext}");
                 println!("\nPass it to a node on first boot:");
@@ -948,6 +958,25 @@ pub fn user_setup_required(user_data_dir: Option<&std::path::Path>) -> Result<bo
             String::from_utf8_lossy(&output.stderr).trim()
         )),
     }
+}
+
+/// Resolve the default owner for resources with no interactive owner
+/// (ADR-087): the earliest-created admin account, via the owning process.
+///
+/// `None` (no admin yet / service not installed) is not an error — the
+/// caller keeps the old ownerless behavior and the claim endpoint
+/// (`POST /api/{nodes,agents}/{id}/claim`) remains as the fallback.
+pub fn user_first_admin(user_data_dir: Option<&std::path::Path>) -> Option<String> {
+    let output = user_command(user_data_dir)
+        .arg("first-admin")
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!id.is_empty()).then_some(id)
 }
 
 /// Set the first-boot admin password, via the owning process.

@@ -732,8 +732,20 @@ fn inject_ort_env(command: &mut Command, ort_lib_dir: &Path) {
 
 /// Find the Gateway binary next to the current executable.
 pub fn find_gateway_binary(app_handle: tauri::AppHandle) -> Result<std::path::PathBuf, String> {
-    // In development, Gateway binary lives next to current_exe in target/release/ or target/debug/.
-    // In production (bundled), it's extracted next to the Desktop app.
+    find_bundled_binary(&app_handle, "acowork-gateway")
+}
+
+/// Locate a bundled sibling binary (`acowork-gateway`, `acowork-node`, …)
+/// next to the Desktop executable or in the resource directory; in dev
+/// builds falls back to the workspace `target/{profile}` dirs.
+/// (ADR-087: extracted from `find_gateway_binary` for `create_local_node`.)
+pub fn find_bundled_binary(
+    app_handle: &tauri::AppHandle,
+    stem: &str,
+) -> Result<std::path::PathBuf, String> {
+    // In development, binaries live next to current_exe in target/release/
+    // or target/debug/. In production (bundled), they're extracted next
+    // to the Desktop app.
     let exe_dir = std::env::current_exe()
         .map_err(|e| format!("Failed to get current exe path: {}", e))?
         .parent()
@@ -743,16 +755,13 @@ pub fn find_gateway_binary(app_handle: tauri::AppHandle) -> Result<std::path::Pa
     // Also check the Tauri resource directory (for bundled builds)
     let resource_dir = app_handle.path().resource_dir().unwrap_or(exe_dir.clone());
 
-    let candidates = [
-        exe_dir.join("acowork-gateway.exe"),
-        exe_dir.join("acowork-gateway"),
-        resource_dir.join("acowork-gateway.exe"),
-        resource_dir.join("acowork-gateway"),
-    ];
-
-    for path in &candidates {
-        if path.exists() {
-            return Ok(path.clone());
+    let names = [format!("{stem}.exe"), stem.to_string()];
+    for dir in [&exe_dir, &resource_dir] {
+        for name in &names {
+            let path = dir.join(name);
+            if path.exists() {
+                return Ok(path);
+            }
         }
     }
 
@@ -775,24 +784,133 @@ pub fn find_gateway_binary(app_handle: tauri::AppHandle) -> Result<std::path::Pa
 
         for profile in &["release", "debug"] {
             let target_dir = base.join("target").join(profile);
-            let exe = target_dir.join("acowork-gateway.exe");
-            let bin = target_dir.join("acowork-gateway");
-            if exe.exists() {
-                return Ok(exe);
-            }
-            if bin.exists() {
-                return Ok(bin);
+            for name in &names {
+                let path = target_dir.join(name);
+                if path.exists() {
+                    return Ok(path);
+                }
             }
         }
     }
 
     Err(format!(
-        "Gateway binary not found. Searched: {:?}",
-        candidates
+        "Binary `{stem}` not found. Searched: {:?}",
+        [&exe_dir, &resource_dir]
             .iter()
             .map(|p| p.display().to_string())
             .collect::<Vec<_>>()
     ))
+}
+
+/// ADR-087: "Create local Node" — spawn an `acowork-node` Agent on this
+/// machine, owned by the signed-in user.
+///
+/// The enrollment token is minted through the Gateway HTTP API (bound to
+/// the caller's account) and handed to the child via argv — it never
+/// surfaces in the UI, config files, or logs. Idempotent: a machine that
+/// is already enrolled (`identity.json` carries a `node_token`) skips the
+/// token step; the spawn just reconnects.
+#[tauri::command]
+pub async fn create_local_node(
+    state: tauri::State<'_, AppState>,
+    app_handle: tauri::AppHandle,
+) -> Result<serde_json::Value, String> {
+    let node_bin = find_bundled_binary(&app_handle, "acowork-node")?;
+    let home = acowork_core::node::default_node_home();
+
+    // Dedup: a node already running on this machine answers `/health` on
+    // the local proxy port. Spawning a second one would fight over the
+    // same identity (two processes re-registering the same node_id kick
+    // each other off MQTT), so no-op instead.
+    // ponytail: a node whose proxy failed to bind (port taken by another
+    // process) is invisible to this probe; upgrade path = match the
+    // Gateway's node list against the local identity.json node_id.
+    let local_node_probe = format!("http://127.0.0.1:{}", acowork_core::node::NODE_PROXY_PORT);
+    if is_gateway_reachable(&local_node_probe).await {
+        tracing::info!("ADR-087: create_local_node — a local node is already running, skipping spawn");
+        return Ok(serde_json::json!({ "already_running": true }));
+    }
+
+    let enrolled = std::fs::read(home.join("identity.json"))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        .and_then(|v| {
+            v.get("node_token")
+                .and_then(|t| t.as_str())
+                .map(|s| !s.is_empty())
+        })
+        .unwrap_or(false);
+
+    let client = state.gateway.read().await;
+    let base_url = client.base_url().to_string();
+    let mqtt_host = reqwest::Url::parse(&base_url)
+        .map_err(|e| format!("bad gateway base_url {base_url}: {e}"))?
+        .host_str()
+        .ok_or_else(|| "gateway base_url has no host".to_string())?
+        .to_string();
+    let status = client
+        .system_status()
+        .await
+        .map_err(|e| format!("GET /api/status failed: {e}"))?;
+
+    let token = if enrolled {
+        None
+    } else {
+        let url = format!("{}/api/nodes/enrollment-tokens", base_url.trim_end_matches('/'));
+        let resp = client
+            .send(|| {
+                Ok(client
+                    .request(reqwest::Method::POST, &url)
+                    .json(&serde_json::json!({ "ttl_seconds": 3600 })))
+            })
+            .await
+            .map_err(|e| format!("enrollment-token request failed: {e}"))?;
+        if !resp.status().is_success() {
+            return Err(format!("enrollment-tokens: HTTP {}", resp.status()));
+        }
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("enrollment-tokens response: {e}"))?;
+        Some(
+            body.get("token")
+                .and_then(|t| t.as_str())
+                .map(|s| s.to_string())
+                .ok_or_else(|| "enrollment-tokens response has no `token`".to_string())?,
+        )
+    };
+
+    let mut command = std::process::Command::new(&node_bin);
+    command
+        .arg("start")
+        .arg("--gateway")
+        .arg(format!("{mqtt_host}:{}", status.mqtt_port))
+        .arg("--home")
+        .arg(&home);
+    if let Some(t) = token.as_deref() {
+        command.arg("--token").arg(t);
+    }
+    // Same console-window suppression as the Gateway spawn: the node is a
+    // console binary; a flashing terminal from a desktop app is noise.
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let child = command
+        .spawn()
+        .map_err(|e| format!("spawn acowork-node: {e}"))?;
+    let pid = child.id();
+    // Detached: the node outlives this command (and the Desktop process);
+    // nobody reaps it, so forget the handle.
+    std::mem::forget(child);
+    tracing::info!(pid, enrolled, "ADR-087: local node started from Desktop");
+    Ok(serde_json::json!({ "pid": pid, "was_enrolled": enrolled }))
 }
 
 /// One-shot health probe used inside `spawn_gateway` to detect a Gateway

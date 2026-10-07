@@ -390,6 +390,67 @@ async fn patch_node_owner(
     Ok(Json(serde_json::json!({ "owner_user_id": new_owner })))
 }
 
+/// `POST /api/nodes/{id}/claim` — take ownership of an ownerless node
+/// (ADR-087 D7, revised). The last-resort path for nodes that landed
+/// ownerless (created before any admin account existed). Rules, enforced
+/// here (the middleware declares `Tier::Claim` and passes through):
+/// - only ownerless nodes are claimable — already-owned answers 409;
+/// - admins may claim any ownerless node; any other logged-in user may
+///   claim only the Gateway's own-machine node (the Desktop "first login
+///   claims the local node" flow — no token ever surfaces);
+/// - no `AuthContext` (local mode / machine actor): 400 — there is no
+///   account system to attribute to.
+async fn claim_node(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    auth: Option<Extension<AuthContext>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let ctx = auth
+        .map(|e| e.0)
+        .ok_or_else(|| ApiError::bad_request("claim requires a logged-in user"))?;
+    // Existence gate (mirrors `edit_node_owner`): never create a row for
+    // a node id that was never seen.
+    let known = ownership::lock_shared(&state.node_owners)
+        .map(|s| s.get(&id).is_some())
+        .unwrap_or(false);
+    let known = known
+        || match state.node_registry.as_ref() {
+            Some(reg) => reg.read().await.get(&id).is_some(),
+            None => false,
+        };
+    if !known {
+        return Err(ApiError::not_found(&format!("no such node: {id}")));
+    }
+    if !ctx.is_admin() {
+        let local = match state.node_registry.as_ref() {
+            Some(reg) => crate::mqtt::node_registry::local_node_id(reg).await,
+            None => None,
+        };
+        if local.as_deref() != Some(id.as_str()) {
+            return Err(ApiError::forbidden(
+                "only admins may claim remote nodes; other users may claim the local node",
+            ));
+        }
+    }
+    let mut store = ownership::lock_shared(&state.node_owners)
+        .ok_or_else(|| ApiError::internal("ownership store unavailable"))?;
+    if store
+        .get(&id)
+        .and_then(|r| r.owner_user_id.as_ref())
+        .is_some()
+    {
+        return Err(ApiError::conflict("node already has an owner"));
+    }
+    let owner = ctx.user_id.clone();
+    store.upsert_with(&id, || ownership::OwnerRecord::new(Some(owner.clone())), |rec| {
+        if rec.owner_user_id.is_none() {
+            rec.owner_user_id = Some(owner.clone());
+        }
+    });
+    tracing::info!(node_id = %id, owner = %ctx.user_id, "ADR-087: ownerless node claimed");
+    Ok(Json(serde_json::json!({ "owner_user_id": ctx.user_id })))
+}
+
 /// Route definitions for the node management API.
 pub fn nodes_routes() -> Router<AppState> {
     Router::new()
@@ -399,10 +460,12 @@ pub fn nodes_routes() -> Router<AppState> {
         .route("/api/nodes/{id}/visibility", patch(patch_node_visibility))
         .route("/api/nodes/{id}/guests", patch(patch_node_guests))
         .route("/api/nodes/{id}/owner", patch(patch_node_owner))
+        .route("/api/nodes/{id}/claim", post(claim_node))
 }
 
 #[cfg(test)]
 mod tests {
+    use axum::response::IntoResponse;
     use super::*;
     use crate::http::routes::AppState;
     use crate::mqtt::node_registry::new_shared_registry;
@@ -855,5 +918,130 @@ mod tests {
         }
         assert_eq!(obj["node_id"], "nicholas-pc");
         assert_eq!(obj["agent_count"], 2);
+    }
+
+    // ── ADR-087 (revised): POST /api/nodes/{id}/claim ─────────────────
+
+    fn admin_ctx() -> Extension<AuthContext> {
+        Extension(AuthContext {
+            user_id: "admin-1".to_string(),
+            role: acowork_core::account::Role::Admin,
+            as_user: None,
+        })
+    }
+
+    fn user_ctx(id: &str) -> Extension<AuthContext> {
+        Extension(AuthContext {
+            user_id: id.to_string(),
+            role: acowork_core::account::Role::User,
+            as_user: None,
+        })
+    }
+
+    async fn mark_online(state: &AppState, node_id: &str) {
+        let mut reg = state.node_registry.as_ref().unwrap().write().await;
+        reg.update_status_from_mqtt(
+            &format!("acowork/nodes/{node_id}/status"),
+            b"online",
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_claims_ownerless_node() {
+        let state = state_with_node_owner_pub(
+            "gpu-1",
+            None,
+            &[],
+            Visibility::Private,
+        );
+        mark_online(&state, "gpu-1").await;
+        let resp = claim_node(
+            State(state.clone()),
+            Path("gpu-1".to_string()),
+            Some(admin_ctx()),
+        )
+        .await
+        .expect("admin claim of an ownerless node succeeds");
+        assert_eq!(resp.0["owner_user_id"], "admin-1");
+        let store = ownership::lock_shared(&state.node_owners).unwrap();
+        assert_eq!(
+            store.get("gpu-1").unwrap().owner_user_id.as_deref(),
+            Some("admin-1")
+        );
+    }
+
+    #[tokio::test]
+    async fn claim_of_owned_node_conflicts() {
+        let state = state_with_node_owner_pub(
+            "gpu-1",
+            Some("alice"),
+            &[],
+            Visibility::Private,
+        );
+        mark_online(&state, "gpu-1").await;
+        let resp = claim_node(
+            State(state.clone()),
+            Path("gpu-1".to_string()),
+            Some(admin_ctx()),
+        )
+        .await;
+        assert!(resp.is_err(), "an owned node is not claimable");
+        let store = ownership::lock_shared(&state.node_owners).unwrap();
+        assert_eq!(
+            store.get("gpu-1").unwrap().owner_user_id.as_deref(),
+            Some("alice"),
+            "a rejected claim must not touch the row"
+        );
+    }
+
+    #[tokio::test]
+    async fn normal_user_claims_local_node_only() {
+        // The Desktop "first login claims the local node" flow: a plain
+        // user may claim the own-machine node (anchor) but nothing else.
+        let state = state_with_node_owner_pub(
+            "local-1",
+            None,
+            &[],
+            Visibility::Private,
+        );
+        mark_online(&state, "local-1").await;
+        mark_online(&state, "remote-1").await;
+        state
+            .node_registry
+            .as_ref()
+            .unwrap()
+            .write()
+            .await
+            .set_local_node_anchor("local-1");
+        let resp = claim_node(
+            State(state.clone()),
+            Path("local-1".to_string()),
+            Some(user_ctx("bob")),
+        )
+        .await
+        .expect("a plain user may claim the local node");
+        assert_eq!(resp.0["owner_user_id"], "bob");
+        let err = claim_node(
+            State(state.clone()),
+            Path("remote-1".to_string()),
+            Some(user_ctx("carol")),
+        )
+        .await
+        .expect_err("remote ownerless nodes stay admin-only");
+        let resp: axum::response::Response = err.into_response();
+        assert_eq!(resp.status(), axum::http::StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn claim_requires_logged_in_user() {
+        // Local mode / machine actor: no AuthContext → 400 (there is no
+        // account system to attribute to).
+        let state = test_app_state();
+        mark_online(&state, "gpu-1").await;
+        let err = claim_node(State(state), Path("gpu-1".to_string()), None)
+            .await
+            .expect_err("claim without a user must fail");
+        let resp: axum::response::Response = err.into_response();
+        assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
     }
 }

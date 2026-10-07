@@ -79,7 +79,7 @@ pub fn extract_target<'a>(method: &Method, path: &'a str) -> Target<'a> {
                 // `classify` only ever yields agent-scoped tiers, so the
                 // routing decision is binary: an agent path or not.
                 match classify(method, rest).1 {
-                    Tier::Agent | Tier::Attribution | Tier::Admin => Target::Agent(id),
+                    Tier::Agent | Tier::Attribution | Tier::Admin | Tier::Claim => Target::Agent(id),
                 }
             }
         },
@@ -92,6 +92,7 @@ pub fn extract_target<'a>(method: &Method, path: &'a str) -> Target<'a> {
                 match (method.as_str(), rest) {
                     ("PATCH", "visibility" | "guests" | "owner") => Target::Node(id),
                     ("PATCH", "") => Target::Node(id), // rename
+                    ("POST", "claim") => Target::Node(id),
                     // Permission dialog read side — manage tier (a guest
                     // may see the list; attribution writes are gated
                     // separately at owner ∨ admin inside the handler).
@@ -116,11 +117,16 @@ pub fn extract_target<'a>(method: &Method, path: &'a str) -> Target<'a> {
 /// [`tests::every_registered_route_declares_a_permission`] turns red.
 pub fn classify(method: &Method, rest: &str) -> (Op, Tier) {
     let head = rest.split('/').next().unwrap_or("");
-    // Ownership transfer / claim — admin only (ADR-087 D7: transfer is
+    // Ownership transfer — admin only (ADR-087 D7: transfer is
     // an authorization change; the owner may share but never hand over
     // mastership without an audit trail).
     if method == Method::PATCH && head == "owner" {
         return (Op::Manage, Tier::Admin);
+    }
+    // Claim of an ownerless resource — handler-enforced, not a tier
+    // gate (see [`Tier::Claim`]).
+    if method == Method::POST && head == "claim" {
+        return (Op::Manage, Tier::Claim);
     }
     // Attribution ops (owner ∨ admin only, guests excluded — ADR-087 D9
     // R1: manage grants do not carry attribution rights).
@@ -284,6 +290,13 @@ pub enum Tier {
     Attribution,
     /// Admin only — ownership transfer and claim.
     Admin,
+    /// Claim of an ownerless resource (ADR-087 D7, revised): NOT a
+    /// capability tier — `manage` cannot be evaluated against an
+    /// ownerless row (it would be admin-only and lock out the local-node
+    /// claim flow). The middleware passes the request through and the
+    /// handler enforces: ownerless-only (409 otherwise) and
+    /// admin ∨ caller-on-local-machine (403 otherwise).
+    Claim,
 }
 
 /// The 403/404 body (ADR-087 D5.3). `required` names the tier, not the
@@ -344,6 +357,12 @@ pub async fn permission_middleware(
                 } else {
                     forbidden(resource.kind(), "transfer")
                 };
+            }
+            if tier == Tier::Claim {
+                // Pass through: claim is enforced in the handler (it
+                // needs the resource's live owner + hosting node, and
+                // answers 409 — not 403 — for an already-owned row).
+                return next.run(req).await;
             }
             match acl::decide(&state, Some(&ctx), op, &resource) {
                 Ok(()) => next.run(req).await,
@@ -413,8 +432,11 @@ async fn route_requirement(
                 Some(node_id.to_string())
             };
             let tier = if path.ends_with("/owner") {
-                // ADR-087 D7: mastership transfer / claim — admin only.
+                // ADR-087 D7: mastership transfer — admin only.
                 Tier::Admin
+            } else if path.ends_with("/claim") {
+                // ADR-087 D7 (revised): ownerless claim — handler-enforced.
+                Tier::Claim
             } else if path.ends_with("/visibility") || path.ends_with("/guests") {
                 Tier::Attribution
             } else {

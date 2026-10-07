@@ -417,3 +417,53 @@ D8 早就写明"客户端只消费服务端算好的布尔"，而 `GET .../permi
 `permissions_reports_an_owned_row_as_publishable`（后端数据状态）、
 `disables the visibility switch instead of offering a write that 409s` /
 `keeps an owned resource's switch enabled` / `claims ownership without also changing visibility`（前端交互）。
+
+## 附录 B：修订记录 — 无主资源不再由构造产生（2026-11 修订）
+
+**触发**：附录 A 解决了"已存在的无主行如何恢复"，但无主行本身仍在被持续制造。
+盘点出 7 条产生路径：
+
+| 路径 | 场景 | 原行为 |
+|---|---|---|
+| N1 | Gateway 启动自 spawn 本机 node | `create_token(3600, None)` → node 无主 |
+| N2 | CLI `nodes token create` | 无用户上下文 → token 无主 → node 无主 |
+| N3 | `mqtt.auth_enabled=false` 下裸 enroll | 无 token 可解析 → 无主 |
+| N4 | re-enroll `put_if_absent` | 已无主则继续无主（固化） |
+| A1 | CLI `install` 走 MQTT 派发 | 完全绕过 owner 写入 |
+| A2 | Local 模式 install/ensure/clone | `ctx=None`（**正确**，见下） |
+| A3 | onboarding 默认 agent 在登录前安装 | 无调用者 → 无主 |
+
+**修订原则**：owner 绑定发生在**用户交互层**，token 是运行时内部物，绝不让用户从日志/配置里
+捞 token 塞命令行。除"服务器上 CLI 启动 Gateway"这一刚需场景（操作者必是 admin）外，
+其余场景全部在 Desktop 内闭环。
+
+**新规则**（对 D2 第 4 条、D7 第 1 行的修订）：
+
+1. **两个汇聚点兜底**：enroll Accept 落库与 agent inventory 首次落地（`commit_pending`）时，
+   若解析不出 owner，回退到 `default_owner`——Gateway 启动时经 user service
+   （`acowork-user first-admin`）解析的最早创建的 admin `user_id`。单点 guard 覆盖所有旁路。
+2. **N1**：Gateway spawn 本机 node 的 enrollment token 直接绑 admin（服务器场景，合理）。
+3. **N2/A1**：CLI `nodes token create` / `install` 在 multi_user 下默认绑 admin。
+4. **新机器接入（替代命令行捞 token）**：
+   - Desktop：agent 列表 `+` 菜单新增「创建本机 Node」→ Tauri 命令内部
+     `POST /api/nodes/enrollment-tokens`（Bearer=登录者，owner 即登录者）→ spawn 随包
+     `acowork-node`（detached）。token 不出现在任何用户可见面。幂等：已 enroll 则跳过签 token，
+     变为纯"启动"。
+   - headless CLI：`acowork-node start` 无 identity 且无 `--token` 时交互式输入账号密码，
+     node 自行 `POST /api/auth/login` → `POST /api/nodes/enrollment-tokens` 换绑定 token 再 enroll。
+5. **认领端点**：`POST /api/nodes/{id}/claim`、`POST /api/agents/{id}/claim`——仅无主行可 claim；
+   本机 node 放宽到任意登录用户（人在机器旁自证），远程 node/agent 仍 admin-only。
+6. **存量 adopt**：Gateway 启动时若解析到 admin，一次性 adopt 全部 ownerless 行
+   （marker-gated，只跑一次）；此后仍残留的 ownerless 行启动 WARN 汇总（node/agent 分别计数）。
+
+**Local 模式不变**（A2 不是 bug）：单机 loopback → `resolve_auth_mode` = Local，账号系统整体
+关闭，`owner=None` 是正确语义——"机器即 owner"（D8 no-op）。local → multi_user 切换时由第 6 条
+adopt 完成历史交接。
+
+**修订后 D7 语义**：ownerless 从"出生即可能的常态"收窄为**过渡态**——只由 owner 账号被禁用/注销
+产生；构造路径全部绑定 owner。
+
+**回归测试**：`enroll_with_ownerless_token_falls_back_to_default_owner`、
+`installed_landing_without_staged_row_gets_default_owner`（汇聚点兜底）、
+`adopt_ownerless_binds_all_null_rows`（存量交接）、claim 端点 4 例（无主可 claim / 有主 409 /
+本机放宽 / 远程 admin-only）。Gateway 全量 619 通过。

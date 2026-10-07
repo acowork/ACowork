@@ -76,6 +76,11 @@ fn main() {
         std::process::exit(code);
     }
 
+    // `first-admin` is a read-only one-shot (ADR-087 default-owner lookup).
+    if let Some(Command::FirstAdmin) = &cli.command {
+        std::process::exit(run_first_admin(&config));
+    }
+
     let auth = if config.is_multi_user() {
         match AuthService::new(
             &config.data_dir,
@@ -234,6 +239,40 @@ fn run_admin_setup(
             1
         }
     }
+}
+
+/// Print the earliest-created active admin's `user_id` (ADR-087).
+///
+/// Deliberately read-only — like `admin-setup --check` it must not run
+/// `AuthService::new` (which creates `auth/` + the signing key) or seed
+/// the bootstrap admin. A passwordless bootstrap admin counts: the
+/// account identity is established even before the password is set, and
+/// the default owner is an identity, not a credential.
+fn run_first_admin(config: &UserServiceConfig) -> i32 {
+    if !config.is_multi_user() {
+        eprintln!(
+            "first-admin requires --auth-mode multi_user (resolved: {}).",
+            config.auth_mode
+        );
+        return 1;
+    }
+    let list = match acowork_user::account::store::load_accounts(&config.data_dir) {
+        Ok(list) => list,
+        Err(e) => {
+            eprintln!("failed to load the account store: {e}");
+            return 1;
+        }
+    };
+    let Some(admin) = list
+        .accounts
+        .iter()
+        .filter(|a| a.is_admin() && a.disabled_at.is_none())
+        .min_by_key(|a| a.created_at.as_str())
+    else {
+        return 1;
+    };
+    println!("{}", admin.user_id);
+    0
 }
 
 /// Read the admin password from a file or stdin.
