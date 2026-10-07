@@ -13,7 +13,7 @@ import { AgentAvatar } from "../common/AgentAvatar";
 import { Tooltip } from "../common/Tooltip";
 import { useTranslation } from "../../i18n/useTranslation";
 import { cn } from "../../lib/utils";
-import { Play, Square, Trash2, Info, Copy, Plus, Search, Package, Sparkles, Bug, ChevronRight, UserCog } from "lucide-react";
+import { Play, Square, Trash2, Info, Copy, Plus, Search, Package, Sparkles, Bug, ChevronRight, UserCog, Settings } from "lucide-react";
 import { StyledInput } from "../common/StyledInput";
 import { open } from "@tauri-apps/plugin-dialog";
 import { isProcessing, instanceIdOf, type AgentInfo, type CloneResponse, type NodeInfo } from "../../lib/types";
@@ -754,7 +754,6 @@ export function AgentList({ width }: AgentListProps) {
                     )}
                     collapsed={collapsed}
                     onToggle={() => toggleNode(group.nodeId)}
-                    agentCount={group.agents.length}
                     // ADR-087: `can_manage` undefined = pre-087 Gateway →
                     // treat as manageable (show); false = explicitly denied.
                     canManage={group.node?.can_manage !== false}
@@ -990,7 +989,6 @@ interface NodeGroupHeaderProps {
   statusLabel: string;
   collapsed: boolean;
   onToggle: () => void;
-  agentCount: number;
   /** ADR-087: caller may manage this node → show the permissions icon. */
   canManage: boolean;
   /** Opens the node permissions dialog. */
@@ -1005,7 +1003,6 @@ function NodeGroupHeader({
   statusLabel,
   collapsed,
   onToggle,
-  agentCount,
   canManage,
   onManagePermissions,
   permissionsLabel,
@@ -1057,9 +1054,6 @@ function NodeGroupHeader({
           aria-hidden
         />
         <span className="truncate">{nodeName}</span>
-        <span className="ml-auto pl-1 text-xs font-normal opacity-60">
-          {agentCount}
-        </span>
       </button>
       {/* ADR-087: node permissions entry — hidden unless the caller may
           manage this node (owner / guest / admin; Local mode counts). */}
@@ -1072,7 +1066,7 @@ function NodeGroupHeader({
           data-testid="node-permissions-btn"
           className="mr-2 flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-text-tertiary transition-colors hover:bg-nav-item-hover hover:text-zinc-600 dark:hover:text-zinc-300"
         >
-          <UserCog className="h-3.5 w-3.5" />
+          <Settings className="h-3.5 w-3.5" />
         </button>
       )}
     </div>
