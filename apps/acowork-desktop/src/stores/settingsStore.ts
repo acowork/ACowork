@@ -71,6 +71,8 @@ const STORAGE_KEY_ACCENT_COLOR = "acowork-accent-color";
 const STORAGE_KEY_GATEWAY_URL = "acowork-gateway-url";
 const STORAGE_KEY_GATEWAY_URL_HISTORY = "acowork-gateway-url-history";
 const STORAGE_KEY_GATEWAY_MODE = "acowork-gateway-mode";
+/** Remote-mode auto-start of the local Node on Desktop launch (ADR-087 follow-up). */
+const STORAGE_KEY_AUTO_START_LOCAL_NODE = "acowork-auto-start-local-node";
 
 /** Max retained gateway URLs in localStorage. 8 covers typical LAN/office/home/relay switches without leaking storage. */
 const GATEWAY_URL_HISTORY_MAX = 8;
@@ -240,6 +242,16 @@ function getPersistedGatewayMode(): GatewayMode {
   return DEFAULT_GATEWAY_MODE;
 }
 
+/** Read persisted auto-start-local-node flag; default ON (only missing
+ *  key or an explicit "false" turns it off). */
+function getPersistedAutoStartLocalNode(): boolean {
+  try {
+    const stored = localStorage.getItem(STORAGE_KEY_AUTO_START_LOCAL_NODE);
+    if (stored !== null) return stored !== "false";
+  } catch { }
+  return true;
+}
+
 /** Read persisted log file size from localStorage, fallback to 10 (MB) */
 function getPersistedLogFileSizeMb(): number {
   try {
@@ -302,6 +314,12 @@ interface SettingsStore {
    */
   gatewayUrlHistory: string[];
   gatewayMode: GatewayMode;
+  /**
+   * Remote mode only: auto-start this machine's local Node on Desktop
+   * launch when the machine is already enrolled (ADR-087 follow-up).
+   * First-time enrollment is never silent — the AgentList banner asks.
+   */
+  autoStartLocalNode: boolean;
   logLevel: string;
   logFileSizeMb: number;
   logFileCount: number;
@@ -325,6 +343,7 @@ interface SettingsStore {
   /** Push a URL to the front of the history (LRU). No-ops for falsy / duplicate-of-front. */
   recordGatewayUrl: (url: string) => void;
   setGatewayMode: (mode: GatewayMode) => void;
+  setAutoStartLocalNode: (on: boolean) => void;
   setLogLevel: (level: string) => void;
   setLogFileSizeMb: (size: number) => void;
   setLogFileCount: (count: number) => void;
@@ -387,6 +406,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => {
     gatewayUrl: getPersistedGatewayUrl(),
     gatewayUrlHistory: getPersistedGatewayUrlHistory(),
     gatewayMode: getPersistedGatewayMode(),
+    autoStartLocalNode: getPersistedAutoStartLocalNode(),
     logLevel: initialLogLevel,
     logFileSizeMb: getPersistedLogFileSizeMb(),
     logFileCount: getPersistedLogFileCount(),
@@ -499,6 +519,10 @@ export const useSettingsStore = create<SettingsStore>((set, get) => {
       // spawned Gateway. For remote→local the user must press Start
       // (or reload) — we don't auto-spawn here.
       pushGatewayConfigToRust(gatewayMode, get().gatewayUrl);
+    },
+    setAutoStartLocalNode: (autoStartLocalNode) => {
+      try { localStorage.setItem(STORAGE_KEY_AUTO_START_LOCAL_NODE, autoStartLocalNode ? "true" : "false"); } catch { }
+      set({ autoStartLocalNode });
     },
     setLogLevel: (logLevel) => {
       try { localStorage.setItem(STORAGE_KEY_LOG_LEVEL, logLevel); } catch { }

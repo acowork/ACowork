@@ -802,6 +802,75 @@ pub fn find_bundled_binary(
     ))
 }
 
+/// Read this machine's node identity (`{home}/identity.json`).
+///
+/// Returns `(node_id, enrolled)`: `node_id` is the stable routing key
+/// (None when the file does not exist yet — the machine has never run a
+/// node), `enrolled` is true when the identity carries a Gateway-issued
+/// `node_token` (the machine has been bound to an account).
+fn read_local_node_identity(home: &Path) -> (Option<String>, bool) {
+    let Some(v) = std::fs::read(home.join("identity.json"))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+    else {
+        return (None, false);
+    };
+    let node_id = v
+        .get("node_id")
+        .and_then(|t| t.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    let enrolled = v
+        .get("node_token")
+        .and_then(|t| t.as_str())
+        .is_some_and(|s| !s.is_empty());
+    (node_id, enrolled)
+}
+
+/// Is a local node on THIS machine already running?
+///
+/// Fast path: a running node answers `/health` on the local proxy port.
+/// Fallback (fixes the old `ponytail` gap): a node whose proxy failed to
+/// bind (port taken by another process) is invisible to the probe but is
+/// still registered online with the Gateway — reconcile the local
+/// `identity.json` node_id against `GET /api/nodes` before declaring it
+/// dead, so we never spawn a second process fighting over the same
+/// identity (two processes re-registering the same node_id kick each
+/// other off MQTT).
+async fn local_node_running(
+    client: &crate::gateway_client::GatewayClient,
+    base_url: &str,
+    local_node_id: Option<&str>,
+) -> bool {
+    let local_node_probe = format!("http://127.0.0.1:{}", acowork_core::node::NODE_PROXY_PORT);
+    if is_gateway_reachable(&local_node_probe).await {
+        return true;
+    }
+    let Some(id) = local_node_id else {
+        return false;
+    };
+    let url = format!("{}/api/nodes", base_url.trim_end_matches('/'));
+    let resp = match client
+        .send(|| Ok(client.request(reqwest::Method::GET, &url)))
+        .await
+    {
+        Ok(resp) => resp,
+        Err(e) => {
+            tracing::debug!("local_node_running: GET /api/nodes failed: {e}");
+            return false;
+        }
+    };
+    let Ok(nodes) = resp.json::<serde_json::Value>().await else {
+        return false;
+    };
+    nodes.as_array().is_some_and(|arr| {
+        arr.iter().any(|n| {
+            n.get("node_id").and_then(|v| v.as_str()) == Some(id)
+                && n.get("online").and_then(|v| v.as_bool()).unwrap_or(false)
+        })
+    })
+}
+
 /// ADR-087: "Create local Node" — spawn an `acowork-node` Agent on this
 /// machine, owned by the signed-in user.
 ///
@@ -810,39 +879,37 @@ pub fn find_bundled_binary(
 /// surfaces in the UI, config files, or logs. Idempotent: a machine that
 /// is already enrolled (`identity.json` carries a `node_token`) skips the
 /// token step; the spawn just reconnects.
+///
+/// `silent` marks the Desktop's auto-start path (remote mode, resume an
+/// existing enrollment after launch). A silent call on a NOT-yet-enrolled
+/// machine returns `skipped_not_enrolled` instead of minting a token:
+/// first-time enrollment binds an account-level resource and leaves a
+/// persistent daemon on the machine — that stays an explicit user action
+/// (the AgentList banner / menu button).
 #[tauri::command]
 pub async fn create_local_node(
     state: tauri::State<'_, AppState>,
     app_handle: tauri::AppHandle,
+    silent: Option<bool>,
 ) -> Result<serde_json::Value, String> {
     let node_bin = find_bundled_binary(&app_handle, "acowork-node")?;
     let home = acowork_core::node::default_node_home();
+    let (local_node_id, enrolled) = read_local_node_identity(&home);
 
-    // Dedup: a node already running on this machine answers `/health` on
-    // the local proxy port. Spawning a second one would fight over the
-    // same identity (two processes re-registering the same node_id kick
-    // each other off MQTT), so no-op instead.
-    // ponytail: a node whose proxy failed to bind (port taken by another
-    // process) is invisible to this probe; upgrade path = match the
-    // Gateway's node list against the local identity.json node_id.
-    let local_node_probe = format!("http://127.0.0.1:{}", acowork_core::node::NODE_PROXY_PORT);
-    if is_gateway_reachable(&local_node_probe).await {
+    let client = state.gateway.read().await;
+    let base_url = client.base_url().to_string();
+
+    // Dedup: never spawn a second node for the same identity.
+    if local_node_running(&client, &base_url, local_node_id.as_deref()).await {
         tracing::info!("ADR-087: create_local_node — a local node is already running, skipping spawn");
         return Ok(serde_json::json!({ "already_running": true }));
     }
 
-    let enrolled = std::fs::read(home.join("identity.json"))
-        .ok()
-        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
-        .and_then(|v| {
-            v.get("node_token")
-                .and_then(|t| t.as_str())
-                .map(|s| !s.is_empty())
-        })
-        .unwrap_or(false);
+    if silent.unwrap_or(false) && !enrolled {
+        tracing::info!("ADR-087: create_local_node(silent) — machine not enrolled yet, leaving first-run to the UI");
+        return Ok(serde_json::json!({ "skipped_not_enrolled": true }));
+    }
 
-    let client = state.gateway.read().await;
-    let base_url = client.base_url().to_string();
     let mqtt_host = reqwest::Url::parse(&base_url)
         .map_err(|e| format!("bad gateway base_url {base_url}: {e}"))?
         .host_str()
@@ -911,6 +978,26 @@ pub async fn create_local_node(
     std::mem::forget(child);
     tracing::info!(pid, enrolled, "ADR-087: local node started from Desktop");
     Ok(serde_json::json!({ "pid": pid, "was_enrolled": enrolled }))
+}
+
+/// ADR-087 follow-up: read-only local-node state for the Desktop startup
+/// hook and the AgentList banner.
+///
+/// `enrolled` — this machine has an identity bound to an account
+/// (`identity.json` carries a `node_token`). `running` — a node process
+/// for this machine's identity is alive (proxy `/health` or Gateway
+/// node-list reconciliation). Deliberately does NOT touch the bundled
+/// binary: the banner needs the state before any spawn decision.
+#[tauri::command]
+pub async fn local_node_status(
+    state: tauri::State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let home = acowork_core::node::default_node_home();
+    let (local_node_id, enrolled) = read_local_node_identity(&home);
+    let client = state.gateway.read().await;
+    let base_url = client.base_url().to_string();
+    let running = local_node_running(&client, &base_url, local_node_id.as_deref()).await;
+    Ok(serde_json::json!({ "enrolled": enrolled, "running": running }))
 }
 
 /// One-shot health probe used inside `spawn_gateway` to detect a Gateway
@@ -1123,4 +1210,83 @@ pub async fn debug_mqtt_start(
     state: tauri::State<'_, AppState>,
 ) -> Result<MqttDebugResponse, String> {
     call_mqtt_debug_endpoint(state, "start").await
+}
+
+#[cfg(test)]
+mod local_node_identity_tests {
+    use super::read_local_node_identity;
+    use std::path::PathBuf;
+
+    /// Create an isolated temp dir for one case; the dir name doubles as
+    /// the uniqueness guard (no tempfile dev-dependency in this crate).
+    fn scratch_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "acowork-localnode-{}-{}",
+            tag,
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn missing_identity_is_unenrolled_without_id() {
+        let dir = scratch_dir("missing");
+        let (node_id, enrolled) = read_local_node_identity(&dir);
+        assert_eq!(node_id, None);
+        assert!(!enrolled);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn unparsable_identity_degrades_to_missing() {
+        let dir = scratch_dir("garbage");
+        std::fs::write(dir.join("identity.json"), b"not json").unwrap();
+        let (node_id, enrolled) = read_local_node_identity(&dir);
+        assert_eq!(node_id, None);
+        assert!(!enrolled);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn identity_without_token_is_created_not_enrolled() {
+        let dir = scratch_dir("notoken");
+        std::fs::write(
+            dir.join("identity.json"),
+            br#"{"node_id":"abc-123","node_name":"box","gateway_managed":false,"created_at":"2026-01-01T00:00:00Z","enrollment":"created"}"#,
+        )
+        .unwrap();
+        let (node_id, enrolled) = read_local_node_identity(&dir);
+        assert_eq!(node_id.as_deref(), Some("abc-123"));
+        assert!(!enrolled);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn identity_with_token_is_enrolled() {
+        let dir = scratch_dir("token");
+        std::fs::write(
+            dir.join("identity.json"),
+            br#"{"node_id":"abc-123","node_name":"box","gateway_managed":false,"node_token":"tok","created_at":"2026-01-01T00:00:00Z","enrollment":"enrolled"}"#,
+        )
+        .unwrap();
+        let (node_id, enrolled) = read_local_node_identity(&dir);
+        assert_eq!(node_id.as_deref(), Some("abc-123"));
+        assert!(enrolled);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn empty_token_string_counts_as_not_enrolled() {
+        let dir = scratch_dir("emptytoken");
+        std::fs::write(
+            dir.join("identity.json"),
+            br#"{"node_id":"abc-123","node_name":"box","gateway_managed":false,"node_token":"","created_at":"2026-01-01T00:00:00Z"}"#,
+        )
+        .unwrap();
+        let (_, enrolled) = read_local_node_identity(&dir);
+        assert!(!enrolled);
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

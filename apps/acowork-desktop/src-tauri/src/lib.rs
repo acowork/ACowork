@@ -659,6 +659,7 @@ pub fn run() {
             // ADR-087: "Create local Node" — Desktop-spawned node bound
             // to the signed-in user (token minted internally, invisible).
             commands::gateway::create_local_node,
+            commands::gateway::local_node_status,
             commands::gateway::stop_local_gateway,
             commands::gateway::get_local_gateway_status,
             // ADR-059: latest Gateway bootstrap snapshot (MQTT cache + HTTP

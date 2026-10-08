@@ -44,6 +44,7 @@ import {
   getAccentPresetByHex,
 } from "../../lib/accentPresets";
 import { SettingsPage } from "../settings/SettingsPage";
+import { useLocalNodeAutoStart } from "../../hooks/useLocalNodeAutoStart";
 import { HarnessPage } from "../harness/HarnessPage";
 import { ProjectsView } from "../../views/ProjectsView";
 
@@ -83,6 +84,11 @@ const DEFAULT_FILE_WIDTH = 450;
 const FILE_WIDTH_KEY = "acowork-file-width";
 
 export function AppLayout() {
+  // ADR-087 follow-up: remote mode — resume this machine's enrolled local
+  // Node on launch (silent; first-time enrollment stays an explicit
+  // action via the AgentList banner).
+  useLocalNodeAutoStart();
+
   // Editor panel load failures stay local: a failed dynamic import used to
   // reject through the app-level ErrorBoundary (App.tsx) and blank the whole
   // window. Bumping the attempt builds a fresh lazy component and remounts
