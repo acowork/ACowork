@@ -123,7 +123,9 @@ pub fn start_lsp_relay_supervisor(cfg: LspRelaySupervisorConfig, state: SharedNo
                 state.write().await.lsp_relay_process = Some(relay_state);
                 publish_lsps_state(&cfg, relay_ready).await;
             } else {
-                match spawn_lsp_relay(&cfg.data_dir, port, &cfg.health_url).await {
+                match spawn_lsp_relay(&cfg.data_dir, port, &cfg.health_url, &cfg.advertise_host)
+                    .await
+                {
                     Ok((relay_state, child)) => {
                         let child_pid = relay_state.pid;
                         tracing::info!(
@@ -286,7 +288,7 @@ async fn run_supervisor(
         tracing::info!(attempt = attempts, ?backoff, "Restarting LSP Relay process");
         sleep(backoff).await;
 
-        match spawn_lsp_relay(&cfg.data_dir, port, &cfg.health_url).await {
+        match spawn_lsp_relay(&cfg.data_dir, port, &cfg.health_url, &cfg.advertise_host).await {
             Ok((new_state, child)) => {
                 tracing::info!(pid = new_state.pid, port = new_state.port, attempt = attempts, "LSP Relay restarted");
                 {

@@ -38,6 +38,26 @@ pub(crate) fn http_client() -> &'static reqwest::Client {
 /// Default port for the LSP Relay service.
 pub const LSP_RELAY_DEFAULT_PORT: u16 = 19878;
 
+/// Build the relay's argv. Split out from [`spawn_lsp_relay`] so the
+/// bind-host contract is assertable without spawning the real binary.
+///
+/// ADR-055 §6.3 D3: the `--host` passed here must equal the host the
+/// node advertises on `acowork/nodes/{id}/lsps`. Hardcoding loopback
+/// while advertising a LAN IP produces an endpoint no one can reach —
+/// which is exactly the bug this signature exists to prevent.
+fn relay_argv(bind_host: &str, port: u16, node_health_url: &str) -> Vec<String> {
+    vec![
+        "--host".into(),
+        bind_host.into(),
+        "--port".into(),
+        port.to_string(),
+        "--gateway-health-url".into(),
+        node_health_url.into(),
+        "--log-level".into(),
+        "info".into(),
+    ]
+}
+
 /// State of the LSP Relay process.
 #[derive(Debug, Clone)]
 pub struct LspRelayProcessState {
@@ -97,10 +117,19 @@ pub fn attach_existing_lsp_relay(
 /// Node process) or the sibling-directory fallback chain in
 /// `acowork-lsp-relay/src/config.rs`. No explicit `--lsp-config-dir`
 /// argument is passed.
+///
+/// `bind_host` is the address the relay actually listens on. It MUST
+/// match the host the node advertises on `acowork/nodes/{id}/lsps`,
+/// or ADR-055 §6.3 D3 ("上报完整可达 endpoint") is violated and every
+/// remote consumer connects to a dead port. The node's own
+/// `advertise_host` is the source of truth (local mode → `127.0.0.1`,
+/// remote mode → LAN IP), so pass it through unchanged rather than
+/// hardcoding loopback.
 pub async fn spawn_lsp_relay(
     data_dir: &Path,
     port: u16,
     node_health_url: &str,
+    bind_host: &str,
 ) -> Result<(LspRelayProcessState, tokio::process::Child)> {
     // Locate the acowork-lsp-relay binary (sibling of current executable)
     let relay_bin = std::env::current_exe()
@@ -145,14 +174,7 @@ pub async fn spawn_lsp_relay(
     tracing::info!(path = %log_path.display(), "LSP Relay process logging to file");
 
     let mut cmd = tokio::process::Command::new(&relay_bin);
-    cmd.arg("--host")
-        .arg("127.0.0.1")
-        .arg("--port")
-        .arg(port.to_string())
-        .arg("--gateway-health-url")
-        .arg(node_health_url)
-        .arg("--log-level")
-        .arg("info")
+    cmd.args(relay_argv(bind_host, port, node_health_url))
         .stdout(Stdio::null())
         .stderr(Stdio::from(log_file));
 
@@ -179,9 +201,10 @@ pub async fn spawn_lsp_relay(
     })?;
 
     tracing::info!(
-        "Spawned acowork-lsp-relay process (PID: {}, port: {})",
+        "Spawned acowork-lsp-relay process (PID: {}, port: {}, host: {})",
         pid,
-        port
+        port,
+        bind_host
     );
 
     Ok((
@@ -256,6 +279,31 @@ pub async fn wait_for_lsp_relay_ready(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Pull the value following `flag` out of the argv.
+    fn argv_value(argv: &[String], flag: &str) -> String {
+        let i = argv.iter().position(|a| a == flag).expect("flag present");
+        argv[i + 1].clone()
+    }
+
+    #[test]
+    fn relay_binds_the_advertised_host() {
+        // ADR-055 §6.3 D3. The regression: `--host 127.0.0.1` hardcoded
+        // while the node advertised `192.168.x.x:19878` — every remote
+        // consumer (Desktop Monaco, harness LSP panel) then fetched a dead
+        // port and reported a bare "Failed to fetch".
+        let argv = relay_argv("192.168.17.113", 19878, "http://127.0.0.1:19900/health");
+        assert_eq!(argv_value(&argv, "--host"), "192.168.17.113");
+        assert_eq!(argv_value(&argv, "--port"), "19878");
+    }
+
+    #[test]
+    fn relay_stays_on_loopback_in_local_mode() {
+        // Local-mode regression guard: the Gateway-spawned node advertises
+        // 127.0.0.1, and the relay must not drift onto the LAN there.
+        let argv = relay_argv("127.0.0.1", 19878, "http://127.0.0.1:19900/health");
+        assert_eq!(argv_value(&argv, "--host"), "127.0.0.1");
+    }
 
     #[test]
     fn test_lsp_relay_process_state_construction() {
