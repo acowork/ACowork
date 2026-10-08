@@ -519,6 +519,10 @@
 
 /* Dark mode overrides */
 .dark {
+  /* UA-drawn form widgets (date/time picker icon, password reveal
+     button, scrollbars) pick their palette from this, not from our
+     tokens — without it they render black-on-dark and vanish. */
+  color-scheme: dark;
   --color-primary: hsl(210 40% 96.1%);
   --color-primary-foreground: hsl(222.2 47.4% 11.2%);
   --color-accent: hsl(222.2 47.4% 11.2%);

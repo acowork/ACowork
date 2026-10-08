@@ -105,7 +105,7 @@ vi.mock("../../stores/authStore", () => ({
   },
 }));
 
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { useState } from "react";
 import { PermissionDialog, type PermissionTarget } from "./PermissionDialog";
 import * as gatewayApi from "../../lib/gateway-api";
@@ -228,7 +228,7 @@ describe("PermissionDialog visibility toggle", () => {
 
     await waitFor(() => expect((sw as HTMLInputElement).checked).toBe(true));
     // The Save button only enables once the draft diverges from the server.
-    const save = screen.getByRole("button", { name: "permissionDialog.save" }) as HTMLButtonElement;
+    const save = screen.getByRole("button", { name: "common.confirm" }) as HTMLButtonElement;
     expect(save.disabled).toBe(false);
   });
 
@@ -253,7 +253,7 @@ describe("PermissionDialog visibility toggle", () => {
     fireEvent.click(sw);
     await waitFor(() => expect((sw as HTMLInputElement).checked).toBe(true));
 
-    const save = screen.getByRole("button", { name: "permissionDialog.save" });
+    const save = screen.getByRole("button", { name: "common.confirm" });
     fireEvent.click(save);
 
     // The draft snaps back — a rejected write must never leave the UI
@@ -469,7 +469,7 @@ describe("PermissionDialog visibility toggle", () => {
       // Selecting is a draft: nothing travels until Save.
       expect(patchNodeOwner).not.toHaveBeenCalled();
 
-      fireEvent.click(screen.getByRole("button", { name: "permissionDialog.save" }));
+      fireEvent.click(screen.getByRole("button", { name: "common.confirm" }));
       await waitFor(() =>
         expect(patchNodeOwner).toHaveBeenCalledWith("n-1", "u-nick"),
       );
@@ -512,7 +512,7 @@ describe("PermissionDialog visibility toggle", () => {
       await screen.findByText("permissionDialog.visibilityOffHint");
 
       fireEvent.change(ownerSelect(), { target: { value: "" } });
-      fireEvent.click(screen.getByRole("button", { name: "permissionDialog.save" }));
+      fireEvent.click(screen.getByRole("button", { name: "common.confirm" }));
 
       await waitFor(() => expect(patchNodeOwner).toHaveBeenCalledWith("n-1", null));
     });
@@ -571,7 +571,7 @@ describe("PermissionDialog visibility toggle", () => {
       const sw = screen.getByRole("switch");
       fireEvent.click(sw);
       await waitFor(() => expect((sw as HTMLInputElement).checked).toBe(true));
-      fireEvent.click(screen.getByRole("button", { name: "permissionDialog.save" }));
+      fireEvent.click(screen.getByRole("button", { name: "common.confirm" }));
 
       await waitFor(() =>
         expect(patchNodeVisibility).toHaveBeenCalledWith("n-1", "public"),
@@ -707,7 +707,7 @@ describe("PermissionDialog node display name (ADR-075 D4)", () => {
     const renamed = await renderNode();
 
     fireEvent.change(nameInput(), { target: { value: "gpu-2" } });
-    fireEvent.click(screen.getByRole("button", { name: "permissionDialog.save" }));
+    fireEvent.click(screen.getByRole("button", { name: "common.confirm" }));
 
     await waitFor(() =>
       expect(patchNodeName).toHaveBeenCalledWith("n-1", "gpu-2"),
@@ -717,12 +717,56 @@ describe("PermissionDialog node display name (ADR-075 D4)", () => {
     expect(renamed).toEqual([["n-1", "gpu-2"]]);
   });
 
+  // The footer is a settings pair, not a browser page: 确认 commits every
+  // draft in the form and dismisses; 取消 discards them and dismisses. Same
+  // for both targets — there is no reason a node and an agent would differ.
+  it("confirms: saves the draft and closes", async () => {
+    const { patchNodeVisibility } = await import("../../lib/gateway-api");
+    (patchNodeVisibility as ReturnType<typeof vi.fn>).mockClear();
+    const closed: string[] = [];
+    render(<PermissionDialog open target={NODE} onClose={() => closed.push("node")} />);
+    const sw = await screen.findByRole("switch");
+    fireEvent.click(sw);
+    fireEvent.click(screen.getByRole("button", { name: "common.confirm" }));
+    await waitFor(() => expect(patchNodeVisibility).toHaveBeenCalledWith("n-1", "public"));
+    await waitFor(() => expect(closed).toEqual(["node"]));
+  });
+
+  it("cancels: closes without writing anything", async () => {
+    const { patchNodeVisibility } = await import("../../lib/gateway-api");
+    (patchNodeVisibility as ReturnType<typeof vi.fn>).mockClear();
+    const closed: string[] = [];
+    render(<PermissionDialog open target={NODE} onClose={() => closed.push("node")} />);
+    const sw = await screen.findByRole("switch");
+    fireEvent.click(sw);
+    fireEvent.click(screen.getByRole("button", { name: "common.cancel" }));
+    expect(closed).toEqual(["node"]);
+    expect(patchNodeVisibility).not.toHaveBeenCalled();
+  });
+
+  it("titles a node dialog Settings and an agent dialog Permissions", async () => {
+    render(<PermissionDialog open target={NODE} onClose={() => {}} />);
+    await screen.findByRole("switch");
+    expect(screen.getByText("permissionDialog.nodeSettingsTitle")).toBeDefined();
+    cleanup();
+
+    render(
+      <PermissionDialog
+        open
+        target={{ kind: "agent", id: "i-1", name: "An Agent" }}
+        onClose={() => {}}
+      />,
+    );
+    await screen.findByRole("switch");
+    expect(screen.getByText("permissionDialog.title")).toBeDefined();
+  });
+
   it("keeps Save disabled for a slug the Gateway would reject", async () => {
     const { patchNodeName } = await import("../../lib/gateway-api");
     (patchNodeName as ReturnType<typeof vi.fn>).mockClear();
     await renderNode();
 
-    const save = screen.getByRole("button", { name: "permissionDialog.save" });
+    const save = screen.getByRole("button", { name: "common.confirm" });
     for (const bad of ["A", "has space", "double--hyphen", "-lead", "local"]) {
       fireEvent.change(nameInput(), { target: { value: bad } });
       expect((save as HTMLButtonElement).disabled).toBe(true);
@@ -744,7 +788,7 @@ describe("PermissionDialog node display name (ADR-075 D4)", () => {
     // issued just because the field was touched.
     fireEvent.change(nameInput(), { target: { value: "My Node" } });
     expect(
-      (screen.getByRole("button", { name: "permissionDialog.save" }) as HTMLButtonElement)
+      (screen.getByRole("button", { name: "common.confirm" }) as HTMLButtonElement)
         .disabled,
     ).toBe(true);
     expect(patchNodeName).not.toHaveBeenCalled();

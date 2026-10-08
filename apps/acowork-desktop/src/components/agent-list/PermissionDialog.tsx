@@ -274,6 +274,9 @@ export function PermissionDialog({ open, target, onClose, onRenamedNode }: Permi
         onRenamedNode?.(target.id, nodeName);
       }
       await load();
+      // OK means apply-and-dismiss: one confirm commits every draft in
+      // the form and closes it. Cancel (below) is the discard path.
+      onClose();
     } catch (e) {
       // `HttpApiError.message` is already the localized denial copy;
       // `String(e)` would re-prefix it with "Error:" and dump raw bodies.
@@ -428,7 +431,16 @@ export function PermissionDialog({ open, target, onClose, onRenamedNode }: Permi
         {/* Header */}
         <div className="flex items-center justify-between border-b border-border-divider px-5 py-3 min-h-[var(--ui-dialog-zone-h)]">
           <h3 className="truncate text-sm font-semibold">
-            {t("permissionDialog.title")}
+            {/* A node opens here from the sidebar's settings gear, so it is
+                titled "Settings" — its first field is that node's own
+                display name, and "Permissions" made the gear a lie. An
+                agent's dialog really is only permissions, so it keeps
+                the ACL wording. */}
+            {t(
+              target.kind === "node"
+                ? "permissionDialog.nodeSettingsTitle"
+                : "permissionDialog.title",
+            )}
             <span className="ml-1.5 font-normal text-text-tertiary">{target.name}</span>
           </h3>
           <button
@@ -663,7 +675,7 @@ export function PermissionDialog({ open, target, onClose, onRenamedNode }: Permi
             onClick={onClose}
             className="rounded-md px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-zinc-100 dark:hover:bg-zinc-700"
           >
-            {t("permissionDialog.close")}
+            {t("common.cancel")}
           </button>
           {editable && (
             <button
@@ -671,7 +683,7 @@ export function PermissionDialog({ open, target, onClose, onRenamedNode }: Permi
               disabled={!dirty || saving}
               className="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-xs font-medium text-white transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
             >
-              {t("permissionDialog.save")}
+              {t("common.confirm")}
             </button>
           )}
         </div>
