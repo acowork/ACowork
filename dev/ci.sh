@@ -352,7 +352,7 @@ run_permission_route_redline() {
     # update IS the review moment where the author must state the tier
     # (classify() default-denies unknown segments to AgentManage, so this
     # red line guards the *visibility* of new routes, not their safety).
-    local known_segments="avatar avatar-config avatar-file clone config cron debug files git health interactions latest-session lsp-endpoint manifest mcp-servers mcp-tools memory messages model owner permissions prompts publish rag search sessions shell-risk-rules skills start status stop tools upgrade visibility workspaces {*rest}"
+    local known_segments="avatar avatar-config avatar-file claim clone config cron debug files git guests health interactions latest-session lsp-endpoint manifest mcp-servers mcp-tools memory messages model owner permissions prompts publish rag search sessions shell-risk-rules skills start status stop tools upgrade visibility workspaces {*rest}"
     local segments seg
     segments=$(grep -rhoE '\.route\("/api/agents/\{id\}/[^"{]*' --include='*.rs' "$root"         | sed -E 's|.*\{id\}/||; s|/.*$||'         | grep -v '^$' | sort -u)
     # Also the bare catch-all wildcard (proxy forwards `{*rest}`).
@@ -374,9 +374,10 @@ run_permission_route_redline() {
     done
 
     # (3) Node side: /api/nodes/{id}/... head segments must be known too
-    # (owner / guests / visibility are the attribution trio; anything else
-    # is NodeManage by the route_requirement default).
-    local known_node_segments="owner guests visibility permissions"
+    # (owner / guests / visibility are the attribution trio; `claim` is the
+    # ADR-087 D7 ownerless-claim route, handler-enforced via `Tier::Claim`;
+    # anything else is NodeManage by the route_requirement default).
+    local known_node_segments="claim owner guests visibility permissions"
     local nsegs nseg
     nsegs=$(grep -rhoE '\.route\("/api/nodes/\{id\}/[^"{]*' --include='*.rs' "$root"         | sed -E 's|.*\{id\}/||; s|/.*$||'         | grep -v '^$' | sort -u)
     for nseg in $nsegs; do
@@ -391,6 +392,52 @@ run_permission_route_redline() {
     done
 
     echo "Permission-route red line: OK"
+}
+
+# Embedding ONNX Runtime compatibility red line.
+#
+# `ort` resolves its API table at runtime with GetApi(ORT_API_VERSION). If the
+# compiled api-N is newer than the installed libonnxruntime, GetApi returns null
+# and `ort` PANICS inside its `Once`-backed global init — poisoning it for the
+# whole process. Every subsequent load then fails with a misleading
+# "Mutex poisoned" (the poison of ort's own internal Mutex, not ours).
+#
+# The compiled api level must therefore never exceed the ORT minor version the
+# project still supports (ORT_VERSION_LEGACY in dev/setup_ort.sh, the legacy
+# glibc 2.31 build). GetApi is backward compatible, so a LOW api level runs
+# fine on a newer runtime — this is a one-sided constraint.
+run_ort_api_redline() {
+    echo "Checking ONNX Runtime API-level compatibility red line..."
+    local cargo_toml="$SCRIPT_DIR/../core/Cargo.toml"
+    local setup_ort="$SCRIPT_DIR/setup_ort.sh"
+
+    local api_feature
+    api_feature=$(grep -oE '"api-[0-9]+"' "$cargo_toml" | head -1 | grep -oE '[0-9]+')
+    if [ -z "$api_feature" ]; then
+        echo "ERROR: could not find an api-N feature for ort in core/Cargo.toml."
+        exit 1
+    fi
+
+    local legacy
+    legacy=$(grep -oE '^ORT_VERSION_LEGACY="[0-9]+\.[0-9]+' "$setup_ort" | grep -oE '[0-9]+\.[0-9]+$')
+    if [ -z "$legacy" ]; then
+        echo "ERROR: could not read ORT_VERSION_LEGACY from dev/setup_ort.sh."
+        exit 1
+    fi
+
+    # ORT 1.19.2 defines ORT_API_VERSION 19 — the api-N feature number is
+    # the API level, which tracks the runtime MINOR version.
+    local legacy_minor="${legacy#*.}"
+    if [ "$api_feature" -gt "$legacy_minor" ]; then
+        echo "ERROR: ort api-${api_feature} is newer than ONNX Runtime ${legacy}"
+        echo "(ORT_VERSION_LEGACY in dev/setup_ort.sh, the oldest supported runtime)."
+        echo "Loading any embedding model will panic in ort's global init and then"
+        echo "fail as 'Mutex poisoned'. Lower the api-N feature, or raise"
+        echo "ORT_VERSION_LEGACY and the minimum glibc it implies."
+        exit 1
+    fi
+
+    echo "ONNX Runtime API red line: OK (ort api-${api_feature} <= ORT ${legacy})"
 }
 
 run_clippy() {
@@ -461,6 +508,7 @@ case "$MODE" in
         run_user_auth_mode_redline
         run_user_chat_path_redline
         run_permission_route_redline
+        run_ort_api_redline
         run_check
         ;;
     clippy)
@@ -484,6 +532,7 @@ case "$MODE" in
         run_gateway_auth_scope_redline
         run_user_auth_mode_redline
         run_user_chat_path_redline
+        run_ort_api_redline
         run_check
         run_clippy
         run_test
