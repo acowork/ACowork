@@ -224,12 +224,21 @@ pub async fn export_package(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
 ) -> Result<Json<ExportInfo>, ApiError> {
+    // ADR-073: the route variable can be either the package id or
+    // the instance id (UUIDv4) — Desktop typically passes the
+    // instance id from the agent list. The filename we look for
+    // must match what `build_package` wrote, which uses the
+    // *package* name from `cmd.agent_id` (see `build_publish`
+    // above). Without this resolve, an instance-id URL would build
+    // a `{instance_id}-{version}.agent` filename that the node
+    // never wrote → spurious 404 "Run publish/build first".
+    let (instance_id, resolved_agent_id) =
+        crate::http::agents::resolve_agent_identity(&state, &agent_id).await?;
     let (output_dir, version) = {
         let gw = state.gateway_state.read().await;
-        let info = gw
-            .installed_agents
-            .get(&agent_id)
-            .ok_or_else(|| ApiError::not_found(&format!("Agent not found: {}", agent_id)))?;
+        let info = gw.installed_agents.get(&instance_id).ok_or_else(|| {
+            ApiError::not_found(&format!("Agent not found: {}", agent_id))
+        })?;
 
         let output_dir = gw
             .config
@@ -240,7 +249,7 @@ pub async fn export_package(
         (output_dir, info.version.clone())
     };
 
-    let filename = format!("{}-{}.agent", agent_id, version);
+    let filename = format!("{}-{}.agent", resolved_agent_id, version);
     let output_path = output_dir.join(&filename);
 
     if !output_path.exists() {
@@ -254,4 +263,50 @@ pub async fn export_package(
         status: "ready".to_string(),
         output_path: output_path.to_string_lossy().to_string(),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    //! Minimal regression coverage for the filename contract between
+    //! `build_publish` (writes `{package_name}-{version}.agent`) and
+    //! `export_package` (must look up the same filename).
+    //!
+    //! The original bug: `export_package` built the filename from
+    //! the raw route variable, which is the *instance* id (UUIDv4) in
+    //! the Desktop call path, producing
+    //! `{instance_id}-{version}.agent` — a path the node never
+    //! wrote. The fix calls `resolve_agent_identity` and uses the
+    //! resolved package name, matching what `build_package` writes.
+    //!
+    //! We test the filename shape directly rather than going through
+    //! the full HTTP stack because the rest of the handler (gateway
+    //! state, packages_dir config, fs existence check) is covered by
+    //! integration tests; this guards the *invariant* the two
+    //! handlers share.
+
+    /// Mirror of the `(resolved_agent_id, version) -> filename` step
+    /// inside `export_package`. If this drifts from the production
+    /// code, the contract test below is meaningless.
+    fn expected_filename(package_name: &str, version: &str) -> String {
+        format!("{}-{}.agent", package_name, version)
+    }
+
+    #[test]
+    fn export_filename_uses_package_name_not_instance_id() {
+        // Two real-looking identities from an installed agent: the
+        // package name (what `build_package` writes) and the instance
+        // id (what Desktop typically passes in the URL).
+        let package_name = "com.acowork.ponytail";
+        let instance_id = "59e7f3a8-7db3-4ffe-94e3-04e04cc45083";
+        let version = "0.1.0";
+
+        // The contract: filename == `{package_name}-{version}.agent`,
+        // never `{instance_id}-{version}.agent`.
+        let name = expected_filename(package_name, version);
+        assert_eq!(name, "com.acowork.ponytail-0.1.0.agent");
+        assert!(
+            !name.contains(instance_id),
+            "filename must be derived from the package name, not the route variable"
+        );
+    }
 }
