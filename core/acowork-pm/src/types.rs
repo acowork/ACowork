@@ -259,14 +259,17 @@ pub struct Project {
     #[serde(default)]
     pub description: String,
     pub status: ProjectStatus,
-    /// 创建者：`human` 或 `agent_instance_id`（UUID，ADR-073）。
+    /// 创建者身份：Agent 实例 `instance_id`（UUID，ADR-073）、人类账号
+    /// `user_id`（ADR-076，REST 面 `X-Actor` 注入）、或 local 模式的哨兵常量
+    /// `"human"`。按 [`crate::types::MemberKind::from_actor`] 判别身份。
     pub created_by: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     /// 额外键值对（颜色、图标、标签等 UI 偏好）
     #[serde(default)]
     pub metadata: IndexMap<String, serde_json::Value>,
-    /// 项目成员（Agent 实例列表）。`#[serde(default)]` 保证旧 `project.json`
+    /// 项目成员（Agent 实例 + 人类账号，ADR-076 §决策 11）。创建者一定在
+    /// 列表里（`kind` 标出身份）；`#[serde(default)]` 保证旧 `project.json`
     /// 无此字段时读出空数组（零迁移）。
     #[serde(default)]
     pub members: Vec<ProjectMember>,

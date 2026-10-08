@@ -55,7 +55,9 @@ export interface PmProjectMember {
   instance_id: string;
   /**
    * 身份类型。服务端 `#[serde(default)]` = `agent`，兼容旧数据（零迁移）；
-   * 前端默认 `agent`。仅 MCP `pm_get_project` 路径透出（REST 路径暂不含）。
+   * 前端默认 `agent`。**REST 与 MCP 两条路径都返回**（Rust `ProjectMember`
+   * 无 `skip_serializing_if`），消费方按它决定去 agentStore 还是登录账号
+   * 解析显示信息 —— 见 `views/pm/pmMembers.ts`。
    */
   kind?: PmMemberKind;
   added_at: string;
@@ -64,8 +66,9 @@ export interface PmProjectMember {
    *
    * **可选字段**：仅在调用方走 MCP `pm_get_project` 路径时填充（PM 服务端
    * 经 `HttpAgentDirectory` join Gateway `AgentListResponse.role` 透出）。
-   * REST `GET /projects/:pid` 仍只返回 `instance_id` + `added_at`（前端
-   * 当前消费的是 REST 路径，member 元信息由 `agentStore` join 提供）。
+   * REST `GET /projects/:pid` 只返回 `ProjectMember` 原生字段
+   * （`instance_id` / `kind` / `added_at`），member 显示信息由前端 join
+   * agentStore + 登录账号提供。
    *
    * - 缺失 / 未声明 manifest role → `null`
    * - `NoopAgentDirectory` 宽松模式 → `null`

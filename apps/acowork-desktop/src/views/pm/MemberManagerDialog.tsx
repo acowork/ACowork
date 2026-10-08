@@ -2,13 +2,15 @@
  * MemberManagerDialog — 项目成员管理对话框。
  *
  * 需求：每个项目可添加 Agent 实例为项目成员。联动指派的前提：
- * 任务 assignee 必须是项目成员（或 "human"），因此成员管理入口
- * 放在 ProjectHeader（成员头像组点击打开）。
+ * 任务 assignee 必须是项目成员，因此成员管理入口放在 ProjectHeader
+ * （成员头像组点击打开）。
  *
  * 数据契约：
- * - 成员以 `instance_id`（UUID，ADR-073）标识，与 task.assignee 同一身份体系。
- * - 头像/名称不存快照，实时 join agentStore（agents: instance_id → AgentStorage）。
- * - 已是成员但 agentStore 缺失（Agent 已卸载）→ 占位行，仅允许移除。
+ * - 成员以 `instance_id` 标识，与 task.assignee 同一身份体系；`kind` 区分
+ *   Agent 实例 / 人类账号（ADR-076 §决策 11）。
+ * - 头像/名称不存快照，实时 join —— Agent 走 agentStore，人类走登录账号，
+ *   两条路都收敛到 `pmMembers.resolveMembers`。
+ * - 已是成员但解析不出名字（Agent 已卸载）→ 占位行，仅允许移除。
  * - 添加失败按 PmApiError.code 映射本地化文案（409 member_already_exists /
  *   member_has_open_tasks / 404 member_not_found）。
  */
@@ -21,6 +23,7 @@ import { showToast } from "../../components/common/ToastProvider";
 import { useTranslation } from "../../i18n/useTranslation";
 import { PmApiError } from "../../lib/pm-api";
 import type { PmProject } from "../../lib/pm-types";
+import { MemberAvatar, useResolvedMembers } from "./pmMembers";
 
 interface MemberManagerDialogProps {
   project: PmProject;
@@ -106,15 +109,8 @@ export function MemberManagerDialog({ project, onClose }: MemberManagerDialogPro
     [agents, memberIds],
   );
 
-  // 已是成员：agentStore 存在 → 解析显示；不存在（Agent 已卸载）→ 占位
-  const currentMembers = useMemo(
-    () =>
-      project.members.map((m) => ({
-        instance_id: m.instance_id,
-        meta: agents[m.instance_id]?.meta ?? null,
-      })),
-    [project.members, agents],
-  );
+  // 已是成员：解析得出名字 → 显示；解析不出（Agent 已卸载）→ 占位
+  const currentMembers = useResolvedMembers(project.members);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
@@ -157,22 +153,10 @@ export function MemberManagerDialog({ project, onClose }: MemberManagerDialogPro
                   key={m.instance_id}
                   className="flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-zinc-50 dark:hover:bg-zinc-800/60"
                 >
-                  {m.meta ? (
-                    <AgentAvatar
-                      agentId={m.meta.instance_id}
-                      displayName={m.meta.display_name ?? m.meta.name}
-                      avatarUrl={m.meta.avatar ?? null}
-                      builtinAvatarId={m.meta.builtin_avatar ?? null}
-                      size={24}
-                    />
-                  ) : (
-                    <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-zinc-200 text-10 text-text-tertiary dark:bg-zinc-700">
-                      ?
-                    </div>
-                  )}
+                  <MemberAvatar member={m} size={24} />
                   <div className="min-w-0 flex-1">
                     <div className="truncate text-xs text-text ">
-                      {m.meta?.display_name ?? m.meta?.name ?? t("pm.memberNotFound")}
+                      {m.displayName ?? t("pm.memberNotFound")}
                     </div>
                     <div className="truncate text-10 text-text-tertiary">{m.instance_id}</div>
                   </div>
