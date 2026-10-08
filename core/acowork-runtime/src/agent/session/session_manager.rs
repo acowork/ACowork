@@ -1613,11 +1613,20 @@ impl SessionManager {
         session_id: &str,
     ) -> Result<Option<SessionOpenOutcome>> {
         let work_dir = std::path::PathBuf::from(&self.core.config.work_dir);
-        match self.get_lifecycle_state(session_id, &work_dir) {
-            SessionLifecycleState::NotFound => Ok(None),
-            SessionLifecycleState::Active => Ok(Some(SessionOpenOutcome::AlreadyActive)),
-            SessionLifecycleState::Closed => self.open(session_id, &work_dir).await.map(Some),
-        }
+        let outcome = match self.get_lifecycle_state(session_id, &work_dir) {
+            SessionLifecycleState::NotFound => return Ok(None),
+            SessionLifecycleState::Active => SessionOpenOutcome::AlreadyActive,
+            SessionLifecycleState::Closed => self.open(session_id, &work_dir).await?,
+        };
+        // Every successful open — including the no-op AlreadyActive path —
+        // refreshes the session's retained `SessionConfig` snapshot. This is
+        // an invariant of the open state machine, not of one transport: the
+        // availability fan-out only re-publishes sessions that were active at
+        // the moment of a transition, so a session opened after a transition
+        // would otherwise keep serving a stale retained `llm_availability`
+        // forever (permanent "syncing LLM config" banner in the Desktop).
+        self.republish_session_config(session_id);
+        Ok(Some(outcome))
     }
 
     /// ADR-076 §决策 4: set the read visibility of a session.
@@ -2580,6 +2589,38 @@ After installation, ask the user to re-enable the MCP server.",
             .iter()
             .filter_map(|(sid, h)| h.conversation.as_ref().map(|c| (sid.clone(), c.clone())))
             .collect()
+    }
+
+    /// Re-publish one active session's `SessionConfig` snapshot.
+    ///
+    /// Called by [`Self::resume_session`] on every successful open (including
+    /// the `AlreadyActive` path, where no config mutation happens) so the
+    /// broker's **retained** snapshot for this session is refreshed. Without
+    /// this, a session whose retained `llm_availability` was stamped `Loading`
+    /// during the startup race keeps serving that stale value forever: the
+    /// availability fan-out only re-publishes sessions that were active at the
+    /// moment of a *transition*, so a session opened after the transition
+    /// never gets corrected and the Desktop shows a permanent "syncing LLM
+    /// config" banner. The chunk relay stamps the authoritative
+    /// `reg.current()` value on every `SessionConfigChanged` publish, so this
+    /// single call carries the true current availability.
+    ///
+    /// A no-op when the session is not active or its conversation has not
+    /// been attached (logged at debug level — the two cases are
+    /// indistinguishable from the caller's side).
+    pub fn republish_session_config(&self, session_id: &str) {
+        match self
+            .sessions
+            .get(session_id)
+            .and_then(|handle| handle.conversation.as_ref())
+        {
+            Some(conv) => conv.notify_config_change(),
+            None => tracing::debug!(
+                session_id = %session_id,
+                "republish_session_config: no live conversation (session not active \
+                 or conversation not attached), skipping"
+            ),
+        }
     }
 
     /// Store the latest session info determined during the startup scan.
@@ -5057,5 +5098,192 @@ mod tests {
         assert!(meta.is_readable_by(&SessionScope::User("u-bob".to_string())));
 
         let _ = std::fs::remove_dir_all(&work_dir);
+    }
+
+    // ── resume_session retained-config republish (open-state-machine invariant) ──
+
+    /// Build a `SessionManager` wired to a chunk channel over a TempDir work
+    /// dir, returned together with the channel receiver. The chunk channel is
+    /// what the per-session config relay publishes `SessionConfigChanged`
+    /// through, so observing it proves a republish happened.
+    fn republish_test_manager(
+        dir: &tempfile::TempDir,
+    ) -> (SessionManager, tokio::sync::mpsc::Receiver<SessionChunkEvent>) {
+        let config = crate::config::RuntimeConfig {
+            work_dir: dir.path().to_string_lossy().to_string(),
+            ..Default::default()
+        };
+        let manifest = acowork_core::AgentManifest::from_toml(
+            r#"
+            agent_id = "com.test.republish"
+            version = "1.0.0"
+            name = "Test republish"
+            description = "Pin resume_session retained-config refresh"
+            author = "test"
+            runtime_version = "0.1.0"
+
+            [llm]
+            provider = "mock"
+            model = "test-model"
+            "#,
+        )
+        .unwrap();
+        let provider = Arc::new(acowork_core::providers::mock::MockProvider::single_text(
+            "test",
+        ));
+        let core = Arc::new(AgentCore::new(
+            config,
+            manifest,
+            provider,
+            Vec::<crate::agent::agent_core::BuiltinToolEntry>::new(),
+        ));
+        let (chunk_tx, chunk_rx) = tokio::sync::mpsc::channel(64);
+        let mut manager = SessionManager::new(
+            core,
+            SessionManagerConfig {
+                chunk_tx: Some(chunk_tx),
+                ..Default::default()
+            },
+        );
+        manager.set_resolver(Arc::new(std::sync::RwLock::new(
+            WorkspaceResolver::new_for_test(vec![]),
+        )));
+        (manager, chunk_rx)
+    }
+
+    /// Let queued relay forwards land, then drain the chunk channel. Used to
+    /// establish "nothing else is in flight" before asserting that an open
+    /// itself produced a `SessionConfigChanged`.
+    async fn settle_and_drain(rx: &mut tokio::sync::mpsc::Receiver<SessionChunkEvent>) {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        while rx.try_recv().is_ok() {}
+    }
+
+    /// Wait for the next `SessionConfigChanged` (skipping other chunk
+    /// events). Panics with context on timeout or channel close.
+    async fn next_config_changed(
+        rx: &mut tokio::sync::mpsc::Receiver<SessionChunkEvent>,
+    ) -> String {
+        loop {
+            let evt = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+                .await
+                .expect("timeout waiting for SessionConfigChanged republish")
+                .expect("chunk channel closed before SessionConfigChanged");
+            if matches!(
+                evt.event,
+                crate::agent::loop_::ChunkEvent::SessionConfigChanged { .. }
+            ) {
+                return evt.session_id;
+            }
+        }
+    }
+
+    /// Regression for the stale-retained-snapshot bug: every successful open
+    /// — including the `AlreadyActive` path, which mutates no config — must
+    /// re-publish the session's `SessionConfig` so the broker's retained
+    /// `llm_availability` cannot stay stale forever (permanent "syncing LLM
+    /// config" banner in the Desktop). The invariant lives in
+    /// `resume_session`, not in the HTTP handler, so any future open entry
+    /// point inherits it.
+    #[tokio::test]
+    async fn resume_session_republishes_config_on_both_open_outcomes() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (mut manager, mut chunk_rx) = republish_test_manager(&dir);
+        // `create_frontend_session` (the production HTTP create path) is the
+        // one that attaches a `ConversationSession` and persists meta —
+        // bare `create_session` has no conversation and cannot be resumed.
+        let sid = manager
+            .create_frontend_session(None, None, None, None)
+            .await
+            .unwrap();
+
+        // Closed → ResumedFromDisk: the relay is spawned inside `open` before
+        // the republish runs, so the event must reach the chunk channel.
+        settle_and_drain(&mut chunk_rx).await;
+        manager.close_session(&sid).await.unwrap();
+        settle_and_drain(&mut chunk_rx).await;
+        let outcome = manager.resume_session(&sid).await.unwrap();
+        assert!(
+            matches!(outcome, Some(SessionOpenOutcome::ResumedFromDisk)),
+            "unexpected outcome: {outcome:?}"
+        );
+        assert_eq!(next_config_changed(&mut chunk_rx).await, sid);
+
+        // AlreadyActive: no config mutation happens on this path — without
+        // the invariant this open would emit nothing.
+        settle_and_drain(&mut chunk_rx).await;
+        let outcome = manager.resume_session(&sid).await.unwrap();
+        assert!(matches!(outcome, Some(SessionOpenOutcome::AlreadyActive)));
+        assert_eq!(next_config_changed(&mut chunk_rx).await, sid);
+    }
+
+    /// A `NotFound` open returns `Ok(None)` and must not publish anything —
+    /// the republish is tied to *successful* opens only.
+    #[tokio::test]
+    async fn resume_session_notfound_does_not_republish() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (mut manager, mut chunk_rx) = republish_test_manager(&dir);
+        let outcome = manager.resume_session("no-such-session").await.unwrap();
+        assert!(outcome.is_none());
+        settle_and_drain(&mut chunk_rx).await;
+        assert!(
+            chunk_rx.try_recv().is_err(),
+            "a NotFound open must not emit any chunk event"
+        );
+    }
+
+    /// `republish_session_config` is a silent-safe no-op for a session that
+    /// is not active (unknown id) or whose handle has no conversation
+    /// attached — it must never panic and must never publish.
+    #[tokio::test]
+    async fn republish_session_config_noop_without_live_conversation() {
+        use crate::agent::session::session_handle::SessionHandle;
+        use crate::agent::session::session_task::SessionMessage;
+        use crate::agent::session_state::{SessionRuntimeSnapshot, SessionStatus};
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let (mut manager, mut chunk_rx) = republish_test_manager(&dir);
+
+        // 1. Unknown id.
+        manager.republish_session_config("never-existed");
+
+        // 2. Handle present but `conversation: None` (startup-scan shape).
+        let sid = "no_conv_handle".to_string();
+        let (inbound_tx, _inbound_rx) = tokio::sync::mpsc::channel::<SessionMessage>(1);
+        let (agent_inbound_tx, _agent_inbound_rx) =
+            tokio::sync::mpsc::channel::<crate::agent::inbound::InboundMessage>(1);
+        let (_status_tx, status_rx) = tokio::sync::watch::channel(SessionStatus::Idle);
+        manager.sessions.insert(
+            sid.clone(),
+            SessionHandle {
+                session_id: sid.clone(),
+                inbound_tx,
+                agent_inbound_tx,
+                join_handle: tokio::spawn(async {}),
+                status_rx,
+                last_active_at: std::sync::Mutex::new(std::time::Instant::now()),
+                pending_debug_handles: Arc::new(tokio::sync::Mutex::new(None)),
+                snapshot: Arc::new(std::sync::RwLock::new(SessionRuntimeSnapshot {
+                    session_id: sid.clone(),
+                    status: r#""idle""#.to_string(),
+                    model: None,
+                    provider: None,
+                    account_id: None,
+                    ratio: None,
+                    todos_json: None,
+                    context_usage: None,
+                })),
+                workspace_id: Arc::new(std::sync::RwLock::new("__agent_home__".to_string())),
+                current_work_dir: Arc::new(std::sync::RwLock::new(None)),
+                conversation: None,
+            },
+        );
+        manager.republish_session_config(&sid);
+
+        settle_and_drain(&mut chunk_rx).await;
+        assert!(
+            chunk_rx.try_recv().is_err(),
+            "no-op republish paths must not emit any chunk event"
+        );
     }
 }

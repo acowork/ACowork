@@ -278,6 +278,11 @@ pub(crate) async fn post_open_session(
         crate::agent::session::SessionOpenOutcome::AlreadyActive => "already_active",
         crate::agent::session::SessionOpenOutcome::ResumedFromDisk => "resumed_from_disk",
     };
+    // NOTE: `resume_session` already refreshed this session's retained
+    // `SessionConfig` snapshot (so a stale `llm_availability` from the
+    // startup race cannot keep the Desktop's "syncing LLM config" banner
+    // up) — the invariant lives in the open state machine, not here.
+
     let (model, provider, last_active_at) = sm
         .lock()
         .await
