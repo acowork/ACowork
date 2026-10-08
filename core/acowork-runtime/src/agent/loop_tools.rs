@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use acowork_core::providers::traits::{ChatMessage, ToolCall};
-use acowork_core::tools::traits::Tool;
+use acowork_core::tools::traits::{Tool, ToolContext};
 use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
 
@@ -100,6 +100,12 @@ impl AgentLoop {
                 let approval_gate = approval_gate.clone();
                 let work_dir = self.session_core.current_work_dir.read().unwrap().clone();
                 let session_id = session_id.clone();
+                // Per-call session context for session-aware tools
+                // (`execute_with_context`). Resolved from THIS session's
+                // loop state — never from agent-shared tool instances —
+                // so concurrent sessions cannot cross-contaminate.
+                // Built LAST among the clones below so `session_id` stays
+                // available for the chunk-event path.
                 let chunk_tx = chunk_tx.clone();
                 let shell_risk_rules = self.core.shell_risk_rules.clone();
                 // ADR-078 git-refresh nudge. Cloned into the spawned task
@@ -108,6 +114,11 @@ impl AgentLoop {
                 // borrowing `self` across the spawn.
                 let git_nudge = self.core.git_nudge.clone();
                 let agent_id = self.core.config.agent_id.clone();
+                let tool_ctx = ToolContext {
+                    work_dir,
+                    session_id: session_id.clone(),
+                    current_user_message: self.current_turn_user_message.clone(),
+                };
 
                 // ADR-045: per-tool cancel token. Created BEFORE `spawn`
                 // so the sender is registered into `pending_tool_cancels`
@@ -226,7 +237,7 @@ impl AgentLoop {
                             execute_single_tool(
                                 &tools,
                                 &tc,
-                                work_dir.as_deref(),
+                                &tool_ctx,
                                 git_nudge.as_ref(),
                                 &agent_id,
                             ),
@@ -687,10 +698,11 @@ impl AgentLoop {
 pub(crate) async fn execute_single_tool(
     tools: &[Arc<dyn Tool>],
     tool_call: &ToolCall,
-    work_dir: Option<&str>,
+    ctx: &ToolContext,
     git_nudge: Option<&crate::agent::git_nudge::GitNudgeSlots>,
     agent_id: &str,
 ) -> (String, bool) {
+    let work_dir = ctx.work_dir.as_deref();
     let tool_name = &tool_call.function.name;
     let params_str = &tool_call.function.arguments;
 
@@ -748,7 +760,7 @@ pub(crate) async fn execute_single_tool(
     });
 
     match tool {
-        Some(tool) => match tool.execute(params.clone(), work_dir).await {
+        Some(tool) => match tool.execute_with_context(params.clone(), ctx).await {
             Ok(result) => {
                 // ADR-078 git-refresh nudge. Fires for every shell tool
                 // whose command may have mutated index/HEAD — `git commit`

@@ -615,6 +615,65 @@ impl RagProvider for MockRagProvider {
 }
 
 // ============================================================================
+// RecordingEmbeddingProvider
+// ============================================================================
+
+/// An `EmbeddingProvider` that records every text passed to `embed` and
+/// returns a fixed vector. Lets tests assert WHICH text drove the vector
+/// source (e.g. the user message vs. the LLM keywords in `memory_recall`).
+pub struct RecordingEmbeddingProvider {
+    seen: RwLock<Vec<String>>,
+    dimension: usize,
+}
+
+impl RecordingEmbeddingProvider {
+    pub fn new(dimension: usize) -> Self {
+        Self {
+            seen: RwLock::new(Vec::new()),
+            dimension,
+        }
+    }
+
+    /// All texts passed to `embed`, in call order.
+    pub fn seen_texts(&self) -> Vec<String> {
+        self.seen.read().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl acowork_core::EmbeddingProvider for RecordingEmbeddingProvider {
+    fn name(&self) -> &str {
+        "recording"
+    }
+
+    async fn embed(&self, text: &str) -> std::result::Result<Vec<f32>, acowork_core::EmbeddingError> {
+        self.seen
+            .write()
+            .unwrap()
+            .push(text.to_string());
+        Ok(vec![0.1f32; self.dimension])
+    }
+
+    async fn embed_batch(
+        &self,
+        texts: &[&str],
+    ) -> std::result::Result<Vec<Vec<f32>>, acowork_core::EmbeddingError> {
+        for t in texts {
+            self.embed(t).await?;
+        }
+        Ok(texts.iter().map(|_| vec![0.1f32; self.dimension]).collect())
+    }
+
+    fn dimension(&self) -> usize {
+        self.dimension
+    }
+
+    async fn is_available(&self) -> bool {
+        true
+    }
+}
+
+// ============================================================================
 // Tests for the test support itself
 // ============================================================================
 
@@ -654,7 +713,7 @@ mod tests {
                 query_text: "Shanghai".to_string(),
                 filters: Default::default(),
                 limit: 10,
-                expand_hops: 0,
+                embedding_text: None,
                 min_cosine: None,
                 abstention_enabled: false,
                 hint_type: Default::default(),

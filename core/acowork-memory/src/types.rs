@@ -82,14 +82,20 @@ pub enum NodeTypeFilter {
 /// Memory query parameters (replaces raw `&str` for future extensibility).
 #[derive(Debug, Clone)]
 pub struct MemoryQuery {
-    /// Text query for hybrid search.
+    /// Text query for hybrid search (drives the BM25 lexical source).
     pub query_text: String,
+    /// Text used to generate the query embedding (drives the vector source).
+    ///
+    /// When `None`, the embedding is generated from `query_text` (the
+    /// historical single-source behaviour). The `memory_recall` tool sets
+    /// this to the current user message while `query_text` carries the
+    /// LLM-extracted keywords: full sentences embed far better than keyword
+    /// bags, and BM25 benefits from the precise keywords.
+    pub embedding_text: Option<String>,
     /// Optional filters.
     pub filters: MemoryFilters,
     /// Maximum number of results.
     pub limit: usize,
-    /// Graph expansion hops (0 = no expansion).
-    pub expand_hops: u8,
     /// Minimum cosine similarity threshold (overrides
     /// `MemoryQualityConfig::min_cosine` when set). Applied to absolute
     /// cosine similarity, not to the fused ranking score.
@@ -107,9 +113,9 @@ impl MemoryQuery {
     pub fn new(query_text: impl Into<String>) -> Self {
         Self {
             query_text: query_text.into(),
+            embedding_text: None,
             filters: MemoryFilters::default(),
             limit: 10,
-            expand_hops: 0,
             min_cosine: None,
             abstention_enabled: false,
             hint_type: HintType::default(),
@@ -122,17 +128,17 @@ impl MemoryQuery {
     /// Lightweight background context: searches all 4 labels (Episodic /
     /// Knowledge / Procedural / Autobiographical) per design §6.6 — even
     /// Identity queries default to all labels, excluding current-session
-    /// nodes, no graph expansion, low limit.
+    /// nodes, low limit.
     pub fn auto_inject(query_text: String, exclude_session_id: Option<String>) -> Self {
         Self {
             query_text,
+            embedding_text: None,
             embedding: None,
             filters: MemoryFilters {
                 exclude_session_id,
                 ..Default::default()
             },
             limit: 5,
-            expand_hops: 0,
             // `min_cosine` left as `None` so it resolves via
             // MemoryManagerConfig.quality.min_cosine (default 0.3, cosine
             // domain). The old hardcoded `Some(0.3)` was mistakenly applied to
@@ -146,18 +152,21 @@ impl MemoryQuery {
 
     /// Build a query for LLM-triggered deep recall (memory_recall tool).
     ///
-    /// Comprehensive retrieval: searches all four labels, enables graph
-    /// expansion, no score filtering — lets the LLM decide relevance.
+    /// Comprehensive retrieval: searches all four labels, no score
+    /// filtering — lets the LLM decide relevance. The caller may set
+    /// [`MemoryQuery::embedding_text`] to the current user message so the
+    /// vector source runs on full-sentence semantics while `query_text`
+    /// (LLM keywords) drives BM25.
     pub fn deep_recall(query_text: String, exclude_session_id: Option<String>) -> Self {
         Self {
             query_text,
+            embedding_text: None,
             embedding: None,
             filters: MemoryFilters {
                 exclude_session_id,
                 ..Default::default()
             },
             limit: 10,
-            expand_hops: 2,
             min_cosine: None,
             abstention_enabled: false,
             hint_type: HintType::Semantic,

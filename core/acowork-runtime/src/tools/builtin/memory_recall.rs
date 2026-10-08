@@ -1,4 +1,4 @@
-//! Memory recall tool — retrieve memories from Grafeo backend
+//! Memory recall tool — retrieve memories from the SQLite memory store
 //!
 //! Adapted from zeroclaw/src/tools/memory_recall.rs
 //! ACowork deviation: uses acowork_core::Tool trait; replaces Memory trait
@@ -17,16 +17,19 @@ use acowork_memory::MemoryQuery;
 
 /// Memory recall tool — allows an Agent to recall stored memories.
 ///
-/// Queries the Grafeo backend with real semantic/text search.
+/// Queries the SQLite memory store with real semantic/text search: the
+/// current user message drives the vector source, the LLM-supplied keywords
+/// drive BM25. Both arrive per call via [`ToolContext`] — never from the
+/// session handle, which is agent-scoped and shared across sessions.
 /// Automatically excludes nodes from the current session to avoid
 /// re-injecting data already present in the conversation context.
 pub struct MemoryRecallTool {
     /// Agent ID (namespace for memory isolation).
-    /// Kept for future per-agent query filtering; Grafeo currently isolates at store level.
+    /// Kept for future per-agent query filtering; the store isolates per agent.
     #[allow(dead_code)]
     agent_id: String,
     /// Memory session handle providing store + current session context.
-    /// None when no Grafeo store is available (degraded mode).
+    /// None when no memory store is available (degraded mode).
     handle: Option<Arc<crate::memory::MemorySessionHandle>>,
 }
 
@@ -41,13 +44,13 @@ impl MemoryRecallTool {
     fn spec_value() -> ToolSpec {
         ToolSpec {
             name: "memory_recall".to_string(),
-            description: "Search long-term memory for relevant facts, preferences, or context. Returns scored results ranked by relevance. Supports keyword search, time-only query (since/until), or both. NOTE: if the conversation context already includes auto-injected memories (a retrieved-memory block is present in the system prompt), do NOT re-run the same query — use this tool only for deeper or targeted recall (different keywords, graph neighbors, or time-filtered) to avoid duplicating already-present context.".to_string(),
+            description: "Search long-term memory for relevant facts, preferences, or context. Returns scored results ranked by relevance. Supports keyword search, time-only query (since/until), or both. The current user message is automatically used for semantic (vector) matching, so 'query' should carry targeted keywords that BM25 can match precisely. NOTE: if the conversation context already includes auto-injected memories (a retrieved-memory block is present in the system prompt), do NOT re-run the same query — use this tool only for deeper or targeted recall (different keywords, or time-filtered) to avoid duplicating already-present context.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "Keywords or phrase to search for in memory (optional if since/until provided)"
+                        "description": "Targeted keywords or phrase for lexical matching (optional if since/until provided); semantic matching uses the current user message automatically"
                     },
                     "limit": {
                         "type": "integer",
@@ -73,10 +76,29 @@ impl Tool for MemoryRecallTool {
         Self::spec_value()
     }
 
+    /// Direct-call path (tests, non-loop callers): no session context, so
+    /// recall runs keyword-only and does not exclude any session.
     async fn execute(
         &self,
         params: Value,
-        _work_dir: Option<&str>,
+        work_dir: Option<&str>,
+    ) -> acowork_core::error::Result<ToolResult> {
+        let ctx = acowork_core::tools::traits::ToolContext {
+            work_dir: work_dir.map(str::to_string),
+            session_id: None,
+            current_user_message: None,
+        };
+        self.execute_with_context(params, &ctx).await
+    }
+
+    /// Session-aware path. The loop resolves `ctx.session_id` /
+    /// `ctx.current_user_message` from per-session state at dispatch time —
+    /// reading them off the agent-shared handle would be last-writer-wins
+    /// across concurrent sessions.
+    async fn execute_with_context(
+        &self,
+        params: Value,
+        ctx: &acowork_core::tools::traits::ToolContext,
     ) -> acowork_core::error::Result<ToolResult> {
         let query = params.get("query").and_then(|v| v.as_str()).unwrap_or("");
         let since = params.get("since").and_then(|v| v.as_str());
@@ -155,12 +177,28 @@ impl Tool for MemoryRecallTool {
             }
         };
 
-        let exclude_session_id = self.handle.as_ref().and_then(|h| h.current_session_id());
+        // Exclude the calling session's own nodes (compaction summaries
+        // already in context). From ToolContext — never from the shared
+        // handle (last-writer-wins across concurrent sessions).
+        let exclude_session_id = ctx.session_id.clone();
 
         // Build memory query with deep recall strategy.
         // LLM can override the limit via the 'limit' parameter.
         let mut memory_query = MemoryQuery::deep_recall(query.to_string(), exclude_session_id);
         memory_query.limit = limit;
+
+        // Split query sources: the current turn's user message drives the
+        // vector source (full-sentence semantics embed far better than the
+        // LLM's keyword bag), while `query_text` (keywords) drives BM25.
+        // Falls back to keywords-only embedding when the context carries no
+        // user message (time-only queries, replay, direct-call tests).
+        if let Some(msg) = ctx
+            .current_user_message
+            .as_deref()
+            .filter(|m| !m.trim().is_empty())
+        {
+            memory_query.embedding_text = Some(msg.to_string());
+        }
 
         // since/until → time_range filter. The dates were validated above;
         // this finally wires them into the query (previously validated but
@@ -265,6 +303,209 @@ mod tests {
             agent_id: "com.test.agent".to_string(),
             handle: None,
         }
+    }
+
+    #[tokio::test]
+    async fn test_memory_recall_uses_user_message_for_vector_source() {
+        // End-to-end wiring: the tool must feed the CURRENT USER MESSAGE
+        // (from the session handle) to the embedding provider, while the
+        // LLM-supplied keywords drive the BM25 lexical source.
+        use acowork_memory::types::Episode;
+
+        let store = Arc::new(
+            acowork_sqlite::SqliteStore::open_in_memory(
+                acowork_memory::types::DEFAULT_EMBEDDING_DIM,
+            )
+            .unwrap(),
+        );
+        let now = chrono::Utc::now();
+        store
+            .store_episode(&Episode {
+                session_id: "other-session".to_string(),
+                turn_index: 0,
+                role: "user".to_string(),
+                content: "user just moved to a new apartment in Hangzhou".to_string(),
+                embedding: Some(vec![0.1f32; acowork_memory::types::DEFAULT_EMBEDDING_DIM]),
+                timestamp: now,
+                consolidated: false,
+                metadata: Default::default(),
+                importance: 0.5,
+                knowledge_subtype: None,
+                normalized: None,
+            })
+            .unwrap();
+
+        let recorder = Arc::new(crate::test_support::RecordingEmbeddingProvider::new(
+            acowork_memory::types::DEFAULT_EMBEDDING_DIM,
+        ));
+        let handle = Arc::new(crate::memory::MemorySessionHandle::new(Some(recorder.clone())));
+        handle.set_provider(store);
+        let tool = MemoryRecallTool {
+            agent_id: "com.test.agent".to_string(),
+            handle: Some(handle),
+        };
+
+        // Dispatch through the session-aware path, exactly as the agent loop
+        // does — session_id + user message arrive per call, not on the
+        // shared handle.
+        let ctx = acowork_core::tools::traits::ToolContext {
+            work_dir: None,
+            session_id: Some("current-session".to_string()),
+            current_user_message: Some("I just moved to a new apartment, any tips?".to_string()),
+        };
+        let result = tool
+            .execute_with_context(serde_json::json!({ "query": "apartment hangzhou" }), &ctx)
+            .await
+            .unwrap();
+
+        assert!(result.ok, "tool must succeed: {:?}", result.error);
+        assert!(
+            result.content.contains("apartment"),
+            "keyword BM25 must surface the episode, got: {}",
+            result.content
+        );
+        assert_eq!(
+            recorder.seen_texts(),
+            vec!["I just moved to a new apartment, any tips?".to_string()],
+            "vector source must embed the user message, not the LLM keywords"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_memory_recall_falls_back_to_keywords_without_user_message() {
+        // Degraded path: no user message in the ToolContext → embedding is
+        // generated from the LLM keywords (historical behaviour).
+        let store = Arc::new(
+            acowork_sqlite::SqliteStore::open_in_memory(
+                acowork_memory::types::DEFAULT_EMBEDDING_DIM,
+            )
+            .unwrap(),
+        );
+        let recorder = Arc::new(crate::test_support::RecordingEmbeddingProvider::new(
+            acowork_memory::types::DEFAULT_EMBEDDING_DIM,
+        ));
+        let handle = Arc::new(crate::memory::MemorySessionHandle::new(Some(recorder.clone())));
+        handle.set_provider(store);
+        let tool = MemoryRecallTool {
+            agent_id: "com.test.agent".to_string(),
+            handle: Some(handle),
+        };
+
+        let result = tool
+            .execute(serde_json::json!({ "query": "coffee preferences" }), None)
+            .await
+            .unwrap();
+
+        assert!(result.ok);
+        assert_eq!(
+            recorder.seen_texts(),
+            vec!["coffee preferences".to_string()],
+            "without a user message the keywords must drive the vector source"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_memory_recall_concurrent_sessions_are_isolated() {
+        // THE regression test for the per-agent shared-instance race: one
+        // tool instance (as shared via AgentCore.all_tools) serving two
+        // concurrent sessions must embed EACH session's own user message
+        // and exclude EACH session's own nodes — never last-writer-wins.
+        use acowork_memory::types::Episode;
+
+        let store = Arc::new(
+            acowork_sqlite::SqliteStore::open_in_memory(
+                acowork_memory::types::DEFAULT_EMBEDDING_DIM,
+            )
+            .unwrap(),
+        );
+        let now = chrono::Utc::now();
+        // One episode per session; exclude_session_id must drop the CALLER's
+        // own session's nodes, so each call sees the OTHER session's episode
+        // only if it survives — we assert on the embed inputs instead, which
+        // is what the race corrupted.
+        for (sid, content) in [
+            ("session-A", "garden gnome collection rotterdam"),
+            ("session-B", "kayak rental schedule utrecht"),
+        ] {
+            store
+                .store_episode(&Episode {
+                    session_id: sid.to_string(),
+                    turn_index: 0,
+                    role: "user".to_string(),
+                    content: content.to_string(),
+                    embedding: Some(vec![0.1f32; acowork_memory::types::DEFAULT_EMBEDDING_DIM]),
+                    timestamp: now,
+                    consolidated: false,
+                    metadata: Default::default(),
+                    importance: 0.5,
+                    knowledge_subtype: None,
+                    normalized: None,
+                })
+                .unwrap();
+        }
+
+        let recorder = Arc::new(crate::test_support::RecordingEmbeddingProvider::new(
+            acowork_memory::types::DEFAULT_EMBEDDING_DIM,
+        ));
+        let handle = Arc::new(crate::memory::MemorySessionHandle::new(Some(recorder.clone())));
+        handle.set_provider(store);
+        let tool = Arc::new(MemoryRecallTool {
+            agent_id: "com.test.agent".to_string(),
+            handle: Some(handle),
+        });
+
+        // Interleave two sessions through the SAME tool instance.
+        let mk_ctx = |sid: &str, msg: &str| acowork_core::tools::traits::ToolContext {
+            work_dir: None,
+            session_id: Some(sid.to_string()),
+            current_user_message: Some(msg.to_string()),
+        };
+        let t1 = {
+            let tool = tool.clone();
+            tokio::spawn(async move {
+                tool.execute_with_context(
+                    serde_json::json!({ "query": "gnome" }),
+                    &mk_ctx("session-A", "tell me about my gnome collection"),
+                )
+                .await
+            })
+        };
+        let t2 = {
+            let tool = tool.clone();
+            tokio::spawn(async move {
+                tool.execute_with_context(
+                    serde_json::json!({ "query": "kayak" }),
+                    &mk_ctx("session-B", "when is the kayak rental open"),
+                )
+                .await
+            })
+        };
+        let r1 = t1.await.unwrap().unwrap();
+        let r2 = t2.await.unwrap().unwrap();
+        assert!(r1.ok && r2.ok);
+
+        // Each session's user message must appear EXACTLY ONCE; neither
+        // may be replaced by the other (the old handle design would let
+        // the later set_user_message overwrite the earlier one).
+        let seen = recorder.seen_texts();
+        assert_eq!(seen.len(), 2, "one embed per call, got {seen:?}");
+        assert!(
+            seen.contains(&"tell me about my gnome collection".to_string())
+                && seen.contains(&"when is the kayak rental open".to_string()),
+            "each session must embed its OWN user message, got {seen:?}"
+        );
+    }
+
+    #[test]
+    fn test_memory_recall_spec_no_longer_pitches_graph_neighbors() {
+        // The backend is SQLite (ADR-082); "graph neighbors" was a false
+        // promise to the LLM and must not come back.
+        let spec = MemoryRecallTool::spec_value();
+        assert!(!spec.description.contains("graph neighbors"));
+        assert!(
+            spec.description.contains("current user message"),
+            "spec should tell the LLM the user message drives semantic matching"
+        );
     }
 
     #[test]
@@ -481,7 +722,7 @@ mod tests {
                 query_text: "Shanghai".to_string(),
                 filters: Default::default(),
                 limit: 5,
-                expand_hops: 0,
+                embedding_text: None,
                 min_cosine: None,
                 abstention_enabled: false,
                 hint_type: Default::default(),

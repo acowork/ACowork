@@ -303,7 +303,15 @@ impl MemoryManager {
         }
         if query.embedding.is_none()
             && let Some(emb_prov) = embedding_provider {
-                match emb_prov.embed(&query.query_text).await {
+                // Vector source prefers `embedding_text` (full user message)
+                // over `query_text` (LLM keywords) when the caller set it —
+                // full sentences embed far better than keyword bags.
+                let embed_src = query
+                    .embedding_text
+                    .as_deref()
+                    .filter(|t| !t.trim().is_empty())
+                    .unwrap_or(&query.query_text);
+                match emb_prov.embed(embed_src).await {
                     Ok(vec) => {
                         tracing::info!(
                             dim = vec.len(),

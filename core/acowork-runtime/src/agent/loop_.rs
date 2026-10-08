@@ -12,7 +12,7 @@ use std::sync::Arc;
 use acowork_core::protocol::ModelCapabilitiesInfo;
 use acowork_core::providers::traits::{ChatMessage, Provider};
 #[allow(unused_imports)]
-use acowork_core::tools::traits::Tool;
+use acowork_core::tools::traits::{Tool, ToolContext};
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 
@@ -418,6 +418,20 @@ pub struct AgentLoop {
     ///    in history. The next `run_inner` (new user input) re-stages it.
     pub(crate) pending_user_message: Option<ChatMessage>,
 
+    /// The current turn's user message text, kept for the WHOLE turn
+    /// (unlike `pending_user_message`, which is cleared once the request
+    /// is built — ADR-060 §5.5 Block D semantics).
+    ///
+    /// Injected into [`acowork_core::tools::traits::ToolContext`] at every
+    /// tool dispatch so session-scoped tools (memory recall) can use the
+    /// full user message as the vector-source query text. Lives on the
+    /// per-session AgentLoop — never on the agent-shared tool instances —
+    /// which is what keeps concurrent sessions from cross-contaminating.
+    /// Overwritten at each `run_inner` entry; `replay` clears it (the
+    /// message is already in history and re-embedding it would misattribute
+    /// it to the replayed turn).
+    pub(crate) current_turn_user_message: Option<String>,
+
     /// ADR-060 §6.3: whether auto-inject has already run for this session.
     ///
     /// `auto_inject_enabled` (default false, per-agent opt-in via manifest
@@ -497,6 +511,7 @@ impl AgentLoop {
             pending_tool_cancels: std::collections::HashMap::new(),
             pending_transient_tool_msgs: Vec::new(),
             pending_user_message: None,
+            current_turn_user_message: None,
             memory_retrieved_for_session: false,
             compress_action_rx: None,
         };
@@ -565,6 +580,7 @@ impl AgentLoop {
             pending_tool_cancels: std::collections::HashMap::new(),
             pending_transient_tool_msgs: Vec::new(),
             pending_user_message: None,
+            current_turn_user_message: None,
             memory_retrieved_for_session: false,
             compress_action_rx: None,
         };
@@ -601,7 +617,12 @@ impl AgentLoop {
             .clone();
 
         let work_dir = self.session_core.current_work_dir.read().unwrap().clone();
-        match tool.execute(params, work_dir.as_deref()).await {
+        let ctx = acowork_core::tools::traits::ToolContext {
+            work_dir,
+            session_id: self.session_core.session_id.clone(),
+            current_user_message: self.current_turn_user_message.clone(),
+        };
+        match tool.execute_with_context(params, &ctx).await {
             Ok(result) if result.ok => Ok(result.content),
             Ok(result) => Err(result
                 .error
@@ -782,6 +803,10 @@ impl AgentLoop {
         // history) must NOT carry a Block D — clear any stale staging.
         if replay {
             self.pending_user_message = None;
+            // Replay is a debug path over existing history; the staged
+            // turn message from the live run is not re-embedded (memory
+            // tools fall back to keyword-only recall).
+            self.current_turn_user_message = None;
         }
 
         // ADR-014: Idle → Streaming
@@ -795,6 +820,11 @@ impl AgentLoop {
             // Add user message to history
             // ADR-011: reset compaction flag — new user input means new content since last compaction
             self.session.is_compacted = false;
+            // Per-turn text for ToolContext (kept for the WHOLE turn,
+            // unlike pending_user_message which is cleared after the
+            // request is built). Lives on this per-session loop, never on
+            // agent-shared tool instances.
+            self.current_turn_user_message = Some(user_message.to_string());
             if let Some(parts) = content_parts {
                 let msg = ChatMessage::user_multimodal(user_message, parts);
                 // ADR-060 §5.5: stage the current user message so
@@ -3542,7 +3572,7 @@ mod tests {
             },
         };
 
-        let (result, _transient) = execute_single_tool(&raw_tools(&tools), &tc, None, None, "test-agent").await;
+        let (result, _transient) = execute_single_tool(&raw_tools(&tools), &tc, &ToolContext::default(), None, "test-agent").await;
 
         // Must NOT contain "Echo:" — tool was never called
         assert!(
@@ -3586,7 +3616,7 @@ mod tests {
             },
         };
 
-        let (result, _transient) = execute_single_tool(&raw_tools(&tools), &tc, None, None, "test-agent").await;
+        let (result, _transient) = execute_single_tool(&raw_tools(&tools), &tc, &ToolContext::default(), None, "test-agent").await;
 
         // Must NOT execute the tool
         assert!(
@@ -3632,7 +3662,7 @@ mod tests {
             },
         };
 
-        let (result, _transient) = execute_single_tool(&raw_tools(&tools), &tc, None, None, "test-agent").await;
+        let (result, _transient) = execute_single_tool(&raw_tools(&tools), &tc, &ToolContext::default(), None, "test-agent").await;
 
         // Tool WAS executed because we recovered the JSON
         assert!(
@@ -3657,7 +3687,7 @@ mod tests {
             },
         };
 
-        let (result, _transient) = execute_single_tool(&raw_tools(&tools), &tc, None, None, "test-agent").await;
+        let (result, _transient) = execute_single_tool(&raw_tools(&tools), &tc, &ToolContext::default(), None, "test-agent").await;
         assert_eq!(
             result, "Echo: hello world",
             "Valid tool call should execute normally, got: {}",

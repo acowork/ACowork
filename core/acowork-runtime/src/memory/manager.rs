@@ -151,7 +151,7 @@ mod tests {
             embedding: Some(emb),
             filters: Default::default(),
             limit: 5,
-            expand_hops: 0,
+            embedding_text: None,
             min_cosine: None,
             abstention_enabled: true,
             hint_type: HintType::Semantic,
@@ -178,7 +178,7 @@ mod tests {
             embedding: Some(emb),
             filters: Default::default(),
             limit: 5,
-            expand_hops: 0,
+            embedding_text: None,
             min_cosine: Some(0.99), // Very high threshold — should filter everything.
             abstention_enabled: true,
             hint_type: HintType::Semantic,
@@ -213,7 +213,7 @@ mod tests {
             embedding: Some(emb.clone()),
             filters: Default::default(),
             limit: 5,
-            expand_hops: 0,
+            embedding_text: None,
             min_cosine: None,
             abstention_enabled: false,
             hint_type: HintType::Semantic,
@@ -238,7 +238,7 @@ mod tests {
             embedding: Some(emb),
             filters: Default::default(),
             limit: 5,
-            expand_hops: 0,
+            embedding_text: None,
             min_cosine: None,
             abstention_enabled: false,
             hint_type: HintType::Semantic,
@@ -280,6 +280,118 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_retrieve_embedding_text_drives_vector_source() {
+        // The vector source must embed `embedding_text` (the full user
+        // message), NOT `query_text` (the LLM keyword bag). BM25 keeps
+        // running on query_text.
+        let store = test_store();
+        let emb = test_embedding();
+        store_episode(&store, "user just moved to a new apartment in Hangzhou", &emb);
+
+        let recorder = crate::test_support::RecordingEmbeddingProvider::new(DEFAULT_EMBEDDING_DIM);
+        let manager = MemoryManager::new(MemoryManagerConfig::default());
+        let mut query = MemoryQuery {
+            query_text: "apartment hangzhou".to_string(),
+            embedding_text: Some("I just moved to a new apartment in Hangzhou".to_string()),
+            embedding: None,
+            filters: Default::default(),
+            limit: 5,
+            min_cosine: None,
+            abstention_enabled: false,
+            hint_type: HintType::Semantic,
+        };
+
+        let result = manager
+            .retrieve(
+                &store as &dyn MemoryProvider,
+                &mut query,
+                Some(&recorder as &dyn acowork_core::EmbeddingProvider),
+            )
+            .await
+            .unwrap();
+
+        let seen = recorder.seen_texts();
+        assert_eq!(
+            seen,
+            vec!["I just moved to a new apartment in Hangzhou".to_string()],
+            "vector source must embed embedding_text, not query_text"
+        );
+        // query_text still drives the lexical source (hybrid, not text-only).
+        assert_eq!(query.embedding.as_deref(), Some(emb.as_slice()));
+        assert!(
+            !result.memories.is_empty(),
+            "keyword BM25 must still match the stored episode"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_retrieve_embedding_text_falls_back_to_query_text() {
+        // Without embedding_text, behaviour is unchanged: the embedding is
+        // generated from query_text.
+        let store = test_store();
+        let recorder = crate::test_support::RecordingEmbeddingProvider::new(DEFAULT_EMBEDDING_DIM);
+        let manager = MemoryManager::new(MemoryManagerConfig::default());
+        let mut query = MemoryQuery {
+            query_text: "rust programming".to_string(),
+            embedding_text: None,
+            embedding: None,
+            filters: Default::default(),
+            limit: 5,
+            min_cosine: None,
+            abstention_enabled: false,
+            hint_type: HintType::Semantic,
+        };
+
+        manager
+            .retrieve(
+                &store as &dyn MemoryProvider,
+                &mut query,
+                Some(&recorder as &dyn acowork_core::EmbeddingProvider),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            recorder.seen_texts(),
+            vec!["rust programming".to_string()],
+            "empty embedding_text must fall back to query_text"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_retrieve_blank_embedding_text_falls_back_to_query_text() {
+        // Whitespace-only embedding_text must not hijack the vector source.
+        let store = test_store();
+        let recorder = crate::test_support::RecordingEmbeddingProvider::new(DEFAULT_EMBEDDING_DIM);
+        let manager = MemoryManager::new(MemoryManagerConfig::default());
+        let mut query = MemoryQuery {
+            query_text: "rust programming".to_string(),
+            embedding_text: Some("   ".to_string()),
+            embedding: None,
+            filters: Default::default(),
+            limit: 5,
+            min_cosine: None,
+            abstention_enabled: false,
+            hint_type: HintType::Semantic,
+        };
+
+        manager
+            .retrieve(
+                &store as &dyn MemoryProvider,
+                &mut query,
+                Some(&recorder as &dyn acowork_core::EmbeddingProvider),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            recorder.seen_texts(),
+            vec!["rust programming".to_string()],
+            "blank embedding_text must fall back to query_text"
+        );
+    }
+
+    #[tokio::test]
     async fn test_retrieve_abstention() {
         let store = test_store();
         // Episode content is lexically disjoint from the query ("test
@@ -295,7 +407,7 @@ mod tests {
             embedding: Some(orthogonal_embedding()),
             filters: Default::default(),
             limit: 5,
-            expand_hops: 0,
+            embedding_text: None,
             // `min_cosine` is now ignored by `MemoryManager::retrieve` — the
             // absolute cosine floor is unreliable as a relevance signal
             // (anisotropic embeddings cluster most pairs at cos 0.5–0.9);
@@ -328,7 +440,7 @@ mod tests {
             embedding: None,
             filters: Default::default(),
             limit: 5,
-            expand_hops: 0,
+            embedding_text: None,
             min_cosine: None,
             abstention_enabled: false,
             hint_type: HintType::Semantic,
@@ -354,7 +466,7 @@ mod tests {
             embedding: Some(emb),
             filters: Default::default(),
             limit: 5,
-            expand_hops: 0,
+            embedding_text: None,
             min_cosine: None,
             abstention_enabled: true,
             hint_type: HintType::Semantic,
@@ -383,7 +495,7 @@ mod tests {
             embedding: Some(orthogonal_embedding()),
             filters: Default::default(),
             limit: 5,
-            expand_hops: 0,
+            embedding_text: None,
             min_cosine: Some(0.99),
             abstention_enabled: true,
             hint_type: HintType::Semantic,
@@ -413,7 +525,7 @@ mod tests {
             embedding: Some(emb),
             filters: Default::default(),
             limit: 5,
-            expand_hops: 0,
+            embedding_text: None,
             min_cosine: None,
             abstention_enabled: false,
             hint_type: HintType::Identity,

@@ -67,13 +67,12 @@ impl super::loop_::AgentLoop {
             .as_ref()
             .map(|c| c.session_id().to_string());
 
-        // Update MemorySessionHandle so memory_recall tool can see the
-        // current session_id for its own exclude_session_id filtering.
-        if let Some(ref handle) = self.core.memory_session
-            && let Some(ref sid) = current_session_id
-        {
-            handle.set_session_id(sid.clone());
-        }
+        // NOTE: session-scoped data for the memory_recall tool is NOT
+        // written to the agent-shared MemorySessionHandle here — it is
+        // delivered per call via ToolContext, resolved from this loop's
+        // `current_turn_user_message` / `session_core.session_id`. The
+        // handle is shared by all concurrent SessionTasks; storing session
+        // state on it was a last-writer-wins race (fixed 2026-10).
 
         // Per-turn auto-injection is OFF by default (per-agent opt-in via
         // manifest `[memory.quality].auto_inject_enabled = true`), and
@@ -93,9 +92,8 @@ impl super::loop_::AgentLoop {
         // `memory_retrieved_for_session`; explicit `memory_recall` tool
         // calls use an independent path and never touch that flag.
         //
-        // NOTE: `clear_retrieved_memory()` and `set_session_id()` above
-        // still run so stale memory from previous turns never leaks into
-        // the next build, and the tool handle stays in sync.
+        // NOTE: `clear_retrieved_memory()` above still runs so stale memory
+        // from previous turns never leaks into the next build.
         if !manager.config().auto_inject_enabled || self.memory_retrieved_for_session {
             tracing::debug!(
                 disabled = !manager.config().auto_inject_enabled,
