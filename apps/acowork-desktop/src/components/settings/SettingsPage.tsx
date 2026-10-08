@@ -302,14 +302,20 @@ export function GatewayTab() {
               asks explicitly regardless of this setting. */}
           {gatewayMode === "remote" && (
             <div className="mt-3 border-t border-border-divider pt-3">
-              <Switch
-                checked={autoStartLocalNode}
-                onChange={setAutoStartLocalNode}
-                label={t("settings.autoStartLocalNode")}
-              />
-              <p className="mt-1 text-xs text-text-tertiary">
-                {t("settings.autoStartLocalNodeHelp")}
-              </p>
+              {/* Row mirrors the Switch's built-in "label left, toggle
+                  right" layout, but the label slot carries a HelpHint —
+                  the long explanation belongs in the same `?` tooltip
+                  language as the gw-id row, not as a paragraph under the
+                  toggle. Hand-rolled because a <button> must not sit
+                  inside the Switch's <label>: clicking the hint would
+                  also flip the switch. */}
+              <div className="flex items-center justify-between gap-2">
+                <span className="flex flex-1 items-center gap-1.5 text-10 font-medium text-text-tertiary">
+                  {t("settings.autoStartLocalNode")}
+                  <HelpHint content={t("settings.autoStartLocalNodeHelp")} />
+                </span>
+                <Switch checked={autoStartLocalNode} onChange={setAutoStartLocalNode} />
+              </div>
             </div>
           )}
           {/* The relay device id, shown in EVERY mode. It is a property of
