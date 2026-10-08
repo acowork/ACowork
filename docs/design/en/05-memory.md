@@ -192,7 +192,8 @@ SQLite `episodes` row
 - **Hybrid retrieval**: `db.hybrid_search()` — SQLite-native RRF fusion ranking, supports `topology_boost` graph connectivity reranking
 - **MMR deduplication**: `db.mmr_search()` — Maximal Marginal Relevance, ensures result diversity, avoids duplicate semantics
 - **Time filter**: Narrow retrieval space by time range
-- **Cross-layer associative diffusion** (§6): Retrieved episodes through consolidated layer KnowledgeNode's `source_episode` field reverse query related nodes, extend to consolidated layer knowledge and other experiential layer episodes along GQL native graph traversal. Example: user asks "hotel stayed at last time in Shanghai", episodic retrieves business trip record → reverse query consolidated layer "user usually stays at Jinjiang Inn" → through `MATCH (m)-[r*1..3]-(other)` graph traversal extend to another business trip episode at same hotel.
+- **Dual-source query split (memory_recall, 2026-10)**: `MemoryQuery.embedding_text` carries the current turn's full user message to drive the vector source (full-sentence embeddings vastly outperform keyword bags), while `query_text` carries LLM-extracted keywords driving the BM25 lexical source; falls back to `query_text` alone when `embedding_text` is unset or blank. The user message and session id are injected per call via `ToolContext` (`execute_with_context`), resolved by the loop from per-session state — they must NEVER live on the agent-shared `MemorySessionHandle` or tool instances (last-writer-wins race under concurrent sessions, fixed 2026-10).
+- **Cross-layer associative diffusion** (§6): **design goal, NOT implemented.** The `MemoryQuery.expand_hops` field was never consumed by `MemoryManager::retrieve()` and has been removed as dead code; the backend migrated from the Grafeo LPG graph to SQLite (ADR-082), which has no `edges`-table multi-hop traversal. §6 is retained as a future reference.
 
 **Embedding Generation Strategy**:
 
@@ -565,7 +566,7 @@ This is a comprehensive architecture document covering memory layers, retrieval 
 - **Compaction = Distillation** (ADR-011): single LLM call for both memory replacement and experience layer writing
 - **Privacy levels** (Public/Personal/Sensitive) for package sharing
 - **Forgetting mechanisms** with three-factor decay and Dormant→Purge lifecycle
-- **SQLite-native** HNSW + BM25 + RRF hybrid retrieval
-- **Associative diffusion** via LPG graph traversal for cross-layer retrieval
+- **SQLite-native** HNSW + BM25 + RRF hybrid retrieval, with a dual-source query split (`embedding_text` = user message → vector, `query_text` = LLM keywords → BM25)
+- **Associative diffusion**: design goal only — never implemented; the `expand_hops` field was removed as dead code (backend is SQLite since ADR-082, no graph traversal)
 
 For full details on sections 4.2 (Offline Consolidation), 4.3 (Conflict Detection), 4.4 (Pending → Active Promotion), 4.5 (LLM Judge), 4.6 (Embedding Update), and chapters 5-11 (Quality Framework, Self-Evaluation, etc.), see the Chinese source document `docs/design/zh/05-memory.md`.

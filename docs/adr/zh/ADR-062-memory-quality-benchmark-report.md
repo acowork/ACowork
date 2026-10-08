@@ -165,6 +165,8 @@ auto_inject min_score=None    → 1 result, score 0.6437
 
 > ⚠️ **后续回退（2026-09）**：该默认值已回退为 `false`（per-agent opt-in，经 manifest `[memory.quality].auto_inject_enabled = true` 显式开启，开启后首轮触发一次）。原因：与 LLM 自主 `memory_recall` 双路径召回重复——两条路径同以 user 消息为 query（auto_inject：全 4 labels / limit=5 / expand_hops=0 / hint=Identity；deep_recall：全 4 labels / limit=10 / expand_hops=2 / hint=Semantic），核心节点必然重叠。配套措施：`memory_recall` 工具描述已加防重复召回提示（"do NOT re-run the same query"），是否去重交由 LLM 判断。
 
+> 📝 **后续修订（2026-10）**：上文引用的 `expand_hops` 已随双源查询拆分改造整体删除——该字段从未被 `MemoryManager::retrieve()` 消费（死字段），且后端已从 Grafeo 图库迁移至 SQLite（ADR-082）。`memory_recall` 现以 `MemoryQuery.embedding_text`（当前轮用户消息）驱动向量源、`query_text`（LLM 关键词）驱动 BM25 源；工具描述中的 "graph neighbors" 说法同步移除。详见 `docs/design/zh/05-memory.md` §检索能力。
+
 ### 6.2 keyword_index：**打开（方案 Y：写时拼入 `object`）**
 
 **事实基线**：

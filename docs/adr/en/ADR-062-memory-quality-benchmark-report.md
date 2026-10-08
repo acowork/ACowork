@@ -230,6 +230,14 @@ manifest `[memory.quality]` to disable it.
 > overlap. Accompanying measure: the `memory_recall` tool description now carries an
 > anti-duplicate-recall hint ("do NOT re-run the same query"), leaving the dedup judgement to the LLM.
 
+> 📝 **Follow-up revision (2026-10)**: the `expand_hops` values quoted above have since been removed
+> entirely as part of the dual-source query split — the field was never consumed by
+> `MemoryManager::retrieve()` (dead code), and the backend migrated from the Grafeo graph store to
+> SQLite (ADR-082). `memory_recall` now drives the vector source from `MemoryQuery.embedding_text`
+> (the current turn's user message) and the BM25 source from `query_text` (LLM keywords); the
+> "graph neighbors" phrasing was removed from the tool description. See
+> `docs/design/en/05-memory.md` §Retrieval capabilities.
+
 ### 6.2 `keyword_index`: **open it (Option Y: write-time injection into `object`)**
 
 **Fact baseline**:

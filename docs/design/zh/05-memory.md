@@ -195,9 +195,10 @@ SQLite `episodes` 行
 - **语义检索**：`MemoryStore::vector_search` — sqlite-vss HNSW 向量索引，支持余弦距离
 - **关键词检索**：`MemoryStore::text_search` — SQLite FTS5 全文索引，`unicode61` 分词器
 - **混合检索**：`MemoryStore::hybrid_search` — 应用层 RRF 融合排序（vector + text 分数按 `1/(k+rank)` 加权求和）
+- **双源查询拆分（memory_recall，2026-10）**：`MemoryQuery.embedding_text` 承载当前轮用户完整消息驱动向量源（整句 embedding 质量远高于关键词袋），`query_text` 承载 LLM 提取的关键词驱动 BM25 词法源；`embedding_text` 缺省（或全空白）时回落为 `query_text` 单源（历史行为）。用户消息与 session ID 经 `ToolContext`（`execute_with_context`）在每次工具调用时由 loop 从 per-session 状态注入——**不得**存放在 agent 级共享的 `MemorySessionHandle` 或工具实例上（多会话并发下 last-writer-wins 竞态，2026-10 已修复）。
 - **MMR 去重**：`MemoryStore::mmr_search` — Maximal Marginal Relevance，保证结果多样性，避免重复语义
 - **时间过滤**：按时间范围缩小检索空间
-- **跨层关联扩散**（§6）：检索到的 episode 通过沉淀层 `nodes.source_episode` 字段反向查询关联节点，应用层多跳（默认 1–3 跳，按 `MemoryQuery.expand_hops` 上限）扩展到沉淀层知识和其他经历层 episode。例如：用户问"上次去上海住的酒店"，经历层检索到出差记录 → 反向查到沉淀层"用户常住锦江之星" → 沿 `edges` 表多跳扩展到同一酒店的另一次出差 episode。
+- **跨层关联扩散**（§6）：**设计目标，当前未实现**。`MemoryQuery.expand_hops` 字段从未被 `MemoryManager::retrieve()` 消费，已作为死字段删除；后端已从 Grafeo LPG 图库迁移至 SQLite（ADR-082），不存在 `edges` 表多跳遍历。§6 保留为未来实现参考。
 
 **Embedding 生成策略：**
 
@@ -710,6 +711,8 @@ retention = exp(-ln2 × age_days / half_life_days)
 
 ## 6. 关联扩散检索
 
+> **⚠️ 状态（2026-10）：本章为设计目标，当前未实现。** `MemoryQuery.expand_hops` 从未被 `MemoryManager::retrieve()` 消费，已作为死字段从代码中删除；`memory_recall` 工具描述中的 "graph neighbors" 说法同步移除（后端为 SQLite，ADR-082，无图遍历能力）。本章保留为未来实现参考，其中的字段名（`expand_hops` / `expand_threshold`）不代表现存 API。
+
 传统检索是"查到什么就是什么"，关联扩散是"查到一个，带出一串"——模拟海马体的模式完成和激活扩散。沉淀层节点间关系存于 `edges` 表（应用层图遍历），跨层扩展通过 SQL JOIN + 早停实现，最多 3 跳。
 
 > **v4.0 变更**：原 `MemoryProvider::graph_expand_*` / `create_memory_edge` / `apply_pagerank_boost` 等图原生 trait 方法随 ADR-082 D4 删除。本节描述的功能由应用层多跳查询实现，不再依赖存储引擎 LPG/GQL。`PageRank` / `topology_boost` / `MATCH (m)-[r*1..3]-(other)` / `CALL grafeo.pagerank()` / `CALL grafeo.louvain()` 等 API 全部下线。
@@ -916,9 +919,12 @@ LongMemEval 的 Abs（Abstention）维度评估 Agent 在信息不足时是否�
 ```rust
 pub struct MemoryQuery {
     pub query_text: String,
+    // 向量源查询文本（memory_recall 双源拆分，2026-10）：设置时向量通路 embed
+    // 该文本（当前轮用户完整消息），query_text 继续驱动 BM25；None/空白时回落
+    // 为 embed query_text。
+    pub embedding_text: Option<String>,
     pub filters: MemoryFilters,
     pub limit: usize,
-    pub expand_hops: u8,
     // 向量源门控阈值（余弦绝对域 [0,1]，归一化 cos）。None = MemoryQualityConfig.min_cosine = 0.3。
     // ⚠️ 与 AbstentionConfig.default_min_score = 0.6（raw scores，拒答判定）语义不同，勿混淆。
     pub min_cosine: Option<f32>,
@@ -1285,10 +1291,10 @@ Runtime 和上层记忆逻辑不直接依赖任何具体存储引擎（SQLite / 
 ```rust
 /// 记忆查询参数（替代裸 &str，支持扩展）
 pub struct MemoryQuery {
-    pub query_text: String,
+    pub query_text: String,       // BM25 词法源查询文本
+    pub embedding_text: Option<String>, // 向量源查询文本（当前轮用户消息）；None/空白 = 回落 query_text
     pub filters: MemoryFilters,
     pub limit: usize,
-    pub expand_hops: u8,          // 关联扩散跳数（0 = 不扩散）
     pub min_cosine: Option<f32>,  // 向量源门控阈值（归一化余弦 [0,1]）
 }
 
