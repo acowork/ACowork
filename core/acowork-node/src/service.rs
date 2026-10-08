@@ -29,8 +29,9 @@ use crate::config::NodeConfig;
 use crate::error::{NodeError, Result};
 use crate::identity::NodeIdentity;
 
-/// The launchd label / systemd unit name, fixed for the node agent.
-#[cfg(not(windows))]
+/// The launchd label, fixed for the node agent (macOS-only: the systemd
+/// unit hard-codes its `Description=` instead of deriving from this).
+#[cfg(target_os = "macos")]
 const SERVICE_LABEL: &str = "com.acowork.node";
 
 /// Split a persisted `gateway_addr` (`host:port`) into its parts,

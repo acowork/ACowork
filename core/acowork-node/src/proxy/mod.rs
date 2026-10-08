@@ -49,6 +49,8 @@ use reqwest::header::HeaderValue;
 
 use crate::state::NodeHttpState;
 
+mod relay;
+
 /// Build the node reverse-proxy router.
 ///
 /// `state` is the node process table (read-only here) providing the
@@ -60,6 +62,8 @@ pub fn router(state: NodeHttpState) -> Router {
         // the relay dies with its parent Node.
         .route("/health", axum::routing::get(health))
         .route("/agents/{id}/{*rest}", any(proxy_agent))
+        // ADR-089 D2: Gateway → loopback LSP relay bridge (HTTP + WS).
+        .route("/relay/{*rest}", any(relay::proxy_relay))
         .with_state(state)
 }
 
@@ -388,6 +392,39 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// ADR-089 D2: `/relay/*` gate + port resolution, end to end.
+    ///
+    /// No relay is running in the unit-test process, so the two
+    /// observable behaviours are: a bad token is refused at the auth
+    /// boundary (never reaching the forward), and a good token with no
+    /// relay process yields the 503 `relay_not_ready` shape the
+    /// Gateway surfaces.
+    #[tokio::test]
+    async fn relay_route_enforces_token_and_reports_missing_relay() {
+        let app = router(http_state(Some("secret-token")));
+        let req = axum::http::Request::builder()
+            .uri("/relay/api/lsp/servers")
+            .method("GET")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        let req = axum::http::Request::builder()
+            .uri("/relay/api/lsp/servers")
+            .method("GET")
+            .header("X-ACowork-Node-Token", "secret-token")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["code"], "relay_not_ready");
     }
 
     #[tokio::test]

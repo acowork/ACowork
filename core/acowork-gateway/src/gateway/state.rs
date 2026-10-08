@@ -268,6 +268,15 @@ pub struct GatewayState {
     /// Set once at startup from `Gateway::run` via
     /// [`Self::set_advertise_host`]. Tests default to "127.0.0.1".
     pub advertise_host: String,
+    /// Actually-bound Gateway HTTP port (ADR-089 D3).
+    ///
+    /// Set by `start_http_server` after the port probe, because
+    /// `find_available_port` may land on a port other than
+    /// `config.http.port`. Used to assemble the LSP relay proxy URL
+    /// handed to the Desktop (`/api/nodes/{id}/lsp`) — the same
+    /// precedent as `pm_mcp_url`, which cannot know the probed port
+    /// at config-snapshot time. Tests default to the canonical 19876.
+    pub http_port: u16,
     /// Process start time — the baseline for `GET /api/status`'s
     /// `uptime_secs`, which the Desktop's service-diagnostics panel
     /// renders ("uptime Ns").
@@ -383,6 +392,7 @@ impl GatewayState {
             mqtt_broker_control: Arc::new(tokio::sync::Mutex::new(None)),
             mqtt_broker_auth: None,
             advertise_host: "127.0.0.1".to_string(),
+            http_port: 19876,
             started_at: Utc::now(),
             mqtt_publisher_handle: None,
             instance_id: String::new(),

@@ -1257,6 +1257,12 @@ impl NodeControlPlane {
                 health_url: format!("http://127.0.0.1:{}/health", config.proxy_port),
                 node_id: node_id.clone(),
                 advertise_host: config.advertise_host.clone(),
+                // ADR-089 D1: bind + probe share one host (loopback
+                // unless the operator set --expose-lsp-relay).
+                bind_host: crate::sidecar::lsp_relay::relay_bind_host(
+                    config.expose_lsp_relay,
+                    &config.advertise_host,
+                ),
             };
             crate::sidecar::lsp_relay_supervisor::start_lsp_relay_supervisor(sup_cfg, state.clone());
         }

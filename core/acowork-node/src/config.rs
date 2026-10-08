@@ -56,6 +56,14 @@ pub struct NodeConfig {
     /// Phase 4). The relay listens on `127.0.0.1:{port}` and its
     /// endpoint is advertised via the retained per-node `lsps` topic.
     pub lsp_relay_port: u16,
+    /// ADR-089 D1: escape hatch for the relay bind address. `false`
+    /// (default) binds the relay to `127.0.0.1` — the only consumer,
+    /// the Desktop, reaches it through the Gateway reverse proxy
+    /// (`/api/nodes/{id}/lsp/*` → node proxy `/relay/*`), so the relay
+    /// never needs a LAN listener. `true` (CLI `--expose-lsp-relay`)
+    /// binds the relay to `advertise_host` for operators who
+    /// deliberately accept the unauthenticated LAN surface.
+    pub expose_lsp_relay: bool,
     /// Runtime log file max size in MB before auto-split (forwarded to
     /// spawned Runtimes, mirrors the Gateway default).
     pub log_file_size_mb: u64,
@@ -79,6 +87,7 @@ impl Default for NodeConfig {
             proxy_bind: "0.0.0.0".to_string(),
             proxy_port: acowork_core::node::NODE_PROXY_PORT,
             lsp_relay_port: crate::sidecar::lsp_relay::LSP_RELAY_DEFAULT_PORT,
+            expose_lsp_relay: false,
             log_file_size_mb: 10,
             log_file_count: 20,
         }

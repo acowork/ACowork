@@ -85,6 +85,13 @@ pub struct LspRelaySupervisorConfig {
     /// (`http://{advertise_host}:{port}` — ADR-055 §6.3, so remote
     /// Runtimes and the Desktop reach the relay on THIS node).
     pub advertise_host: String,
+    /// ADR-089 D1: the address the relay binds AND the address the
+    /// supervisor's health/SSE probes target — always the same value
+    /// (loopback by default, `advertise_host` behind the
+    /// `expose_lsp_relay` escape hatch). Computed once via
+    /// [`super::lsp_relay::relay_bind_host`] at construction so spawn
+    /// and probe can never diverge (the §2.2 disappearing-node bug).
+    pub bind_host: String,
 }
 
 /// Publish the retained node-local LSP state through the process-wide
@@ -112,7 +119,7 @@ pub fn start_lsp_relay_supervisor(cfg: LspRelaySupervisorConfig, state: SharedNo
     tokio::spawn(async move {
         // ── Initial attach-or-spawn (ADR-055 §6.7, §6.11 local node) ──
         {
-            if let Some(health) = check_lsp_relay_health(port).await {
+            if let Some(health) = check_lsp_relay_health(&cfg.bind_host, port).await {
                 let relay_state = super::lsp_relay::attach_existing_lsp_relay(port, Some(health));
                 let relay_ready = relay_state.ready;
                 tracing::info!(
@@ -123,7 +130,7 @@ pub fn start_lsp_relay_supervisor(cfg: LspRelaySupervisorConfig, state: SharedNo
                 state.write().await.lsp_relay_process = Some(relay_state);
                 publish_lsps_state(&cfg, relay_ready).await;
             } else {
-                match spawn_lsp_relay(&cfg.data_dir, port, &cfg.health_url, &cfg.advertise_host)
+                match spawn_lsp_relay(&cfg.data_dir, port, &cfg.health_url, &cfg.bind_host)
                     .await
                 {
                     Ok((relay_state, child)) => {
@@ -188,7 +195,7 @@ async fn run_supervisor(
     {
         let deadline = Instant::now() + supervisor_defaults::STARTUP_GRACE;
         loop {
-            if try_connect_events(port).await {
+            if try_connect_events(&cfg.bind_host, port).await {
                 tracing::info!("Initial LSP Relay is serving /events");
                 break;
             }
@@ -198,7 +205,7 @@ async fn run_supervisor(
                 break;
             }
             if Instant::now() >= deadline {
-                if lsp_relay_alive(&state, port).await {
+                if lsp_relay_alive(&state, &cfg.bind_host, port).await {
                     tracing::warn!("Initial LSP Relay has not bound /events within {:?}, but process is still running; continuing startup wait", supervisor_defaults::STARTUP_GRACE);
                     sleep(supervisor_defaults::STARTUP_POLL).await;
                     continue;
@@ -226,11 +233,11 @@ async fn run_supervisor(
             continue;
         }
 
-        let relay_alive = try_connect_events(port).await;
+        let relay_alive = try_connect_events(&cfg.bind_host, port).await;
 
         match exit_reason {
             MonitorExit::HeartbeatTimeout { elapsed_secs } => {
-                let health = check_lsp_relay_health(port).await;
+                let health = check_lsp_relay_health(&cfg.bind_host, port).await;
                 if health.is_some() {
                     tracing::warn!(elapsed_secs, "LSP Relay heartbeat timeout, but /health probe succeeded — likely watchdog starvation, not relay stuck. Reconnecting without kill.");
                     continue;
@@ -254,7 +261,7 @@ async fn run_supervisor(
             MonitorExit::Clean => unreachable!(),
         }
 
-        if lsp_relay_alive(&state, port).await {
+        if lsp_relay_alive(&state, &cfg.bind_host, port).await {
             tracing::info!("LSP Relay HTTP is not ready yet, but process is still alive; waiting instead of restarting");
             sleep(supervisor_defaults::STARTUP_POLL).await;
             continue;
@@ -288,7 +295,7 @@ async fn run_supervisor(
         tracing::info!(attempt = attempts, ?backoff, "Restarting LSP Relay process");
         sleep(backoff).await;
 
-        match spawn_lsp_relay(&cfg.data_dir, port, &cfg.health_url, &cfg.advertise_host).await {
+        match spawn_lsp_relay(&cfg.data_dir, port, &cfg.health_url, &cfg.bind_host).await {
             Ok((new_state, child)) => {
                 tracing::info!(pid = new_state.pid, port = new_state.port, attempt = attempts, "LSP Relay restarted");
                 {
@@ -314,7 +321,7 @@ async fn run_supervisor(
                 });
             }
             Err(e) => {
-                if let Some(health) = check_lsp_relay_health(port).await {
+                if let Some(health) = check_lsp_relay_health(&cfg.bind_host, port).await {
                     let attached = super::lsp_relay::attach_existing_lsp_relay(port, Some(health));
                     let attached_ready = attached.ready;
                     tracing::info!(port, ready = attached_ready, "Reusing existing LSP Relay after restart failure");
@@ -333,7 +340,7 @@ async fn run_supervisor(
         {
             let deadline = Instant::now() + supervisor_defaults::STARTUP_GRACE;
             loop {
-                if try_connect_events(port).await {
+                if try_connect_events(&cfg.bind_host, port).await {
                     tracing::info!("Restarted LSP Relay is serving /events");
                     break;
                 }
@@ -342,7 +349,7 @@ async fn run_supervisor(
                     break;
                 }
                 if Instant::now() >= deadline {
-                    if lsp_relay_alive(&state, port).await {
+                    if lsp_relay_alive(&state, &cfg.bind_host, port).await {
                         sleep(supervisor_defaults::STARTUP_POLL).await;
                         continue;
                     }
@@ -368,7 +375,7 @@ async fn run_monitor_session(
     port: u16,
     in_startup_grace: &mut bool,
 ) -> MonitorExit {
-    let url = format!("http://127.0.0.1:{port}/events");
+    let url = format!("http://{}:{port}/events", cfg.bind_host);
     tracing::info!(%url, "Connecting to LSP Relay SSE event stream");
 
     // SSE is a long-lived connection (hours/days). Use only a connect
@@ -475,18 +482,18 @@ async fn run_monitor_session(
 }
 
 /// Check if the LSP Relay process is alive (by PID or health check).
-async fn lsp_relay_alive(state: &SharedNodeState, port: u16) -> bool {
+async fn lsp_relay_alive(state: &SharedNodeState, host: &str, port: u16) -> bool {
     let pid = state.read().await.lsp_relay_process.as_ref().map(|e| e.pid);
     match pid {
-        Some(0) => check_lsp_relay_health(port).await.is_some(),
+        Some(0) => check_lsp_relay_health(host, port).await.is_some(),
         Some(pid) => crate::process::spawn::check_health(pid).await,
         None => false,
     }
 }
 
 /// Try once to connect to /events and confirm it returns 2xx.
-async fn try_connect_events(port: u16) -> bool {
-    let url = format!("http://127.0.0.1:{port}/events");
+async fn try_connect_events(host: &str, port: u16) -> bool {
+    let url = format!("http://{host}:{port}/events");
     let client = http_client();
     match client
         .get(&url)
@@ -514,6 +521,7 @@ mod tests {
             health_url: "http://127.0.0.1:19900/health".to_string(),
             node_id: "local".to_string(),
             advertise_host: "127.0.0.1".to_string(),
+            bind_host: "127.0.0.1".to_string(),
         }
     }
 
@@ -533,6 +541,7 @@ mod tests {
             health_url: "http://127.0.0.1:19900/health".to_string(),
             node_id: "gpu-1".to_string(),
             advertise_host: "192.168.1.10".to_string(),
+            bind_host: "127.0.0.1".to_string(),
         };
         assert_eq!(cfg.port, 0);
         assert_eq!(cfg.advertise_host, "192.168.1.10");
@@ -547,14 +556,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_try_connect_events_unreachable() {
-        let result = try_connect_events(1).await;
+        let result = try_connect_events("127.0.0.1", 1).await;
         assert!(!result, "Port 1 should be unreachable");
     }
 
     #[tokio::test]
     async fn test_lsp_relay_alive_no_state() {
         let state: SharedNodeState = Arc::new(RwLock::new(NodeState::new(16)));
-        let result = lsp_relay_alive(&state, 1).await;
+        let result = lsp_relay_alive(&state, "127.0.0.1", 1).await;
         assert!(!result, "Should be false when no relay process state");
     }
 }

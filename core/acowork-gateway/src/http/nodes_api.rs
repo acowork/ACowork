@@ -227,7 +227,7 @@ pub async fn list_nodes(
 
 /// Ownership row for a node, cloned out of the store (no guard crosses an
 /// await). `None` = no record (ownerless -> admin-only, fail-closed).
-fn node_owner_rec(
+pub(crate) fn node_owner_rec(
     state: &AppState,
     node_id: &str,
 ) -> Option<crate::gateway::ownership::OwnerRecord> {

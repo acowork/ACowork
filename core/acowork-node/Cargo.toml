@@ -44,6 +44,10 @@ zip = { workspace = true }
 # WebSocket upgrades terminate at the relay.
 axum = { workspace = true }
 reqwest = { workspace = true }
+# ADR-089 D2: the `/relay/*` route bridges the Gateway's WebSocket
+# connection to the loopback relay (the relay's WS handler used to be
+# the upgrade's only terminator; the reverse proxy inserts a hop).
+tokio-tungstenite = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }

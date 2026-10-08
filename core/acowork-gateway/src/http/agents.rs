@@ -816,11 +816,20 @@ pub struct AgentLspEndpointResponse {
     /// Node hosting the agent (ADR-055 §6.5); `"local"` for agents the
     /// Gateway spawns directly.
     pub node_id: String,
-    /// LSP relay endpoint advertised by the node, `None` when the node
-    /// has not published a ready LSP relay state yet.
+    /// Gateway LSP relay **proxy** URL for this node
+    /// (`http://{advertise_host}:{http_port}/api/nodes/{node_id}/lsp`,
+    /// ADR-089 D3) — clients never address the node's relay directly:
+    /// the relay binds loopback on its node (D1), so the node-local
+    /// address the registry carries would be unreachable from any
+    /// other machine. `None` when the relay is not usable, with
+    /// [`Self::reason`] naming why.
     pub endpoint: Option<String>,
-    /// Whether the node's LSP relay is ready.
+    /// Whether the node's LSP relay is ready (and the node online).
     pub ready: bool,
+    /// ADR-089 D4: why `endpoint` is `None` — `node_offline` /
+    /// `relay_not_ready` / `no_lsp_sidecar`. `None` when ready.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 // ─── ADR-087: ownership metadata endpoints ──────────────────────────────
@@ -1098,21 +1107,46 @@ pub async fn get_agent_lsp_endpoint(
             .ok_or_else(|| ApiError::not_found(&format!("Agent not found: {}", agent_id)))?
     };
 
-    let endpoint = match state.node_registry.as_ref() {
-        Some(registry) => registry
-            .read()
-            .await
-            .get(&node_id)
-            .and_then(|n| n.lsp_endpoint.clone()),
-        None => None,
+    let (endpoint, ready, reason) = {
+        let node = match state.node_registry.as_ref() {
+            Some(registry) => registry.read().await.get(&node_id).cloned(),
+            None => None,
+        };
+        match node {
+            // Node unknown to the registry (never enrolled) or offline:
+            // the proxy could not forward anyway (ADR-089 D4 gating —
+            // `ready` no longer rides on the retained endpoint alone,
+            // which stays published after an LWT offline flip).
+            None => (
+                None,
+                false,
+                Some("no_lsp_sidecar".to_string()),
+            ),
+            Some(n) if !n.online => (None, false, Some("node_offline".to_string())),
+            // The retained `lsp_endpoint` is the relay's node-local
+            // loopback address (ADR-089 D1) — never hand it to a
+            // remote client. Assemble the Gateway proxy URL instead.
+            Some(n) if n.lsp_endpoint.is_some() => {
+                let gw = state.gateway_state.read().await;
+                (
+                    Some(format!(
+                        "http://{}:{}/api/nodes/{}/lsp",
+                        gw.advertise_host, gw.http_port, node_id
+                    )),
+                    true,
+                    None,
+                )
+            }
+            Some(_) => (None, false, Some("relay_not_ready".to_string())),
+        }
     };
-    let ready = endpoint.is_some();
 
     Ok(Json(AgentLspEndpointResponse {
         agent_id,
         node_id,
         endpoint,
         ready,
+        reason,
     }))
 }
 

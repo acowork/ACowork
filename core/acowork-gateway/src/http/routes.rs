@@ -125,6 +125,36 @@ impl AppState {
     }
 }
 
+/// Replace the value of an `access_token` query parameter with `***`
+/// before a URI is logged (ADR-089 D2 WS auth).
+fn redact_access_token(uri: axum::http::Uri) -> axum::http::Uri {
+    let Some(q) = uri.query() else {
+        return uri;
+    };
+    if !q.contains("access_token") {
+        return uri;
+    }
+    let redacted: String = q
+        .split('&')
+        .map(|pair| {
+            if pair.starts_with("access_token=") || pair == "access_token" {
+                "access_token=***"
+            } else {
+                pair
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("&");
+    // Replace only the query part; path + scheme are untouched.
+    let s = uri.to_string();
+    let prefix = &s[..s.len() - q.len()];
+    format!("{prefix}{redacted}")
+        .parse()
+        // A redacted copy of a valid URI is always valid; keep the
+        // original rather than panic on a pathological input.
+        .unwrap_or(uri)
+}
+
 /// Log request Origin and response CORS header for every HTTP request.
 /// This middleware runs AFTER the CORS layer, so `Access-Control-Allow-Origin`
 /// reflects what the browser actually sees.
@@ -135,7 +165,9 @@ async fn log_request_origin(req: Request, next: Next) -> axum::response::Respons
         .and_then(|v| v.to_str().ok())
         .unwrap_or("<none>");
     let method = req.method().clone();
-    let uri = req.uri().clone();
+    // ADR-089 D2: a WS upgrade may carry `?access_token=` (browser
+    // WebSockets cannot set headers) — never write it into the log.
+    let uri = redact_access_token(req.uri().clone());
     let msg = format!(
         "HTTP request: origin={} method={} uri={}",
         origin, method, uri
@@ -266,6 +298,8 @@ pub fn build_router(state: AppState) -> Router {
         .merge(crate::http::publish_api::publish_routes())
         .merge(crate::http::mcp_catalog_api::mcp_catalog_routes())
         .merge(crate::http::nodes_api::nodes_routes())
+        // ADR-089 D2: LSP relay reverse proxy (HTTP + WebSocket).
+        .merge(crate::http::lsp_proxy::lsp_proxy_routes())
         // Plan §3.3 P2-2: Gateway-perspective service diagnostics
         // (`GET /api/services/diagnose`) — one-fetch aggregate of
         // gateway / mqtt / embed / pm / doc / nodes for the Desktop
@@ -746,6 +780,21 @@ impl ApiError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn redact_access_token_only_touches_that_param() {
+        let uri: axum::http::Uri = "/api/nodes/n-1/lsp/lsp/rust?workspace_root=%2Ftmp&access_token=SECRET"
+            .parse()
+            .unwrap();
+        let red = super::redact_access_token(uri).to_string();
+        assert_eq!(
+            red,
+            "/api/nodes/n-1/lsp/lsp/rust?workspace_root=%2Ftmp&access_token=***"
+        );
+        // No token -> untouched; other params keep their order/value.
+        let plain: axum::http::Uri = "/api/nodes?x=1".parse().unwrap();
+        assert_eq!(super::redact_access_token(plain).to_string(), "/api/nodes?x=1");
+    }
+
     use super::*;
     use axum::body::Body;
     use tower::ServiceExt;

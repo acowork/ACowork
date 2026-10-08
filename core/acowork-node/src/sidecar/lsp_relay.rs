@@ -38,13 +38,32 @@ pub(crate) fn http_client() -> &'static reqwest::Client {
 /// Default port for the LSP Relay service.
 pub const LSP_RELAY_DEFAULT_PORT: u16 = 19878;
 
+/// The address the relay binds, given the node's config (ADR-089 D1).
+///
+/// Default is loopback: the relay is unauthenticated, its only
+/// consumer (the Desktop) reaches it through the two-hop Gateway →
+/// Node reverse proxy, and the retained `lsps` topic value is a health
+/// signal, not a routable address. `expose_lsp_relay = true` is the
+/// operator escape hatch that re-exposes the relay on
+/// `advertise_host` (LAN) — the historical ADR-055 §6.3 D3 behavior.
+///
+/// The supervisor's health/SSE probes MUST use this same host: a probe
+/// aimed at loopback against a LAN-bound relay (or vice versa) never
+/// turns ready, which is the ADR-089 §2.2 disappearing-node regression.
+pub fn relay_bind_host(expose_lsp_relay: bool, advertise_host: &str) -> String {
+    if expose_lsp_relay {
+        advertise_host.to_string()
+    } else {
+        "127.0.0.1".to_string()
+    }
+}
+
 /// Build the relay's argv. Split out from [`spawn_lsp_relay`] so the
 /// bind-host contract is assertable without spawning the real binary.
 ///
-/// ADR-055 §6.3 D3: the `--host` passed here must equal the host the
-/// node advertises on `acowork/nodes/{id}/lsps`. Hardcoding loopback
-/// while advertising a LAN IP produces an endpoint no one can reach —
-/// which is exactly the bug this signature exists to prevent.
+/// ADR-089 D1: `--host` comes from [`relay_bind_host`] — loopback by
+/// default, `advertise_host` only behind the `expose_lsp_relay`
+/// escape hatch.
 fn relay_argv(bind_host: &str, port: u16, node_health_url: &str) -> Vec<String> {
     vec![
         "--host".into(),
@@ -118,13 +137,11 @@ pub fn attach_existing_lsp_relay(
 /// `acowork-lsp-relay/src/config.rs`. No explicit `--lsp-config-dir`
 /// argument is passed.
 ///
-/// `bind_host` is the address the relay actually listens on. It MUST
-/// match the host the node advertises on `acowork/nodes/{id}/lsps`,
-/// or ADR-055 §6.3 D3 ("上报完整可达 endpoint") is violated and every
-/// remote consumer connects to a dead port. The node's own
-/// `advertise_host` is the source of truth (local mode → `127.0.0.1`,
-/// remote mode → LAN IP), so pass it through unchanged rather than
-/// hardcoding loopback.
+/// `bind_host` is the address the relay listens on — see
+/// [`relay_bind_host`] (ADR-089 D1: loopback by default; the Desktop
+/// reaches the relay through the Gateway → Node reverse proxy, so the
+/// advertised `lsps` topic value is a health signal, not a routable
+/// address). The supervisor's health/SSE probes use the same host.
 pub async fn spawn_lsp_relay(
     data_dir: &Path,
     port: u16,
@@ -224,10 +241,14 @@ pub async fn kill_lsp_relay(pid: u32) -> Result<()> {
 
 /// Check if the LSP Relay is healthy by calling its /health endpoint.
 ///
+/// `host` is the relay's bind host ([`relay_bind_host`]) — probing a
+/// different address than the one the relay listens on never succeeds
+/// (ADR-089 §2.2: the disappearing-node regression).
+///
 /// Returns `None` if the health check fails (process not started,
 /// not responding, or invalid response).
-pub async fn check_lsp_relay_health(port: u16) -> Option<LspRelayHealthStatus> {
-    let url = format!("http://127.0.0.1:{}/health", port);
+pub async fn check_lsp_relay_health(host: &str, port: u16) -> Option<LspRelayHealthStatus> {
+    let url = format!("http://{host}:{}/health", port);
     let client = http_client();
 
     let resp = client
@@ -258,13 +279,14 @@ pub async fn check_lsp_relay_health(port: u16) -> Option<LspRelayHealthStatus> {
 ///
 /// Returns `Some(health)` if healthy within the timeout, `None` otherwise.
 pub async fn wait_for_lsp_relay_ready(
+    host: &str,
     port: u16,
     timeout: std::time::Duration,
     poll_interval: std::time::Duration,
 ) -> Option<LspRelayHealthStatus> {
     let deadline = std::time::Instant::now() + timeout;
     loop {
-        if let Some(health) = check_lsp_relay_health(port).await
+        if let Some(health) = check_lsp_relay_health(host, port).await
             && health.ready
         {
             return Some(health);
@@ -287,22 +309,23 @@ mod tests {
     }
 
     #[test]
-    fn relay_binds_the_advertised_host() {
-        // ADR-055 §6.3 D3. The regression: `--host 127.0.0.1` hardcoded
-        // while the node advertised `192.168.x.x:19878` — every remote
-        // consumer (Desktop Monaco, harness LSP panel) then fetched a dead
-        // port and reported a bare "Failed to fetch".
-        let argv = relay_argv("192.168.17.113", 19878, "http://127.0.0.1:19900/health");
-        assert_eq!(argv_value(&argv, "--host"), "192.168.17.113");
-        assert_eq!(argv_value(&argv, "--port"), "19878");
+    fn relay_bind_host_defaults_to_loopback() {
+        // ADR-089 D1: the relay is unauthenticated and its only consumer
+        // (Desktop) reaches it through the Gateway → Node reverse proxy,
+        // so the bind stays on loopback even when the node advertises a
+        // LAN IP.
+        assert_eq!(relay_bind_host(false, "192.168.17.113"), "127.0.0.1");
+        assert_eq!(relay_bind_host(true, "192.168.17.113"), "192.168.17.113");
     }
 
     #[test]
-    fn relay_stays_on_loopback_in_local_mode() {
-        // Local-mode regression guard: the Gateway-spawned node advertises
-        // 127.0.0.1, and the relay must not drift onto the LAN there.
+    fn relay_argv_carries_the_bind_host() {
+        // The argv is a pure pass-through of the computed bind host —
+        // the contract that broke in the ADR-089 §2.2 regression is the
+        // bind/probe pairing, not the argv itself.
         let argv = relay_argv("127.0.0.1", 19878, "http://127.0.0.1:19900/health");
         assert_eq!(argv_value(&argv, "--host"), "127.0.0.1");
+        assert_eq!(argv_value(&argv, "--port"), "19878");
     }
 
     #[test]
@@ -347,7 +370,7 @@ mod tests {
     #[tokio::test]
     async fn test_check_lsp_relay_health_unreachable() {
         // Port 1 is always unreachable — health check should return None
-        let result = check_lsp_relay_health(1).await;
+        let result = check_lsp_relay_health("127.0.0.1", 1).await;
         assert!(result.is_none(), "Expected None for unreachable port");
     }
 
@@ -355,6 +378,7 @@ mod tests {
     async fn test_wait_for_lsp_relay_ready_timeout() {
         // Port 1 is always unreachable — should timeout and return None
         let result = wait_for_lsp_relay_ready(
+            "127.0.0.1",
             1,
             std::time::Duration::from_millis(200),
             std::time::Duration::from_millis(50),
@@ -398,6 +422,7 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         let result = wait_for_lsp_relay_ready(
+            "127.0.0.1",
             port,
             std::time::Duration::from_secs(2),
             std::time::Duration::from_millis(100),

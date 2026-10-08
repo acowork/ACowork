@@ -83,6 +83,14 @@ pub enum Command {
         /// Node-local LSP relay TCP port (ADR-055 §6.7, default 19878).
         #[arg(long, env = "ACOWORK_NODE_LSP_RELAY_PORT", default_value = "19878")]
         lsp_relay_port: u16,
+        /// ADR-089 D1 escape hatch: bind the LSP relay to
+        /// `advertise_host` instead of `127.0.0.1`. The relay has no
+        /// authentication — only set this when you deliberately accept
+        /// an open LAN port. The supported access path is the Gateway
+        /// reverse proxy (`/api/nodes/{id}/lsp/*`), which needs no
+        /// relay listener beyond loopback.
+        #[arg(long, env = "ACOWORK_NODE_EXPOSE_LSP_RELAY", default_value = "false")]
+        expose_lsp_relay: bool,
         /// Internal spawn marker: set ONLY by the Gateway when it
         /// spawns its own-machine node (hidden from help). Persisted
         /// into identity.json at creation so the Gateway can recognize
@@ -313,6 +321,7 @@ impl Cli {
                 gateway_http,
                 max_agents,
                 lsp_relay_port,
+                expose_lsp_relay,
                 gateway_managed,
             }) => {
                 let (gateway_host, gateway_mqtt_port) = split_gateway(&gateway)?;
@@ -359,6 +368,7 @@ impl Cli {
                     advertise_host_auto,
                     proxy_port,
                     lsp_relay_port,
+                    expose_lsp_relay,
                     ..NodeConfig::default()
                 };
                 init_tracing(&config);

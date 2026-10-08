@@ -1186,7 +1186,7 @@ mod blob_tests {
 
     #[test]
     fn embedding_blob_round_trips() {
-        let v = vec![1.5f32, -2.25, 0.0, 3.1415927];
+        let v = vec![1.5f32, -2.25, 0.0, 9.81];
         assert_eq!(blob_to_embedding(&embedding_to_blob(&v)), v);
     }
 

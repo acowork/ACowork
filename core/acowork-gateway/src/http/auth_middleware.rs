@@ -243,13 +243,36 @@ pub async fn auth_middleware(
         );
     };
 
-    let token = req
+    let header_token = req
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .map(str::trim)
         .filter(|t| !t.is_empty());
+    // ADR-089 D2: browser `WebSocket` cannot set headers, so the LSP
+    // relay WS bridge authenticates with `?access_token=` — accepted
+    // ONLY for upgrade requests (a plain HTTP caller must use the
+    // header, keeping the token out of URLs, caches and logs for
+    // everything else). `log_request_origin` redacts it regardless.
+    let is_ws_upgrade = req
+        .headers()
+        .get(header::CONNECTION)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.to_ascii_lowercase().contains("upgrade"))
+        && req
+            .headers()
+            .get(header::UPGRADE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.eq_ignore_ascii_case("websocket"));
+    let query_token: Option<String> = if header_token.is_none() && is_ws_upgrade {
+        query_param(req.uri().query(), "access_token")
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+    } else {
+        None
+    };
+    let token = header_token.or(query_token.as_deref());
 
     let Some(token) = token else {
         return unauthorized("missing bearer token");

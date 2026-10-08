@@ -241,6 +241,13 @@ pub(crate) async fn start_http_server(
     // Write pidfile for Desktop App discovery
     let _pidfile_guard = write_pidfile(data_dir, actual_port)?;
 
+    // ADR-089 D3: record the probed port so handlers can assemble
+    // externally-reachable URLs (LSP relay proxy) without re-reading
+    // config (which may name a different port than we bound).
+    {
+        app_state.gateway_state.write().await.http_port = actual_port;
+    }
+
     // Snapshot for the remote-origin listener (M3) — `build_router`
     // consumes `app_state` below, and the remote listener serves the
     // same routes from its own copy.
