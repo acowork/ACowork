@@ -3,6 +3,7 @@ import { useTranslation } from "../../i18n/useTranslation";
 import { useGatewayStore } from "../../stores/gatewayStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { fetchLspServers, fetchLspStatus, fetchLspStatusForLanguage, fetchLspInstallScript, runLspInstall, getLspRelayUrl, fetchNodes } from "../../lib/gateway-api";
+import { getGatewayUrl } from "../../lib/config";
 import { Dropdown } from "../common/Dropdown";
 import type { LspServersConfig, LspServerEntry, LspServerStatusEntry, LspHealthStatus, NodeInfo } from "../../lib/types";
 import { CheckCircle2, XCircle, Loader2, Eye, Terminal, Code2, RefreshCw } from "lucide-react";
@@ -153,22 +154,32 @@ export function LspTab() {
     return null;
   }, [nodeOverride, relayNodes]);
 
+  // ADR-089 D3: the relay binds loopback on its node, so the panel
+  // addresses it exclusively through the Gateway reverse proxy
+  // (`{gateway}/api/nodes/{id}/lsp`) — the raw `lsp_endpoint` from
+  // `/api/nodes` is the node-local topic value, never a client URL.
   const effectiveRelayUrl = useMemo(() => {
     if (effectiveNodeId) {
-      return relayNodes.find((n) => n.node_id === effectiveNodeId)?.lsp_endpoint ?? null;
+      return `${getGatewayUrl().replace(/\/+$/, "")}/api/nodes/${encodeURIComponent(effectiveNodeId)}/lsp`;
     }
     return defaultRelayUrl;
-  }, [effectiveNodeId, relayNodes, defaultRelayUrl]);
+  }, [effectiveNodeId, defaultRelayUrl]);
 
   // The node the panel is actually talking to, matched by relay URL. Works
   // for the agent-derived default too, so the label is honest in both modes
   // and needs no extra round-trip. Null when the endpoint is one the caller
   // may not see (ADR-087 D5 prunes it for non-managers) — the panel still
   // functions, it just cannot name the machine.
-  const shownNode = useMemo(
-    () => relayNodes.find((n) => n.lsp_endpoint === effectiveRelayUrl) ?? null,
-    [relayNodes, effectiveRelayUrl],
-  );
+  const shownNode = useMemo(() => {
+    // Match by node id: the proxy URL embeds it for the override path,
+    // and the agent-derived default carries the hosting node's id in
+    // the endpoint the Gateway assembled.
+    const m = effectiveRelayUrl
+      ? /\/api\/nodes\/([^/]+)\/lsp\/?$/.exec(effectiveRelayUrl)
+      : null;
+    if (!m) return null;
+    return relayNodes.find((n) => n.node_id === decodeURIComponent(m[1])) ?? null;
+  }, [relayNodes, effectiveRelayUrl]);
 
   const loadAll = useCallback(async (options: { force?: boolean } = {}) => {
     if (!effectiveRelayUrl) return;
@@ -395,7 +406,15 @@ export function LspTab() {
         // (ADR-087 D5), leaving the panel on an endpoint it cannot name.
         // Show the host rather than an empty select.
         ...(effectiveRelayUrl && !shownNode
-          ? [{ value: "", label: effectiveRelayUrl.replace(/^https?:\/\//, "") }]
+          ? [{
+              value: "",
+              // Unnamed host (outside the manage list): show the node id
+              // embedded in the proxy URL rather than the whole URL
+              // (ADR-089 D3 — the URL is plumbing, not a machine name).
+              label:
+                /\/api\/nodes\/([^/]+)\/lsp\/?$/.exec(effectiveRelayUrl)?.[1] ??
+                effectiveRelayUrl.replace(/^https?:\/\//, ""),
+            }]
           : []),
         ...relayNodes.map((n) => ({
           value: n.node_id,

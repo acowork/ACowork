@@ -7,6 +7,7 @@
 
 import type { IWebSocket } from "vscode-ws-jsonrpc";
 import { getCachedLspRelayEndpoint, invalidateLspRelayEndpointCache } from "./gateway-api";
+import { useAuthStore } from "../stores/authStore";
 import { MonacoVscodeApiWrapper } from "monaco-languageclient/vscodeApiWrapper";
 import type { MonacoVscodeApiConfig } from "monaco-languageclient/vscodeApiWrapper";
 import { log } from "./logger";
@@ -274,12 +275,21 @@ export async function buildLspWsUrl(
     if (!relayUrl) {
         throw new Error("LSP Relay not available");
     }
-    // The endpoint is the relay's HTTP base URL (e.g. "http://127.0.0.1:19878");
-    // swap the scheme for the WebSocket transport.
+    // The endpoint is the Gateway relay-proxy base URL (ADR-089 D3,
+    // e.g. "http://127.0.0.1:19876/api/nodes/{id}/lsp"); swap the
+    // scheme for the WebSocket transport.
     const wsUrl = relayUrl.replace(/^http/, "ws");
     let url = `${wsUrl}/lsp/${encodeURIComponent(language)}`;
     const params = new URLSearchParams();
     if (workspaceRoot) params.set("workspace_root", workspaceRoot);
+    // ADR-089 D2: the proxy sits behind the Gateway bearer gate and a
+    // browser WebSocket cannot set headers — under `multi_user` the
+    // token rides as a query parameter (the Gateway accepts it for
+    // upgrade requests only and redacts it from logs).
+    const auth = useAuthStore.getState();
+    if (auth.mode === "multi_user" && auth.accessToken) {
+        params.set("access_token", auth.accessToken);
+    }
     const qs = params.toString();
     const result = qs ? `${url}?${qs}` : url;
     log.debug(

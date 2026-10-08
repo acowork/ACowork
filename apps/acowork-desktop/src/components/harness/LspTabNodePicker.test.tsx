@@ -31,8 +31,10 @@ interface NodeFixture {
 
 /** Nodes returned by `GET /api/nodes`. */
 let nodes: NodeFixture[] = [];
-/** What `GET /api/agents/{id}/lsp-endpoint` resolves to. */
-let agentRelayUrl: string | null = null;
+/** Hosting node reported by `GET /api/agents/{id}/lsp-endpoint`.
+ *  ADR-089 D3: the client assembles the usable relay URL as
+ *  `{gateway}/api/nodes/{node_id}/lsp` from this id; `null` = no relay. */
+let agentNodeId: string | null = null;
 
 /** `getLspRelayUrl` memoises per agent id in a module-level map, so each
  *  case needs its own id or an earlier case's endpoint leaks into it. */
@@ -43,14 +45,18 @@ function stubFetch() {
   vi.stubGlobal(
     "fetch",
     vi.fn((url: string) => {
-      if (url.includes("/api/nodes")) {
-        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(nodes) });
-      }
       if (url.includes("lsp-endpoint")) {
         return Promise.resolve({
           ok: true,
           status: 200,
-          json: () => Promise.resolve({ endpoint: agentRelayUrl, ready: agentRelayUrl !== null }),
+          json: () =>
+            Promise.resolve({
+              node_id: agentNodeId,
+              endpoint: agentNodeId
+                ? `http://localhost:19876/api/nodes/${agentNodeId}/lsp`
+                : null,
+              ready: agentNodeId !== null,
+            }),
         });
       }
       if (url.includes("/api/lsp/servers")) {
@@ -78,6 +84,9 @@ function stubFetch() {
           json: () => Promise.resolve([{ language: "rust", installed: true }]),
         });
       }
+      if (url.includes("/api/nodes")) {
+        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(nodes) });
+      }
       return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) });
     }),
   );
@@ -99,7 +108,7 @@ describe("LspTab node picker placement (ADR-055 6.7)", () => {
       { node_id: NODE_A, node_name: "desktop-a", lsp_endpoint: "http://192.168.5.82:19878" },
       { node_id: NODE_B, node_name: "desktop-b", lsp_endpoint: "http://192.168.17.113:19878" },
     ];
-    agentRelayUrl = "http://192.168.5.82:19878";
+    agentNodeId = NODE_A;
     agentId = `com.example.agent-${++agentSeq}`;
     invalidateLspRelayEndpointCache();
     useGatewayStore.setState({ status: "connected" } as never);
@@ -121,7 +130,7 @@ describe("LspTab node picker placement (ADR-055 6.7)", () => {
 
   it("still renders the card when no relay is reachable, so the picker stays usable", async () => {
     nodes = [];
-    agentRelayUrl = null;
+    agentNodeId = null;
     render(<LspTab />);
 
     await waitFor(() =>
@@ -138,7 +147,7 @@ describe("LspTab node picker placement (ADR-055 6.7)", () => {
     nodes = [
       { node_id: NODE_B, node_name: "desktop-b", lsp_endpoint: "http://192.168.17.113:19878" },
     ];
-    agentRelayUrl = "http://127.0.0.1:19878";
+    agentNodeId = NODE_A;
     render(<LspTab />);
 
     await waitFor(() => expect(picker()).toBeTruthy());

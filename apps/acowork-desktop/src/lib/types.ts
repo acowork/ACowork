@@ -2116,10 +2116,21 @@ export interface AgentLspEndpointResponse {
   agent_id: string;
   /** Node hosting the agent ("local" for Gateway-spawned agents) */
   node_id: string;
-  /** Relay base URL (e.g. "http://127.0.0.1:19878"), null when not ready */
+  /**
+   * Gateway relay-proxy base URL
+   * (`http://{advertise_host}:{port}/api/nodes/{node_id}/lsp`, ADR-089
+   * D3), null when not ready. Clients may also assemble it from their
+   * own gateway URL + `node_id` (what `getCachedLspRelayEndpoint`
+   * does — relay-mode tunnels make the advertise-host URL wrong).
+   */
   endpoint: string | null;
-  /** Whether the node's LSP relay is ready */
+  /** Whether the node's LSP relay is ready (and the node online) */
   ready: boolean;
+  /**
+   * ADR-089 D4: why `endpoint` is null — `node_offline` /
+   * `relay_not_ready` / `no_lsp_sidecar`. Absent when ready.
+   */
+  reason?: string;
 }
 
 /** LSP server entry — matches acowork_lsp_relay::config::LspServerEntry */

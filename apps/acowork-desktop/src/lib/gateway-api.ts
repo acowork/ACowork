@@ -50,9 +50,18 @@ const relayEndpointCache = new Map<string, Promise<string | null>>();
  * Get the cached LSP Relay base URL for an agent, fetching from Gateway
  * if needed.
  *
- * Returns `null` when the relay is not available (the hosting node has
- * not published a ready LSP relay state). On fetch error, the cache
- * entry is cleared so the next call retries.
+ * ADR-089 D3: the usable URL is assembled from the caller's own
+ * gateway URL + the hosting `node_id` (`{gateway}/api/nodes/{id}/lsp`,
+ * reverse-proxied to the node's loopback relay). The endpoint's raw
+ * `endpoint` field is NOT used as a URL: it carries the advertise-host
+ * address, which is wrong for relay-mode tunnels and needlessly
+ * fragile for LAN clients — the gateway URL the app is actually
+ * talking to is the only reachable base the client truly knows.
+ *
+ * Returns `null` when the relay is not available (the hosting node is
+ * offline or has not published a ready LSP relay state; `reason`
+ * carries the code). On fetch error, the cache entry is cleared so the
+ * next call retries.
  */
 export async function getCachedLspRelayEndpoint(
   agentId: string,
@@ -61,7 +70,11 @@ export async function getCachedLspRelayEndpoint(
   let cached = relayEndpointCache.get(agentId);
   if (!cached) {
     cached = fetchAgentLspEndpoint(agentId, gatewayUrl)
-      .then((ep) => (ep.ready && ep.endpoint ? ep.endpoint : null))
+      .then((ep) =>
+        ep.ready && ep.node_id
+          ? `${gatewayUrl.replace(/\/+$/, "")}/api/nodes/${encodeURIComponent(ep.node_id)}/lsp`
+          : null,
+      )
       .catch((err) => {
         relayEndpointCache.delete(agentId); // Clear cache on error
         throw err;
