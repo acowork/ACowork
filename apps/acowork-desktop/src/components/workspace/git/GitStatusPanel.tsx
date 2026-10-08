@@ -343,7 +343,11 @@ export function GitStatusPanel({ agentId, workspaceId }: GitStatusPanelProps) {
     }
     return (
       <>
-      <ul className="flex-1 overflow-y-auto py-0.5">
+      {/* overflow-auto (vs overflow-y-auto): long file paths exceed the
+          panel's width — without an x-scrollbar the path got truncated
+          silently. `min-w-max` on the row lets its content push the
+          scroller wider, mirroring FileTree's virtualizer layout. */}
+      <ul className="flex-1 overflow-auto py-0.5">
         {pagedChanges.map((c) => {
           const meta = statusMeta(c);
           return (
@@ -357,7 +361,10 @@ export function GitStatusPanel({ agentId, workspaceId }: GitStatusPanelProps) {
                 // (12px at the default base, i.e. the app's `text-xs` step).
                 // Keep `py-[0.2em]` in sync with the tree row: the em padding
                 // is part of the height the tree's virtualizer derives.
-                "file-tree-row flex cursor-pointer items-center gap-1.5 py-[0.2em] pr-3 pl-4 select-none",
+                // `min-w-max` keeps long paths from collapsing into the
+                // row width — combined with the scroller's overflow-auto
+                // it surfaces a horizontal scrollbar instead of `…`.
+                "file-tree-row flex min-w-max cursor-pointer items-center gap-1.5 py-[0.2em] pr-3 pl-4 select-none",
                 "hover:bg-zinc-100 dark:hover:bg-zinc-800",
               )}
               onDoubleClick={() => {
@@ -376,7 +383,12 @@ export function GitStatusPanel({ agentId, workspaceId }: GitStatusPanelProps) {
               <span className={cn("shrink-0", meta.color)} title={t(meta.labelKey)}>
                 {meta.icon}
               </span>
-              <span className="flex-1 truncate text-text-tertiary ">
+              {/* whitespace-nowrap (was truncate): long paths must stay on
+                  one line and overflow the row, not be cut to `…`. The
+                  scroller's overflow-auto + the row's `min-w-max` then
+                  surface a horizontal scrollbar so the user can read the
+                  full path. */}
+              <span className="flex-1 whitespace-nowrap text-text-tertiary ">
                 {c.path}
               </span>
               {c.oldPath && (
@@ -384,7 +396,7 @@ export function GitStatusPanel({ agentId, workspaceId }: GitStatusPanelProps) {
                 // row's own 12px font-size (em-based tokens), so text-10 here
                 // would land at 8.6px — under the app's 9px floor. text-11
                 // renders 9.4px, i.e. the same visual step as before.
-                <span className="truncate text-11 text-text-tertiary ">
+                <span className="whitespace-nowrap text-11 text-text-tertiary ">
                   ← {c.oldPath}
                 </span>
               )}

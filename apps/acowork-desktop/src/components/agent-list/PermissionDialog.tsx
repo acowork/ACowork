@@ -124,6 +124,39 @@ export function PermissionDialog({ open, target, onClose }: PermissionDialogProp
     } else {
       setUsers([]);
     }
+
+    // The caller's own account is NOT in either listing's roster when the
+    // directory answered: `/api/users/directory` filters `ctx.user_id` out
+    // by design (it is a contact picker, ADR-076 §决策 8), and a non-admin
+    // never reaches the full roster. So a resource that lists the caller
+    // among its guests — the ordinary "I shared this with myself after
+    // being made a guest", and always the case for an owner viewing a
+    // roster they are on — rendered the caller's own UUID instead of their
+    // name. `me` is the one source that can name them, and the owner row
+    // below already relies on exactly that.
+    //
+    // Appended idempotently (`prev.some`), not conditionally on the path:
+    // on the admin path `GET /api/users` already returned the caller, so
+    // this is a no-op, and on either failure path it leaves the roster
+    // carrying the one account it can still name. A `push` guarded only by
+    // "is the caller an admin" would miss that last case.
+    const self = useAuthStore.getState().account;
+    if (self) {
+      setUsers((prev) =>
+        prev.some((u) => u.user_id === self.user_id)
+          ? prev
+          : [
+              ...prev,
+              {
+                user_id: self.user_id,
+                username: self.username,
+                display_name: self.display_name,
+                avatar: self.avatar ?? null,
+                builtin_avatar: self.builtin_avatar ?? null,
+              },
+            ],
+      );
+    }
   }, [open, target]);
 
   useEffect(() => {

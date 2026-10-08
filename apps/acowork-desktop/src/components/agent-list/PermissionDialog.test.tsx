@@ -93,6 +93,7 @@ type AccountRow = DirectoryRow & {
 // test can act as a non-admin — the name source splits on exactly that.
 const ACCOUNT = {
   user_id: "me-admin",
+  username: "me",
   role: "admin" as "admin" | "user",
   display_name: "Me",
 };
@@ -376,6 +377,49 @@ describe("PermissionDialog visibility toggle", () => {
       await screen.findByText("permissionDialog.visibilityOffHint");
       // The id survives as its own option and stays the selected one.
       expect(ownerLabel()).toBe("u-owner");
+    });
+
+    it("names the caller in the guest roster, whom the directory drops", async () => {
+      // The caller is a guest on this resource. `/api/users/directory`
+      // excludes `ctx.user_id` by design, so the roster can never name
+      // them — they used to render as a raw UUID in italic while every
+      // other guest showed a name, which reads as "corrupt id" rather
+      // than "you". `me` is the only source that can answer.
+      ACCOUNT.role = "user";
+      try {
+        authApi.fetchDirectory.mockResolvedValue([
+          { user_id: "u-owner", username: "bob", display_name: "Bob Bobson" },
+        ]);
+        (gatewayApi.fetchNodePermissions as ReturnType<typeof vi.fn>).mockResolvedValue({
+          ...PERMS,
+          guests: ["me-admin", "u-owner"],
+        });
+        await renderOpen();
+        await screen.findByText("permissionDialog.visibilityOffHint");
+        // Named, not an id — and not a second row for the same person.
+        expect(screen.getAllByTitle("Me").length).toBeGreaterThan(0);
+        expect(screen.queryByText("me-admin")).toBeNull();
+      } finally {
+        ACCOUNT.role = "admin";
+      }
+    });
+
+    it("does not duplicate the caller when the roster already listed them", async () => {
+      // The admin path's roster is the complete set and includes the
+      // caller, so the `users` append must be a no-op rather than a
+      // second row for one account — a duplicate checkbox would make
+      // revoking look like it needed two clicks.
+      authApi.fetchAccounts.mockResolvedValue([
+        { user_id: "me-admin", username: "me", display_name: "Me", role: "admin" },
+        { user_id: "u-owner", username: "bob", display_name: "Bob Bobson", role: "user" },
+      ]);
+      (gatewayApi.fetchNodePermissions as ReturnType<typeof vi.fn>).mockResolvedValue({
+        ...PERMS,
+        guests: ["me-admin"],
+      });
+      await renderOpen();
+      await screen.findByText("permissionDialog.visibilityOffHint");
+      expect(screen.getAllByTitle("Me").length).toBe(1);
     });
   });
 
