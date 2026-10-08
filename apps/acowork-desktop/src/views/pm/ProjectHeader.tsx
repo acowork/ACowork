@@ -9,15 +9,14 @@
  * - [⋯] 菜单（编辑项目、删除项目——含级联语义确认）
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { usePmProjectStore } from "../../stores/pm/projectStore";
 import { usePmBoardStore } from "../../stores/pm/boardStore";
 import { usePmHealthStore } from "../../stores/pm/healthStore";
-import { useAgentStore } from "../../stores/agentStore";
 import { ConfirmDialog } from "../../components/common/ConfirmDialog";
-import { AgentAvatar } from "../../components/common/AgentAvatar";
 import { showToast } from "../../components/common/ToastProvider";
 import { MemberManagerDialog } from "./MemberManagerDialog";
+import { MemberAvatar, useResolvedMembers } from "./pmMembers";
 import { useTranslation } from "../../i18n/useTranslation";
 import type { PmProject } from "../../lib/pm-types";
 
@@ -35,7 +34,6 @@ export function ProjectHeader({ project, onNewTask }: ProjectHeaderProps) {
   const deleteProject = usePmProjectStore((s) => s.deleteProject);
   const tasks = usePmBoardStore((s) => s.tasks);
   const healthy = usePmHealthStore((s) => s.healthy);
-  const agents = useAgentStore((s) => s.agents);
   const offline = healthy === false;
 
   const [editingTitle, setEditingTitle] = useState(false);
@@ -53,15 +51,10 @@ export function ProjectHeader({ project, onNewTask }: ProjectHeaderProps) {
   const submitted = tasks.filter((t) => t.status === "submitted").length;
   const done = tasks.filter((t) => t.status === "done").length;
 
-  // 成员头像：join agentStore 实时解析（不存快照）。已卸载 Agent 的头像
-  // 显示为占位圆点，计数不受影响。
-  const memberMetas = useMemo(
-    () =>
-      project.members
-        .map((m) => agents[m.instance_id]?.meta)
-        .filter((meta): meta is NonNullable<typeof meta> => Boolean(meta)),
-    [project.members, agents],
-  );
+  // 成员头像：join 实时源解析（不存快照）。Agent 走 agentStore，人类成员走
+  // 登录账号 —— 两者都收敛到 `pmMembers`。解析不出名字的成员（Agent 已
+  // 卸载）画问号占位，而不是被过滤掉：否则头像数会和旁边那个计数对不上。
+  const memberViews = useResolvedMembers(project.members);
 
   useEffect(() => {
     if (editingTitle) titleInputRef.current?.focus();
@@ -197,13 +190,10 @@ export function ProjectHeader({ project, onNewTask }: ProjectHeaderProps) {
               ) : (
                 <>
                   <span className="flex -space-x-1.5">
-                    {memberMetas.slice(0, MAX_AVATARS).map((meta) => (
-                      <AgentAvatar
-                        key={meta.instance_id}
-                        agentId={meta.instance_id}
-                        displayName={meta.display_name ?? meta.name}
-                        avatarUrl={meta.avatar ?? null}
-                        builtinAvatarId={meta.builtin_avatar ?? null}
+                    {memberViews.slice(0, MAX_AVATARS).map((m) => (
+                      <MemberAvatar
+                        key={m.instance_id}
+                        member={m}
                         size={18}
                         className="ring-[var(--color-modal-surface)]"
                       />

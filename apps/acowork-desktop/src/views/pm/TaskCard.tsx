@@ -14,7 +14,6 @@
 import { useState } from "react";
 import { useDraggable, useDroppable } from "@dnd-kit/core";
 import { CSS } from "@dnd-kit/utilities";
-import { useAgentStore } from "../../stores/agentStore";
 import { usePmBoardStore } from "../../stores/pm/boardStore";
 import { usePmHealthStore } from "../../stores/pm/healthStore";
 import { useTranslation } from "../../i18n/useTranslation";
@@ -23,14 +22,7 @@ import { TaskTypeIcon } from "./TaskTypeIcon";
 import { RejectDialog } from "./RejectDialog";
 import { cn } from "../../lib/utils";
 import type { PmTaskResponse } from "../../lib/pm-types";
-
-/** 解析 agent id → 显示名（meta.display_name ?? meta.name ?? id） */
-function resolveAgentName(agents: Record<string, { meta?: { display_name?: string; name?: string } }>, id: string | null): string | null {
-  if (!id) return null;
-  const a = agents[id];
-  if (!a?.meta) return id;
-  return a.meta.display_name || a.meta.name || id;
-}
+import { useActorLabel } from "./pmMembers";
 
 interface TaskCardProps {
   task: PmTaskResponse;
@@ -42,7 +34,6 @@ interface TaskCardProps {
 
 export function TaskCard({ task, onOpenTask, className, depth = 0 }: TaskCardProps) {
   const { t } = useTranslation();
-  const agents = useAgentStore((s) => s.agents);
   const healthy = usePmHealthStore((s) => s.healthy);
   const childCount = usePmBoardStore((s) => s.childrenOf(task.id).length);
   const [rejecting, setRejecting] = useState(false);
@@ -71,8 +62,8 @@ export function TaskCard({ task, onOpenTask, className, depth = 0 }: TaskCardPro
     ? { transform: CSS.Transform.toString(transform) }
     : undefined;
 
-  const assigneeName = resolveAgentName(agents, task.assignee);
-  const creatorName = resolveAgentName(agents, task.created_by);
+  const assigneeName = useActorLabel(task.assignee);
+  const creatorName = useActorLabel(task.created_by);
 
   /** 待人类审核：Agent 交活待验收（submitted），或 Agent 新建待批准开工（pending + review_status=pending） */
   const needsReview =

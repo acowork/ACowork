@@ -19,11 +19,13 @@ import { createTask, updateTask } from "../../lib/pm-api";
 import { useAgentStore } from "../../stores/agentStore";
 import { usePmBoardStore } from "../../stores/pm/boardStore";
 import { usePmProjectStore } from "../../stores/pm/projectStore";
+import { useUserProfileStore } from "../../stores/userProfileStore";
 import { useTranslation } from "../../i18n/useTranslation";
 import { Dropdown } from "../../components/common/Dropdown";
 import { StyledInput, StyledTextarea } from "../../components/common/StyledInput";
 import { showToast } from "../../components/common/ToastProvider";
 import type { PmTaskResponse, Priority, TaskType } from "../../lib/pm-types";
+import { memberOptions, useSelfAccount } from "./pmMembers";
 
 export interface TaskEditDialogProps {
   mode: "create" | "edit";
@@ -69,13 +71,14 @@ export function TaskEditDialog({
   const boardTasks = usePmBoardStore((s) => s.tasks);
   const reload = usePmBoardStore((s) => s.reload);
 
-  // 项目成员（instance_id 集合）— 联动指派：assignee 必须是项目成员。
+  // 项目成员 — 联动指派：assignee 必须是项目成员。
   // selector 返回数组元素引用（find），非新建对象，符合 store 契约。
   const project = usePmProjectStore((s) => s.projects.find((p) => p.id === projectId));
-  const memberIds = useMemo(
-    () => new Set((project?.members ?? []).map((m) => m.instance_id)),
-    [project?.members],
-  );
+  const memberCount = project?.members.length ?? 0;
+  const selfAccount = useSelfAccount();
+  // local 模式：`authStore.account` 恒 null，但 PM 仍可能有 `kind:"user"`
+  // 成员（`instance_id` 是 "human"/"unknown" 哨兵），用本地 profile 命名。
+  const localProfile = useUserProfileStore((s) => s.profile);
 
   const [title, setTitle] = useState(initial?.title ?? "");
   const [type, setType] = useState<TaskType>(initial?.type ?? "task");
@@ -114,12 +117,14 @@ export function TaskEditDialog({
     return boardTasks;
   }, [boardTasks, mode, initial]);
 
-  // ADR-073: dropdown value 是 agent_instance_id（UUID）— 与 task.assignee 语义一致。
-  // label 用 display_name 解析（meta.display_name ?? meta.name ?? agent_id）。
-  // 联动指派：仅列出项目成员（memberIds），服务端强校验 assignee ∈ 成员 ∪ "human"。
-  const agentOptions = useMemo(
-    () => buildAgentOptions(Object.values(agents), memberIds),
-    [agents, memberIds],
+  // ADR-073: dropdown value 是 instance_id — 与 task.assignee 语义一致
+  // （Agent → instance UUID；User → user_id，ADR-076 §决策 11）。
+  // 联动指派：仅列出项目成员，服务端强校验 assignee ∈ members。成员来源
+  // 必须是 project.members 本身，不能是 agentStore —— 否则 `kind: "user"`
+  // 的成员（恒为项目创建者）不在下拉里，用户没法把任务指派给自己。
+  const assigneeOptions = useMemo(
+    () => memberOptions(project?.members ?? [], agents, selfAccount, localProfile),
+    [project?.members, agents, selfAccount, localProfile],
   );
 
   const parentOptions = useMemo(
@@ -270,7 +275,7 @@ export function TaskEditDialog({
 
           <div className="grid grid-cols-2 gap-3">
             <Field label={t("pm.task.assignee")}>
-              {memberIds.size === 0 ? (
+              {memberCount === 0 ? (
                 <p className="rounded-md border border-dashed border-zinc-300 px-2 py-1.5 text-11 text-text-tertiary dark:border-zinc-600">
                   {t("pm.assigneeNoMembersHint")}
                 </p>
@@ -278,7 +283,7 @@ export function TaskEditDialog({
                 <Dropdown
                   value={assignee}
                   onChange={setAssignee}
-                  options={agentOptions}
+                  options={assigneeOptions}
                   placeholder={{ value: "", label: t("pm.task.unassigned") }}
                 />
               )}
@@ -368,26 +373,3 @@ function Field({
   );
 }
 
-// ── Pure helpers (exported for testing) ──────────────────────────────
-// ADR-073: assignee dropdown uses instance_id as value (matches
-// task.assignee semantics); label is human-readable display name.
-// Extracted as a pure function so it's directly testable without
-// needing to mount the React component.
-export interface AgentMeta {
-  instance_id: string;
-  agent_id: string;
-  display_name?: string;
-  name?: string;
-}
-
-export function buildAgentOptions(
-  agentList: ReadonlyArray<{ meta: AgentMeta }>,
-  onlyIds?: ReadonlySet<string> | null,
-): Array<{ value: string; label: string }> {
-  return agentList
-    .filter((a) => !onlyIds || onlyIds.has(a.meta.instance_id))
-    .map((a) => ({
-      value: a.meta.instance_id,
-      label: a.meta.display_name || a.meta.name || a.meta.agent_id,
-    }));
-}

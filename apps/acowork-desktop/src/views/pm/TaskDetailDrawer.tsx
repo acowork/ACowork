@@ -9,10 +9,9 @@
  * - 关闭时焦点回归原 Task Card
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { usePmTaskDetailStore } from "../../stores/pm/taskDetailStore";
 import { usePmBoardStore } from "../../stores/pm/boardStore";
-import { useAgentStore } from "../../stores/agentStore";
 import { useTranslation } from "../../i18n/useTranslation";
 import { PriorityBadge } from "./PriorityBadge";
 import { TaskTypeIcon } from "./TaskTypeIcon";
@@ -22,6 +21,7 @@ import { showToast } from "../../components/common/ToastProvider";
 import { attachmentUrl } from "../../lib/pm-api";
 import { cn } from "../../lib/utils";
 import type { PmTaskResponse, TaskStatus } from "../../lib/pm-types";
+import { useActorLabel } from "./pmMembers";
 
 interface TaskDetailDrawerProps {
   taskId: string;
@@ -31,16 +31,6 @@ interface TaskDetailDrawerProps {
 }
 
 type TabId = "overview" | "description" | "subtasks" | "dependencies" | "attachments";
-
-function resolveAgentName(
-  agents: Record<string, { meta?: { display_name?: string; name?: string } }>,
-  id: string | null,
-): string | null {
-  if (!id) return null;
-  const a = agents[id];
-  if (!a?.meta) return id;
-  return a.meta.display_name || a.meta.name || id;
-}
 
 const TASK_STATUS_I18N: Record<TaskStatus, string> = {
   pending: "pm.board.pending",
@@ -80,7 +70,6 @@ export function TaskDetailDrawer({ taskId, onClose, onEdit, onAddSubtask }: Task
   const uploadAttachment = usePmTaskDetailStore((s) => s.uploadAttachment);
   const deleteAttachment = usePmTaskDetailStore((s) => s.deleteAttachment);
 
-  const agents = useAgentStore((s) => s.agents);
   const [activeTab, setActiveTab] = useState<TabId>("overview");
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmDeleteAtt, setConfirmDeleteAtt] = useState<string | null>(null);
@@ -122,14 +111,8 @@ export function TaskDetailDrawer({ taskId, onClose, onEdit, onAddSubtask }: Task
     return () => window.removeEventListener("keydown", handler);
   }, [onClose]);
 
-  const assigneeName = useMemo(
-    () => resolveAgentName(agents, detail?.assignee ?? null),
-    [agents, detail?.assignee],
-  );
-  const creatorName = useMemo(
-    () => resolveAgentName(agents, detail?.created_by ?? null),
-    [agents, detail?.created_by],
-  );
+  const assigneeName = useActorLabel(detail?.assignee ?? null);
+  const creatorName = useActorLabel(detail?.created_by ?? null);
 
   const removeTask = usePmBoardStore((s) => s.removeTask);
 
