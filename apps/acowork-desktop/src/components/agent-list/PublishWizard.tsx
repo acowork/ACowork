@@ -278,7 +278,7 @@ export function PublishWizard({
       />
 
       {/* Dialog */}
-      <div className="relative z-10 flex w-full max-w-2xl flex-col rounded-md border border-border-outer bg-modal-surface shadow-xl">
+      <div className="relative z-10 flex max-h-[90vh] w-full max-w-2xl flex-col rounded-md border border-border-outer bg-modal-surface shadow-xl">
         {/* Header */}
         <div className="flex items-center gap-2 border-b border-border-divider px-5 py-3 min-h-[var(--ui-dialog-zone-h)]">
           <Package className="h-5 w-5 text-text-tertiary " />
@@ -325,11 +325,18 @@ export function PublishWizard({
           })}
         </div>
 
-        {/* Step content */}
-        <div className="flex-1 space-y-4 overflow-y-auto px-5 py-4">
-          {/* Check results */}
+        {/* Step content — `min-h-0` lets the flex child shrink below
+             its content size so `overflow-y-auto` actually triggers
+             (well-known flexbox quirk; see CreateWizard for the
+             pattern). */}
+        <div className="flex-1 min-h-0 space-y-4 overflow-y-auto px-5 py-4">
+          {/* Check results — `max-h-[360px]` + internal scroll matches
+              CreateWizard's Preview step: a deeply-broken agent can
+              produce dozens of check rows, and the dialog itself
+              should not grow beyond the viewport. The outer step
+              scroll stays as a safety net. */}
           {checkResult && (
-            <div className="space-y-2">
+            <div className="max-h-[360px] space-y-2 overflow-y-auto">
               <h3 className="text-xs font-medium text-text-secondary ">
                 Check Results
               </h3>
