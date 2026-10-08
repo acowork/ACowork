@@ -30,6 +30,7 @@
 //! ├── sidecar/      # LSP relay supervisor (Phase 4 — migrated from
 //! │                 # gateway lifecycle/lsp_relay_supervisor.rs)
 //! ├── fs_browse.rs  # node-local filesystem browsing (Phase 3, L7-1)
+//! ├── node_api.rs   # node-local identity HTTP (rename, ADR-075 D4)
 //! ├── state.rs      # NodeState — the GatewayState replacement
 //! └── cli.rs        # §6.13.2 command surface (thin orchestration shell)
 //! ```
@@ -41,6 +42,7 @@ pub mod control;
 pub mod error;
 pub mod fs_browse;
 pub mod identity;
+pub mod node_api;
 pub mod package;
 pub mod process;
 pub mod proxy;

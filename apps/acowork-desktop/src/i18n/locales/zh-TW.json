@@ -1703,6 +1703,9 @@
   },
   "permissionDialog": {
     "title": "權限",
+    "displayName": "顯示名稱",
+    "displayNameHint": "顯示在側邊欄和日誌中。只能是小寫字母、數字和連字號；節點的 ID 不會改變。",
+    "displayNameInvalid": "2-32 個字元，僅限 a-z、0-9 和不重複的連字號；「local」為保留字。",
     "ariaLabelClose": "關閉",
     "owner": "擁有者",
     "ownerUnassigned": "未指定（僅管理員）",

@@ -1705,6 +1705,9 @@
   },
   "permissionDialog": {
     "title": "권한",
+    "displayName": "표시 이름",
+    "displayNameHint": "사이드바와 로그에 표시됩니다. 소문자, 숫자, 하이픈만 사용할 수 있으며 노드 ID는 변경되지 않습니다.",
+    "displayNameInvalid": "2-32자의 a-z, 0-9 및 중복되지 않는 하이픈. \"local\"은 예약어입니다.",
     "ariaLabelClose": "닫기",
     "owner": "소유자",
     "ownerUnassigned": "미지정(관리자만)",

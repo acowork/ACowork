@@ -1200,6 +1200,9 @@ impl NodeControlPlane {
         let proxy_state = state.clone();
         let proxy_bind = format!("{}:{}", config.proxy_bind, config.proxy_port);
         let proxy_node_id = node_id.clone();
+        // The rename route (ADR-075 D4) writes `identity.json` under
+        // `config.home` and rebuilds the info snapshot with it.
+        let proxy_config = config.clone();
         // Signals that the node HTTP server (hosting `/health`) is
         // bound — the LSP relay sidecar start waits for this so the
         // relay's parent-health watchdog has a live target from birth.
@@ -1215,10 +1218,12 @@ impl NodeControlPlane {
             let node_http_state = crate::state::NodeHttpState {
                 node: proxy_state.clone(),
                 identity: http_identity,
+                config: proxy_config,
             };
             let app = crate::proxy::router(node_http_state.clone())
                 .merge(crate::fs_browse::router(node_http_state.clone()))
-                .merge(crate::package_http::router(node_http_state));
+                .merge(crate::package_http::router(node_http_state.clone()))
+                .merge(crate::node_api::router(node_http_state));
             let listener = match tokio::net::TcpListener::bind(&proxy_bind).await {
                 Ok(l) => l,
                 Err(e) => {
@@ -2113,7 +2118,10 @@ pub(crate) mod dispatcher {
         publish_raw(node_sidecar_status_topic(node_id, "lsp_relay"), Vec::new(), true).await
     }
 
-    async fn publish_envelope(
+    /// Publish an arbitrary retained envelope on the daemon's shared
+    /// MQTT client (the node HTTP services use it to republish a
+    /// snapshot after a local mutation — e.g. the ADR-075 D4 rename).
+    pub async fn publish_envelope(
         topic: String,
         envelope: DataEnvelope,
         retained: bool,

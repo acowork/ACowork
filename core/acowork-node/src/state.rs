@@ -274,8 +274,12 @@ pub type SharedNodeState = std::sync::Arc<RwLock<NodeState>>;
 pub struct NodeHttpState {
     /// Runtime process table + local install table.
     pub node: SharedNodeState,
-    /// Live identity — `node_token` is read on every proxied request.
+    /// Live identity — `node_token` is read on every proxied request,
+    /// `node_name` is written by the rename route (ADR-075 D4).
     pub identity: Arc<RwLock<NodeIdentity>>,
+    /// Node config — the rename route persists `identity.json` under
+    /// `config.home` and rebuilds the `NodeInfo` snapshot with it.
+    pub config: crate::config::NodeConfig,
 }
 
 /// Load a persisted snapshot, mapped to the crate Result for CLI use.

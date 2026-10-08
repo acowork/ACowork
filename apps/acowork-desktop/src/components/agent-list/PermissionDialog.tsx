@@ -14,9 +14,11 @@ import {
   patchNodeGuests,
   patchAgentOwner,
   patchNodeOwner,
+  patchNodeName,
   type ResourcePermissions,
 } from "../../lib/gateway-api";
 import { ErrorBox } from "../common/ErrorBox";
+import { StyledInput } from "../common/StyledInput";
 import { Switch } from "../common/Switch";
 import { Dropdown } from "../common/Dropdown";
 
@@ -33,6 +35,26 @@ interface PermissionDialogProps {
   open: boolean;
   target: PermissionTarget | null;
   onClose: () => void;
+  /**
+   * ADR-075 D4: called after a node display-name rename succeeds, so
+   * the caller can refresh its node list. The Gateway's own view
+   * converges when the node republishes its info snapshot; without a
+   * callback the sidebar would keep rendering the old name until the
+   * next poll. Ignored for agents (no rename).
+   */
+  onRenamedNode?: (nodeId: string, nodeName: string) => void;
+}
+
+/**
+ * ADR-075 D2 slug rules, mirrored client-side so the Save button
+ * disables on an impossible name instead of round-tripping to a 400.
+ * The Gateway and the node both re-validate — this is a convenience,
+ * not the security boundary.
+ */
+export function isValidNodeName(name: string): boolean {
+  if (name.length < 2 || name.length > 32 || name === "local") return false;
+  if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(name)) return false;
+  return !name.includes("--");
 }
 
 /**
@@ -51,7 +73,7 @@ interface PermissionDialogProps {
  *   therefore gets the picker; an owner sees the same row as read-only
  *   text, which is what it always was.
  */
-export function PermissionDialog({ open, target, onClose }: PermissionDialogProps) {
+export function PermissionDialog({ open, target, onClose, onRenamedNode }: PermissionDialogProps) {
   const { t } = useTranslation();
   const [perms, setPerms] = useState<ResourcePermissions | null>(null);
   const [users, setUsers] = useState<DirectoryUser[]>([]);
@@ -68,6 +90,9 @@ export function PermissionDialog({ open, target, onClose }: PermissionDialogProp
   /** Owner draft. `""` is the ownerless value the wire spells `null`;
    *  the `<Dropdown>` needs a real option value to select. */
   const [owner, setOwner] = useState<string>("");
+  /** ADR-075 D4: the node's display name (`node_name`). Only nodes have
+   *  one — `target.name` is what the sidebar already renders. */
+  const [nodeName, setNodeName] = useState<string>("");
   const closeRef = useRef<HTMLButtonElement>(null);
 
   const load = useCallback(async () => {
@@ -163,6 +188,13 @@ export function PermissionDialog({ open, target, onClose }: PermissionDialogProp
     void load();
   }, [load]);
 
+  // ADR-075 D4: the display name is the header text, not a permissions
+  // field the Gateway returns — seed the draft from the target whenever
+  // the dialog opens on a (possibly different) node.
+  useEffect(() => {
+    setNodeName(target?.kind === "node" ? (target.name ?? "") : "");
+  }, [target]);
+
   // Focus close on open; Escape to close (same affordance as the detail dialog).
   useEffect(() => {
     if (!open) return;
@@ -184,12 +216,19 @@ export function PermissionDialog({ open, target, onClose }: PermissionDialogProp
   );
   const offLabel = t("permissionDialog.visibilityPrivate");
 
+  // ADR-075 D4: a node's display name is not part of the permissions
+  // payload, so it is compared against the value the dialog opened on
+  // (`target.name`) rather than against a server read.
+  const nameChanged = target.kind === "node" && nodeName !== (target.name ?? "");
+  const nameValid = isValidNodeName(nodeName);
+
   const dirty =
-    perms !== null &&
-    (visibility !== perms.visibility ||
-      owner !== (perms.owner_user_id ?? "") ||
-      guests.size !== perms.guests.length ||
-      perms.guests.some((g) => !guests.has(g)));
+    (perms !== null &&
+      (visibility !== perms.visibility ||
+        owner !== (perms.owner_user_id ?? "") ||
+        guests.size !== perms.guests.length ||
+        perms.guests.some((g) => !guests.has(g)))) ||
+    (nameChanged && nameValid);
 
   const handleSave = async () => {
     if (!perms || !dirty) return;
@@ -213,6 +252,17 @@ export function PermissionDialog({ open, target, onClose }: PermissionDialogProp
         const fn = target.kind === "agent" ? patchAgentGuests : patchNodeGuests;
         await fn(target.id, Array.from(guests));
       }
+      // ADR-075 D4: last, and only for a node. A rename is a separate
+      // machine mutation against the node itself; doing it after the
+      // attribution writes means an owner transfer that gets rejected
+      // (e.g. the node is offline for the rename) does not leave a
+      // half-applied name behind in the same click.
+      if (nameChanged && nameValid) {
+        await patchNodeName(target.id, nodeName);
+        // The node republished its info snapshot; the caller refreshes
+        // its node list so the sidebar header picks the new name up.
+        onRenamedNode?.(target.id, nodeName);
+      }
       await load();
     } catch (e) {
       // `HttpApiError.message` is already the localized denial copy;
@@ -225,6 +275,7 @@ export function PermissionDialog({ open, target, onClose }: PermissionDialogProp
       setVisibility(perms.visibility);
       setGuests(new Set(perms.guests));
       setOwner(perms.owner_user_id ?? "");
+      if (target.kind === "node") setNodeName(target.name ?? "");
     } finally {
       setSaving(false);
     }
@@ -394,6 +445,37 @@ export function PermissionDialog({ open, target, onClose }: PermissionDialogProp
 
           {perms && !loading && (
             <>
+              {/* ADR-075 D4: display name — a node-only field, and the
+                  ONLY thing here that is not about permissions. It sits
+                  first because it is what the header above shows and
+                  the most common reason to open this dialog on a node. */}
+              {target.kind === "node" && (
+                <div className="flex flex-col gap-2">
+                  <div>
+                    <div className="text-text-secondary">
+                      {t("permissionDialog.displayName")}
+                    </div>
+                    <div className="text-10 text-text-tertiary">
+                      {t("permissionDialog.displayNameHint")}
+                    </div>
+                  </div>
+                  <StyledInput
+                    data-node-name
+                    value={nodeName}
+                    onChange={(e) => setNodeName(e.target.value)}
+                    disabled={!editable}
+                    aria-label={t("permissionDialog.displayName")}
+                    aria-invalid={nameChanged && !nameValid}
+                    className="w-full"
+                  />
+                  {nameChanged && !nameValid && (
+                    <div className="text-10 text-text-tertiary" role="alert">
+                      {t("permissionDialog.displayNameInvalid")}
+                    </div>
+                  )}
+                </div>
+              )}
+
               {/* Owner — an admin picks any account; everyone else reads it.
                   `PATCH .../owner` is the Admin tier (ADR-087 D7), so this
                   is deliberately NOT gated on `editable`, which is also true
