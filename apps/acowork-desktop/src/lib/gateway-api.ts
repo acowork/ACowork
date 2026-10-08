@@ -729,7 +729,14 @@ export async function runLspInstall(
     method: "POST",
   });
   const data = await resp.json();
-  if (!resp.ok) throw new Error((data as { error?: string }).error ?? `Install failed: ${resp.status}`);
+  if (!resp.ok) {
+    // The relay's 500/504 answers carry no `error` field — only the script's
+    // stdout/stderr. Without these fallbacks the UI showed a bare
+    // "Install failed: 500" and the actual reason (missing JDK, no package
+    // manager, …) was dropped on the floor.
+    const detail = data as { error?: string; stderr?: string; stdout?: string };
+    throw new Error(detail.error || detail.stderr || detail.stdout || `Install failed: ${resp.status}`);
+  }
   return data as LspInstallRunResponse;
 }
 
@@ -829,6 +836,10 @@ function normalizeNode(raw: Record<string, unknown>): NodeInfo {
     max_agents: snakeOrCamel("max_agents", "maxAgents") as number | undefined,
     agent_count: snakeOrCamel("agent_count", "agentCount") as number | undefined,
     http_endpoint: snakeOrCamel("http_endpoint", "httpEndpoint") as string | undefined,
+    // ADR-055 §6.7: manage-list only (ADR-087 D5), so `undefined` for a
+    // non-manager even when the relay is up — callers must treat a
+    // missing endpoint as "no relay visible to me", not "no relay".
+    lsp_endpoint: snakeOrCamel("lsp_endpoint", "lspEndpoint") as string | undefined,
     // ADR-087: permission bits (absent on pre-087 Gateways — undefined).
     can_manage: raw.can_manage as boolean | undefined,
     is_guest: raw.is_guest as boolean | undefined,

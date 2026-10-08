@@ -1457,7 +1457,10 @@
     "connectToGateway": "ゲートウェイに接続して LSP サーバーを管理",
     "refresh": "更新",
     "loading": "読み込み中...",
-    "refreshing": "更新中..."
+    "refreshing": "更新中...",
+    "node": "ノード",
+    "relayUnavailable": "このノードの LSP Relay を利用できません",
+    "noRelayNodes": "LSP Relay が利用可能なノードがありません"
   },
   "pm": {
     "projects": "プロジェクト",

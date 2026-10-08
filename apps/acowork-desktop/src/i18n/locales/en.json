@@ -1502,7 +1502,10 @@
     "connectToGateway": "Connect to Gateway to manage LSP servers",
     "refresh": "Refresh",
     "loading": "Loading...",
-    "refreshing": "Refreshing..."
+    "refreshing": "Refreshing...",
+    "node": "Node",
+    "relayUnavailable": "LSP Relay unavailable on this node",
+    "noRelayNodes": "No node with an available LSP Relay"
   },
   "pm": {
     "projects": "Projects",

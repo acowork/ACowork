@@ -1456,7 +1456,10 @@
     "connectToGateway": "連接閘道以管理 LSP 伺服器",
     "refresh": "重新整理",
     "loading": "載入中...",
-    "refreshing": "重新整理中..."
+    "refreshing": "重新整理中...",
+    "node": "節點",
+    "relayUnavailable": "該節點的 LSP Relay 不可用",
+    "noRelayNodes": "沒有可用 LSP Relay 的節點"
   },
   "pm": {
     "projects": "專案",

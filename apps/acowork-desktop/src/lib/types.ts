@@ -109,6 +109,17 @@ export interface NodeInfo {
   agent_count?: number;
   http_endpoint?: string;
   /**
+   * ADR-055 §6.7: this node's LSP relay base URL, from the retained
+   * `acowork/nodes/{node_id}/lsps` envelope. Present only while the
+   * node's relay is ready.
+   *
+   * Machine-identifying metadata under ADR-087 D5, so the Gateway only
+   * returns it to callers who can manage the node — a merely-visible
+   * caller sees `undefined` even for a node that is up. Absent on
+   * Gateways predating this field.
+   */
+  lsp_endpoint?: string;
+  /**
    * ADR-087 D8: caller may manage this node (owner / guest / admin, or
    * anyone in Local mode). Server-computed — gates the node-group-header
    * permissions icon. Optional: absent on Gateways predating ADR-087.

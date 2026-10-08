@@ -16,6 +16,7 @@ import {
     fetchActiveUser,
     verifyAgentHealth,
     fetchNodes,
+    runLspInstall,
 } from "./gateway-api";
 import type { BackendUserProfile } from "./types";
 
@@ -291,5 +292,72 @@ describe("fetchNodes field normalization", () => {
         expect(nodes[0].agent_count).toBe(2);
         expect(nodes[0].max_agents).toBe(16);
         expect(nodes[0].http_endpoint).toBe("http://127.0.0.1:19900");
+    });
+
+    it("carries lsp_endpoint so the harness panel can offer a node picker", async () => {
+        // ADR-055 §6.7: the panel needs every node's relay address, not just
+        // the selected agent's, or the node dropdown has nothing to list.
+        mockFetchOnce([
+            {
+                node_id: "gpu-1",
+                online: true,
+                node_name: "gpu-box",
+                lsp_endpoint: "http://10.0.0.2:19878",
+            },
+            {
+                node_id: "laptop",
+                online: true,
+                node_name: "laptop",
+                // Relay down / not yet published — the picker must be able to
+                // tell "no relay" apart from "not a manager" by omission.
+            },
+        ]);
+
+        const nodes = await fetchNodes("http://gw");
+
+        expect(nodes[0].lsp_endpoint).toBe("http://10.0.0.2:19878");
+        expect(nodes[1].lsp_endpoint).toBeUndefined();
+    });
+
+    it("accepts the legacy camelCase lspEndpoint spelling", async () => {
+        mockFetchOnce([
+            { nodeId: "gpu-1", online: true, lspEndpoint: "http://10.0.0.2:19878" },
+        ]);
+
+        const nodes = await fetchNodes("http://gw");
+
+        expect(nodes[0].lsp_endpoint).toBe("http://10.0.0.2:19878");
+    });
+});
+
+describe("runLspInstall failure reporting", () => {
+    it("surfaces the script stderr on the relay's 500 (no `error` field)", async () => {
+        // The relay's non-zero-exit answer carries no `error` key, so reading
+        // only `data.error` degraded to "Install failed: 500" and hid the real
+        // reason (missing JDK / no package manager).
+        mockFetchOnce(
+            {
+                language: "java",
+                success: false,
+                exit_code: 1,
+                stdout: "",
+                stderr: "ERROR: jdtls requires Java 21+, but found Java 11.",
+            },
+            500,
+        );
+
+        await expect(runLspInstall("java", "http://relay")).rejects.toThrow(
+            "ERROR: jdtls requires Java 21+, but found Java 11.",
+        );
+        expect(calls[0].url).toBe("http://relay/api/lsp/install/java");
+        expect(calls[0].init?.method).toBe("POST");
+    });
+
+    it("still prefers an explicit `error` field when present (404 path)", async () => {
+        mockFetchOnce({ error: "Install script file 'java.sh' not found", code: 404 }, 404);
+
+        await expect(runLspInstall("java", "http://relay")).rejects.toThrow(
+            "Install script file 'java.sh' not found",
+        );
     });
 });

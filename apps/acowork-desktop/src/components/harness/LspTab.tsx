@@ -1,9 +1,10 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { useTranslation } from "../../i18n/useTranslation";
 import { useGatewayStore } from "../../stores/gatewayStore";
 import { useAgentStore } from "../../stores/agentStore";
-import { fetchLspServers, fetchLspStatus, fetchLspStatusForLanguage, fetchLspInstallScript, runLspInstall, getLspRelayUrl } from "../../lib/gateway-api";
-import type { LspServersConfig, LspServerEntry, LspServerStatusEntry, LspHealthStatus } from "../../lib/types";
+import { fetchLspServers, fetchLspStatus, fetchLspStatusForLanguage, fetchLspInstallScript, runLspInstall, getLspRelayUrl, fetchNodes } from "../../lib/gateway-api";
+import { Dropdown } from "../common/Dropdown";
+import type { LspServersConfig, LspServerEntry, LspServerStatusEntry, LspHealthStatus, NodeInfo } from "../../lib/types";
 import { CheckCircle2, XCircle, Loader2, Eye, Terminal, Code2, RefreshCw } from "lucide-react";
 import { ErrorBox } from "../common/ErrorBox";
 import { ExpandableRow, ListBox, ListRow } from "../common/list";
@@ -90,30 +91,87 @@ export function LspTab() {
   const [installResults, setInstallResults] = useState<Record<string, { success: boolean; stdout: string; stderr: string }>>({});
   const [scriptDialog, setScriptDialog] = useState<{ language: string; script: string; filename: string } | null>(null);
   const [scriptLoading, setScriptLoading] = useState(false);
-  /** LSP Relay base URL (e.g. "http://127.0.0.1:19878"), null when not available */
-  const [relayUrl, setRelayUrl] = useState<string | null>(null);
+  /** LSP Relay base URL derived from the selected agent (e.g. "http://127.0.0.1:19878") */
+  const [defaultRelayUrl, setDefaultRelayUrl] = useState<string | null>(null);
   /** LSP list — Tools-tab level-1 collapsible group, default open. */
   const [serversOpen, setServersOpen] = useState(true);
 
-  // Discover LSP Relay endpoint when Gateway is connected
+  // Which node's relay the panel is showing. The default follows the
+  // selected agent, but once the user picks a node explicitly their choice
+  // wins — otherwise switching agents in the sidebar would yank the panel
+  // back to a different machine mid-inspection.
+  const [nodeOverride, setNodeOverride] = useState<string | null>(null);
+  // Nodes advertising a ready LSP relay (ADR-055 §6.7). Only these are
+  // offered: listing offline / relay-less nodes would put rows in the
+  // picker that cannot answer a single request.
+  const [relayNodes, setRelayNodes] = useState<NodeInfo[]>([]);
+
+  // Discover the LSP Relay endpoint when Gateway is connected.
   useEffect(() => {
     if (status !== "connected" || !selectedAgentId) {
-      setRelayUrl(null);
+      setDefaultRelayUrl(null);
       return;
     }
     let cancelled = false;
     getLspRelayUrl(selectedAgentId)
       .then((url) => {
-        if (!cancelled) setRelayUrl(url);
+        if (!cancelled) setDefaultRelayUrl(url);
       })
       .catch(() => {
-        if (!cancelled) setRelayUrl(null);
+        if (!cancelled) setDefaultRelayUrl(null);
       });
     return () => { cancelled = true; };
   }, [status, selectedAgentId]);
 
+  // Enumerate nodes with a live relay. `selectedAgentId` stays the source
+  // of truth for the default selection, so this runs whenever the agent
+  // changes too — it is what turns "which node" into a visible choice.
+  useEffect(() => {
+    if (status !== "connected") {
+      setRelayNodes([]);
+      return;
+    }
+    let cancelled = false;
+    fetchNodes()
+      .then((nodes) => {
+        if (cancelled) return;
+        setRelayNodes(nodes.filter((n) => n.lsp_endpoint));
+      })
+      .catch(() => {
+        if (!cancelled) setRelayNodes([]);
+      });
+    return () => { cancelled = true; };
+  }, [status, selectedAgentId]);
+
+  // A node override is only valid while that node still advertises a
+  // relay; a node going offline or restarting its relay drops back to the
+  // agent-derived default instead of stranding the panel on a dead URL.
+  const effectiveNodeId = useMemo(() => {
+    if (nodeOverride && relayNodes.some((n) => n.node_id === nodeOverride)) {
+      return nodeOverride;
+    }
+    return null;
+  }, [nodeOverride, relayNodes]);
+
+  const effectiveRelayUrl = useMemo(() => {
+    if (effectiveNodeId) {
+      return relayNodes.find((n) => n.node_id === effectiveNodeId)?.lsp_endpoint ?? null;
+    }
+    return defaultRelayUrl;
+  }, [effectiveNodeId, relayNodes, defaultRelayUrl]);
+
+  // The node the panel is actually talking to, matched by relay URL. Works
+  // for the agent-derived default too, so the label is honest in both modes
+  // and needs no extra round-trip. Null when the endpoint is one the caller
+  // may not see (ADR-087 D5 prunes it for non-managers) — the panel still
+  // functions, it just cannot name the machine.
+  const shownNode = useMemo(
+    () => relayNodes.find((n) => n.lsp_endpoint === effectiveRelayUrl) ?? null,
+    [relayNodes, effectiveRelayUrl],
+  );
+
   const loadAll = useCallback(async (options: { force?: boolean } = {}) => {
-    if (!relayUrl) return;
+    if (!effectiveRelayUrl) return;
     setRefreshing(true);
     setError(null);
 
@@ -124,7 +182,7 @@ export function LspTab() {
       // full list immediately — each row's badge falls back to
       // "unknown" (neutral pending) via `healthStatus[lang] ?? "unknown"`
       // in JSX, so the user never sees an empty list area.
-      const cfg = await fetchLspServers(relayUrl);
+      const cfg = await fetchLspServers(effectiveRelayUrl);
       setConfig(cfg);
 
       // Flip every row from the neutral "pending" badge to the amber
@@ -137,7 +195,7 @@ export function LspTab() {
       // have a non-pending cached status for every language — this is
       // the fast path on Tab re-mount: the user shouldn't see a
       // "checking" flash if the LSP Relay has fresh cached data.
-      const cachedModule = getModuleHealthCache(relayUrl);
+      const cachedModule = getModuleHealthCache(effectiveRelayUrl);
       const langs = Object.keys(cfg.servers);
       const allCachedFresh =
         !options.force &&
@@ -160,7 +218,7 @@ export function LspTab() {
       // The list is already on screen; only badges need updating when
       // the response arrives.
       try {
-        const entries = await fetchLspStatus(relayUrl, { force: options.force });
+        const entries = await fetchLspStatus(effectiveRelayUrl, { force: options.force });
         setHealthStatus((prev) => {
           const next = { ...prev };
           for (const entry of entries) {
@@ -171,7 +229,7 @@ export function LspTab() {
         // Mirror the result into the module-level cache so a remount
         // (e.g. switching Chat → Harness → back to LSP) can skip the
         // network call entirely.
-        seedModuleHealthCache(relayUrl, entries);
+        seedModuleHealthCache(effectiveRelayUrl, entries);
       } catch (statusErr) {
         // Phase 1 succeeded but the status probe failed — the list is
         // fine, so we don't surface a page-level error. Flip every row
@@ -200,24 +258,24 @@ export function LspTab() {
     } finally {
       setRefreshing(false);
     }
-  }, [relayUrl]);
+  }, [effectiveRelayUrl]);
 
   useEffect(() => {
-    if (status === "connected" && relayUrl) {
+    if (status === "connected" && effectiveRelayUrl) {
       // Two-phase load (see `loadAll`): the list arrives almost
       // immediately, then badges resolve incrementally as PATH probes
       // complete on the server.
       void loadAll();
     }
-  }, [status, relayUrl, loadAll]);
+  }, [status, effectiveRelayUrl, loadAll]);
 
   /** Check if an LSP server is available by querying the relay's PATH lookup */
   const handleCheck = useCallback(async (language: string) => {
-    // relayUrl is guaranteed non-null: the Check button is only rendered
-    // after the early-return above for `!relayUrl`. Use an early return
+    // effectiveRelayUrl is guaranteed non-null: the Check button is only rendered
+    // after the early-return above for `!effectiveRelayUrl`. Use an early return
     // to satisfy TypeScript's flow analysis (matches the `!` pattern
     // used in `handleInstall`).
-    if (!relayUrl) return;
+    if (!effectiveRelayUrl) return;
     setCheckingLangs((prev) => new Set(prev).add(language));
     setHealthStatus((prev) => ({ ...prev, [language]: "checking" }));
     setHealthErrors((prev) => ({ ...prev, [language]: null }));
@@ -230,14 +288,14 @@ export function LspTab() {
       // 12 times longer than necessary. The relay canonicalizes the
       // language (e.g. "js" → "typescript") so the response key
       // matches the canonical row key in our healthStatus map.
-      const entry = await fetchLspStatusForLanguage(relayUrl, language);
+      const entry = await fetchLspStatusForLanguage(effectiveRelayUrl, language);
       setHealthStatus((prev) => ({
         ...prev,
         [entry.language]: entry.installed ? "installed" : "not_installed",
       }));
       // Mirror the single-language result into the module-level cache
       // so a future batch load can use it without re-fetching.
-      seedModuleHealthCache(relayUrl, [entry]);
+      seedModuleHealthCache(effectiveRelayUrl, [entry]);
     } catch (e) {
       setHealthStatus((prev) => ({ ...prev, [language]: "error" }));
       setHealthErrors((prev) => ({
@@ -251,14 +309,14 @@ export function LspTab() {
         return next;
       });
     }
-  }, [relayUrl]);
+  }, [effectiveRelayUrl]);
 
   /** View install script for a language */
   const handleViewScript = useCallback(async (language: string) => {
-    if (!relayUrl) return;
+    if (!effectiveRelayUrl) return;
     setScriptLoading(true);
     try {
-      const resp = await fetchLspInstallScript(language, relayUrl);
+      const resp = await fetchLspInstallScript(language, effectiveRelayUrl);
       setScriptDialog({
         language: resp.language,
         script: resp.script,
@@ -269,17 +327,17 @@ export function LspTab() {
     } finally {
       setScriptLoading(false);
     }
-  }, [relayUrl]);
+  }, [effectiveRelayUrl]);
 
   /** Run install script for a language */
   const handleInstall = useCallback(async (language: string) => {
-    // No guard needed: the UI only renders Install buttons when relayUrl is
-    // available (see the early return above). If this function is called
-    // without a relayUrl, fail loudly so the bug is immediately visible.
+    // No guard needed: the UI only renders Install buttons when
+    // effectiveRelayUrl is available (see the early return above). If this
+    // function is called without one, fail loudly so the bug is visible.
     setInstallingLangs((prev) => new Set(prev).add(language));
     setError(null);
     try {
-      const result = await runLspInstall(language, relayUrl!);
+      const result = await runLspInstall(language, effectiveRelayUrl!);
       setInstallResults((prev) => ({
         ...prev,
         [language]: {
@@ -307,7 +365,7 @@ export function LspTab() {
         return next;
       });
     }
-  }, [relayUrl]);
+  }, [effectiveRelayUrl]);
 
   if (status !== "connected") {
     return (
@@ -317,12 +375,39 @@ export function LspTab() {
     );
   }
 
-  if (!relayUrl) {
+  const nodePicker = relayNodes.length > 0 && (
+    <div className="flex items-center gap-2">
+      <label
+        htmlFor="lsp-node-picker"
+        className="shrink-0 text-xs text-text-tertiary"
+      >
+        {t("harnessLsp.node")}
+      </label>
+      <div className="min-w-0 flex-1">
+        <Dropdown
+          id="lsp-node-picker"
+          size="small"
+          value={shownNode?.node_id ?? ""}
+          onChange={(v) => setNodeOverride(v)}
+          options={relayNodes.map((n) => ({
+            value: n.node_id,
+            // node_name is the renameable display slug (ADR-075 D2); the id
+            // is the disambiguator when two nodes share a slug.
+            label: n.node_name ? `${n.node_name} (${n.node_id.slice(0, 8)})` : n.node_id,
+          }))}
+        />
+      </div>
+    </div>
+  );
+
+  if (!effectiveRelayUrl) {
     return (
-      <div className="max-w-lg">
+      <div className="max-w-lg space-y-3">
+        {nodePicker}
         <p className="text-xs text-text-tertiary">
-          LSP Relay not available. The relay process may not be running.
-          Ensure the Gateway started the LSP Relay successfully.
+          {relayNodes.length > 0
+            ? t("harnessLsp.relayUnavailable")
+            : t("harnessLsp.noRelayNodes")}
         </p>
       </div>
     );
@@ -333,6 +418,11 @@ export function LspTab() {
 
   return (
     <div className="max-w-2xl space-y-4">
+      {/* Which machine's relay this panel is showing. Every row below is
+          that node's install state — without this the list reads as global
+          and, with several nodes online, silently means "whichever agent
+          happened to be selected". */}
+      {nodePicker}
       {/* LSP Servers — Tools-tab level-1 collapsible card: chevron + title +
           count badge. The Refresh action sits in the header trailing slot
           (wrapped in stopPropagation so it never toggles the fold). */}

@@ -1519,7 +1519,10 @@
     "connectToGateway": "连接网关以管理 LSP 服务器",
     "refresh": "刷新",
     "loading": "加载中...",
-    "refreshing": "刷新中..."
+    "refreshing": "刷新中...",
+    "node": "节点",
+    "relayUnavailable": "该节点的 LSP Relay 不可用",
+    "noRelayNodes": "没有可用 LSP Relay 的节点"
   },
   "pm": {
     "projects": "项目",

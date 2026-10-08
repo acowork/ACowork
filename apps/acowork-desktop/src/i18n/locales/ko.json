@@ -1458,7 +1458,10 @@
     "connectToGateway": "게이트웨이에 연결하여 LSP 서버 관리",
     "refresh": "새로고침",
     "loading": "로딩 중...",
-    "refreshing": "새로고침 중..."
+    "refreshing": "새로고침 중...",
+    "node": "노드",
+    "relayUnavailable": "이 노드의 LSP Relay를 사용할 수 없습니다",
+    "noRelayNodes": "사용 가능한 LSP Relay가 있는 노드가 없습니다"
   },
   "pm": {
     "projects": "프로젝트",

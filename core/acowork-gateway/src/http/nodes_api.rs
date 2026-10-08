@@ -81,6 +81,19 @@ pub struct NodeResponse {
     /// This node's reverse-proxy base URL.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub http_endpoint: Option<String>,
+    /// ADR-055 §6.7: this node's LSP relay base URL, from the retained
+    /// `acowork/nodes/{node_id}/lsps` envelope. `Some` only while the
+    /// node's relay is ready.
+    ///
+    /// The Desktop's harness LSP panel needs this to offer a per-node
+    /// relay picker: without it the panel can only resolve a relay
+    /// through `GET /api/agents/{id}/lsp-endpoint`, which is agent-scoped
+    /// and therefore silently shows "the selected agent's node" with no
+    /// way to inspect any other node (or to see which one it is looking
+    /// at). Classified as machine-identifying metadata alongside
+    /// `http_endpoint` under ADR-087 D5, so it is manage-list only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lsp_endpoint: Option<String>,
     /// ADR-087 D8: caller may manage this node (owner / guest / admin,
     /// or anyone in Local mode). Server-computed — the client renders
     /// from this boolean and never re-derives from owner/guest lists.
@@ -146,7 +159,8 @@ pub async fn list_nodes(
             // / agent_count) are pruned too — they identify the machine
             // and its capacity just as concretely as the hostname.
             let (hostname, os, arch, http_endpoint, node_version,
-                 protocol_version, capabilities, max_agents, agent_count) =
+                 protocol_version, capabilities, max_agents, agent_count,
+                 lsp_endpoint) =
                 if can_manage {
                     (
                         info.map(|i| i.hostname.clone()),
@@ -158,6 +172,10 @@ pub async fn list_nodes(
                         info.map(|i| i.capabilities.clone()).unwrap_or_default(),
                         info.map(|i| i.max_agents),
                         info.map(|i| i.agent_count),
+                        // Straight off the registry entry (not `info`) —
+                        // the lsps topic is a separate envelope from the
+                        // NodeInfo snapshot, and `n` is the live record.
+                        n.lsp_endpoint.clone(),
                     )
                 } else {
                     (
@@ -168,6 +186,7 @@ pub async fn list_nodes(
                         None,
                         None,
                         Vec::new(),
+                        None,
                         None,
                         None,
                     )
@@ -187,6 +206,7 @@ pub async fn list_nodes(
                 max_agents,
                 agent_count,
                 http_endpoint,
+                lsp_endpoint,
                 can_manage,
                 is_guest,
                 visibility: rec
@@ -563,6 +583,69 @@ mod tests {
         assert_eq!(node.http_endpoint.as_deref(), Some("http://10.0.0.2:19900"));
     }
 
+    /// Feed a node the retained `lsps` envelope (ADR-055 §6.7).
+    fn publish_lsps(reg: &mut crate::mqtt::node_registry::NodeRegistry, node_id: &str, endpoint: &str) {
+        let lsps = acowork_core::mqtt_proto::AvailableLsps {
+            version: 1,
+            endpoint: endpoint.to_string(),
+            ready: true,
+        };
+        let envelope = acowork_core::mqtt_proto::DataEnvelope {
+            version: 1,
+            payload: Some(acowork_core::mqtt_proto::data_envelope::Payload::AvailableLsps(
+                lsps,
+            )),
+        };
+        let bytes = prost::Message::encode_to_vec(&envelope);
+        reg.update_lsps_from_mqtt(&format!("acowork/nodes/{}/lsps", node_id), &bytes);
+    }
+
+    #[tokio::test]
+    async fn lsps_endpoint_surfaces_for_manager_and_is_pruned_otherwise() {
+        // The harness LSP panel resolves a relay per node, so `/api/nodes`
+        // must carry `lsp_endpoint`. It is machine-identifying metadata
+        // (ADR-087 D5), so it follows `http_endpoint`: present for a
+        // manager, absent for a merely-visible caller.
+        let state = state_with_node_owner_pub("gpu-1", Some("alice"), &[], Visibility::Public);
+        {
+            let mut reg = state.node_registry.as_ref().unwrap().write().await;
+            reg.update_status_from_mqtt("acowork/nodes/gpu-1/status", b"online");
+            let envelope = acowork_core::mqtt_proto::DataEnvelope {
+                version: 1,
+                payload: Some(acowork_core::mqtt_proto::data_envelope::Payload::NodeInfo(
+                    info("gpu-1"),
+                )),
+            };
+            let bytes = prost::Message::encode_to_vec(&envelope);
+            reg.update_info_from_mqtt("acowork/nodes/gpu-1/info", &bytes);
+            publish_lsps(&mut reg, "gpu-1", "http://10.0.0.2:19878");
+        }
+
+        let owner = Extension(AuthContext {
+            user_id: "alice".to_string(),
+            role: acowork_core::account::Role::User,
+            as_user: None,
+        });
+        let resp = list_nodes(State(state.clone()), Some(owner)).await;
+        assert_eq!(
+            resp.0[0].lsp_endpoint.as_deref(),
+            Some("http://10.0.0.2:19878"),
+            "a manager must see the relay endpoint"
+        );
+
+        let stranger = Extension(AuthContext {
+            user_id: "stranger".to_string(),
+            role: acowork_core::account::Role::User,
+            as_user: None,
+        });
+        let resp = list_nodes(State(state), Some(stranger)).await;
+        assert_eq!(resp.0.len(), 1);
+        assert!(
+            resp.0[0].lsp_endpoint.is_none(),
+            "a non-manager must not see the relay endpoint"
+        );
+    }
+
     #[tokio::test]
     async fn private_node_is_absent_for_non_manager() {
         // ADR-087 D5 (B): a `private` node is not field-trimmed for an
@@ -876,6 +959,7 @@ mod tests {
             max_agents: Some(16),
             agent_count: Some(2),
             http_endpoint: Some("http://127.0.0.1:19900".to_string()),
+            lsp_endpoint: Some("http://127.0.0.1:19878".to_string()),
             can_manage: true,
             is_guest: false,
             visibility: "private".to_string(),
@@ -899,6 +983,7 @@ mod tests {
             "max_agents",
             "agent_count",
             "http_endpoint",
+            "lsp_endpoint",
         ] {
             assert!(obj.contains_key(key), "missing snake_case field `{key}`");
         }
