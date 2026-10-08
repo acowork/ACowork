@@ -217,7 +217,15 @@ yamux = "0.14"
 #
 # GPU acceleration (opt-in per platform):
 #   --features directml (Windows) | cuda (Linux) | coreml (macOS)
-ort = { version = "2.0.0-rc.12", default-features = false, features = ["std", "api-22"] }
+#
+# `api-19` is pinned to the OLDEST ONNX Runtime the project supports (1.19.2,
+# the legacy glibc 2.31 / Ubuntu 20.04 build that `dev/setup_ort.sh` installs).
+# `GetApi(22)` returns null against a 1.19.2 runtime, and `ort` panics in
+# `setup_api` — poisoning its internal `Once`, so every later load attempt
+# fails with a misleading "Mutex poisoned". `GetApi` is backward compatible,
+# so a newer runtime still serves the API-19 table. Raise this only together
+# with the minimum in `ORT_VERSION_LEGACY` (dev/setup_ort.sh).
+ort = { version = "2.0.0-rc.12", default-features = false, features = ["std", "api-19"] }
 
 # Tokenizer (HuggingFace)
 tokenizers = { version = "0.23", default-features = false, features = ["onig"] }

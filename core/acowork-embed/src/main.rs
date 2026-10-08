@@ -126,13 +126,25 @@ async fn bootstrap_default_model(state: Arc<AppState>, model_id: String) {
         return;
     };
 
-    let onnx_file = state
+    // Resolve the ONNX file and its external-data weights together; an
+    // unresolvable variant is a registry bug, so fail loudly instead of
+    // downloading a graph whose weights are missing.
+    let (onnx_file, external_data_files) = match state
         .registry
-        .onnx_path(&model_id, &state.onnx_variant)
-        .unwrap_or(entry.onnx_file.clone());
-    let external_data_files = state
-        .registry
-        .external_data_paths(&model_id, &state.onnx_variant);
+        .resolve_variant(&model_id, &state.onnx_variant)
+    {
+        Some(resolved) => resolved,
+        None => {
+            let supported = state.registry.variants(&model_id).join(", ");
+            state.event_bus.publish_state(BusState::Error {
+                message: format!(
+                    "Unknown ONNX variant '{}' for model '{}' (supported: {supported})",
+                    state.onnx_variant, model_id
+                ),
+            });
+            return;
+        }
+    };
     let progress = Arc::new(DownloadProgress::new());
     let cancel_flag = std::sync::atomic::AtomicBool::new(false);
 

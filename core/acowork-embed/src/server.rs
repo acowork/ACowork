@@ -543,11 +543,30 @@ pub async fn download_model(
     // Select ONNX variant
     let variant = req.variant.unwrap_or_else(|| state.onnx_variant.clone());
 
-    let onnx_file = state
-        .registry
-        .onnx_path(&model_id, &variant)
-        .unwrap_or(entry.onnx_file.clone());
-    let external_data_files = state.registry.external_data_paths(&model_id, &variant);
+    // Resolve the variant's ONNX file AND its external-data weights together.
+    // An unknown variant must be rejected, not silently downgraded to
+    // `onnx_file` — that would drop the `*.onnx_data` files and produce a
+    // model that downloads cleanly and then fails to load.
+    let (onnx_file, external_data_files) = match state.registry.resolve_variant(&model_id, &variant)
+    {
+        Some(resolved) => resolved,
+        None => {
+            let supported = state.registry.variants(&model_id).join(", ");
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: ErrorDetail {
+                        message: format!(
+                            "Unknown ONNX variant '{variant}' for model '{model_id}' (supported: {supported})"
+                        ),
+                        error_type: "invalid_request".to_string(),
+                        code: Some("unknown_variant".to_string()),
+                    },
+                }),
+            )
+                .into_response();
+        }
+    };
 
     // Create shared progress tracker
     let progress = Arc::new(DownloadProgress::new());

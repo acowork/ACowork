@@ -192,22 +192,49 @@ impl ModelRegistry {
         self.models.iter().find(|m| m.recommended)
     }
 
-    /// Get the ONNX file path for a model, respecting variant selection.
-    pub fn onnx_path(&self, model_id: &str, variant: &str) -> Option<String> {
-        let model = self.get(model_id)?;
-        if let Some(variants) = &model.onnx_variants
-            && let Some(path) = variants.get(variant)
-        {
-            return Some(path.clone());
-        }
-        // Fallback to the default onnx_file
-        Some(model.onnx_file.clone())
-    }
-
+    /// External-data weight files for a variant (empty if it has none).
+    ///
+    /// Resolves the WEIGHTS ONLY — it does not tell you which graph they go
+    /// with. Use [`Self::resolve_variant`], which returns both together,
+    /// anywhere a download is actually being assembled.
     pub fn external_data_paths(&self, model_id: &str, variant: &str) -> Vec<String> {
         self.get(model_id)
             .and_then(|model| model.external_data_files.get(variant))
             .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Resolve a variant to the `(onnx_file, external_data_files)` pair that
+    /// must be downloaded together.
+    ///
+    /// Returns `None` when `variant` is not a key of `onnx_variants`. Callers
+    /// must NOT assemble a download from the graph and weights separately:
+    /// resolving the graph alone falls back to `onnx_file` while
+    /// `external_data_paths` yields an empty list, so the download silently
+    /// omits the `*.onnx_data` weights. ORT resolves those by name at
+    /// session-creation time, so the result is a model that downloads
+    /// "successfully" and then fails to load.
+    ///
+    /// Registries without an `onnx_variants` map accept any variant and use
+    /// `onnx_file` (no variant data to select).
+    pub fn resolve_variant(&self, model_id: &str, variant: &str) -> Option<(String, Vec<String>)> {
+        let model = self.get(model_id)?;
+        let onnx_file = match &model.onnx_variants {
+            Some(variants) => variants.get(variant)?.clone(),
+            None => model.onnx_file.clone(),
+        };
+        Some((onnx_file, self.external_data_paths(model_id, variant)))
+    }
+
+    /// The variant keys this model supports, for error messages.
+    pub fn variants(&self, model_id: &str) -> Vec<String> {
+        self.get(model_id)
+            .and_then(|m| m.onnx_variants.as_ref())
+            .map(|v| {
+                let mut keys: Vec<String> = v.keys().cloned().collect();
+                keys.sort();
+                keys
+            })
             .unwrap_or_default()
     }
 
@@ -226,6 +253,85 @@ impl ModelRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression test: an unknown variant must NOT silently resolve to the
+    /// registry's default `onnx_file`.
+    ///
+    /// The old `onnx_path(...)` + `external_data_paths(...)` pair did exactly
+    /// that — `onnx_path` fell back to `onnx_file` for an unknown key while
+    /// `external_data_paths` returned `[]`. The download then skipped the
+    /// `*.onnx_data` weights entirely, ORT failed to resolve them at
+    /// session-creation time, and the user got a model that downloaded at
+    /// 100% and could never load.
+    #[test]
+    fn unknown_variant_does_not_silently_fall_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let json = r#"{"version": 1, "models": [{
+            "id": "bge-test",
+            "name": "Test",
+            "dimension": 512,
+            "max_tokens": 512,
+            "size_mb": 90,
+            "languages": ["zh"],
+            "hf_repo": "onnx-community/bge-test-ONNX",
+            "pooling_strategy": "cls",
+            "onnx_file": "onnx/model.onnx",
+            "tokenizer_file": "tokenizer.json",
+            "onnx_variants": {
+                "fp32": "onnx/model.onnx",
+                "fp16": "onnx/model_fp16.onnx"
+            },
+            "external_data_files": {
+                "fp32": ["onnx/model.onnx_data"],
+                "fp16": ["onnx/model_fp16.onnx_data"]
+            },
+            "bundled": false,
+            "recommended": true
+        }]}"#;
+        std::fs::write(dir.path().join("embedding_models.json"), json).unwrap();
+        let registry = ModelRegistry::load(dir.path());
+
+        // A known variant resolves the graph AND its weights together.
+        let (onnx_file, ext) = registry.resolve_variant("bge-test", "fp16").unwrap();
+        assert_eq!(onnx_file, "onnx/model_fp16.onnx");
+        assert_eq!(ext, vec!["onnx/model_fp16.onnx_data".to_string()]);
+
+        // An unknown variant is rejected rather than downgraded to the fp32
+        // graph — otherwise the weights would be missing at load time.
+        assert!(
+            registry.resolve_variant("bge-test", "onnx").is_none(),
+            "unknown variant must not fall back to the default onnx_file"
+        );
+        assert_eq!(registry.variants("bge-test"), vec!["fp16", "fp32"]);
+    }
+
+    #[test]
+    fn variant_resolution_without_variants_map_uses_onnx_file() {
+        // Registries predating `onnx_variants` have nothing to select, so
+        // any variant resolves to `onnx_file` (with no external data).
+        let dir = tempfile::tempdir().unwrap();
+        let json = r#"{"version": 1, "models": [{
+            "id": "legacy",
+            "name": "Legacy",
+            "dimension": 256,
+            "max_tokens": 128,
+            "size_mb": 50,
+            "languages": ["en"],
+            "hf_repo": "test/repo",
+            "pooling_strategy": "mean",
+            "onnx_file": "model.onnx",
+            "tokenizer_file": "tokenizer.json",
+            "bundled": false,
+            "recommended": true
+        }]}"#;
+        std::fs::write(dir.path().join("embedding_models.json"), json).unwrap();
+        let registry = ModelRegistry::load(dir.path());
+
+        let (onnx_file, ext) = registry.resolve_variant("legacy", "fp32").unwrap();
+        assert_eq!(onnx_file, "model.onnx");
+        assert!(ext.is_empty());
+        assert!(registry.variants("legacy").is_empty());
+    }
 
     #[test]
     fn test_load_registry_from_bundled_path() {
@@ -281,17 +387,20 @@ mod tests {
         seed_test_registry(dir.path());
         let registry = ModelRegistry::load(dir.path());
 
-        // fp16 variant
-        let path = registry.onnx_path("bge-small-zh-v1.5", "fp16").unwrap();
+        // fp16 variant → graph + its matching weights
+        let (path, ext) = registry.resolve_variant("bge-small-zh-v1.5", "fp16").unwrap();
         assert_eq!(path, "onnx/model_fp16.onnx");
+        assert_eq!(ext, vec!["onnx/model_fp16.onnx_data".to_string()]);
 
-        // unknown variant falls back to default
-        let path = registry.onnx_path("bge-small-zh-v1.5", "int8").unwrap();
+        // int8 variant
+        let (path, ext) = registry.resolve_variant("bge-small-zh-v1.5", "int8").unwrap();
         assert_eq!(path, "onnx/model_quantized.onnx");
+        assert_eq!(ext, vec!["onnx/model_quantized.onnx_data".to_string()]);
 
-        // model without variants falls back to default onnx_file
-        // (bge-m3 only has fp32 in variants)
-        let path = registry.onnx_path("bge-m3", "fp16").unwrap();
+        // Model whose variants map lacks fp16 (bge-m3 has only fp32):
+        // asking for fp16 must be rejected, not silently downgraded.
+        assert!(registry.resolve_variant("bge-m3", "fp16").is_none());
+        let (path, _) = registry.resolve_variant("bge-m3", "fp32").unwrap();
         assert_eq!(path, "model.onnx");
     }
 
