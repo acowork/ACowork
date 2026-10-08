@@ -1348,8 +1348,14 @@ export function ChatPanel() {
       (it) => it.status === "uploading",
     );
 
-    // Block send: no content AND no resolved attachments, or attachments still uploading
-    if ((!content && !hasItems) || sending || !selectedAgentId || hasUploading) return;
+    // The button stays enabled when empty so a click can explain itself
+    // instead of a dead (disabled) button that reads as "the app is
+    // broken". Toast, then no-op.
+    if (!content && !hasItems) {
+      addToast({ type: "warning", message: t("chatPanel.emptyMessage") });
+      return;
+    }
+    if (sending || !selectedAgentId || hasUploading) return;
 
     // Collect resolved (success) AttachedItem[] for the optimistic bubble
     // and the MQTT `attached_items` payload. Backfill workspace refs
@@ -2899,12 +2905,17 @@ export function ChatPanel() {
                     // ADR-076 §决策 4: a session shared with us is read-only
                     // — sending is write-gated server-side (404), and so is
                     // stopping someone else's stream.
+                    //
+                    // Empty input is NOT a disable condition: a dead button
+                    // has no affordance to explain why, so the button stays
+                    // live and `handleSend` toasts "message is empty" on the
+                    // click. Uploading attachments still disables (the
+                    // payload can't be assembled mid-upload).
                     readOnlySession
                       ? true
                       : sending
                         ? false
                         : (inputDisabled
-                          || (!session.inputValue.trim() && !session.pendingAttachedItems.some((p) => p.status === "success" && p.item !== undefined))
                           || session.pendingAttachedItems.some((p) => p.status === "uploading"))
                   }
                   aria-label={sending ? (session.inputValue.trim() ? t("chatPanel.addToQueue") : queuedMessages.length > 0 ? t("chatPanel.sendQueuedAndStop") : t("chatPanel.stop")) : t("chatPanel.sendMessage")}

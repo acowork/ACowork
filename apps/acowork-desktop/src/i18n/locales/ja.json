@@ -257,6 +257,7 @@
     "uploadFile": "ファイルをアップロード",
     "uploadHint": "ファイルをアップロード（PDF/DOCX/PPTX/XLSX/PNG/JPG/GIF/WebP）",
     "sendMessage": "メッセージを送信",
+    "emptyMessage": "メッセージが空です",
     "sendFailedNotConnected": "メッセージの送信に失敗しました:エージェントはまだ接続されていない可能性があります。しばらくしてから再試行してください",
     "modelSwitchFailed": "モデルの切り替えに失敗しました:{{model}}",
     "reasoningEffortFailed": "推論強度の設定に失敗しました",

@@ -257,6 +257,7 @@
     "uploadFile": "上传文件",
     "uploadHint": "上传文件 (PDF/DOCX/PPTX/XLSX/PNG/JPG/GIF/WebP)",
     "sendMessage": "发送消息",
+    "emptyMessage": "消息为空",
     "sendFailedNotConnected": "发送失败:Agent 可能尚未连接,请稍候重试",
     "modelSwitchFailed": "切换模型失败:{{model}}",
     "reasoningEffortFailed": "推理强度设置失败",
