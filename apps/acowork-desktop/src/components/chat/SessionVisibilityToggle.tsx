@@ -3,11 +3,13 @@ import { useTranslation } from "react-i18next";
 import { useAgentStore } from "../../stores/agentStore";
 import { useToast } from "../common/ToastProvider";
 import { Tooltip } from "../common/Tooltip";
-import { toolbarButton } from "../../lib/ui-styles";
+import { toolbarIconButton } from "../../lib/ui-styles";
 
 /**
  * ADR-076 §决策 4: per-session read-visibility toggle, mounted in the
- * composer toolbar next to the other session-scoped controls.
+ * composer toolbar's right cluster (visibility / usage / attachment /
+ * send) — it is icon-only, so it does not belong to the collapsible
+ * left-hand text row.
  *
  * Public = readable by every signed-in account; private = owner + admins
  * only. It is a **read**-side setting, so it lives on the session (not on
@@ -74,7 +76,7 @@ export function SessionVisibilityToggle({
       }
     >
       <button
-        className={toolbarButton}
+        className={toolbarIconButton}
         onClick={handleToggle}
         disabled={!canWrite}
         aria-label={label}

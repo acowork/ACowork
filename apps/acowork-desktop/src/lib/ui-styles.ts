@@ -38,6 +38,24 @@ export const inputMono =
 export const toolbarButton =
   "inline-flex items-center gap-1 rounded px-2 py-1.5 text-xs transition-colors text-text-tertiary hover:bg-zinc-200 dark:hover:bg-zinc-700 hover:text-zinc-700 dark:hover:text-zinc-200 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent dark:disabled:hover:bg-transparent";
 
+/**
+ * Composer right-cluster icon button — visibility / context-usage /
+ * attachment / send.
+ *
+ * Fixed 28x28 (`h-7 w-7`) + `rounded-md` so all four hover highlight
+ * rectangles are identical. Do NOT reach for `toolbarButton` here: it is
+ * sized for a text label (`px-2 py-1.5` breathing room around the label),
+ * which renders 30px wide with a 4px radius — 2px wider and visibly
+ * boxier next to these. Icon-only buttons share this token instead.
+ *
+ * `disabled:*` carries the same load as `toolbarButton`: a disabled send
+ * button with no visual difference is indistinguishable from an enabled
+ * one, and `hover:bg-transparent` keeps a disabled button from lighting
+ * up while refusing the click.
+ */
+export const toolbarIconButton =
+  "inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition-colors text-text-tertiary hover:bg-zinc-200 dark:hover:bg-zinc-700 hover:text-zinc-700 dark:hover:text-zinc-200 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent dark:disabled:hover:bg-transparent";
+
 /** Toolbar button active state */
 export const toolbarButtonActive =
   "bg-zinc-200 dark:bg-zinc-700 text-text ";
