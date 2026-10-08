@@ -325,6 +325,75 @@ async fn get_node_permissions(
     })))
 }
 
+/// `PATCH /api/nodes/{id}` — `{ "node_name": "gpu-2" }`: change the
+/// node's DISPLAY name (ADR-075 D4).
+///
+/// **Node-manage** — declared in [`permission::extract_target`] as
+/// `("PATCH", "") => Target::Node(id)`, so the middleware has already
+/// run the ADR-087 owner ∨ admin check by the time this handler sees the
+/// request. Nothing here re-derives authority.
+///
+/// The write itself is forwarded to the node's own HTTP service
+/// (`PATCH {http_endpoint}/node/name`, ADR-075 D4) with the node token
+/// attached — the same machine-mutation path `/api/fs/browse` uses. It
+/// cannot be done here: `node_name` lives in the node's `identity.json`,
+/// and the daemon re-reads that file every heartbeat, so a Gateway-side
+/// cache would be clobbered within 60 s. The node answers 200 only after
+/// the name is durable on disk.
+async fn patch_node(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let new_name = body
+        .get("node_name")
+        .or_else(|| body.get("nodeName"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .ok_or_else(|| ApiError::bad_request("missing `node_name`"))?
+        .to_string();
+
+    // Validate at the boundary so an obvious typo costs no network hop;
+    // the node re-validates anyway (it owns the file being written).
+    if !acowork_core::node::node_name_is_valid(&new_name) {
+        return Err(ApiError::bad_request(
+            "invalid node name: must be 2-32 chars of [a-z0-9-], no consecutive \
+             '--', no leading/trailing hyphen, and not the reserved word 'local'",
+        ));
+    }
+
+    let endpoint = crate::http::proxy::node_http_endpoint(&state, &id).await?;
+    let token = crate::http::proxy::node_token_for(&state, &id)
+        .await
+        .ok_or_else(|| {
+            ApiError::service_unavailable(&format!("Node '{id}' has no token yet"))
+        })?;
+
+    let client = crate::http::proxy::runtime_http_client();
+    let resp = client
+        .patch(format!("{endpoint}/node/name"))
+        .header("X-ACowork-Node-Token", token)
+        .json(&serde_json::json!({ "nodeName": new_name }))
+        .send()
+        .await
+        .map_err(|e| {
+            ApiError::service_unavailable(&format!("Failed to reach node '{id}': {e}"))
+        })?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        // Pass the node's own reason through — it is the only side that
+        // can say WHY (e.g. the file was not writable).
+        let detail = resp.text().await.unwrap_or_default();
+        return Err(ApiError::internal(&format!(
+            "Node '{id}' refused the rename ({status}): {detail}"
+        )));
+    }
+
+    tracing::info!(node_id = %id, node_name = %new_name, "Node display name renamed");
+    Ok(Json(serde_json::json!({ "node_name": new_name })))
+}
+
 /// `PATCH /api/nodes/{id}/visibility` — `{ "visibility": "public"|"private" }`.
 ///
 /// **Ownerless guard** — same rationale as the agent-side handler
@@ -477,6 +546,7 @@ pub fn nodes_routes() -> Router<AppState> {
         .route("/api/nodes", get(list_nodes))
         .route("/api/nodes/enrollment-tokens", post(create_enrollment_token))
         .route("/api/nodes/{id}/permissions", get(get_node_permissions))
+        .route("/api/nodes/{id}", patch(patch_node))
         .route("/api/nodes/{id}/visibility", patch(patch_node_visibility))
         .route("/api/nodes/{id}/guests", patch(patch_node_guests))
         .route("/api/nodes/{id}/owner", patch(patch_node_owner))
@@ -772,6 +842,52 @@ mod tests {
         );
         state.node_owners = Some(store);
         state
+    }
+
+    /// `PATCH /api/nodes/{id}` (rename) is a **boundary** validation:
+    /// the handler must reject a bad slug itself, so an obvious typo
+    /// never becomes a network hop to the node — and, more importantly,
+    /// so a rename can never be persisted with a name the node would
+    /// refuse (the node is the only writer of `identity.json`).
+    #[tokio::test]
+    async fn patch_node_rejects_invalid_names_before_reaching_the_node() {
+        for bad in ["", "A", "has space", "double--hyphen", "-lead", "trail-", "local"] {
+            let state = test_app_state();
+            let err = patch_node(
+                State(state),
+                Path("gpu-1".to_string()),
+                Json(serde_json::json!({ "node_name": bad })),
+            )
+            .await
+            .expect_err(&format!("expected rejection for {bad:?}"));
+            assert_eq!(err.code, 400, "for {bad:?}");
+        }
+    }
+
+    /// The node is the only writer of `identity.json`, so a rename that
+    /// cannot reach it must fail loudly rather than answer 200 and let
+    /// the UI show a name that will be overwritten by the next
+    /// heartbeat. `node_http_endpoint` answers 503 for an offline node —
+    /// that is the whole contract: rename needs the node online.
+    #[tokio::test]
+    async fn patch_node_requires_an_online_node() {
+        let state = test_app_state();
+        {
+            let mut reg = state.node_registry.as_ref().unwrap().write().await;
+            // Known node (online creates the record, an offline status
+            // alone does not — `update_status_from_mqtt` drops a stale
+            // LWT replay), then flipped back offline.
+            reg.update_status_from_mqtt("acowork/nodes/gpu-1/status", b"online");
+            reg.update_status_from_mqtt("acowork/nodes/gpu-1/status", b"offline");
+        }
+        let err = patch_node(
+            State(state),
+            Path("gpu-1".to_string()),
+            Json(serde_json::json!({ "node_name": "gpu-2" })),
+        )
+        .await
+        .expect_err("an offline node cannot be renamed");
+        assert_eq!(err.code, 503);
     }
 
     #[tokio::test]

@@ -612,6 +612,7 @@ mod tests {
     use tokio::sync::RwLock;
     use tower::ServiceExt;
 
+    use crate::config::NodeConfig;
     use crate::identity::{EnrollmentState, NodeIdentity};
     use crate::state::{InstalledAgent, NodeState};
 
@@ -655,6 +656,7 @@ avatar = \"assets/avatar.png\"
         });
         NodeHttpState {
             node: Arc::new(RwLock::new(node)),
+            config: NodeConfig::default(),
             identity: Arc::new(RwLock::new(node_identity(Some(TEST_TOKEN)))),
         }
     }

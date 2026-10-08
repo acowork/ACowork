@@ -67,6 +67,7 @@ vi.mock("../../lib/gateway-api", () => ({
   patchAgentGuests: vi.fn(async () => {}),
   patchNodeOwner: vi.fn(async () => {}),
   patchAgentOwner: vi.fn(async () => {}),
+  patchNodeName: vi.fn(async () => {}),
 }));
 
 // The name sources: the admin-only full roster and the contact-picker
@@ -105,6 +106,7 @@ vi.mock("../../stores/authStore", () => ({
 }));
 
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { useState } from "react";
 import { PermissionDialog, type PermissionTarget } from "./PermissionDialog";
 import * as gatewayApi from "../../lib/gateway-api";
 import * as authApi from "../../lib/auth-api";
@@ -151,6 +153,7 @@ beforeEach(() => {
   api.patchAgentGuests.mockResolvedValue(undefined);
   api.patchNodeOwner.mockResolvedValue(undefined);
   api.patchAgentOwner.mockResolvedValue(undefined);
+  api.patchNodeName.mockResolvedValue(undefined);
   // Same reset hazard for both name sources.
   authApi.fetchDirectory.mockResolvedValue([]);
   authApi.fetchAccounts.mockResolvedValue([]);
@@ -653,5 +656,166 @@ describe("PermissionDialog visibility toggle", () => {
       // explicitly on the switch afterwards.
       expect(patchNodeVisibility).not.toHaveBeenCalled();
     });
+  });
+});
+
+// ADR-075 D4: the node display-name field. It is the only control here
+// that is not about permissions, and the only one whose draft state
+// comes from the DIALOG (the Gateway's permissions payload has no
+// `node_name`).
+describe("PermissionDialog node display name (ADR-075 D4)", () => {
+  function nameInput(): HTMLInputElement {
+    const el = document.querySelector<HTMLInputElement>("[data-node-name]");
+    if (!el) throw new Error("display name input not found");
+    return el;
+  }
+
+  async function renderNode() {
+    const renamed: Array<[string, string]> = [];
+    render(
+      <PermissionDialog
+        open
+        target={NODE}
+        onClose={() => {}}
+        onRenamedNode={(id, n) => renamed.push([id, n])}
+      />,
+    );
+    await screen.findByRole("switch");
+    return renamed;
+  }
+
+  it("seeds the input with the node's current name", async () => {
+    await renderNode();
+    expect(nameInput().value).toBe("My Node");
+  });
+
+  it("has no display-name field for an agent", async () => {
+    render(
+      <PermissionDialog
+        open
+        target={{ kind: "agent", id: "i-1", name: "An Agent" }}
+        onClose={() => {}}
+      />,
+    );
+    await screen.findByRole("switch");
+    expect(document.querySelector("[data-node-name]")).toBeNull();
+  });
+
+  it("saves a valid rename and reports it to the caller", async () => {
+    const { patchNodeName } = await import("../../lib/gateway-api");
+    (patchNodeName as ReturnType<typeof vi.fn>).mockClear();
+    const renamed = await renderNode();
+
+    fireEvent.change(nameInput(), { target: { value: "gpu-2" } });
+    fireEvent.click(screen.getByRole("button", { name: "permissionDialog.save" }));
+
+    await waitFor(() =>
+      expect(patchNodeName).toHaveBeenCalledWith("n-1", "gpu-2"),
+    );
+    // The caller must re-pull the node list, or the group header keeps
+    // rendering the pre-rename name.
+    expect(renamed).toEqual([["n-1", "gpu-2"]]);
+  });
+
+  it("keeps Save disabled for a slug the Gateway would reject", async () => {
+    const { patchNodeName } = await import("../../lib/gateway-api");
+    (patchNodeName as ReturnType<typeof vi.fn>).mockClear();
+    await renderNode();
+
+    const save = screen.getByRole("button", { name: "permissionDialog.save" });
+    for (const bad of ["A", "has space", "double--hyphen", "-lead", "local"]) {
+      fireEvent.change(nameInput(), { target: { value: bad } });
+      expect((save as HTMLButtonElement).disabled).toBe(true);
+    }
+    fireEvent.change(nameInput(), { target: { value: "gpu-2" } });
+    expect((save as HTMLButtonElement).disabled).toBe(false);
+
+    fireEvent.click(save);
+    await waitFor(() => expect(patchNodeName).toHaveBeenCalledTimes(1));
+    expect((patchNodeName as ReturnType<typeof vi.fn>).mock.calls[0][1]).toBe("gpu-2");
+  });
+
+  it("leaves the draft untouched when the save is unchanged", async () => {
+    const { patchNodeName } = await import("../../lib/gateway-api");
+    (patchNodeName as ReturnType<typeof vi.fn>).mockClear();
+    await renderNode();
+
+    // Re-typing the same value is not a change — a rename must not be
+    // issued just because the field was touched.
+    fireEvent.change(nameInput(), { target: { value: "My Node" } });
+    expect(
+      (screen.getByRole("button", { name: "permissionDialog.save" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+    expect(patchNodeName).not.toHaveBeenCalled();
+  });
+});
+
+// The reported symptom: focus left the field (and the owner's <select>
+// popup collapsed, since a native select closes on blur) seconds after the
+// user interacted — with nothing refreshing. The cause was NOT the dialog
+// re-rendering on its own data; it was the PARENT re-rendering for
+// unrelated reasons (MQTT ticks, inventory re-broadcasts, the 3 s gateway
+// death-watch probe), handing the inline `onClose` a new identity, which
+// re-ran the effect that called `closeRef.current?.focus()`.
+//
+// So the test drives the real thing: a parent that re-renders with a
+// FRESH onClose, which is what every AgentList tick looks like.
+describe("PermissionDialog focus survival", () => {
+  /** Wraps the dialog in a parent whose `onClose` identity changes on
+   *  every render — the inline-arrow pattern used throughout AgentList.
+   *  `onCloseTick` stands in for the unrelated work that makes AgentList
+   *  re-render (an MQTT tick, a re-published inventory). */
+  function Wrapped({ onCloseTick }: { onCloseTick: () => void }) {
+    const [, bump] = useState(0);
+    return (
+      <>
+        <button onClick={() => { bump((n) => n + 1); onCloseTick(); }}>tick</button>
+        <PermissionDialog open target={NODE} onClose={() => {}} />
+      </>
+    );
+  }
+
+  it("keeps focus in the display-name input across unrelated parent re-renders", async () => {
+    render(<Wrapped onCloseTick={() => {}} />);
+    const input = await waitFor(() => {
+      const el = document.querySelector<HTMLInputElement>("[data-node-name]");
+      if (!el) throw new Error("display name input not found");
+      return el;
+    });
+    input.focus();
+    expect(document.activeElement).toBe(input);
+
+    // Three "unrelated store tick" re-renders, each rebuilding the inline
+    // `onClose` — exactly what the effect's old dep array keyed on.
+    fireEvent.click(screen.getByRole("button", { name: "tick" }));
+    fireEvent.click(screen.getByRole("button", { name: "tick" }));
+    fireEvent.click(screen.getByRole("button", { name: "tick" }));
+
+    // Focus must still be where the user left it.
+    expect(document.activeElement).toBe(input);
+  });
+
+  it("keeps focus on the owner <select> across unrelated parent re-renders", async () => {
+    render(<Wrapped onCloseTick={() => {}} />);
+    await screen.findByRole("switch");
+    const select = ownerCell();
+    select.focus();
+    expect(document.activeElement).toBe(select);
+
+    fireEvent.click(screen.getByRole("button", { name: "tick" }));
+    fireEvent.click(screen.getByRole("button", { name: "tick" }));
+
+    expect(document.activeElement).toBe(select);
+  });
+
+  it("still focuses the close button when the dialog OPENS", async () => {
+    render(<Wrapped onCloseTick={() => {}} />);
+    await screen.findByRole("switch");
+    // The initial focus is deliberate — the dialog must be keyboard-ready.
+    // It just must not RE-fire on every later render.
+    const closeBtn = document.querySelector<HTMLButtonElement>('[aria-label="permissionDialog.ariaLabelClose"]');
+    expect(closeBtn).not.toBeNull();
+    expect(document.activeElement).toBe(closeBtn);
   });
 });

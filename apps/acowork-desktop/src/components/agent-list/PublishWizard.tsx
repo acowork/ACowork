@@ -12,6 +12,7 @@ import type {
 } from "../../lib/types";
 import { BUILTIN_ICONS, BUILTIN_ICON_IDS } from "../common/UserAvatar";
 import { resolveAgentAvatarUrl } from "../../lib/avatar";
+import { useEscapeClose } from "../../hooks/useEscapeClose";
 import { AuthedImage } from "../common/AuthedImage";
 import { log } from "../../lib/logger";
 import {
@@ -155,15 +156,9 @@ export function PublishWizard({
     }
   }, [agentId, avatar, avatarDirty]);
 
-  // Close on Escape
-  useEffect(() => {
-    if (!open) return;
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !busy) onClose();
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [open, busy, onClose]);
+  // Close on Escape — see CreateWizard; `busy` is read at keydown time so a
+  // spinner flip no longer re-subscribes the listener.
+  useEscapeClose(open, onClose, !busy);
 
   const runCheck = async () => {
     setBusy(true);

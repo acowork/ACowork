@@ -308,12 +308,14 @@ mod tests {
     use tokio::sync::RwLock;
     use tower::ServiceExt;
 
+    use crate::config::NodeConfig;
     use crate::identity::{EnrollmentState, NodeIdentity};
     use crate::state::{NodeState, NodeHttpState};
 
     fn http_state(node_token: Option<&str>) -> NodeHttpState {
         NodeHttpState {
             node: Arc::new(RwLock::new(NodeState::new(16))),
+            config: NodeConfig::default(),
             identity: Arc::new(RwLock::new(NodeIdentity {
                 node_id: "0f0e0d0c-0b0a-4009-8007-060504030201".to_string(),
                 node_name: "node-1".to_string(),

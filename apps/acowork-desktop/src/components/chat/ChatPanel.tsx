@@ -13,7 +13,7 @@ import { cn } from "../../lib/utils";
 import { CAPSULE_PANE_CN } from "../common/capsule";
 import { fetchProviderModels } from "../../lib/gateway-api";
 import { startAgentAndSyncUI } from "../../lib/agent-start";
-import { toolbarButton } from "../../lib/ui-styles";
+import { toolbarIconButton } from "../../lib/ui-styles";
 import { AddProviderFlow } from "../harness/AddProviderFlow";
 import * as sessionControl from "../../lib/session-control";
 import { useActiveSessionReadOnly } from "../../lib/session-write-access";
@@ -564,15 +564,14 @@ export function ChatPanel() {
         const totalGaps = (els.length - 1) * GAP;
 
         // Layout constants: container padding (px-3 = 12px each side),
-        // gap-2 between the left cluster and right cluster,
-        // ~60px for the right cluster (ContextUsageIcon + send button),
-        // ~68px for the upload buttons (paperclip + image).
+        // gap-2 between the left cluster and right cluster, and the
+        // right cluster (visibility + usage + attachment + send:
+        // 4 × 28px buttons + 3 × gap-1).
         const PAD_X = 24;
         const FLEX_GAP = 8;
-        const RIGHT_CLUSTER = 60;
-        const UPLOAD_BUTTONS = 68;
+        const RIGHT_CLUSTER = 4 * 28 + 3 * 4;
         const available = node.offsetWidth
-                        - PAD_X - FLEX_GAP - RIGHT_CLUSTER - UPLOAD_BUTTONS;
+                        - PAD_X - FLEX_GAP - RIGHT_CLUSTER;
 
         // Progressive collapse from LEFT to RIGHT (matches the
         // documented product behavior: model hides first, then effort,
@@ -1349,8 +1348,14 @@ export function ChatPanel() {
       (it) => it.status === "uploading",
     );
 
-    // Block send: no content AND no resolved attachments, or attachments still uploading
-    if ((!content && !hasItems) || sending || !selectedAgentId || hasUploading) return;
+    // The button stays enabled when empty so a click can explain itself
+    // instead of a dead (disabled) button that reads as "the app is
+    // broken". Toast, then no-op.
+    if (!content && !hasItems) {
+      addToast({ type: "warning", message: t("chatPanel.emptyMessage") });
+      return;
+    }
+    if (sending || !selectedAgentId || hasUploading) return;
 
     // Collect resolved (success) AttachedItem[] for the optimistic bubble
     // and the MQTT `attached_items` payload. Backfill workspace refs
@@ -2849,17 +2854,17 @@ export function ChatPanel() {
               <div ref={skBtnRef} className="min-w-0">
                 <SkillsPanel textHidden={textHidden.sk} readOnly={readOnlySession} />
               </div>
+            </div>
+
+            {/* Right: session visibility + usage + attachment + send */}
+            <div className="flex shrink-0 items-center gap-1">
               {/* ADR-076 §决策 4: per-session read visibility (owner only).
-                  Sits with the other session-scoped write controls and is
-                  disabled (not hidden) on a session shared with us. */}
+                  Icon-only, so it rides with the other icon-only right-cluster
+                  controls and stays out of the collapsible text row. */}
               {selectedAgentId && currentSessionId && (
                 <SessionVisibilityToggle agentId={selectedAgentId} sessionId={currentSessionId} />
               )}
-            </div>
 
-            {/* Right: send/stop button + context usage icon */}
-
-            <div className="flex shrink-0 items-center gap-1">
               {/* Context usage icon — shown when session is active */}
               {selectedAgentId && currentSessionId && <ContextUsageIcon agentId={selectedAgentId} sessionId={currentSessionId} />}
 
@@ -2869,7 +2874,7 @@ export function ChatPanel() {
                   so it is disabled on a read-only session. */}
               <Tooltip content={readOnlySession ? t("chatPanel.readOnlySession") : t("chatPanel.uploadHint")}>
                 <button
-                  className={toolbarButton}
+                  className={toolbarIconButton}
                   onClick={handleFileUpload}
                   disabled={!currentSessionId || !selectedAgentId || readOnlySession}
                   aria-label={t("chatPanel.uploadFile")}
@@ -2891,21 +2896,26 @@ export function ChatPanel() {
                   // a viewer watching the owner's stream lands here with the
                   // button disabled, and an unstyled disabled button reads as
                   // a live stop control.
-                  className={`rounded-md p-1.5 transition-colors ${sending
-                    ? "text-[var(--color-accent)] hover:bg-[var(--color-accent)]/10"
-                    : "text-text-tertiary hover:bg-zinc-200 dark:hover:bg-zinc-700 hover:text-zinc-700 dark:hover:text-zinc-200"
-                    } disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent`}
+                  className={cn(
+                    toolbarIconButton,
+                    sending && "text-[var(--color-accent)] hover:bg-[var(--color-accent)]/10",
+                  )}
                   onClick={sending ? handleStop : handleSend}
                   disabled={
                     // ADR-076 §决策 4: a session shared with us is read-only
                     // — sending is write-gated server-side (404), and so is
                     // stopping someone else's stream.
+                    //
+                    // Empty input is NOT a disable condition: a dead button
+                    // has no affordance to explain why, so the button stays
+                    // live and `handleSend` toasts "message is empty" on the
+                    // click. Uploading attachments still disables (the
+                    // payload can't be assembled mid-upload).
                     readOnlySession
                       ? true
                       : sending
                         ? false
                         : (inputDisabled
-                          || (!session.inputValue.trim() && !session.pendingAttachedItems.some((p) => p.status === "success" && p.item !== undefined))
                           || session.pendingAttachedItems.some((p) => p.status === "uploading"))
                   }
                   aria-label={sending ? (session.inputValue.trim() ? t("chatPanel.addToQueue") : queuedMessages.length > 0 ? t("chatPanel.sendQueuedAndStop") : t("chatPanel.stop")) : t("chatPanel.sendMessage")}

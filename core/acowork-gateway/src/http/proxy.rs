@@ -2663,6 +2663,15 @@ async fn resolve_node_token(state: &AppState, agent_id: &str) -> Option<String> 
     store.get_token(node_id).map(str::to_string)
 }
 
+/// The `node_token` for a **node** (not an agent), for Gateway → node
+/// HTTP machine mutations (ADR-055 §6.8: the node's own HTTP surface is
+/// the same token boundary the reverse proxy uses).
+pub(crate) async fn node_token_for(state: &AppState, node_id: &str) -> Option<String> {
+    let gw = state.gateway_state.read().await;
+    let store = gw.mqtt_broker_auth.as_ref()?.node_tokens.lock().ok()?;
+    store.get_token(node_id).map(str::to_string)
+}
+
 /// HTTP client for making proxy requests to Runtime.
 ///
 /// Uses a static `reqwest::Client` (built once, reused) for connection

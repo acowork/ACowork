@@ -955,6 +955,26 @@ export const patchAgentOwner = (id: string, ownerUserId: string | null) =>
 export const patchNodeOwner = (id: string, ownerUserId: string | null) =>
   patchPermissions("nodes", id, "owner", { owner_user_id: ownerUserId });
 
+/**
+ * `PATCH /api/nodes/{id}` — change a node's DISPLAY name (ADR-075 D4).
+ *
+ * Only `node_name` moves: `node_id` is a UUID routing key and is never
+ * touched, so no agent re-bucketing or reconnect follows. Node-manage
+ * gated on the Gateway (owner ∨ admin) — the same tier as install /
+ * fs browse, which is why this goes through the Gateway rather than
+ * straight to the node.
+ */
+export const patchNodeName = async (id: string, nodeName: string): Promise<void> => {
+  const resp = await fetch(`${getGatewayUrl()}/api/nodes/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ node_name: nodeName }),
+  });
+  if (!resp.ok) {
+    throw await httpApiError(resp);
+  }
+};
+
 // ── Structured error codes (ADR-059 §6.3) ──────────────────────────────
 //
 // The Gateway's mutation APIs fail with `{ error, code, structured? }`

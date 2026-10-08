@@ -6,6 +6,7 @@ import { cn } from "../../lib/utils";
 import { StyledInput } from "../common/StyledInput";
 import type { CloneMode, CloneResponse } from "../../lib/types";
 import { Copy, Info } from "lucide-react";
+import { useEscapeClose } from "../../hooks/useEscapeClose";
 
 interface CloneDialogProps {
   open: boolean;
@@ -71,14 +72,7 @@ export function CloneDialog({
   }, [open, packageId]);
 
   // Close on Escape
-  useEffect(() => {
-    if (!open) return;
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [open, onClose]);
+  useEscapeClose(open, onClose);
 
   const handleClone = async () => {
     const trimmed = newAgentId.trim();

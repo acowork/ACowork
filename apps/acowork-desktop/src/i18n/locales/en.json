@@ -158,6 +158,7 @@
     "uploadFile": "Upload file",
     "uploadHint": "Upload file (PDF/DOCX/PPTX/XLSX/PNG/JPG/GIF/WebP)",
     "sendMessage": "Send message",
+    "emptyMessage": "Message is empty",
     "sendFailedNotConnected": "Failed to send message: the agent may not be connected yet. Please wait and try again.",
     "modelSwitchFailed": "Failed to switch model: {{model}}",
     "reasoningEffortFailed": "Failed to update reasoning effort",
@@ -1764,6 +1765,9 @@
   },
   "permissionDialog": {
     "title": "Permissions",
+    "displayName": "Display name",
+    "displayNameHint": "Shown in the sidebar and logs. Lowercase letters, digits and hyphens; the node's ID never changes.",
+    "displayNameInvalid": "2-32 characters of a-z, 0-9 and single hyphens; \"local\" is reserved.",
     "ariaLabelClose": "Close",
     "owner": "Owner",
     "ownerUnassigned": "Unassigned (admin only)",

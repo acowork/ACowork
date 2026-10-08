@@ -969,6 +969,11 @@ export function AgentList({ width }: AgentListProps) {
         open={!!permTarget}
         target={permTarget}
         onClose={() => setPermTarget(null)}
+        // ADR-075 D4: a rename lands in the node's identity.json and the
+        // node republishes its info snapshot, so the Gateway's view is
+        // already correct — re-pull it so the group header above stops
+        // rendering the old name.
+        onRenamedNode={() => void useAgentStore.getState().fetchNodes()}
       />
 
       {/* Clone dialog */}

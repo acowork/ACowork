@@ -14,6 +14,7 @@ import { getProcessingPhase } from "../../lib/types";
 import { computeCacheHitStats, formatCacheHitRate, hasCacheData } from "../../lib/cacheHitRate";
 import { COMPRESS_SUMMARY } from "../../lib/session-control";
 import { useSessionReadOnly } from "../../lib/session-write-access";
+import { toolbarIconButton } from "../../lib/ui-styles";
 
 // ADR-074: the editor mirrors the backend `is_valid_context_window`
 // bounds (CONTEXT_WINDOW_FLOOR..=CEILING) so out-of-range input is
@@ -288,12 +289,10 @@ const handleCompressSummary = () => {
       onMouseEnter={handleMouseEnter}
       onMouseLeave={handleMouseLeave}
     >
-      {/* Icon button — matches the adjacent Send button exactly */}
+      {/* Icon button — shared right-cluster token so the hover rectangle
+          matches the visibility / attachment / send buttons exactly. */}
       <button
-        className={cn(
-          "rounded-md p-1.5 transition-colors",
-          "text-text-tertiary hover:bg-zinc-200 dark:hover:bg-zinc-700 hover:text-zinc-700 dark:hover:text-zinc-200",
-        )}
+        className={toolbarIconButton}
         aria-label={t("contextUsage.ariaLabel")}
       >
         {isCompacting ? (
