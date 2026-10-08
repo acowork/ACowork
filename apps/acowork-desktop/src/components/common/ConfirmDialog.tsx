@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import { cn } from "../../lib/utils";
+import { useEscapeClose } from "../../hooks/useEscapeClose";
 
 interface ConfirmDialogProps {
   open: boolean;
@@ -22,16 +23,16 @@ export function ConfirmDialog({
 }: ConfirmDialogProps) {
   const cancelRef = useRef<HTMLButtonElement>(null);
 
-  // Focus cancel button on open; close on Escape
+  // Focus cancel on open — keyed on `open` alone. `AgentList` passes an
+  // inline `onCancel`, so listing it here re-ran `focus()` on every parent
+  // re-render and stole focus from whatever the user was using.
   useEffect(() => {
     if (!open) return;
     cancelRef.current?.focus();
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onCancel();
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [open, onCancel]);
+  }, [open]);
+
+  // Close on Escape
+  useEscapeClose(open, onCancel);
 
   if (!open) return null;
 

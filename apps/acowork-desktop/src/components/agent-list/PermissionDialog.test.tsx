@@ -106,6 +106,7 @@ vi.mock("../../stores/authStore", () => ({
 }));
 
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { useState } from "react";
 import { PermissionDialog, type PermissionTarget } from "./PermissionDialog";
 import * as gatewayApi from "../../lib/gateway-api";
 import * as authApi from "../../lib/auth-api";
@@ -747,5 +748,74 @@ describe("PermissionDialog node display name (ADR-075 D4)", () => {
         .disabled,
     ).toBe(true);
     expect(patchNodeName).not.toHaveBeenCalled();
+  });
+});
+
+// The reported symptom: focus left the field (and the owner's <select>
+// popup collapsed, since a native select closes on blur) seconds after the
+// user interacted — with nothing refreshing. The cause was NOT the dialog
+// re-rendering on its own data; it was the PARENT re-rendering for
+// unrelated reasons (MQTT ticks, inventory re-broadcasts, the 3 s gateway
+// death-watch probe), handing the inline `onClose` a new identity, which
+// re-ran the effect that called `closeRef.current?.focus()`.
+//
+// So the test drives the real thing: a parent that re-renders with a
+// FRESH onClose, which is what every AgentList tick looks like.
+describe("PermissionDialog focus survival", () => {
+  /** Wraps the dialog in a parent whose `onClose` identity changes on
+   *  every render — the inline-arrow pattern used throughout AgentList.
+   *  `onCloseTick` stands in for the unrelated work that makes AgentList
+   *  re-render (an MQTT tick, a re-published inventory). */
+  function Wrapped({ onCloseTick }: { onCloseTick: () => void }) {
+    const [, bump] = useState(0);
+    return (
+      <>
+        <button onClick={() => { bump((n) => n + 1); onCloseTick(); }}>tick</button>
+        <PermissionDialog open target={NODE} onClose={() => {}} />
+      </>
+    );
+  }
+
+  it("keeps focus in the display-name input across unrelated parent re-renders", async () => {
+    render(<Wrapped onCloseTick={() => {}} />);
+    const input = await waitFor(() => {
+      const el = document.querySelector<HTMLInputElement>("[data-node-name]");
+      if (!el) throw new Error("display name input not found");
+      return el;
+    });
+    input.focus();
+    expect(document.activeElement).toBe(input);
+
+    // Three "unrelated store tick" re-renders, each rebuilding the inline
+    // `onClose` — exactly what the effect's old dep array keyed on.
+    fireEvent.click(screen.getByRole("button", { name: "tick" }));
+    fireEvent.click(screen.getByRole("button", { name: "tick" }));
+    fireEvent.click(screen.getByRole("button", { name: "tick" }));
+
+    // Focus must still be where the user left it.
+    expect(document.activeElement).toBe(input);
+  });
+
+  it("keeps focus on the owner <select> across unrelated parent re-renders", async () => {
+    render(<Wrapped onCloseTick={() => {}} />);
+    await screen.findByRole("switch");
+    const select = ownerCell();
+    select.focus();
+    expect(document.activeElement).toBe(select);
+
+    fireEvent.click(screen.getByRole("button", { name: "tick" }));
+    fireEvent.click(screen.getByRole("button", { name: "tick" }));
+
+    expect(document.activeElement).toBe(select);
+  });
+
+  it("still focuses the close button when the dialog OPENS", async () => {
+    render(<Wrapped onCloseTick={() => {}} />);
+    await screen.findByRole("switch");
+    // The initial focus is deliberate — the dialog must be keyboard-ready.
+    // It just must not RE-fire on every later render.
+    const closeBtn = document.querySelector<HTMLButtonElement>('[aria-label="permissionDialog.ariaLabelClose"]');
+    expect(closeBtn).not.toBeNull();
+    expect(document.activeElement).toBe(closeBtn);
   });
 });

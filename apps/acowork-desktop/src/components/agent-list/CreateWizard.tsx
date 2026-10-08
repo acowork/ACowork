@@ -12,6 +12,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { StyledInput, StyledTextarea } from "../common/StyledInput";
+import { useEscapeClose } from "../../hooks/useEscapeClose";
 import { Switch } from "../common/Switch";
 import { ListBox, ListRow } from "../common/list";
 import { useTranslation } from "../../i18n/useTranslation";
@@ -108,15 +109,10 @@ export function CreateWizard({ open, onCreated, onClose }: CreateWizardProps) {
     };
   }, [open]);
 
-  // Close on Escape
-  useEffect(() => {
-    if (!open) return;
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !busy) onClose();
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [open, busy, onClose]);
+  // Close on Escape — `!busy` is the gate so a wizard mid-submit cannot be
+  // dismissed out from under itself. The hook reads it at keydown time,
+  // so a spinner flip no longer re-subscribes the listener.
+  useEscapeClose(open, onClose, !busy);
 
   const update = (patch: Partial<AgentFormData>) =>
     setForm((prev) => ({ ...prev, ...patch }));

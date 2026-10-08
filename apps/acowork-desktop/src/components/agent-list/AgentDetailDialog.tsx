@@ -5,6 +5,7 @@ import { cn } from "../../lib/utils";
 import { getGatewayUrl } from "../../lib/config";
 import { useTranslation } from "../../i18n/useTranslation";
 import { ErrorBox } from "../common/ErrorBox";
+import { useEscapeClose } from "../../hooks/useEscapeClose";
 
 interface AgentDetailDialogProps {
   open: boolean;
@@ -43,16 +44,16 @@ export function AgentDetailDialog({ open, agentId, onClose }: AgentDetailDialogP
       .catch(() => setModelInfo(null));
   }, [open, agentId]);
 
-  // Focus close button on open; Escape to close
+  // Focus close on open — keyed on `open` alone. `AgentList` passes an
+  // inline `onClose`, so listing it here re-ran `focus()` on every parent
+  // re-render and stole focus from whatever the user was using.
   useEffect(() => {
     if (!open) return;
     closeRef.current?.focus();
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [open, onClose]);
+  }, [open]);
+
+  // Escape to close
+  useEscapeClose(open, onClose);
 
   if (!open) return null;
 

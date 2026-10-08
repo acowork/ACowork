@@ -3,6 +3,7 @@ import { useTranslation } from "../../i18n/useTranslation";
 import { cn } from "../../lib/utils";
 import { getGatewayUrl } from "../../lib/config";
 import { useAuthStore } from "../../stores/authStore";
+import { useEscapeClose } from "../../hooks/useEscapeClose";
 import { fetchAccounts, fetchDirectory } from "../../lib/auth-api";
 import type { DirectoryUser } from "../../lib/types";
 import {
@@ -195,16 +196,25 @@ export function PermissionDialog({ open, target, onClose, onRenamedNode }: Permi
     setNodeName(target?.kind === "node" ? (target.name ?? "") : "");
   }, [target]);
 
-  // Focus close on open; Escape to close (same affordance as the detail dialog).
+  // Focus close on open — keyed on `open` ALONE.
+  //
+  // This used to share one effect with the Escape listener, which listed
+  // `onClose` as a dependency. `AgentList` passes an inline
+  // `onClose={() => setPermTarget(null)}`, so a fresh identity arrived on
+  // every parent re-render (MQTT session-status ticks, inventory
+  // re-broadcasts, the 3 s gateway death-watch probe) and the effect
+  // re-ran `focus()`. That stole focus out of the display-name input
+  // seconds after it was clicked, and collapsed the owner `<select>`
+  // popup — which closes on blur — seconds after it was opened. Nothing
+  // was refreshing; focus was simply being re-grabbed on a timer.
+  // `useEscapeClose` keeps the listener on the same `[open]` key.
   useEffect(() => {
     if (!open) return;
     closeRef.current?.focus();
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [open, onClose]);
+  }, [open]);
+
+  // Escape to close (same affordance as the detail dialog).
+  useEscapeClose(open, onClose);
 
   if (!open || !target) return null;
 
