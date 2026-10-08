@@ -713,25 +713,25 @@ impl AgentCore {
     pub fn accumulate_llm_usage(&self, usage: &UsageInfo) {
         if usage.prompt_tokens > 0 {
             self.agent_total_input_tokens
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
+                .try_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
                     Some(cur.saturating_add(usage.prompt_tokens))
                 })
                 .ok();
             // ADR-066: cache_read shares the zero-skip gate.
             self.agent_total_cache_read_tokens
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
+                .try_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
                     Some(cur.saturating_add(usage.cache_read_tokens))
                 })
                 .ok();
         }
         self.agent_total_output_tokens
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
                 Some(cur.saturating_add(usage.completion_tokens))
             })
             .ok();
         // ADR-066: cache_write always accumulates (no zero-skip gate).
         self.agent_total_cache_write_tokens
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
                 Some(cur.saturating_add(usage.cache_write_tokens))
             })
             .ok();
@@ -756,14 +756,14 @@ impl AgentCore {
     ) {
         if let Some(inp) = scanned.0 {
             self.agent_total_input_tokens
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
+                .try_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
                     Some(cur.max(inp))
                 })
                 .ok();
         }
         if let Some(out) = scanned.1 {
             self.agent_total_output_tokens
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
+                .try_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
                     Some(cur.max(out))
                 })
                 .ok();
@@ -772,14 +772,14 @@ impl AgentCore {
         // merge pattern.
         if let Some(cache_read) = scanned.2 {
             self.agent_total_cache_read_tokens
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
+                .try_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
                     Some(cur.max(cache_read))
                 })
                 .ok();
         }
         if let Some(cache_write) = scanned.3 {
             self.agent_total_cache_write_tokens
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
+                .try_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
                     Some(cur.max(cache_write))
                 })
                 .ok();
