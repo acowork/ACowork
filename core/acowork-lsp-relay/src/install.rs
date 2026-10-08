@@ -290,6 +290,22 @@ fn build_install_script_candidates(filename: &str, config_dir: Option<&std::path
         candidates.push(cwd.join("lsp_install").join(filename));
     }
 
+    // 4. `assets/lsp_install/` in an ancestor of the executable. In a dev
+    // build the binary sits at `target/release/acowork-lsp-relay` while the
+    // scripts live in the repo root — candidates 0-3 all miss there (the
+    // Gateway/Node spawns the relay with cwd=core/, and there is no
+    // ACOWORK_LSP_CONFIG_DIR outside a Tauri bundle), so every install
+    // answered 404. In a packaged build this finds nothing: the scripts are
+    // already resolved by candidate 2 (`<exe_dir>/lsp_install`).
+    if let Ok(exe_path) = std::env::current_exe() {
+        for dir in exe_path.ancestors().skip(1) {
+            let path = dir.join("assets").join("lsp_install").join(filename);
+            if path.exists() {
+                candidates.push(path);
+            }
+        }
+    }
+
     candidates
 }
 
@@ -527,6 +543,35 @@ mod tests {
     fn test_find_install_script_path_returns_none_for_nonexistent() {
         let path = find_install_script_path("definitely_nonexistent_script_12345.sh", None);
         assert!(path.is_none());
+    }
+
+    #[test]
+    fn test_candidates_include_repo_assets_next_to_exe() {
+        // Dev builds run from `target/<profile>/` while the scripts live in
+        // the repo root — the exe-ancestor `assets/lsp_install/` arm is what
+        // makes installs resolvable outside a Tauri bundle. Under `cargo
+        // test` the test binary lives in `target/<profile>/deps/`, so the
+        // ancestor walk must climb past `deps/` to reach the repo root.
+        //
+        // The expectation is recomputed from `current_exe()` here rather
+        // than matched loosely: `CARGO_MANIFEST_DIR` is also set for the
+        // test process, so a loose `ends_with("assets/lsp_install/rust.sh")`
+        // would be satisfied by candidate 1 and never notice arm 4 dying.
+        let exe = std::env::current_exe().expect("current_exe");
+        let expected = exe
+            .ancestors()
+            .skip(1)
+            .map(|d| d.join("assets").join("lsp_install").join("rust.sh"))
+            .find(|p| p.exists())
+            .expect("repo assets/lsp_install/rust.sh reachable from the test binary");
+
+        let candidates = build_install_script_candidates("rust.sh", None);
+        assert!(
+            candidates.contains(&expected),
+            "exe-ancestor candidate {} missing from {:?}",
+            expected.display(),
+            candidates
+        );
     }
 
     #[test]
