@@ -145,7 +145,14 @@ export function ProjectsView() {
             onMouseDown={sidebar.onHandleMouseDown}
             ariaLabel={t("appLayout.ariaLabelResizeSidebar")}
           />
-          <main className="flex min-w-0 flex-1 items-center justify-center">
+          {/* 右侧空态必须与 ProjectBoard / DocsView 同款胶囊外壳，
+              否则图标+文字+按钮直接浮在窗口毛玻璃上（无描边、无面板底色）。 */}
+          <main
+            className={cn(
+              CAPSULE_PANE_CN,
+              "min-w-0 flex-1 items-center justify-center bg-page-bg",
+            )}
+          >
             <div className="flex flex-col items-center justify-center gap-4 p-8">
               <div className="flex h-16 w-16 items-center justify-center rounded-full bg-zinc-100 text-3xl dark:bg-zinc-800">
                 📋

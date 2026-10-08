@@ -122,6 +122,16 @@ describe("pm / docs / extensions join the capsule layout", () => {
     expect(src).not.toMatch(/rounded-xl bg-page-bg/);
   });
 
+  it("ProjectsView's no-project state is a capsule, not bare glass", () => {
+    // The "no projects yet" pane used to be a bare `<main>` with no shell,
+    // so its icon + copy + button floated directly on the window vibrancy
+    // while every neighbouring state (board skeleton, ProjectBoard, DocsView
+    // right column) was an outlined panel.
+    expect(read("views/ProjectsView.tsx")).toMatch(
+      /<main\s+className=\{cn\(\s*CAPSULE_PANE_CN,\s*"min-w-0 flex-1 items-center justify-center bg-page-bg"/,
+    );
+  });
+
   it("AppLayout keeps every view wrapper transparent", () => {
     const src = read("components/layout/AppLayout.tsx");
     // settings + harness used to keep a solid `bg-page-bg` plane (a
