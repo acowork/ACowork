@@ -375,57 +375,44 @@ export function LspTab() {
     );
   }
 
-  const nodePicker = relayNodes.length > 0 && (
-    <div className="flex items-center gap-2">
-      <label
-        htmlFor="lsp-node-picker"
-        className="shrink-0 text-xs text-text-tertiary"
-      >
-        {t("harnessLsp.node")}
-      </label>
-      <div className="min-w-0 flex-1">
-        <Dropdown
-          id="lsp-node-picker"
-          size="small"
-          value={shownNode?.node_id ?? ""}
-          onChange={(v) => setNodeOverride(v)}
-          options={relayNodes.map((n) => ({
-            value: n.node_id,
-            // node_name is the renameable display slug (ADR-075 D2); the id
-            // is the disambiguator when two nodes share a slug.
-            label: n.node_name ? `${n.node_name} (${n.node_id.slice(0, 8)})` : n.node_id,
-          }))}
-        />
-      </div>
-    </div>
-  );
-
-  if (!effectiveRelayUrl) {
-    return (
-      <div className="max-w-lg space-y-3">
-        {nodePicker}
-        <p className="text-xs text-text-tertiary">
-          {relayNodes.length > 0
-            ? t("harnessLsp.relayUnavailable")
-            : t("harnessLsp.noRelayNodes")}
-        </p>
-      </div>
-    );
-  }
-
   const servers = config?.servers ?? {};
   const serverEntries = Object.entries(servers);
 
+  // Which machine's relay this panel is showing. It rides in the card
+  // header next to Refresh: every row below is that node's install state,
+  // so a free-floating control above the card read as a separate form and
+  // left the list looking global when it is per-node.
+  const nodePicker = relayNodes.length > 0 && (
+    <Dropdown
+      id="lsp-node-picker"
+      size="small"
+      aria-label={t("harnessLsp.node")}
+      value={shownNode?.node_id ?? ""}
+      onChange={(v) => setNodeOverride(v)}
+      className="max-w-[190px]"
+      options={[
+        // The agent's own node may fall outside the caller's manage list
+        // (ADR-087 D5), leaving the panel on an endpoint it cannot name.
+        // Show the host rather than an empty select.
+        ...(effectiveRelayUrl && !shownNode
+          ? [{ value: "", label: effectiveRelayUrl.replace(/^https?:\/\//, "") }]
+          : []),
+        ...relayNodes.map((n) => ({
+          value: n.node_id,
+          // node_name is the renameable display slug (ADR-075 D2); the id
+          // is the disambiguator when two nodes share a slug.
+          label: n.node_name ? `${n.node_name} (${n.node_id.slice(0, 8)})` : n.node_id,
+        })),
+      ]}
+    />
+  );
+
   return (
     <div className="max-w-2xl space-y-4">
-      {/* Which machine's relay this panel is showing. Every row below is
-          that node's install state — without this the list reads as global
-          and, with several nodes online, silently means "whichever agent
-          happened to be selected". */}
-      {nodePicker}
       {/* LSP Servers — Tools-tab level-1 collapsible card: chevron + title +
-          count badge. The Refresh action sits in the header trailing slot
-          (wrapped in stopPropagation so it never toggles the fold). */}
+          count badge. Node picker and Refresh share the header trailing
+          slot (both wrapped in stopPropagation so neither toggles the
+          fold). */}
       <ListBox dividers={false}>
         <ExpandableRow
           open={serversOpen}
@@ -433,7 +420,8 @@ export function LspTab() {
           title={t("harnessLsp.lspServerManagement", { count: serverEntries.length })}
           ariaLabel={t("harnessLsp.lspServerManagement", { count: serverEntries.length })}
           trailing={
-            <span onClick={(e) => e.stopPropagation()}>
+            <span className="flex items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
+              {nodePicker}
               <Tooltip
                 content={refreshing ? t("harnessLsp.refreshing") : t("harnessLsp.refresh")}
                 variant="plain"
@@ -442,7 +430,7 @@ export function LspTab() {
                   aria-label={refreshing ? t("harnessLsp.refreshing") : t("harnessLsp.refresh")}
                   onClick={() => void loadAll({ force: true })}
                   disabled={refreshing}
-                  className="inline-flex items-center justify-center rounded h-6 w-6 text-text-tertiary hover:bg-zinc-200 hover:text-zinc-600 disabled:opacity-60 dark:hover:bg-zinc-700 dark:hover:text-zinc-300 transition-colors"
+                  className="inline-flex items-center justify-center rounded h-6 w-6 text-text-tertiary hover:bg-zinc-200 hover:text-zinc-600 disabled:opacity-60 dark:hover:bg-zinc-700 dark:text-zinc-300 transition-colors"
                 >
                   {refreshing ? (
                     <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -455,6 +443,16 @@ export function LspTab() {
           }
           bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset"
         >
+          {/* No relay to talk to — the card stays so the picker remains
+              reachable, and the reason replaces the row list. */}
+          {!effectiveRelayUrl && (
+            <div className="px-3 py-3 text-xs text-text-tertiary">
+              {relayNodes.length > 0
+                ? t("harnessLsp.relayUnavailable")
+                : t("harnessLsp.noRelayNodes")}
+            </div>
+          )}
+
           {/* Error message */}
           {error && (
             <div className="px-3 pt-2">
@@ -463,18 +461,18 @@ export function LspTab() {
           )}
 
           {/* Loading state */}
-          {refreshing && serverEntries.length === 0 && (
+          {effectiveRelayUrl && refreshing && serverEntries.length === 0 && (
             <div className="px-3 py-3 text-xs text-text-tertiary">{t("harnessLsp.loadingServers")}</div>
           )}
 
           {/* Empty state */}
-          {!refreshing && serverEntries.length === 0 && (
+          {effectiveRelayUrl && !refreshing && serverEntries.length === 0 && (
             <div className="px-3 py-3 text-xs text-text-tertiary">{t("harnessLsp.noLspServers")}</div>
           )}
 
           {/* Server list — unified ListRow rows (hairline separators, inset
               hover), one per language. */}
-          {serverEntries.length > 0 && (
+          {effectiveRelayUrl && serverEntries.length > 0 && (
             <ListBox variant="plain">
               {serverEntries.map(([language, entry]) => (
                 <LspServerCard
