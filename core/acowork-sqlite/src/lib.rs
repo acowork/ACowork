@@ -1123,12 +1123,16 @@ fn embedding_to_blob(embedding: &[f32]) -> Vec<u8> {
     out
 }
 
+// `clippy::chunks_exact_to_as_chunks` prefers `slice::as_chunks`, but that is
+// a rustc 1.99 API. The fleet is heterogeneous — the gateway builds on 1.99
+// while remote nodes and desktop machines are on 1.96 — so the workspace MSRV
+// stays at 1.95 and we keep `chunks_exact` here rather than force every machine
+// to upgrade rustc for one helper. Revisit once the fleet MSRV reaches 1.99.
+#[allow(clippy::chunks_exact_to_as_chunks)]
 fn blob_to_embedding(blob: &[u8]) -> Vec<f32> {
-    // A blob is always a whole number of 4-byte f32s, so `as_chunks`'s
-    // remainder is empty; dropping it matches the old `chunks_exact(4)`
-    // behavior exactly.
-    let (chunks, _remainder) = blob.as_chunks::<4>();
-    chunks.iter().map(|c| f32::from_le_bytes(*c)).collect()
+    blob.chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect()
 }
 
 fn dot(a: &[f32], b: &[f32]) -> f64 {

@@ -24,10 +24,7 @@ resolver = "2"
 version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
-# Bumped 1.95 -> 1.99 to use `slice::as_chunks` (stabilized in 1.99.0) in
-# acowork-sqlite; this matches the toolchain the workspace actually builds
-# with.
-rust-version = "1.99"
+rust-version = "1.95"
 
 # Dev profile uses Cargo defaults (`opt-level = 0` + full debuginfo).
 # An earlier optimization (PERF-001, `opt-level = 2` in dev) was reverted after
