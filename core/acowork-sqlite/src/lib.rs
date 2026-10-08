@@ -1124,9 +1124,11 @@ fn embedding_to_blob(embedding: &[f32]) -> Vec<u8> {
 }
 
 fn blob_to_embedding(blob: &[u8]) -> Vec<f32> {
-    blob.chunks_exact(4)
-        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-        .collect()
+    // A blob is always a whole number of 4-byte f32s, so `as_chunks`'s
+    // remainder is empty; dropping it matches the old `chunks_exact(4)`
+    // behavior exactly.
+    let (chunks, _remainder) = blob.as_chunks::<4>();
+    chunks.iter().map(|c| f32::from_le_bytes(*c)).collect()
 }
 
 fn dot(a: &[f32], b: &[f32]) -> f64 {
@@ -1172,4 +1174,24 @@ fn escape_like(s: &str) -> String {
         out.push(ch);
     }
     out
+}
+
+#[cfg(test)]
+mod blob_tests {
+    use super::*;
+
+    #[test]
+    fn embedding_blob_round_trips() {
+        let v = vec![1.5f32, -2.25, 0.0, 3.1415927];
+        assert_eq!(blob_to_embedding(&embedding_to_blob(&v)), v);
+    }
+
+    #[test]
+    fn blob_ignores_trailing_partial_f32() {
+        // 3 whole f32s + 2 stray bytes: as_chunks drops the 2-byte tail,
+        // matching the old chunks_exact(4) semantics.
+        let mut blob = embedding_to_blob(&[1.0, 2.0, 3.0]);
+        blob.extend_from_slice(&[0xff, 0xff]);
+        assert_eq!(blob_to_embedding(&blob), vec![1.0, 2.0, 3.0]);
+    }
 }

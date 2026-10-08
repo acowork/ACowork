@@ -270,9 +270,12 @@ impl AgentLoop {
         let mut should_stop = false;
 
         // ── Step 1: process messages deferred from poll_stop() ──
-        // Collect to release the drain iterator's borrow on self.session
-        // before calling apply_user_op() (which needs &mut self).
-        let deferred: Vec<_> = self.session.deferred_inbound.drain(..).collect();
+        // Detach the whole stash (swap with an empty Vec) so the loop below
+        // can call apply_user_op(&mut self) — iterating
+        // self.session.deferred_inbound in place would hold a borrow across
+        // it. `mem::take` is one swap, not a drain + re-collect. Same idiom
+        // as loop_tools.rs.
+        let deferred = std::mem::take(&mut self.session.deferred_inbound);
         for msg in deferred {
             let (msg, _truncated) = msg.enforce_size_limit();
             match msg {

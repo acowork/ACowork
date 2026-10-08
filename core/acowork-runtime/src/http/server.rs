@@ -1047,47 +1047,72 @@ async fn list_sessions(
     ))
 }
 
-/// Error tuple for the session read endpoints: status + optional
-/// `Retry-After` header + JSON body (`{"error": "<code>"}`).
-type SessionHttpError = (
-    StatusCode,
-    axum::http::HeaderMap,
-    Json<serde_json::Value>,
-);
+/// Error for the session read endpoints, rendered as a status + optional
+/// `Retry-After` header + a JSON body (`{"error": "<code>"}`).
+///
+/// Modelled as a small discriminant enum rather than the 3-tuple it renders
+/// to, so the `Result<_, SessionHttpError>` error variant stays a couple of
+/// bytes and does not trip `clippy::large_error_types`. The heavy
+/// `(StatusCode, HeaderMap, Json)` response is built only at the
+/// `IntoResponse` boundary, not carried through every early-return `?`.
+enum SessionHttpError {
+    /// `503 session_not_ready` + `Retry-After: 2` (startup window, ADR-085 D4).
+    NotReady,
+    /// `404 no_session` — ready, and there is no session. The same body is
+    /// used when the session exists but this caller may not read it, so the
+    /// two stay indistinguishable on the wire (no existence leak).
+    NoSession,
+    /// Any other status; body is `{"error": <canonical_reason>}`.
+    Status(StatusCode),
+}
+
+impl IntoResponse for SessionHttpError {
+    fn into_response(self) -> axum::response::Response {
+        match self {
+            Self::NotReady => {
+                let mut headers = HeaderMap::new();
+                headers.insert(
+                    header::RETRY_AFTER,
+                    axum::http::HeaderValue::from_static("2"),
+                );
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    headers,
+                    Json(serde_json::json!({ "error": "session_not_ready" })),
+                )
+                    .into_response()
+            }
+            Self::NoSession => (
+                StatusCode::NOT_FOUND,
+                HeaderMap::new(),
+                Json(serde_json::json!({ "error": "no_session" })),
+            )
+                .into_response(),
+            Self::Status(status) => (
+                status,
+                HeaderMap::new(),
+                Json(serde_json::json!({
+                    "error": status.canonical_reason().unwrap_or("error")
+                })),
+            )
+                .into_response(),
+        }
+    }
+}
 
 fn session_http_error(status: StatusCode) -> SessionHttpError {
-    (
-        status,
-        axum::http::HeaderMap::new(),
-        Json(serde_json::json!({ "error": status.canonical_reason().unwrap_or("error") })),
-    )
+    SessionHttpError::Status(status)
 }
 
 /// ADR-085 D4: the "not yet, ask again shortly" answer for session
 /// interfaces — `503 {"error":"session_not_ready"}` + `Retry-After: 2`.
 fn session_not_ready() -> SessionHttpError {
-    let mut headers = axum::http::HeaderMap::new();
-    headers.insert(
-        axum::http::header::RETRY_AFTER,
-        axum::http::HeaderValue::from_static("2"),
-    );
-    (
-        StatusCode::SERVICE_UNAVAILABLE,
-        headers,
-        Json(serde_json::json!({ "error": "session_not_ready" })),
-    )
+    SessionHttpError::NotReady
 }
 
-/// ADR-085 D4: the honest "ready, and there is no session" answer —
-/// `404 {"error":"no_session"}`. The same body is used for
-/// "session exists but this caller may not read it", so the two are
-/// indistinguishable on the wire (no existence leak).
+/// ADR-085 D4: the honest "ready, and there is no session" answer.
 fn no_session() -> SessionHttpError {
-    (
-        StatusCode::NOT_FOUND,
-        axum::http::HeaderMap::new(),
-        Json(serde_json::json!({ "error": "no_session" })),
-    )
+    SessionHttpError::NoSession
 }
 
 /// ADR-085 D4 ("扫描未完成" row): whether an empty `latest_session`
