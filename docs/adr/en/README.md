@@ -106,6 +106,8 @@ ADRs are not a sequence to be read front to back. Suggested entry points:
 | 78 | [ADR-085](./ADR-085-agent-lifecycle-state-machine.md) | The Agent Lifecycle State Machine (ready: bool → the AgentStatus.state enum) | Accepted (v2 revision, implemented on 2026-10-01 and passed review —… | [zh](../zh/ADR-085-agent-lifecycle-state-machine.md) |
 | 79 | [ADR-086](./ADR-086-mobile-app-im-ia-and-multi-session.md) | Mobile App Information Architecture (IM Form) and Multi-Session Carrier | Accepted (2026-10-02; the UI/interaction design passed two-layer auto… | [zh](../zh/ADR-086-mobile-app-im-ia-and-multi-session.md) |
 | 80 | [ADR-087](./ADR-087-node-agent-owner-permissions.md) | The Node and Agent Owner Permission Model — Plugging the Hole Where "the Whole Machine Is Writable by Every User by Def… | Draft (v2 revision; Q1/Q2/Q4 and the "single owner + multiple guests"… | [zh](../zh/ADR-087-node-agent-owner-permissions.md) |
+| 81 | [ADR-088](./ADR-088-cloud-hub-application-layer-remote-access.md) | Adding the Cloud Hub Application-Layer Remote-Access Mode, Coexisting Permanently with the Thin Relay | Decided (not yet implemented; Phase 0 not started) | [zh](../zh/ADR-088-cloud-hub-application-layer-remote-access.md) |
+| 82 | [ADR-089](./ADR-089-lsp-relay-reachability-vs-exposure.md) | LSP Relay Reachability vs. Exposure — Desktop Accesses the Relay Through a Gateway Reverse Proxy | Proposed (pending architecture review) | [zh](../zh/ADR-089-lsp-relay-reachability-vs-exposure.md) |
 
 ---
 
