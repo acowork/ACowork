@@ -1159,7 +1159,10 @@ function NodeGroupHeader({
           data-testid="node-permissions-btn"
           className="mr-2 flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-text-tertiary transition-colors hover:bg-nav-item-hover hover:text-zinc-600 dark:hover:text-zinc-300"
         >
-          <Settings className="h-3.5 w-3.5" />
+          {/* ponytail: icon only shrinks to 90% (14 -> 12.6px) for a lighter
+              glyph; the button box stays h-6 w-6 so padding + hit area are
+              unchanged. Swap back to h-3.5 w-3.5 if the row density changes. */}
+          <Settings className="h-[12.6px] w-[12.6px]" />
         </button>
       )}
     </div>
