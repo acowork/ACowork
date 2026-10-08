@@ -301,6 +301,29 @@ export function AgentList({ width }: AgentListProps) {
   // machine, bound to the signed-in account. The enrollment token is minted
   // and consumed inside the command; it never surfaces in the UI.
   const [creatingNode, setCreatingNode] = useState(false);
+
+  // ADR-087 follow-up: first-run banner. In remote mode the Desktop
+  // auto-start path deliberately only RESUMES an existing enrollment and
+  // skips first-time enrollment silently — so when this machine has no
+  // enrolled node, prompt for the explicit action here. The state is read
+  // from the Rust side (identity.json + Gateway node-list reconciliation),
+  // not from the node list, because an unenrolled machine has no row to
+  // look up. Amber banner style mirrors GatewayBanner (translucent bg +
+  // 1px border) — the app's shared non-modal reminder language.
+  const [localNode, setLocalNode] = useState<{ enrolled: boolean; running: boolean } | null>(null);
+  const refreshLocalNode = useCallback(() => {
+    if (!isRemoteMode || !selfAccount) {
+      setLocalNode(null);
+      return;
+    }
+    invoke<{ enrolled: boolean; running: boolean }>("local_node_status")
+      .then(setLocalNode)
+      .catch(() => setLocalNode(null));
+  }, [isRemoteMode, selfAccount]);
+  useEffect(() => {
+    refreshLocalNode();
+  }, [refreshLocalNode]);
+
   const handleCreateLocalNode = async () => {
     setAddMenuOpen(false);
     setCreatingNode(true);
@@ -317,6 +340,7 @@ export function AgentList({ width }: AgentListProps) {
         message: res.was_enrolled ? t("agentList.localNodeStarted") : t("agentList.localNodeCreated"),
       });
       await useAgentStore.getState().fetchNodes();
+      refreshLocalNode();
     } catch (e) {
       addToast({ type: "error", message: t("agentList.errorCreateLocalNode", { error: String(e) }) });
     } finally {
@@ -722,6 +746,24 @@ export function AgentList({ width }: AgentListProps) {
       className="flex flex-col shrink-0 bg-nav-surface rounded-xl border-r border-agentlist-border"
       style={{ width: width ?? 240 }}
     >
+      {/* ADR-087 follow-up: remote mode + signed-in + machine not enrolled
+          → ask for the one explicit action that starts everything. Hides
+          itself the moment enrollment lands (refreshLocalNode after
+          create); no dismiss control — a closable first-run reminder
+          would just re-appear every launch. */}
+      {!isCollapsed && localNode && !localNode.enrolled && (
+        <div className="flex items-start gap-2 border-b border-amber-300/60 bg-amber-50/80 px-3 py-2 text-xs text-amber-900 backdrop-blur-sm dark:border-amber-700/60 dark:bg-amber-950/40 dark:text-amber-100">
+          <Server className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-500 dark:text-amber-300" />
+          <span className="min-w-0 flex-1">{t("agentList.localNodeBanner")}</span>
+          <button
+            onClick={() => void handleCreateLocalNode()}
+            disabled={creatingNode}
+            className="shrink-0 rounded-md px-2 py-0.5 text-xs font-medium transition-colors hover:bg-amber-200/60 disabled:opacity-50 dark:hover:bg-amber-900/60"
+          >
+            {t("agentList.createLocalNode")}
+          </button>
+        </div>
+      )}
       {/* Header — search input */}
       {/* Search band: `min-h-[var(--ui-list-header-h)]` + `items-center`
           matches pm / extensions / doc / settings, whose search boxes sit in

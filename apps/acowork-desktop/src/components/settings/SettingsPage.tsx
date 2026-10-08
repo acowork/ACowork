@@ -10,6 +10,7 @@ import { cn } from "../../lib/utils";
 import { ConfirmDialog } from "../common/ConfirmDialog";
 import { ExpandableRow, ListBox, ListRow } from "../common/list";
 import { RadioGroup } from "../common/RadioGroup";
+import { Switch } from "../common/Switch";
 import { DEFAULT_GATEWAY_URL, getGatewayUrl, DEFAULT_THEME, DEFAULT_FONT_SIZE, DEFAULT_CONTENT_WIDTH, DEFAULT_OPACITY, DEFAULT_ACCENT_COLOR } from "../../lib/config";
 import { ACCENT_PRESETS } from "../../lib/accentPresets";
 import { Bug, HelpCircle, Monitor, User, SlidersHorizontal, Palette, Globe } from "lucide-react";
@@ -72,6 +73,8 @@ export function GatewayTab() {
   const gatewayUrlHistory = useSettingsStore((s) => s.gatewayUrlHistory);
   const gatewayMode = useSettingsStore((s) => s.gatewayMode);
   const setGatewayMode = useSettingsStore((s) => s.setGatewayMode);
+  const autoStartLocalNode = useSettingsStore((s) => s.autoStartLocalNode);
+  const setAutoStartLocalNode = useSettingsStore((s) => s.setAutoStartLocalNode);
   const [testing, setTesting] = useState(false);
   const [agents, setAgents] = useState<AgentListResponse[]>([]);
   const [agentsLoading, setAgentsLoading] = useState(false);
@@ -291,6 +294,24 @@ export function GatewayTab() {
               <HelpHint content={t("settings.localModeKeepsUrl")} />
             )}
           </div>
+          {/* ADR-087 follow-up: remote-mode-only behavior — resume this
+              machine's already-enrolled local Node on every Desktop
+              launch. Local mode needs no toggle (the Gateway auto-spawns
+              the node itself); relay is not validated for this path yet.
+              First-time enrollment is NEVER silent: the AgentList banner
+              asks explicitly regardless of this setting. */}
+          {gatewayMode === "remote" && (
+            <div className="mt-3 border-t border-border-divider pt-3">
+              <Switch
+                checked={autoStartLocalNode}
+                onChange={setAutoStartLocalNode}
+                label={t("settings.autoStartLocalNode")}
+              />
+              <p className="mt-1 text-xs text-text-tertiary">
+                {t("settings.autoStartLocalNodeHelp")}
+              </p>
+            </div>
+          )}
           {/* The relay device id, shown in EVERY mode. It is a property of
               the Gateway, not of the connection mode — and it is the one
               thing a user needs before they can fill in a relay address
@@ -325,14 +346,20 @@ export function GatewayTab() {
 
           <div className="flex items-center gap-2 text-xs">
             <span className="text-text-tertiary">{t("settings.status")}</span>
+            {/* Connection state, not branding: the "on" dot uses the same
+                green as the node rows below (NodesTree) and the service
+                rows in ServicesPanel, so every online marker in this tab
+                reads alike. Deliberately NOT `--color-accent`, which would
+                make the state follow the user's highlight color and blend
+                into buttons/switches. */}
             <span
               className={cn(
                 "h-2 w-2 rounded-full",
-                localIsRunning ? "bg-[var(--color-accent)]" : localIsStarting ? "bg-amber-500" : "bg-zinc-400",
+                localIsRunning ? "bg-emerald-500" : localIsStarting ? "bg-amber-500" : "bg-zinc-400",
               )}
             />
             <span className={cn(
-              localIsRunning ? "text-[var(--color-accent)]" :
+              localIsRunning ? "text-emerald-600 dark:text-emerald-400" :
                 localIsStarting ? "text-amber-600 dark:text-amber-400" :
                   "text-text-tertiary"
             )}>
@@ -446,11 +473,11 @@ export function GatewayTab() {
               <span
                 className={cn(
                   "h-2 w-2 rounded-full",
-                  status === "connected" ? "bg-[var(--color-accent)]" : status === "error" ? "bg-red-500" : "bg-zinc-400",
+                  status === "connected" ? "bg-emerald-500" : status === "error" ? "bg-red-500" : "bg-zinc-400",
                 )}
               />
               <span className={cn(
-                status === "connected" ? "text-[var(--color-accent)]" :
+                status === "connected" ? "text-emerald-600 dark:text-emerald-400" :
                   status === "error" ? "text-red-600 dark:text-red-400" :
                     "text-text-tertiary"
               )}>
@@ -694,13 +721,13 @@ function RelayTunnelPanel() {
             <span
               className={cn(
                 "h-2 w-2 rounded-full",
-                connected ? "bg-[var(--color-accent)]" : relayError ? "bg-red-500" : "bg-zinc-400",
+                connected ? "bg-emerald-500" : relayError ? "bg-red-500" : "bg-zinc-400",
               )}
             />
             <span
               className={cn(
                 connected
-                  ? "text-[var(--color-accent)]"
+                  ? "text-emerald-600 dark:text-emerald-400"
                   : relayError
                     ? "text-red-600 dark:text-red-400"
                     : "text-text-tertiary",
