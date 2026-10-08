@@ -1321,18 +1321,19 @@
   },
   "createWizard": {
     "stepBasic": "基础",
-    "stepLLM": "LLM",
-    "stepTemplate": "模板",
+    "stepTools": "工具",
+    "stepSkills": "技能",
     "stepPreview": "预览",
-    "templateBlank": "空白",
-    "templateAssistant": "助手",
+    "toolsHint": "选择此 Agent 可用的内置工具。后续可在 Agent 设置中更改。",
+    "skillsHint": "拖入一个或多个技能 ZIP 包以加入此 Agent。每个 SKILL.md 会成为 manifest 的一个 capability。跳过则可在聊天中后续添加。",
+    "skillsDropzonePrompt": "点击或拖拽 .zip 文件（需包含 SKILL.md）",
+    "previewTitle": "检查 Agent",
+    "removeSkillAriaLabel": "移除技能",
     "buttonCreateAgent": "创建 Agent",
     "buttonNext": "下一步",
-    "buttonBack": "上一步",
     "placeholderAgentName": "我的 Agent",
     "placeholderYourName": "你的名字",
-    "placeholderDescribe": "描述此 Agent 的功能...",
-    "templateLocal": "本地 LLM"
+    "placeholderDescribe": "描述此 Agent 的功能..."
   },
   "publishWizard": {
     "stepCheck": "检查",

@@ -649,6 +649,8 @@ pub fn run() {
             commands::publish::build_publish,
             commands::publish::export_package,
             commands::create::create_agent,
+            commands::create::list_builtin_tools,
+            commands::create::parse_skill_zip_preview,
             commands::gateway::set_gateway_config,
             commands::gateway::get_gateway_config,
             commands::gateway::set_gateway_access_token,

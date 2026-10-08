@@ -1258,18 +1258,19 @@
   },
   "createWizard": {
     "stepBasic": "基本",
-    "stepLLM": "LLM",
-    "stepTemplate": "範本",
+    "stepTools": "工具",
+    "stepSkills": "技能",
     "stepPreview": "預覽",
-    "templateBlank": "空白",
-    "templateAssistant": "助手",
+    "toolsHint": "選擇此 Agent 可用的內建工具。後續可在 Agent 設定中變更。",
+    "skillsHint": "拖入一個或多個技能 ZIP 包以加入此 Agent。每個 SKILL.md 會成為 manifest 的一個 capability。略過則可在聊天中後續新增。",
+    "skillsDropzonePrompt": "點擊或拖曳 .zip 檔案（需包含 SKILL.md）",
+    "previewTitle": "檢查 Agent",
+    "removeSkillAriaLabel": "移除技能",
     "buttonCreateAgent": "建立 Agent",
     "buttonNext": "下一步",
-    "buttonBack": "上一步",
     "placeholderAgentName": "我的 Agent",
     "placeholderYourName": "你的名字",
-    "placeholderDescribe": "描述此 Agent 的功能...",
-    "templateLocal": "本地 LLM"
+    "placeholderDescribe": "描述此 Agent 的功能..."
   },
   "publishWizard": {
     "stepCheck": "檢查",

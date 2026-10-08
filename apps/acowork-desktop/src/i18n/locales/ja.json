@@ -1259,18 +1259,19 @@
   },
   "createWizard": {
     "stepBasic": "基本",
-    "stepLLM": "LLM",
-    "stepTemplate": "テンプレート",
+    "stepTools": "ツール",
+    "stepSkills": "スキル",
     "stepPreview": "プレビュー",
-    "templateBlank": "空",
-    "templateAssistant": "アシスタント",
+    "toolsHint": "この Agent が使う内蔵ツールを選択します。Agent 設定から後で変更できます。",
+    "skillsHint": "Agent に含めるスキル ZIP を 1 つ以上ドロップしてください。各 SKILL.md は manifest の capability になります。スキップすれば、チャットで後から追加できます。",
+    "skillsDropzonePrompt": ".zip ファイルをクリックまたはドロップ（SKILL.md を含むこと）",
+    "previewTitle": "Agent の確認",
+    "removeSkillAriaLabel": "スキルを削除",
     "buttonCreateAgent": "Agent を作成",
     "buttonNext": "次へ",
-    "buttonBack": "戻る",
     "placeholderAgentName": "マイ Agent",
     "placeholderYourName": "あなたの名前",
-    "placeholderDescribe": "この Agent の機能を説明...",
-    "templateLocal": "ローカル LLM"
+    "placeholderDescribe": "この Agent の機能を説明..."
   },
   "publishWizard": {
     "stepCheck": "チェック",
