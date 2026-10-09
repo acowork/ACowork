@@ -3152,12 +3152,12 @@ function ModelMenu({
   // header so the row calc dropped its term, but the header itself
   // (logo + uppercase provider name + padding) can exceed the row for
   // long ids like `minimax-cn-coding-plan`.
-  // Ponytail — ceiling: ~max(modelName * 7.5 + 74px, providerName * 7px + 42px).
+  // Ponytail — ceiling: ~max(modelName * 7.5 + 86px, providerName * 7px + 42px).
   const menuWidth = useMemo(() => {
     const CHAR_WIDTH = 7.5; // px per char for text-xs (model rows)
     const HEADER_CHAR_WIDTH = 7.5; // px per char for text-10 uppercase + tracking-wide
     const PADDING = 24; // px-3 on each side
-    const ROW_CHROME = 66; // feature icons + check slot + chevron + gaps on model rows
+    const ROW_CHROME = 78; // leading logo + feature icons + check slot + chevron + gaps on model rows
     const HEADER_CHROME = 18; // 12 logo + 6 gap, before the provider name
     let maxWidth = 0;
 
@@ -3323,7 +3323,19 @@ function ModelMenu({
 
   return (
     <ToolbarDropdownTrigger
-      icon={<Layers size={14} />}
+      // The button shows a MODEL, so the icon is resolved from the model
+      // name first (claude-* → anthropic, gemini-* → google, …) and only then
+      // from the provider id. That ordering is what makes it correct for a
+      // custom gateway serving several vendors' models, and for an aggregate
+      // one where the gateway's own name says nothing. Falls back to Layers
+      // only when there's no provider at all.
+      icon={
+        currentProvider ? (
+          <ProviderLogo providerId={currentProvider} modelId={currentModel ?? undefined} size={14} />
+        ) : (
+          <Layers size={14} />
+        )
+      }
       label={modelDisplayName}
       collapseClass="tb-model-text"
       tipClass="tb-model-tip"
@@ -3388,6 +3400,10 @@ function ModelMenu({
                   {groupIdx > 0 && <div className="border-t border-border-divider" />}
                   {/* Sticky so the provider stays visible while its models scroll */}
                   <div className="sticky top-0 z-10 flex items-center gap-1.5 bg-modal-surface px-3 py-1 text-10 font-semibold uppercase tracking-wide text-text-tertiary">
+                    {/* Provider section header — no modelId on purpose: the
+                        header names the *provider*, so it shows the provider's
+                        own mark (or nothing). Only the trigger, which shows a
+                        single selected model, resolves through the model name. */}
                     <ProviderLogo providerId={provider} size={12} />
                     <span className="truncate">{provider}</span>
                   </div>
@@ -3421,6 +3437,12 @@ function ModelMenu({
                         )}
                       >
                         <span className="flex items-center gap-1 min-w-0">
+                          {/* Row shows a model, so the mark resolves from the model
+                              name first (same rule as the trigger button) — a
+                              custom gateway serving several vendors gets a
+                              distinct mark per row instead of one wrong mark for
+                              all of them. */}
+                          <ProviderLogo providerId={m.provider} modelId={m.name} size={12} />
                           <span className={cn("font-medium truncate")} style={isActive ? { color: "var(--color-accent)" } : undefined}>
                             {/* Strip provider prefix from model name if format is provider/model and model is longer */}
                             {(() => {

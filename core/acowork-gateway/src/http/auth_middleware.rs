@@ -118,7 +118,7 @@ fn is_valid_scope_id(id: &str) -> bool {
 /// and logout (a client with an expired access token must still be able to
 /// drop a dead session). The legacy Gateway token file is never exposed.
 fn is_public_path(path: &str) -> bool {
-    matches!(
+    if matches!(
         path,
         "/health"
             | "/api/status"
@@ -127,7 +127,27 @@ fn is_public_path(path: &str) -> bool {
             | "/api/auth/refresh"
             | "/api/auth/logout"
             | "/api/auth/first-login"
-    )
+    ) {
+        return true;
+    }
+    // `/api/providers/{id}/logo` — a public brand mark (a models.dev SVG), no
+    // user data in it. It has to be reachable without a token because the
+    // Desktop renders it via `<img src>`, and an `<img>` cannot carry an
+    // `Authorization` header. Without this the model menu and the Harness
+    // provider list get a 401 per row under `AUTH_MODE=multi_user`.
+    //
+    // Exactly two segments after the prefix, and the second must be `logo`:
+    // a looser suffix test would also match
+    // `/api/providers/{id}/keys/{account_id}` for an account literally named
+    // "logo", publishing that provider's masked keys.
+    let Some(rest) = path.strip_prefix("/api/providers/") else {
+        return false;
+    };
+    let mut parts = rest.split('/');
+    let (Some(id), Some("logo"), None) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    !id.is_empty() && !id.contains('?')
 }
 
 /// Bearer-token gate for `AUTH_MODE=multi_user` (ADR-076 §决策 3).
@@ -429,6 +449,27 @@ mod tests {
             "/api/agents",
             "/api/users",
             "/api/agents/foo/sessions",
+        ] {
+            assert!(!is_public_path(p), "{p} must require auth");
+        }
+    }
+
+    #[test]
+    fn provider_logo_is_public_but_the_rest_of_the_provider_api_is_not() {
+        // The Desktop renders provider marks with `<img src>`, which cannot
+        // carry an Authorization header — so this one route has to be
+        // reachable unauthenticated or every row 401s under multi_user mode.
+        assert!(is_public_path("/api/providers/anthropic/logo"));
+        assert!(is_public_path("/api/providers/custom-my-proxy/logo"));
+
+        // The suffix match must not leak the rest of the provider API. These
+        // are the routes that return masked keys, base URLs and account ids.
+        for p in [
+            "/api/providers",
+            "/api/providers/anthropic",
+            "/api/providers/anthropic/keys/abc-123",
+            // A key id that merely ends in "logo" is not a logo request.
+            "/api/providers/anthropic/keys/logo",
         ] {
             assert!(!is_public_path(p), "{p} must require auth");
         }

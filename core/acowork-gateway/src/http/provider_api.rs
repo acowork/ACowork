@@ -7,11 +7,13 @@
 //! - POST   /api/providers          — add a provider (key + config)
 //! - DELETE /api/providers/:provider — remove a provider
 //! - PUT    /api/providers/:provider — update a provider (key and/or config)
+//! - GET    /api/providers/:id/logo — provider brand mark, cacheable
 
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
+    response::{IntoResponse, Response},
     routing::{delete, get},
 };
 use serde::{Deserialize, Serialize};
@@ -36,6 +38,7 @@ pub fn provider_routes() -> Router<AppState> {
             "/api/providers/{provider}/keys/{account_id}",
             delete(remove_provider_account).patch(update_provider_account),
         )
+        .route("/api/providers/{provider}/logo", get(provider_logo))
 }
 
 // ── Response types ────────────────────────────────────────────────────
@@ -293,6 +296,125 @@ pub async fn list_providers(
     }
 
     Ok(Json(response))
+}
+
+/// `GET /api/providers/{id}/logo` — proxy a provider's brand mark, with a
+/// cache header the upstreams refuse to send.
+///
+/// The Desktop renders provider marks in the Harness picker and the chat
+/// input's model menu. Pointed straight at the upstreams those are up to ~180
+/// separate requests per full-list open, and both models.dev and Simple Icons
+/// answer `Cache-Control: max-age=0, must-revalidate` — so every one of them
+/// costs a round-trip on *every* open, and the list visibly fills in row by
+/// row.
+///
+/// Relaying through the Gateway is what makes the second open free: the
+/// response is served under our own origin, so the browser applies
+/// `max-age=31536000, immutable` and never asks again. `immutable` is safe
+/// because the URL is keyed by provider id — a changed logo is a new id, not
+/// a stale cache entry.
+///
+/// `?src=si` selects the Simple Icons upstream (brand-tinted); the default is
+/// models.dev (`currentColor`, i.e. black). The Desktop applies a dark-mode
+/// invert only to the latter, and an `<img>` cannot read a response header, so
+/// the distinction has to ride in the URL.
+///
+/// ponytail: no disk cache and no prefetch. The browser's HTTP cache is the
+/// cache; a local store would duplicate it and add an invalidation problem
+/// that never existed. First open is still slow by design — the bar is
+/// "second open is not slow", and this is the smallest thing that meets it.
+pub async fn provider_logo(
+    Path(provider): Path<String>,
+    Query(src): Query<LogoSource>,
+) -> Result<Response, ApiError> {
+    let url = logo_upstream_url(&provider, src.source.as_deref())?;
+
+    let resp = logo_client()
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| ApiError::internal(&format!("fetch provider logo failed: {e}")))?;
+
+    if !resp.status().is_success() {
+        // A short cache, NOT `immutable`: a miss here usually means only that
+        // this upstream lacks the mark (the other one may still have it), and
+        // pinning that negative for a year would freeze the miss in place.
+        return Ok((
+            StatusCode::NOT_FOUND,
+            [(axum::http::header::CACHE_CONTROL, "public, max-age=3600")],
+            "",
+        )
+            .into_response());
+    }
+
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| ApiError::internal(&format!("read provider logo failed: {e}")))?;
+
+    Ok((
+        StatusCode::OK,
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                "image/svg+xml; charset=utf-8",
+            ),
+            (
+                axum::http::header::CACHE_CONTROL,
+                "public, max-age=31536000, immutable",
+            ),
+        ],
+        bytes,
+    )
+        .into_response())
+}
+
+/// `?src=` selector for [`provider_logo`]. Absent or unrecognised falls back
+/// to models.dev, the tier that actually carries marks for most ids.
+#[derive(Deserialize)]
+pub struct LogoSource {
+    #[serde(default)]
+    pub source: Option<String>,
+}
+
+/// Build the upstream URL for a logo request, or reject the provider id.
+///
+/// `provider` is caller-supplied and gets spliced into a remote URL, so this
+/// is a trust boundary: without the character allowlist, `..`, a `/`, or a
+/// whole `https://evil.example` value would aim the request somewhere other
+/// than the two upstreams below. `source` is *matched*, never interpolated,
+/// so an unrecognised value lands on the default rather than the URL builder.
+fn logo_upstream_url(provider: &str, source: Option<&str>) -> Result<String, ApiError> {
+    if provider.is_empty()
+        || !provider
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.')
+    {
+        return Err(ApiError::bad_request(
+            "provider id must be alphanumeric with - _ .",
+        ));
+    }
+    // NOTE the asymmetric extensions: models.dev serves `<id>.svg`, but
+    // Simple Icons' CDN path is the bare slug — `cdn.simpleicons.org/amd`
+    // is 200 and `cdn.simpleicons.org/amd.svg` is 404. They look alike and
+    // are not.
+    Ok(match source {
+        Some("si") => format!("https://cdn.simpleicons.org/{provider}"),
+        _ => format!("https://models.dev/logos/{provider}.svg"),
+    })
+}
+
+/// Long-lived client for logo fetches. Shared across requests so the TLS
+/// handshake and connection pool are paid once, not per row in the list.
+fn logo_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .expect("Failed to build provider logo HTTP client")
+    })
 }
 
 /// `POST /api/providers` — add a provider (key + config).
@@ -875,5 +997,45 @@ mod tests {
         let req: UpdateProviderAccountRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.alias.as_deref(), Some("prod"));
         assert_eq!(req.key.as_deref(), Some("sk-rotated"));
+    }
+
+
+    #[test]
+    fn logo_upstream_url_only_ever_targets_the_two_known_hosts() {
+        // The provider id is spliced into a remote URL, so anything that can
+        // steer that URL is a request-forgery hole: '..' walks the path, a
+        // '/' adds a segment, and a scheme makes it a whole different origin.
+        for bad in [
+            "",
+            "../secret",
+            "a/b",
+            "https://evil.example/x",
+            "anthropic?x=1",
+            "anthropic#frag",
+            "an thropic",
+        ] {
+            assert!(
+                logo_upstream_url(bad, None).is_err(),
+                "provider id {bad:?} must be rejected"
+            );
+        }
+
+        // Real ids resolve, and the two tiers hit their own host. The
+        // extensions differ per upstream and are NOT interchangeable:
+        // models.dev wants `<id>.svg`, Simple Icons' CDN wants the bare slug.
+        assert_eq!(
+            logo_upstream_url("anthropic", None).unwrap(),
+            "https://models.dev/logos/anthropic.svg"
+        );
+        assert_eq!(
+            logo_upstream_url("amd", Some("si")).unwrap(),
+            "https://cdn.simpleicons.org/amd"
+        );
+        // An unknown `src` is not interpolated into the URL — it falls
+        // back to the default upstream.
+        assert_eq!(
+            logo_upstream_url("anthropic", Some("https://evil.example")).unwrap(),
+            "https://models.dev/logos/anthropic.svg"
+        );
     }
 }
