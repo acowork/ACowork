@@ -94,20 +94,30 @@ export const toolbarButtonActive =
  */
 
 // Cursor over an unselected row on the raised list surface (default).
+// One tint family for the whole app: every list — popups, side panels,
+// file tree, search results, todo/queued rows, ask options, subtask
+// tree, review queue, trash, etc. — shares the same accent /10 (light)
+// / /15 (dark). The previous split between "card" and "inset" tints
+// read as two different list families when the cursor crossed between
+// them (AgentList vs FileTree was the canonical pair), so the cursor
+// passing over a row now reads the same way everywhere.
 export const listRowHover =
-  "hover:bg-[var(--color-accent)]/5 dark:hover:bg-[var(--color-accent)]/10";
+  "hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15";
 
 // Cursor over an unselected row on the inset sub-surface (one step deeper).
+// Reserved for the body revealed by an ExpandableRow header (PROMPT /
+// context-snapshot / compression-history / tool lists), which sits one
+// surface darker than the rest of the app.
 export const listRowHoverInset =
-  "hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15";
+  "hover:bg-[var(--color-accent)]/15 dark:hover:bg-[var(--color-accent)]/20";
 
 // The current selection on the raised list surface.
 export const listRowSelected =
-  "bg-[var(--color-accent)]/10 hover:bg-[var(--color-accent)]/15 dark:bg-[var(--color-accent)]/15 dark:hover:bg-[var(--color-accent)]/20";
+  "bg-[var(--color-accent)]/15 hover:bg-[var(--color-accent)]/15 dark:bg-[var(--color-accent)]/20 dark:hover:bg-[var(--color-accent)]/20";
 
 // The current selection on the inset sub-surface.
 export const listRowSelectedInset =
-  "bg-[var(--color-accent)]/15 hover:bg-[var(--color-accent)]/15 dark:bg-[var(--color-accent)]/20 dark:hover:bg-[var(--color-accent)]/20";
+  "bg-[var(--color-accent)]/20 hover:bg-[var(--color-accent)]/20 dark:bg-[var(--color-accent)]/25 dark:hover:bg-[var(--color-accent)]/25";
 
 /**
  * @deprecated use `listRowSelected` — kept as an alias so the popup

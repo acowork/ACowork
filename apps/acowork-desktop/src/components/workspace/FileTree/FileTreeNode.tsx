@@ -1,7 +1,7 @@
 import { memo, useCallback, useState, useRef, useEffect, useMemo } from "react";
 import { ChevronRight, FilePlus, FolderPlus, MessageSquarePlus, Trash2, Copy, ClipboardPaste, Eye, Check, Code, Pencil, ExternalLink } from "lucide-react";
 import { cn } from "../../../lib/utils";
-import { listRowHoverInset } from "../../../lib/ui-styles";
+import { listRowHover } from "../../../lib/ui-styles";
 import { getFileIcon } from "./fileIcons";
 import { SetiIcon } from "../../common/SetiIcon";
 import { useChatStore } from "../../../stores/chatStore";
@@ -467,9 +467,11 @@ export const FileTreeNode = memo(function FileTreeNode({
         className={cn(
           "file-tree-row flex cursor-pointer items-center gap-1 py-[0.2em] pr-3 select-none",
           // Hover is the same accent tint every list row in the app uses;
-          // we compose it via the `listRowHoverInset` token because the
-          // file tree is the inset sub-surface of the workspace card.
-          !isSelected && listRowHoverInset,
+          // the file tree lives on the same raised list surface (right-panel
+          // / panel-block) as AgentList / ProjectSidebar / DocTreeSidebar,
+          // so it takes the card token, not the inset one — otherwise the
+          // cursor passing over a tree row reads as a different list family.
+          !isSelected && listRowHover,
           // Selected highlight lives in globals.css (`.file-tree-row-selected`)
           // — see comment in styles/globals.css for why it can't be a Tailwind
           // utility on this row.
