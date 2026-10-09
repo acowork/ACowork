@@ -4,6 +4,7 @@ import { useGatewayStore } from "../../stores/gatewayStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { fetchLspServers, fetchLspStatus, fetchLspStatusForLanguage, fetchLspInstallScript, runLspInstall, getLspRelayUrl, fetchNodes } from "../../lib/gateway-api";
 import { getGatewayUrl } from "../../lib/config";
+import { useLspInstallStore } from "../../stores/lspInstallStore";
 import { Dropdown } from "../common/Dropdown";
 import type { LspServersConfig, LspServerEntry, LspServerStatusEntry, LspHealthStatus, NodeInfo } from "../../lib/types";
 import { CheckCircle2, XCircle, Loader2, Eye, Terminal, Code2, RefreshCw } from "lucide-react";
@@ -88,8 +89,13 @@ export function LspTab() {
   const [healthStatus, setHealthStatus] = useState<Record<string, LspHealthStatus>>({});
   const [healthErrors, setHealthErrors] = useState<Record<string, string | null>>({});
   const [checkingLangs, setCheckingLangs] = useState<Set<string>>(new Set());
-  const [installingLangs, setInstallingLangs] = useState<Set<string>>(new Set());
-  const [installResults, setInstallResults] = useState<Record<string, { success: boolean; stdout: string; stderr: string }>>({});
+  // Install progress lives in a store, not here: `LspTab` unmounts on
+  // every view switch, and an install outlives that. See lspInstallStore.
+  const installing = useLspInstallStore((s) => s.installing);
+  const installOutcomes = useLspInstallStore((s) => s.outcomes);
+  const beginInstall = useLspInstallStore((s) => s.beginInstall);
+  const endInstall = useLspInstallStore((s) => s.endInstall);
+  const installingSet = useMemo(() => new Set(installing), [installing]);
   const [scriptDialog, setScriptDialog] = useState<{ language: string; script: string; filename: string } | null>(null);
   const [scriptLoading, setScriptLoading] = useState(false);
   /** LSP Relay base URL derived from the selected agent (e.g. "http://127.0.0.1:19878") */
@@ -345,38 +351,26 @@ export function LspTab() {
     // No guard needed: the UI only renders Install buttons when
     // effectiveRelayUrl is available (see the early return above). If this
     // function is called without one, fail loudly so the bug is visible.
-    setInstallingLangs((prev) => new Set(prev).add(language));
+    beginInstall(language);
     setError(null);
     try {
       const result = await runLspInstall(language, effectiveRelayUrl!);
-      setInstallResults((prev) => ({
-        ...prev,
-        [language]: {
-          success: result.success,
-          stdout: result.stdout,
-          stderr: result.stderr,
-        },
-      }));
       if (result.success) {
         setHealthStatus((prev) => ({ ...prev, [language]: "installed" }));
       }
+      endInstall(language, {
+        success: result.success,
+        stdout: result.stdout,
+        stderr: result.stderr,
+      });
     } catch (e) {
-      setInstallResults((prev) => ({
-        ...prev,
-        [language]: {
-          success: false,
-          stdout: "",
-          stderr: e instanceof Error ? e.message : "Install failed",
-        },
-      }));
-    } finally {
-      setInstallingLangs((prev) => {
-        const next = new Set(prev);
-        next.delete(language);
-        return next;
+      endInstall(language, {
+        success: false,
+        stdout: "",
+        stderr: e instanceof Error ? e.message : "Install failed",
       });
     }
-  }, [effectiveRelayUrl]);
+  }, [effectiveRelayUrl, beginInstall, endInstall]);
 
   if (status !== "connected") {
     return (
@@ -501,8 +495,8 @@ export function LspTab() {
                   healthStatus={healthStatus[language] ?? "unknown"}
                   healthError={healthErrors[language] ?? null}
                   isChecking={checkingLangs.has(language)}
-                  isInstalling={installingLangs.has(language)}
-                  installResult={installResults[language] ?? null}
+                  isInstalling={installingSet.has(language)}
+                  installResult={installOutcomes[language] ?? null}
                   onCheck={() => handleCheck(language)}
                   onViewScript={() => handleViewScript(language)}
                   onInstall={() => handleInstall(language)}
@@ -584,6 +578,7 @@ function LspServerCard({
   return (
     <ListRow
       surface="inset"
+      testId={`lsp-row-${language}`}
       trailing={
         /* Action cluster — mirrors the MCP row grammar */
         <div className="flex shrink-0 items-center gap-1.5">
@@ -681,7 +676,19 @@ function LspServerCard({
             {t("harnessLsp.installed")}
           </span>
         )}
-        {healthStatus === "not_installed" && (
+        {/* A running install owns the badge. Without this the probe that
+            lands mid-install (binary not on PATH yet) repaints the row as
+            "not installed" while the script is still running. */}
+        {isInstalling && (
+          <span
+            data-testid="lsp-installing-badge"
+            className="inline-flex items-center gap-1 rounded bg-amber-100 px-1.5 py-0.5 text-10 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
+          >
+            <Loader2 className="h-2.5 w-2.5 animate-spin" />
+            {t("harnessLsp.installing")}
+          </span>
+        )}
+        {healthStatus === "not_installed" && !isInstalling && (
           <span className="inline-flex items-center gap-1 rounded bg-red-100 px-1.5 py-0.5 text-10 text-red-700 dark:bg-red-900/30 dark:text-red-400">
             <XCircle className="h-2.5 w-2.5" />
             {t("harnessLsp.notInstalled")}
