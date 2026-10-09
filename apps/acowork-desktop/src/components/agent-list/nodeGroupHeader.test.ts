@@ -49,4 +49,14 @@ describe("NodeGroupHeader", () => {
     const header = src.slice(src.indexOf("function NodeGroupHeader"));
     expect(header).toMatch(/flex-1[^"]*"[\s\S]{0,80}onClick=\{onToggle\}|onToggle[\s\S]{0,200}flex-1/);
   });
+
+  it("sits on the same fill as the right-panel card title bars", () => {
+    // The node band is raised off `nav-surface` with the one token that
+    // also drives ListBox's card (right-panel Agent Status / Session
+    // Status titles). Both themes auto-flip, so a `dark:` pair would
+    // drift from the token by definition.
+    const header = src.slice(src.indexOf("function NodeGroupHeader"));
+    expect(header).toContain("bg-panel-block");
+    expect(header).not.toMatch(/bg-panel-block[^\n]*dark:bg-/);
+  });
 });

@@ -132,4 +132,17 @@ describe("UserList rows carry the agent-list hairline", () => {
 
     expect(screen.getByTestId("user-row-u-self").className).not.toContain(DIVIDER);
   });
+
+  it("raises the group header on the same fill as the node header", async () => {
+    // The Users band must match the Agents node band (NodeGroupHeader) and
+    // the right-panel card title bars: one `panel-block` fill. Both themes
+    // auto-flip, so a `dark:bg-*` pair here would drift from the token.
+    await act(async () => {
+      render(<UserList />);
+    });
+
+    const band = screen.getByTestId("user-group-header").parentElement!;
+    expect(band.className).toContain("bg-panel-block");
+    expect(band.className).not.toMatch(/dark:bg-/);
+  });
 });

@@ -1118,6 +1118,11 @@ function NodeGroupHeader({
         "text-text-tertiary ",
         "hover:text-zinc-600 dark:hover:text-zinc-300",
         "transition-colors duration-150",
+        // Same fill as the right-panel card title bars (ListBox's
+        // `bg-panel-block`), one step above `nav-surface`, so the node
+        // strip reads as a raised band instead of a bare hairline on the
+        // sidebar. Both themes flip via the token — no `dark:` pair.
+        "bg-panel-block",
         // Dedicated divider on BOTH edges so the header reads as its own
         // row when it sits between agent rows / above an empty group.
         "border-y border-nav-divider/40 dark:border-zinc-600/40",

@@ -290,7 +290,7 @@ export const UserList = forwardRef<UserListHandle>(function UserList(_props, ref
 
   return (
     <div data-testid="user-list">
-      <div className="flex h-6 items-center border-y border-nav-divider/40 dark:border-zinc-600/40">
+      <div className="flex h-6 items-center border-y border-nav-divider/40 bg-panel-block dark:border-zinc-600/40">
         <button
           type="button"
           onClick={() => setCollapsed((c) => !c)}
