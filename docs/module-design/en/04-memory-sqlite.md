@@ -163,7 +163,7 @@ purged_at TEXT NOT NULL
 ### 4.1 The trinity
 
 ```rust
-pub const SCHEMA_VERSION: i64 = 1;                           // current version
+pub const SCHEMA_VERSION: i64 = 3;                           // current version
 pub(crate) const MIGRATIONS: &[(i64, &str)] = &[...];        // [(target, sql)]
 pub(crate) fn apply_migrations(conn: &mut Connection) -> Result<()>;
 ```
@@ -176,15 +176,26 @@ pub(crate) fn apply_migrations(conn: &mut Connection) -> Result<()>;
 2. For each `(target, sql)`, execute only when `stored < target`.
 3. After all steps run, write `PRAGMA user_version = SCHEMA_VERSION` inside a single transaction.
 
-**Idempotency**: each migration step's SQL guards itself with `WHERE NOT EXISTS` / `IF NOT EXISTS`, so repeated execution never errors.
+**Idempotency**: comes from the `user_version` gate (`stored < target` is the only guard) plus a single transaction — **not** from self-guarding SQL. `ALTER TABLE ... ADD COLUMN` has no `IF NOT EXISTS` form, so a migration step that ran twice would error outright; the version gate is the sole protection against that.
 
 ### 4.3 Adding a column (developer reference)
 
-1. Add a new entry `(target = SCHEMA_VERSION + 1, sql)` to `MIGRATIONS`, with `ADD COLUMN ... WHERE NOT EXISTS`.
-2. Add the same column to the initial DDL in `SCHEMA_SQL` so a fresh DB gets it without migration.
-3. Add the field to the node struct with `#[serde(default)]` so old databases still deserialize.
-4. Run `tests::round_trip_*` to assert the new field round-trips.
-5. Open PR, bump `SCHEMA_VERSION`.
+1. Add a new entry `(target = SCHEMA_VERSION + 1, sql)` to `MIGRATIONS`, with `ALTER TABLE ... ADD COLUMN`.
+2. Do **not** add the column to the initial DDL in `SCHEMA_SQL` — the base DDL describes the pre-v1 shape and new columns belong to `MIGRATIONS` only (explicit convention in `schema.rs`). A fresh DB starts at `user_version = 0` and runs the whole chain, ending with the same shape as an upgraded one; `fresh_and_upgraded_databases_share_one_sessions_shape` pins that.
+3. Make the new columns nullable with no default, so a pre-existing row reads as `NULL` = "no data yet" rather than a fabricated zero.
+4. Add the field to the node struct with `#[serde(default)]` so old databases still deserialize.
+5. Run `tests::round_trip_*` to assert the new field round-trips, and add the column to the `DROP COLUMN` list in `fresh_and_upgraded_*`.
+6. Open PR, bump `SCHEMA_VERSION`.
+
+### 4.4 Migration history
+
+| target | Contents | Origin |
+|--------|----------|--------|
+| 1 | `sessions.version` / `sessions.corrupted` | ADR-082 D2 |
+| 2 | `sessions.user_id` / `sessions.visibility` | ADR-076 §Decision 4 (session ownership) |
+| 3 | `sessions.perf_tps_sum` / `perf_tps_samples` / `perf_ttft_ms_sum` / `perf_ttft_ms_samples` | Session-level LLM output speed and first-token latency |
+
+v3 stores **sum + count**, not a folded mean: each figure divides by its own sample count. A call can be measurable for TTFT only (the Provider reported no completion count), and a shared denominator would systematically inflate the speed mean.
 
 > `acowork-sqlite::SCHEMA_VERSION` is independent of the trait-layer semantic version — it is the SQLite in-library `user_version`, decoupled from the `acowork-memory` crate version.
 

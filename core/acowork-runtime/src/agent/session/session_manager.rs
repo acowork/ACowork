@@ -4968,6 +4968,7 @@ mod tests {
                 last_active_at: "2026-01-01T00:00:00Z".to_string(),
                 tokens: None,
                 llm_call_counter: None,
+                perf: None,
                 model_ratio: None,
                 last_compaction_offset: None,
                 corrupted: false,

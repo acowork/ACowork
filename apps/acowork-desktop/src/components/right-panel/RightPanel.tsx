@@ -893,6 +893,26 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
                   below separates this token cluster from the runtime
                   / model / status fields that follow. */}
               <StatRow label={t("rightPanel.labelCharactersPerToken")} value={modelRatio != null ? modelRatio.toFixed(2) : undefined} />
+              {/* Speed / responsiveness — session-level means the Runtime
+                  samples once per LLM response and persists in the session
+                  meta, so a resumed session shows the same figures. The two
+                  are sampled independently (a call can yield a latency
+                  sample without a speed one), so each has its own sample
+                  count behind it. `—` until the first measurement, never a
+                  fake 0; the unit lives in the label, matching
+                  `labelCharactersPerToken`. */}
+              <StatRow
+                label={t("rightPanel.labelAvgOutputSpeed")}
+                value={contextUsage?.avg_tps != null ? contextUsage.avg_tps.toFixed(1) : undefined}
+              />
+              <StatRow
+                label={t("rightPanel.labelAvgFirstTokenLatency")}
+                value={
+                  contextUsage?.avg_ttft_ms != null
+                    ? Math.round(contextUsage.avg_ttft_ms).toString()
+                    : undefined
+                }
+              />
               {/* Divider — separates the token-count cluster above from
                   the runtime / model / status fields below. Uses `my-2`
                   (not `mb-2`) so the gap above and below the line is

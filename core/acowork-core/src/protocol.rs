@@ -872,6 +872,24 @@ pub struct ContextUsageInfo {
     /// falls back to assistant-message count in that case.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub iteration: Option<u32>,
+    /// Session-level mean output speed in tokens/second.
+    ///
+    /// Per call it is `completion_tokens / streaming_seconds`, timed from
+    /// the first output token; the session figure is the unweighted mean
+    /// over the calls that produced a speed measurement (calls whose
+    /// generation window was too short to be credible are skipped, so this
+    /// can average fewer calls than [`Self::avg_ttft_ms`]). `None` until the
+    /// first usable measurement (and on pre-existing sessions) — the
+    /// frontend renders "—" rather than a fake 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avg_tps: Option<f64>,
+    /// Session-level mean time-to-first-token in milliseconds — the wait
+    /// from "LLM call started" to the first output event. Sampled
+    /// independently of [`Self::avg_tps`], so the two means can cover
+    /// different numbers of calls. Same `None` semantics as
+    /// [`Self::avg_tps`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avg_ttft_ms: Option<f64>,
 }
 
 /// One entry in [`ContextUsageInfo::sections`].
@@ -2391,6 +2409,8 @@ mod tests {
             agent_total_cache_write_tokens: Some(100),
             sections: None,
             iteration: Some(42),
+            avg_tps: Some(48.25),
+            avg_ttft_ms: Some(512.0),
         };
         let json = serde_json::to_string(&info).unwrap();
         let parsed: ContextUsageInfo = serde_json::from_str(&json).unwrap();
@@ -2433,6 +2453,8 @@ mod tests {
             agent_total_cache_write_tokens: None,
             sections: None,
             iteration: None,
+            avg_tps: None,
+            avg_ttft_ms: None,
         };
         let json = serde_json::to_string(&info).unwrap();
         // Cache fields absent → no `"cache_..."` substring in the JSON.

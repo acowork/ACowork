@@ -21,6 +21,7 @@ use crate::agent::context::ContextBuilder;
 use crate::agent::history::HistoryManager;
 use crate::agent::inbound::InboundMessage;
 use crate::agent::loop_approval::{ApprovalDecision, ApprovalHandle};
+use crate::agent::loop_llm::CallPerf;
 use crate::agent::session_state::{PauseReason, SessionState, SessionStatus};
 use crate::config::RuntimeConfig;
 use crate::conversation::ConversationSession;
@@ -353,6 +354,12 @@ pub struct AgentLoop {
     /// Total input chars of the most recent ChatRequest, used for token
     /// ratio calibration together with the API-reported prompt_tokens.
     pub(crate) last_input_chars: usize,
+    /// Speed / latency measurement of the most recent `call_llm_streaming`,
+    /// consumed by `process_llm_response_usage` and folded into the
+    /// session averages there. Stays on `AgentLoop` rather than on
+    /// `ChatResponse` so the provider/loop layers keep their existing
+    /// struct shapes.
+    pub(crate) last_call_perf: Option<CallPerf>,
     /// The reasoning_effort from the most recent build_chat_request() call.
     /// Preserved for emergency trim retry in call_llm_streaming_inner()
     /// where the context_builder is immutable.
@@ -505,6 +512,7 @@ impl AgentLoop {
             approval_handle: approval_handle.clone(),
             pending_approvals: std::collections::HashMap::new(),
             last_input_chars: 0,
+            last_call_perf: None,
             last_reasoning_effort: None,
             last_thinking_mode: None,
             pending_interrupt: None,
@@ -574,6 +582,7 @@ impl AgentLoop {
             approval_handle: approval_handle.clone(),
             pending_approvals: std::collections::HashMap::new(),
             last_input_chars: 0,
+            last_call_perf: None,
             last_reasoning_effort: None,
             last_thinking_mode: None,
             pending_interrupt: None,

@@ -72,8 +72,8 @@ pub use types::{
     SearchResult, StoreHealth, StoreStats,
 };
 pub use session_meta::{
-    SessionMeta, SessionMetaStore, SessionScope, SessionTokens, SessionVisibility, TodoItem,
-    TodoStatus,
+    SessionMeta, SessionMetaStore, SessionPerf, SessionScope, SessionTokens, SessionVisibility,
+    TodoItem, TodoStatus,
 };
 
 // Label constants

@@ -127,8 +127,8 @@ CREATE INDEX IF NOT EXISTS idx_purge_log_purged_at ON purge_log(purged_at);
 /// next monotonic version (see [`MIGRATIONS`] for the format).
 ///
 /// History: 1 = `version` / `corrupted` columns; 2 = `user_id` / `visibility`
-/// (ADR-076 §决策 4 session ownership).
-pub const SCHEMA_VERSION: i64 = 2;
+/// (ADR-076 §决策 4 session ownership); 3 = `perf_*` LLM speed averages.
+pub const SCHEMA_VERSION: i64 = 3;
 
 /// Versioned upgrade steps, ordered.
 ///
@@ -165,6 +165,20 @@ const MIGRATIONS: &[(i64, &str)] = &[
         2,
         "ALTER TABLE sessions ADD COLUMN user_id TEXT; \
          ALTER TABLE sessions ADD COLUMN visibility TEXT;",
+    ),
+    // Session-level LLM speed / responsiveness accumulation. Stored as
+    // sum + count per figure (never a folded mean), so each mean divides by
+    // its own sample count. All nullable with no default: a pre-existing row
+    // migrates to NULL, which reads as "no measurement yet" — the frontend
+    // renders "—", exactly as it renders a session that has never made an
+    // LLM call. No backfill (a fabricated speed for past calls would be a
+    // lie).
+    (
+        3,
+        "ALTER TABLE sessions ADD COLUMN perf_tps_sum REAL; \
+         ALTER TABLE sessions ADD COLUMN perf_tps_samples INTEGER; \
+         ALTER TABLE sessions ADD COLUMN perf_ttft_ms_sum REAL; \
+         ALTER TABLE sessions ADD COLUMN perf_ttft_ms_samples INTEGER;",
     ),
 ];
 

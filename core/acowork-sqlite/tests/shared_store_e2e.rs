@@ -35,6 +35,7 @@ fn meta(sid: &str, title: &str) -> SessionMeta {
         last_active_at: "2026-02-02T00:00:00.000Z".into(),
         tokens: None,
         llm_call_counter: None,
+        perf: None,
         model_ratio: None,
         last_compaction_offset: None,
         corrupted: false,

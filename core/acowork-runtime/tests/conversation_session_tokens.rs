@@ -159,6 +159,7 @@ async fn resume_tokens_feed_context_usage_emission() {
         None,             // no context_window_override
         Some(&persisted), // ADR-027: cumulative totals must flow through
         None,             // no persisted iteration count
+        None,             // no persisted speed / latency averages
     );
 
     assert_eq!(ctx.input_tokens, 45_000);
@@ -220,6 +221,7 @@ async fn resume_tokens_cumulative_totals_diverge_from_per_turn() {
         32_768,
         None,
         Some(&persisted),
+        None,
         None,
     );
 
@@ -408,6 +410,7 @@ async fn legacy_meta_file_loads_with_tokens_none() {
         tokens: None, // missing in legacy format
         model_ratio: None,
         llm_call_counter: None,
+        perf: None,
         last_compaction_offset: None,
         corrupted: false,
     };
@@ -568,6 +571,7 @@ async fn resume_hydrates_last_compaction_offset_from_meta() {
         last_active_at: "2026-01-01T00:00:00Z".to_string(),
         tokens: None,
         llm_call_counter: None,
+        perf: None,
         model_ratio: None,
         last_compaction_offset: Some(1234),
         corrupted: false,
@@ -665,4 +669,127 @@ async fn model_ratio_round_trips_through_meta_and_resume() {
     let meta_on_disk: SessionMeta =
         read_session_meta(&dir.path().join("conversations"), session_id).expect("read meta");
     assert_eq!(meta_on_disk.model_ratio, Some(2.5));
+}
+
+// ─── session speed / TTFT samples → meta → resume → push ────────────────
+
+/// The perf pair rides the same path as the token counters: one
+/// `record_llm_round` per LLM response → one meta write → resume → the
+/// `ContextUsageInfo` the frontend renders. A resumed session must show the
+/// same means its live panel did, so this pins all four hops.
+///
+/// The four rounds deliberately mix fully-measurable and partially
+/// measurable calls:
+///
+///   1. speed + TTFT
+///   2. TTFT only (Provider reported no completion count)
+///   3. speed + TTFT
+///   4. neither (stream cancelled before its first token)
+///
+/// The speed mean therefore divides by 2 while the latency mean divides by
+/// 3. Regression: the first implementation shared one `samples` counter
+/// between them, which reported 233.3 t/s for this exact sequence instead
+/// of the true 200 — a user-visible figure inflated by calls that never
+/// measured a speed at all.
+#[tokio::test]
+async fn perf_samples_round_trip_through_meta_resume_and_push() {
+    let dir = TempDir::new().unwrap();
+    let session_id = "perf_roundtrip";
+
+    let session = make_session(&dir, session_id);
+    session.record_llm_round(&usage(1_000, 300), Some(300.0), Some(500.0));
+    session.record_llm_round(&usage(1_000, 0), None, Some(100.0));
+    session.record_llm_round(&usage(1_000, 100), Some(100.0), Some(300.0));
+    // An unmeasurable round must not drag either mean toward a fake 0.
+    session.record_llm_round(&usage(1_000, 50), None, None);
+
+    let perf = session.perf().expect("perf recorded");
+    assert_eq!(perf.tps_samples, 2, "two speed samples");
+    assert_eq!(perf.ttft_ms_samples, 3, "three latency samples");
+    assert!((perf.avg_tps().unwrap() - 200.0).abs() < 1e-6, "got {:?}", perf.avg_tps());
+    assert!(
+        (perf.avg_ttft_ms().unwrap() - 300.0).abs() < 1e-6,
+        "got {:?}",
+        perf.avg_ttft_ms()
+    );
+
+    session.close().await.expect("close");
+
+    // Persisted meta carries both accumulators.
+    let meta_on_disk: SessionMeta =
+        read_session_meta(&dir.path().join("conversations"), session_id).expect("read meta");
+    let disk_perf = meta_on_disk.perf.expect("perf persisted");
+    assert_eq!(disk_perf.tps_samples, 2);
+    assert_eq!(disk_perf.ttft_ms_samples, 3);
+
+    let resumed =
+        ConversationSession::resume(dir.path(), session_id, Arc::new(AtomicUsize::new(0)))
+            .expect("resume must succeed");
+    let tokens = resumed.0.tokens().unwrap_or_default();
+    let perf = resumed.0.perf().expect("perf survives resume");
+    assert!((perf.avg_tps().unwrap() - 200.0).abs() < 1e-6);
+    assert!((perf.avg_ttft_ms().unwrap() - 300.0).abs() < 1e-6);
+
+    // The resume push the frontend actually consumes carries them.
+    let ctx = build_context_usage_from_persisted(
+        &caps(128_000, 16_384),
+        tokens.last_input,
+        tokens.last_output,
+        32_768,
+        None,
+        Some(&tokens),
+        None,
+        Some(&perf),
+    );
+    assert_eq!(ctx.avg_tps, Some(200.0));
+    assert_eq!(ctx.avg_ttft_ms, Some(300.0));
+}
+
+/// One LLM round-trip is one persisted write.
+///
+/// `record_llm_round` is the single owner of the round's three accumulators
+/// (tokens, perf, call count). Splitting them back into their individually
+/// persisting wrappers would issue three full-row meta upserts per LLM call
+/// on the runtime's hottest path, so the observable contract is that ONE
+/// call advances all three and leaves meta consistent with them.
+#[tokio::test]
+async fn record_llm_round_advances_every_accumulator_in_one_call() {
+    let dir = TempDir::new().unwrap();
+    let session_id = "perf_single_write";
+
+    let session = make_session(&dir, session_id);
+    let iteration = session.record_llm_round(&usage(1_000, 200), Some(64.0), Some(420.0));
+    assert_eq!(iteration, 1, "returns the post-increment 1-based count");
+
+    assert_eq!(session.llm_call_counter(), Some(1));
+    let tokens = session.tokens().expect("tokens recorded");
+    assert_eq!(tokens.total_output, 200);
+    let perf = session.perf().expect("perf recorded");
+    assert_eq!(perf.avg_tps(), Some(64.0));
+    assert_eq!(perf.avg_ttft_ms(), Some(420.0));
+
+    // A second round accumulates rather than replaces.
+    assert_eq!(session.record_llm_round(&usage(1_000, 100), Some(32.0), Some(20.0)), 2);
+    let perf = session.perf().unwrap();
+    assert_eq!(perf.avg_tps(), Some(48.0));
+    assert_eq!(perf.avg_ttft_ms(), Some(220.0));
+
+    session.close().await.expect("close");
+    let meta_on_disk = read_session_meta(&dir.path().join("conversations"), session_id).unwrap();
+    assert_eq!(meta_on_disk.llm_call_counter, Some(2));
+    assert_eq!(meta_on_disk.perf.unwrap().tps_samples, 2);
+}
+
+/// A fresh session has no measurement at all — the push must carry
+/// `None` (frontend "—"), never a fabricated zero.
+#[tokio::test]
+async fn perf_absent_on_a_session_that_never_called_an_llm() {
+    let dir = TempDir::new().unwrap();
+    let session = make_session(&dir, "perf_none");
+    assert_eq!(session.perf(), None);
+    session.close().await.expect("close");
+
+    let meta_on_disk: SessionMeta =
+        read_session_meta(&dir.path().join("conversations"), "perf_none").expect("read meta");
+    assert_eq!(meta_on_disk.perf, None, "absent, not Some(0.0)");
 }

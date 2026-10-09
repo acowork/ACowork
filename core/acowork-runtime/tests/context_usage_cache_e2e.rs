@@ -105,6 +105,8 @@ fn patch_session_totals_populates_all_cumulative_fields() {
         agent_total_cache_write_tokens: None,
         sections: None,
         iteration: None,
+        avg_tps: None,
+        avg_ttft_ms: None,
     };
     // Before patch: cache fields default to None.
     assert_eq!(info.total_input_tokens, None);
@@ -176,6 +178,12 @@ async fn push_path_carries_total_cache_fields_after_resume() {
         None,
         Some(&persisted),
         None,
+        Some(&acowork_memory::SessionPerf {
+            tps_sum: 184.5,
+            tps_samples: 3,
+            ttft_ms_sum: 720.0,
+            ttft_ms_samples: 3,
+        }),
     );
 
     // Per-turn cache (last turn only — comes from SessionTokens.last_*).
@@ -232,6 +240,12 @@ async fn cumulative_cache_accumulates_across_calls() {
         None,
         Some(&persisted),
         None,
+        Some(&acowork_memory::SessionPerf {
+            tps_sum: 184.5,
+            tps_samples: 3,
+            ttft_ms_sum: 720.0,
+            ttft_ms_samples: 3,
+        }),
     );
 
     // Per-turn values are the most-recent round only.
@@ -271,6 +285,12 @@ async fn openai_zero_cache_write_surfaces_as_some_zero() {
         None,
         Some(&persisted),
         None,
+        Some(&acowork_memory::SessionPerf {
+            tps_sum: 184.5,
+            tps_samples: 3,
+            ttft_ms_sum: 720.0,
+            ttft_ms_samples: 3,
+        }),
     );
 
     // cache_read populated (OpenAI does report cached_tokens).
@@ -314,6 +334,12 @@ async fn anthropic_cache_write_round_trips() {
         None,
         Some(&persisted),
         None,
+        Some(&acowork_memory::SessionPerf {
+            tps_sum: 184.5,
+            tps_samples: 3,
+            ttft_ms_sum: 720.0,
+            ttft_ms_samples: 3,
+        }),
     );
 
     // Last-turn cache_write is 0 (round 2 wrote 0) but cumulative is 3000.
@@ -343,6 +369,7 @@ fn legacy_scalar_path_leaves_cache_fields_absent() {
         None,
         None, // no cumulative snapshot
         None, // no persisted iteration count
+        None, // no persisted speed / latency averages
     );
 
     assert_eq!(info.input_tokens, 45_000);

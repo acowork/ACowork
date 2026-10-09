@@ -171,8 +171,10 @@ impl super::loop_::AgentLoop {
                 Some(&persisted),
                 // Per-session lifetime LLM-call count so the retained
                 // session_state snapshot carries the same "Iterations" as
-                // the live ContextUsage push.
+                // the live ContextUsage push — same reason for the
+                // persisted speed / TTFT averages below.
                 conv.llm_call_counter(),
+                conv.perf().as_ref(),
             );
             // ADR-067: this path builds from persisted tokens and has no
             // `ContextBuilder`, so it cannot recompute sections. Merge the

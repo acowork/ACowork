@@ -94,6 +94,14 @@ impl AgentLoop {
         // method, so a Cancel from a prior request cannot short-circuit
         // this run.
         let cancel_handle = self.session_core.cancel_handle();
+        // Session perf timing starts here — one `Instant`, three marks:
+        // `t0` (this line), the first output event (TTFT), and stream end
+        // (generation duration). The slot is cleared on entry and written
+        // once on completion, so the consumer's `take()` sees exactly one
+        // sample per call — a value left over from the previous round would
+        // otherwise be folded into the session mean a second time.
+        self.last_call_perf = None;
+        let call_t0 = std::time::Instant::now();
         let provider_stream = select_on_cancel(
             cancel_handle.clone(),
             self.core.provider.chat_stream(chat_request.clone()),
@@ -127,6 +135,11 @@ impl AgentLoop {
         let mut reasoning_started_at: Option<i64> = None;
         let mut reasoning_finished_at: Option<i64> = None;
         let mut reasoning_in_progress = false;
+        // Timestamp of the first event that carries model output
+        // (content / reasoning / tool call) — the TTFT mark. `None` until
+        // one arrives; a stream cancelled before any output leaves it
+        // unset and the whole measurement is dropped.
+        let mut first_output_at: Option<std::time::Instant> = None;
 
         // ADR-022: No think tag state machine needed here.
         // The provider layer (openai.rs ThinkTagParser) already splits
@@ -168,6 +181,16 @@ impl AgentLoop {
                 event = stream.next() => {
                     match event {
                         Some(event) => {
+                            if first_output_at.is_none()
+                                && matches!(
+                                    event,
+                                    StreamEvent::Content(_)
+                                        | StreamEvent::ReasoningContent(_)
+                                        | StreamEvent::ToolCallStart(_)
+                                )
+                            {
+                                first_output_at = Some(std::time::Instant::now());
+                            }
                             // Check for control signals before processing each stream event
                             match self.poll_control() {
                                 ControlDecision::Stop => {
@@ -718,6 +741,8 @@ if this keeps happening the upstream provider may be truncating responses."
             return Ok(retry_response);
         }
 
+        self.last_call_perf = CallPerf::measure(call_t0, first_output_at, usage.as_ref());
+
         Ok(ChatResponse {
             content: accumulated_content,
             reasoning_content: if accumulated_reasoning_content.is_empty() {
@@ -731,6 +756,81 @@ if this keeps happening the upstream provider may be truncating responses."
             reasoning_finished_at,
             finish_reason,
         })
+    }
+}
+
+/// Wall-clock measurement of one streaming LLM call.
+///
+/// Lives on [`AgentLoop::last_call_perf`] rather than on `ChatResponse`:
+/// the provider structs are shared with the debug path and every literal
+/// site would have to learn a new field, while the consumer
+/// (`process_llm_response_usage`) is one call away from the producer.
+///
+/// The slot is a **one-shot handshake**: `call_llm_streaming_inner` clears
+/// it on entry and writes it on completion, and the consumer `take()`s it.
+/// That pairing is what guarantees one sample per call — a folded mean that
+/// counted the same call twice would silently inflate the session figure.
+///
+/// `tps` is `None` when the call cannot be measured honestly — a Provider
+/// that reported no completion count, or a generation window too short to
+/// divide by (see [`MIN_MEASURABLE_WINDOW_MS`]). The frontend renders "—"
+/// instead of 0, matching the token counters' "宁可 miss 也不估计" rule.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct CallPerf {
+    /// Time from "call started" to the first output event.
+    pub ttft_ms: f64,
+    /// Output tokens per second for this call.
+    pub tps: Option<f64>,
+}
+
+/// Shortest generation window (first output token → stream end) that can
+/// produce a credible tokens/second figure.
+///
+/// Under this, the number is dominated by clock granularity and by how the
+/// provider batched its chunks, not by generation speed. A provider that
+/// delivers the entire completion in one chunk would otherwise report
+/// `completion_tokens * 1000` t/s — 5 tokens becoming a permanent 5000 t/s
+/// outlier in the session mean. Speed is then reported as unmeasurable.
+/// TTFT is unaffected: a single-chunk response still has a real first-token
+/// time, so responsiveness keeps being sampled.
+const MIN_MEASURABLE_WINDOW_MS: u64 = 50;
+
+impl CallPerf {
+    /// Build the measurement, or `None` when the call produced nothing
+    /// measurable (no output event → no TTFT and no generation window).
+    pub(crate) fn measure(
+        started: std::time::Instant,
+        first_output: Option<std::time::Instant>,
+        usage: Option<&acowork_core::providers::traits::UsageInfo>,
+    ) -> Option<Self> {
+        let first_output = first_output?;
+        Self::from_window(
+            first_output.saturating_duration_since(started),
+            first_output.elapsed(),
+            usage.map(|u| u.completion_tokens).unwrap_or(0),
+        )
+    }
+
+    /// Pure half of [`Self::measure`]: two wall-clock windows plus the
+    /// Provider's completion count → the per-call figures. Split out so the
+    /// credible-window rule is testable without sleeping on a real clock.
+    fn from_window(
+        ttft: std::time::Duration,
+        generation: std::time::Duration,
+        completion_tokens: u64,
+    ) -> Option<Self> {
+        let ttft_ms = ttft.as_secs_f64() * 1000.0;
+        let window_ms = generation.as_millis().min(u64::MAX as u128) as u64;
+        let credible_window = window_ms >= MIN_MEASURABLE_WINDOW_MS;
+        let tps = (credible_window && completion_tokens > 0)
+            .then(|| completion_tokens as f64 / (window_ms as f64 / 1000.0));
+        tracing::debug!(
+            ttft_ms = (ttft_ms * 1000.0).round() / 1000.0,
+            window_ms,
+            tps = ?tps,
+            "LLM call performance measured"
+        );
+        Some(Self { ttft_ms, tps })
     }
 }
 
@@ -765,4 +865,59 @@ pub(crate) fn make_incomplete_marker(tool_name: &str, raw_len: usize) -> String 
     // Legacy signature kept for backwards compatibility.  New code should
     // call `crate::tools::arguments::make_incomplete_marker(name, hint)` directly.
     crate::tools::arguments::make_incomplete_marker_with_len(tool_name, raw_len)
+}
+
+#[cfg(test)]
+mod perf_tests {
+    use super::{CallPerf, MIN_MEASURABLE_WINDOW_MS};
+    use std::time::Duration;
+
+    fn window(ms: u64) -> Duration {
+        Duration::from_millis(ms)
+    }
+
+    /// A credible window divides normally.
+    #[test]
+    fn measures_speed_over_the_generation_window_only() {
+        // 900 tokens generated in 3s after the first token; the 500ms
+        // pre-token wait must NOT count as generation time.
+        let perf = CallPerf::from_window(window(500), window(3_000), 900).unwrap();
+        assert!((perf.ttft_ms - 500.0).abs() < 1e-6);
+        assert!((perf.tps.unwrap() - 300.0).abs() < 1e-6);
+    }
+
+    /// Regression: a response delivered in (near) one chunk used to hit a
+    /// 1ms floor and report `completion_tokens * 1000` t/s — 5 tokens became
+    /// a permanent 5000 t/s outlier in the session mean.
+    #[test]
+    fn sub_credible_window_reports_speed_unmeasurable() {
+        let perf = CallPerf::from_window(window(420), window(MIN_MEASURABLE_WINDOW_MS - 1), 5)
+            .unwrap();
+        assert_eq!(perf.tps, None, "window below the credibility floor");
+        // TTFT is still a real measurement — responsiveness keeps sampling.
+        assert!((perf.ttft_ms - 420.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn window_at_the_floor_is_measured() {
+        let perf =
+            CallPerf::from_window(window(100), window(MIN_MEASURABLE_WINDOW_MS), 10).unwrap();
+        assert!((perf.tps.unwrap() - 200.0).abs() < 1e-6);
+    }
+
+    /// A Provider that reports no completion count still yields TTFT.
+    #[test]
+    fn zero_completion_tokens_yields_ttft_without_speed() {
+        let perf = CallPerf::from_window(window(300), window(1_000), 0).unwrap();
+        assert_eq!(perf.tps, None);
+        assert!((perf.ttft_ms - 300.0).abs() < 1e-6);
+    }
+
+    /// No output event at all (cancelled before the first token) — there is
+    /// nothing to measure, and folding a 0 would claim the model stalled.
+    #[test]
+    fn no_output_event_is_not_a_measurement() {
+        let started = std::time::Instant::now();
+        assert!(CallPerf::measure(started, None, None).is_none());
+    }
 }

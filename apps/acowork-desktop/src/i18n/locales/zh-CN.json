@@ -849,6 +849,8 @@
     "labelProvider": "服务商",
     "labelApiKeyAlias": "API Key 别名",
     "labelCharactersPerToken": "字符/Token",
+    "labelAvgOutputSpeed": "平均输出速度 (t/s)",
+    "labelAvgFirstTokenLatency": "平均首字延迟 (ms)",
     "labelThinkingLevel": "思考深度",
     "labelTemperature": "温度",
     "statePaused": "已暂停",

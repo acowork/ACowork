@@ -838,6 +838,7 @@ mod tests {
                     todos: None,
                     message_count: 0,
                     llm_call_counter: None,
+                    perf: None,
                     model_ratio: None,
                     last_compaction_offset: None,
                     last_active_at: chrono::Utc::now().to_rfc3339(),

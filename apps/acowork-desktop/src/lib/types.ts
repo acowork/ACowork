@@ -938,6 +938,20 @@ export interface ContextUsageInfo {
    *  older Runtimes; RightPanel falls back to assistant-message count in
    *  that case. */
   iteration?: number;
+  /** Session-level mean output speed in tokens/second. Per call it is
+   *  `completion_tokens / streaming_seconds` timed from the first output
+   *  token; the session figure is the unweighted mean over the calls that
+   *  produced a speed measurement. Sampled independently of `avg_ttft_ms`
+   *  (a call can yield a latency sample without a speed one), so the two
+   *  rows can reflect different call counts. `undefined` until the first
+   *  measurement — the row renders "—" rather than a fake 0. Persisted in
+   *  the session meta, so a resumed session shows the same average its live
+   *  panel did. Unit lives in the i18n label. */
+  avg_tps?: number;
+  /** Session-level mean time-to-first-token in milliseconds — the wait
+   *  from "LLM call started" to the first output event. Same `undefined`
+   *  semantics as `avg_tps`. */
+  avg_ttft_ms?: number;
 }
 
 /** Navigation view type */

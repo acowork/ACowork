@@ -60,6 +60,92 @@ pub struct SessionTokens {
     pub total_cache_write: u64,
 }
 
+/// Per-session LLM performance accumulator (speed / responsiveness).
+///
+/// Two independent sample means, each stored as a running **sum plus
+/// count**:
+///
+///   - [`Self::avg_tps`] — mean output tokens per second. Per call it is
+///     `completion_tokens / stream_seconds`, timed from the **first**
+///     output token, so the pre-token wait is not counted as generation.
+///   - [`Self::avg_ttft_ms`] — mean time to first token: the wait from
+///     "LLM call started" to the first output event.
+///
+/// Sum + count is the storage form, not the display form — the means are
+/// derived on read. A folded running mean cannot carry two *independent*
+/// denominators: a call that measured TTFT but not speed (a Provider that
+/// reported no completion count) would either pollute the speed mean's
+/// denominator or drop a real responsiveness sample. Keeping the counts
+/// apart makes each mean exact, and it stays exact rather than drifting
+/// with rounding as a session accumulates hundreds of calls.
+///
+/// `None` from either accessor means "no measurement yet" — the frontend
+/// renders "—" rather than a fake 0, matching the `total_input_tokens`
+/// convention.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SessionPerf {
+    /// Sum of per-call output speeds, in tokens/second.
+    pub tps_sum: f64,
+    /// How many calls contributed to [`Self::tps_sum`].
+    pub tps_samples: u32,
+    /// Sum of per-call time-to-first-token, in milliseconds.
+    pub ttft_ms_sum: f64,
+    /// How many calls contributed to [`Self::ttft_ms_sum`].
+    pub ttft_ms_samples: u32,
+}
+
+impl SessionPerf {
+    /// Mean output tokens/second, or `None` when nothing has been measured.
+    pub fn avg_tps(&self) -> Option<f64> {
+        mean(self.tps_sum, self.tps_samples)
+    }
+
+    /// Mean time-to-first-token in milliseconds, or `None`.
+    pub fn avg_ttft_ms(&self) -> Option<f64> {
+        mean(self.ttft_ms_sum, self.ttft_ms_samples)
+    }
+
+    /// `true` when no call has produced a measurement for either field.
+    /// Lets a caller avoid persisting an accumulator that carries no
+    /// information (the "absent, not zero" rule the meta fields follow).
+    pub fn is_empty(&self) -> bool {
+        self.tps_samples == 0 && self.ttft_ms_samples == 0
+    }
+
+    /// Fold one call's measurements in, returning the updated snapshot.
+    ///
+    /// Each field advances against its OWN count, so a call that measured
+    /// only TTFT moves the latency mean and leaves the speed mean exactly
+    /// where it was — and vice versa.
+    ///
+    /// A call with neither measurement (cancelled before its first token,
+    /// or a Provider that reported no usage) is ignored entirely: it cannot
+    /// drag either mean and bumps neither count.
+    pub fn merged(&self, tps: Option<f64>, ttft_ms: Option<f64>) -> Self {
+        let mut out = self.clone();
+        if let Some(v) = tps.filter(|v| v.is_finite() && *v > 0.0) {
+            out.tps_sum += v;
+            out.tps_samples = out.tps_samples.saturating_add(1);
+        }
+        if let Some(v) = ttft_ms.filter(|v| v.is_finite() && *v >= 0.0) {
+            out.ttft_ms_sum += v;
+            out.ttft_ms_samples = out.ttft_ms_samples.saturating_add(1);
+        }
+        out
+    }
+}
+
+/// Derive a mean from a running sum, `None` when nothing was sampled or the
+/// accumulation is not a usable number.
+fn mean(sum: f64, samples: u32) -> Option<f64> {
+    if samples == 0 || !sum.is_finite() {
+        return None;
+    }
+    let m = sum / samples as f64;
+    m.is_finite().then_some(m)
+}
+
 /// One todo entry (ADR-060). Lives inside `SessionMeta.todos`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TodoItem {
@@ -236,6 +322,11 @@ pub struct SessionMeta {
     pub tokens: Option<SessionTokens>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub llm_call_counter: Option<u32>,
+    /// Session-level LLM speed / responsiveness averages. `None` until the
+    /// first LLM call has produced a measurement; absent on sessions created
+    /// before this field existed, which deserialise via the `Option` default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub perf: Option<SessionPerf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_ratio: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -358,3 +449,116 @@ const _: fn() = || {
     fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<Box<dyn SessionMetaStore>>();
 };
+
+#[cfg(test)]
+mod perf_tests {
+    use super::SessionPerf;
+
+    fn approx(a: f64, b: f64) {
+        assert!((a - b).abs() < 1e-6, "expected {b}, got {a}");
+    }
+
+    #[test]
+    fn merged_averages_each_call_in() {
+        let mut perf = SessionPerf::default();
+
+        // Call 1: 900 tokens over 3.0s = 300 t/s, TTFT 500ms.
+        perf = perf.merged(Some(300.0), Some(500.0));
+        approx(perf.avg_tps().unwrap(), 300.0);
+        approx(perf.avg_ttft_ms().unwrap(), 500.0);
+        assert_eq!(perf.tps_samples, 1);
+        assert_eq!(perf.ttft_ms_samples, 1);
+
+        // Call 2: 100 t/s, TTFT 100ms → sample mean of both.
+        perf = perf.merged(Some(100.0), Some(100.0));
+        approx(perf.avg_tps().unwrap(), 200.0);
+        approx(perf.avg_ttft_ms().unwrap(), 300.0);
+        assert_eq!(perf.tps_samples, 2);
+
+        // Call 3: 200 t/s, TTFT 300ms → mean of three.
+        perf = perf.merged(Some(200.0), Some(300.0));
+        approx(perf.avg_tps().unwrap(), 200.0);
+        approx(perf.avg_ttft_ms().unwrap(), 300.0);
+        assert_eq!(perf.tps_samples, 3);
+        assert_eq!(perf.ttft_ms_samples, 3);
+    }
+
+    /// The two means count DIFFERENT sets of calls, so each must divide by
+    /// its own sample count.
+    ///
+    /// Regression: the first implementation folded a running mean under a
+    /// single shared `samples` counter, so a call that measured TTFT but not
+    /// speed (a Provider reporting no completion count — the common
+    /// `usage == None` / `completion_tokens == 0` case) still advanced the
+    /// denominator of the speed mean. `{300 t/s}, {no speed}, {100 t/s}`
+    /// then reported 233.3 t/s instead of the true 200: a silently inflated
+    /// figure shown to the user.
+    #[test]
+    fn partial_samples_do_not_inflate_the_other_mean() {
+        let mut perf = SessionPerf::default();
+        perf = perf.merged(Some(300.0), Some(500.0));
+        // Speed unmeasurable, TTFT measurable.
+        perf = perf.merged(None, Some(100.0));
+        // Speed measurable again.
+        perf = perf.merged(Some(100.0), Some(300.0));
+
+        assert_eq!(perf.tps_samples, 2, "two speed samples");
+        assert_eq!(perf.ttft_ms_samples, 3, "three latency samples");
+        approx(perf.avg_tps().unwrap(), 200.0);
+        approx(perf.avg_ttft_ms().unwrap(), 300.0);
+    }
+
+    #[test]
+    fn unmeasurable_call_does_not_move_the_average() {
+        let mut perf = SessionPerf::default();
+        perf = perf.merged(Some(300.0), Some(500.0));
+
+        // A cancelled stream: no TTFT, no completion count, no duration.
+        // Folding in a 0 here would report "the model stopped generating".
+        let after = perf.merged(None, None);
+        assert_eq!(after, perf);
+        assert_eq!(after.tps_samples, 1);
+        assert_eq!(after.ttft_ms_samples, 1);
+    }
+
+    #[test]
+    fn first_call_seeds_each_field_independently() {
+        // A provider that reports no completion count still yields a TTFT —
+        // the user cares about responsiveness even when the speed is unknown.
+        let perf = SessionPerf::default().merged(None, Some(250.0));
+        assert_eq!(perf.avg_tps(), None);
+        approx(perf.avg_ttft_ms().unwrap(), 250.0);
+        assert_eq!(perf.ttft_ms_samples, 1);
+        assert_eq!(perf.tps_samples, 0);
+    }
+
+    #[test]
+    fn non_positive_and_non_finite_samples_are_rejected() {
+        let perf = SessionPerf::default()
+            // A 0 t/s would mean "generated nothing"; a NaN/inf from a
+            // degenerate duration must not poison a running sum.
+            .merged(Some(0.0), None)
+            .merged(Some(f64::NAN), None)
+            .merged(Some(-12.0), None)
+            .merged(None, Some(f64::INFINITY))
+            .merged(None, Some(-1.0));
+        assert!(perf.is_empty());
+        assert_eq!(perf.avg_tps(), None);
+        assert_eq!(perf.avg_ttft_ms(), None);
+
+        // TTFT of exactly 0ms is a legitimate measurement (sub-ms first
+        // token), unlike a 0 speed.
+        let perf = SessionPerf::default().merged(None, Some(0.0));
+        assert_eq!(perf.avg_ttft_ms(), Some(0.0));
+        assert_eq!(perf.ttft_ms_samples, 1);
+        assert!(!perf.is_empty());
+    }
+
+    #[test]
+    fn empty_accumulator_reads_as_none_not_zero() {
+        let perf = SessionPerf::default();
+        assert!(perf.is_empty());
+        assert_eq!(perf.avg_tps(), None);
+        assert_eq!(perf.avg_ttft_ms(), None);
+    }
+}

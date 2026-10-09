@@ -1307,6 +1307,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
 
         assert_eq!(fresh.context_window, persisted.context_window);
@@ -1325,7 +1326,7 @@ mod tests {
     fn test_build_context_usage_from_persisted_zero_tokens() {
         // New session with no token data yet → should produce 0 input/output
         let caps = test_caps(200_000, 8_192);
-        let info = build_context_usage_from_persisted(&caps, 0, 0, 32_768, None, None, None);
+        let info = build_context_usage_from_persisted(&caps, 0, 0, 32_768, None, None, None, None);
         assert_eq!(info.input_tokens, 0);
         assert_eq!(info.output_tokens, 0);
         assert_eq!(info.total_tokens, 0);
@@ -1361,6 +1362,7 @@ mod tests {
             None,
             Some(&cumulative),
             Some(9),
+            None,
         );
 
         // Per-turn fields populated from last_input/last_output scalars.
@@ -1607,6 +1609,7 @@ mod tests {
             10_000,
             500,
             32_768,
+            None,
             None,
             None,
             None,
@@ -1912,6 +1915,11 @@ pub fn compute_context_usage(
         // (process_llm_response_usage) before push, so this builder
         // doesn't need to know the counter.
         iteration: None,
+        // Session speed / latency averages are session-level, never
+        // derivable from a single `UsageInfo` — same caller-patch
+        // policy as the cumulative counters above.
+        avg_tps: None,
+        avg_ttft_ms: None,
     }
 }
 
@@ -1937,6 +1945,11 @@ pub fn compute_context_usage(
 /// populated on the resulting [`ContextUsageInfo`]. Pass `None` when only the
 /// last-turn snapshot is available (e.g. unit tests exercising the legacy
 /// scalar path).
+///
+/// `perf` does the same for `avg_tps` / `avg_ttft_ms` — the session speed
+/// and first-token-latency means. Project convention for a pure builder
+/// whose parameter list mirrors the persisted meta's field groups.
+#[allow(clippy::too_many_arguments)]
 pub fn build_context_usage_from_persisted(
     caps: &ModelCapabilitiesInfo,
     last_input_tokens: u64,
@@ -1945,6 +1958,7 @@ pub fn build_context_usage_from_persisted(
     context_window_cap: Option<u64>,
     cumulative_tokens: Option<&crate::conversation::SessionTokens>,
     llm_call_counter: Option<u32>,
+    perf: Option<&crate::conversation::SessionPerf>,
 ) -> acowork_core::protocol::ContextUsageInfo {
     let mut info = {
         let usage = acowork_core::providers::traits::UsageInfo {
@@ -1972,6 +1986,10 @@ pub fn build_context_usage_from_persisted(
     // `ContextUsage` push so the retained `session_state` snapshot and
     // the `fetchSessionState` pull carry the same count as the push.
     info.iteration = llm_call_counter;
+    // Same for the session speed / latency averages — persisted in
+    // `SessionMeta.perf` so a resumed session shows the figures its live
+    // panel had.
+    patch_perf(&mut info, perf);
     info
 }
 
@@ -2040,6 +2058,7 @@ pub(crate) fn build_persisted_ctx_usage(
         Some(resolved),
         Some(&persisted),
         conv.llm_call_counter(),
+        conv.perf().as_ref(),
     );
     patch_agent_totals(&mut ctx, core.agent_token_totals());
     Some(ctx)
@@ -2070,6 +2089,25 @@ pub fn patch_session_totals(
     info.total_output_tokens = Some(tokens.total_output);
     info.total_cache_read_tokens = Some(tokens.total_cache_read);
     info.total_cache_write_tokens = Some(tokens.total_cache_write);
+}
+
+/// Patch the session-level speed / latency averages onto a
+/// [`ContextUsageInfo`].
+///
+/// Same centralised-patcher policy as [`patch_session_totals`]: the five
+/// `ContextUsageInfo` push sites (one per LLM response, plus the
+/// resume / compaction / config-change pushes) must not each decide how to
+/// source the averages, or a resumed session starts showing "—" for a
+/// session whose live panel had a number.
+pub fn patch_perf(
+    info: &mut acowork_core::protocol::ContextUsageInfo,
+    perf: Option<&crate::conversation::SessionPerf>,
+) {
+    let Some(perf) = perf else {
+        return;
+    };
+    info.avg_tps = perf.avg_tps();
+    info.avg_ttft_ms = perf.avg_ttft_ms();
 }
 
 /// Patch agent-scoped cumulative fields on a [`ContextUsageInfo`].

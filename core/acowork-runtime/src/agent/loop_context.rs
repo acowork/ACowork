@@ -14,7 +14,7 @@ use acowork_core::providers::traits::Provider;
 
 use crate::agent::compression_constants::MIN_COMPRESSION_RATIO;
 use crate::agent::context::{
-    ContextBuilder, count_chat_request_chars, patch_agent_totals, patch_session_totals,
+    ContextBuilder, count_chat_request_chars, patch_agent_totals, patch_perf, patch_session_totals,
 };
 use crate::agent::loop_::{AgentLoop, ChunkEvent, CompactionCancelReason};
 use crate::agent::session::session_manager::RuntimeConfigOverrides;
@@ -162,6 +162,8 @@ impl AgentLoop {
                     sections: None,
                     // No LLM call here — context_window override only.
                     iteration: None,
+                    avg_tps: None,
+                    avg_ttft_ms: None,
                 };
                 tracing::info!(
                     context_window = effective_window,
@@ -179,6 +181,10 @@ impl AgentLoop {
                 // ADR-028 / ADR-066: same centralised patcher as the live
                 // LLM-call push, so the config-change and post-compaction
                 // pushes never drift from the main path either.
+                patch_perf(
+                    &mut ctx_info,
+                    self.session.conversation.as_ref().and_then(|c| c.perf()).as_ref(),
+                );
                 patch_agent_totals(&mut ctx_info, self.core.agent_token_totals());
                 let _ = self
                     .session_core
@@ -1289,12 +1295,21 @@ impl AgentLoop {
                     // `process_llm_response_usage` bump), so no count here —
                     // this push only reflects the new context shape.
                     iteration: None,
+                    avg_tps: None,
+                    avg_ttft_ms: None,
                 };
                 // ADR-028 + ADR-066: patch session + agent totals in one place.
                 let mut ctx_info = ctx_info;
                 if let Some(t) = session_tokens {
                     patch_session_totals(&mut ctx_info, &t);
                 }
+                // Session speed / latency averages: no LLM call happened on
+                // this path, but the persisted values must survive the push
+                // or the panel would blank out mid-session.
+                patch_perf(
+                    &mut ctx_info,
+                    self.session.conversation.as_ref().and_then(|c| c.perf()).as_ref(),
+                );
                 patch_agent_totals(&mut ctx_info, self.core.agent_token_totals());
                 let _ = self
                     .session_core
@@ -1674,6 +1689,10 @@ impl AgentLoop {
                         sections: None,
                         // Filled in just before the push below.
                         iteration: None,
+                        // Same for the session speed / latency averages —
+                        // recorded and patched just below.
+                        avg_tps: None,
+                        avg_ttft_ms: None,
                     }
                 };
                 tracing::debug!(
@@ -1701,8 +1720,29 @@ impl AgentLoop {
                 // panel show session-level cumulative figures alongside
                 // per-turn input_tokens / output_tokens.
                 let mut ctx_usage = ctx_usage;
+                // The measurement belongs to *this* response. `take()` makes
+                // the one-sample-per-round pairing explicit instead of
+                // relying on every early-return path of
+                // `call_llm_streaming_inner` happening to leave the slot
+                // untouched (see the reset at the top of that method).
+                let call_perf = self.last_call_perf.take();
                 if let Some(ref conv) = self.session.conversation {
-                    conv.accumulate_llm_usage(usage);
+                    // One persisted write for the whole round-trip: token
+                    // usage, this call's speed / TTFT sample, and the
+                    // per-session call count. Folding them separately would
+                    // issue three full-row meta upserts per LLM call on the
+                    // runtime's hottest path.
+                    //
+                    // `tps` is `None` when the Provider reported no usable
+                    // completion count, and the whole sample is `None` for a
+                    // call that never produced output (cancelled before its
+                    // first token) — `SessionPerf` folds those as "no
+                    // measurement", never as 0.
+                    ctx_usage.iteration = Some(conv.record_llm_round(
+                        usage,
+                        call_perf.and_then(|p| p.tps),
+                        call_perf.map(|p| p.ttft_ms),
+                    ));
                     if let Some(t) = conv.tokens() {
                         // ADR-066 §2 / ADR-066 §7: "compute 只看 per-turn、
                         // session total 由 caller patch".  All four
@@ -1713,6 +1753,9 @@ impl AgentLoop {
                         // behind the helper.
                         patch_session_totals(&mut ctx_usage, &t);
                     }
+                    // Read back AFTER the round was recorded so the push
+                    // carries the averages including this call.
+                    patch_perf(&mut ctx_usage, conv.perf().as_ref());
                 }
                 // ADR-028: feed the agent-scoped counters and snapshot them
                 // into the push payload so the frontend's Results Panel can
@@ -1764,18 +1807,14 @@ impl AgentLoop {
                     conv.cache_context_usage_sections(sections.clone());
                 }
 
-                // Bump the per-session LLM-call counter (returns the
-                // post-increment 1-based value) and stamp it onto the push.
+                // The per-session LLM-call count was already folded and
+                // stamped onto `ctx_usage.iteration` by `record_llm_round`
+                // above — one persisted write for the whole round-trip.
                 // The counter lives on the conversation session and is
                 // persisted in meta.json (`SessionMeta.llm_call_counter`),
                 // so it is monotonic for the session's lifetime and
                 // survives restarts — unlike the `max_iterations` per-burst
                 // loop counter which resets on Continue (loop_.rs).
-                ctx_usage.iteration = self
-                    .session
-                    .conversation
-                    .as_ref()
-                    .map(|c| c.bump_llm_call_counter());
 
                 if !self
                     .session_core

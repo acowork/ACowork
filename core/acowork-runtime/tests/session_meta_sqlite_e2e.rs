@@ -42,6 +42,7 @@ fn make_meta(sid: &str, last_active: &str, title: &str) -> SessionMeta {
         last_active_at: last_active.to_string(),
         tokens: None,
         llm_call_counter: None,
+        perf: None,
         model_ratio: None,
         last_compaction_offset: None,
         corrupted: false,

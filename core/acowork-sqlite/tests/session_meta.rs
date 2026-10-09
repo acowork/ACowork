@@ -65,6 +65,15 @@ fn make_meta(
             total_cache_write: 0,
         }),
         llm_call_counter: Some(2),
+        // Deliberately different sample counts per figure: the storage
+        // layer must round-trip the two independent denominators, not just
+        // the derived means.
+        perf: Some(acowork_memory::SessionPerf {
+            tps_sum: 105.0,
+            tps_samples: 2,
+            ttft_ms_sum: 1290.0,
+            ttft_ms_samples: 3,
+        }),
         model_ratio: Some(1.0),
         last_compaction_offset: Some(0),
         corrupted: false,
@@ -121,6 +130,11 @@ fn round_trip_preserves_every_field() -> AcoworkResult<()> {
     assert_eq!(got.context_window, Some(128_000));
     assert_eq!(got.message_count, 3);
     assert_eq!(got.llm_call_counter, Some(2));
+    assert_eq!(got.perf.as_ref().and_then(|p| p.avg_tps()), Some(52.5));
+    assert_eq!(got.perf.as_ref().and_then(|p| p.avg_ttft_ms()), Some(430.0));
+    // The per-figure counts survive the round-trip independently.
+    assert_eq!(got.perf.as_ref().map(|p| p.tps_samples), Some(2));
+    assert_eq!(got.perf.as_ref().map(|p| p.ttft_ms_samples), Some(3));
     assert_eq!(got.model_ratio, Some(1.0));
     let tokens = got.tokens.as_ref().expect("tokens persisted");
     assert_eq!(tokens.last_input, 100);
@@ -447,6 +461,19 @@ fn migrations_run_in_order_and_stop_at_stored_version() -> AcoworkResult<()> {
     // ... and the whole chain runs, so v2's columns land in the same pass.
     assert!(cols.iter().any(|c| c == "user_id"), "v2 added `user_id`");
     assert!(cols.iter().any(|c| c == "visibility"), "v2 added `visibility`");
+    assert!(cols.iter().any(|c| c == "perf_tps_sum"), "v3 added `perf_tps_sum`");
+    assert!(
+        cols.iter().any(|c| c == "perf_tps_samples"),
+        "v3 added `perf_tps_samples`"
+    );
+    assert!(
+        cols.iter().any(|c| c == "perf_ttft_ms_sum"),
+        "v3 added `perf_ttft_ms_sum`"
+    );
+    assert!(
+        cols.iter().any(|c| c == "perf_ttft_ms_samples"),
+        "v3 added `perf_ttft_ms_samples`"
+    );
 
     let v: i64 = rusqlite::Connection::open(&path)
         .map_err(|e| acowork_core::error::AcoworkError::Memory(format!("sqlite: {e}")))?
@@ -463,6 +490,8 @@ fn migrations_run_in_order_and_stop_at_stored_version() -> AcoworkResult<()> {
     // visibility, which reads as "public". Nothing is retroactively hidden.
     assert_eq!(row.user_id, None);
     assert_eq!(row.visibility, None);
+    // A pre-perf row migrates to "no measurement", never a fabricated 0.
+    assert_eq!(row.perf, None);
 
     // Reopen is a no-op: file mtime unchanged (no transaction, no rewrite).
     let mtime_before = std::fs::metadata(&path).unwrap().modified().unwrap();
@@ -490,16 +519,21 @@ fn fresh_and_upgraded_databases_share_one_sessions_shape() -> AcoworkResult<()> 
     let _ = open_pair(&fresh);
 
     // A v1 database: build it fully, then roll it back to the shape every
-    // database created before ADR-076 has (no `user_id` / `visibility`,
-    // `user_version = 1`) and let the store upgrade it again.
+    // database created before ADR-076 has (no `user_id` / `visibility` /
+    // `perf_*`, `user_version = 1`) and let the store upgrade it again.
     let old = dir.path().join("old.sqlite");
     let _ = open_pair(&old);
-    open_raw(&old).execute_batch(
-        "ALTER TABLE sessions DROP COLUMN user_id;
-         ALTER TABLE sessions DROP COLUMN visibility;
-         PRAGMA user_version = 1;",
-    )
-    .unwrap();
+    open_raw(&old)
+        .execute_batch(
+            "ALTER TABLE sessions DROP COLUMN user_id;
+             ALTER TABLE sessions DROP COLUMN visibility;
+             ALTER TABLE sessions DROP COLUMN perf_tps_sum;
+             ALTER TABLE sessions DROP COLUMN perf_tps_samples;
+             ALTER TABLE sessions DROP COLUMN perf_ttft_ms_sum;
+             ALTER TABLE sessions DROP COLUMN perf_ttft_ms_samples;
+             PRAGMA user_version = 1;",
+        )
+        .unwrap();
     let _ = open_pair(&old);
 
     assert_eq!(

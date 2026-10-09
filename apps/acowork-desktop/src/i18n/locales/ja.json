@@ -793,6 +793,8 @@
     "labelProvider": "プロバイダー",
     "labelApiKeyAlias": "APIキー別名",
     "labelCharactersPerToken": "文字数/トークン",
+    "labelAvgOutputSpeed": "平均出力速度 (t/s)",
+    "labelAvgFirstTokenLatency": "平均初トークン遅延 (ms)",
     "labelThinkingLevel": "思考レベル",
     "labelTemperature": "温度",
     "statePaused": "一時停止中",

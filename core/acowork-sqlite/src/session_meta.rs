@@ -130,6 +130,33 @@ fn row_to_meta(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionMeta> {
         None => None,
     };
 
+    // A row that never produced a measurement reads as `None` (frontend
+    // shows "—") rather than a fabricated 0 — the same "宁可 miss 也不估计"
+    // rule the token counters follow. The two figures keep separate sample
+    // counts, so a speed sum with zero counts is not a mean of anything.
+    let perf_tps_sum: Option<f64> = row.get("perf_tps_sum")?;
+    let perf_tps_samples: Option<i64> = row.get("perf_tps_samples")?;
+    let perf_ttft_ms_sum: Option<f64> = row.get("perf_ttft_ms_sum")?;
+    let perf_ttft_ms_samples: Option<i64> = row.get("perf_ttft_ms_samples")?;
+    let perf = match (
+        perf_tps_sum,
+        perf_tps_samples,
+        perf_ttft_ms_sum,
+        perf_ttft_ms_samples,
+    ) {
+        (None, None, None, None) => None,
+        (tps_sum, tps_n, ttft_sum, ttft_n) => {
+            let perf = acowork_memory::SessionPerf {
+                tps_sum: tps_sum.unwrap_or(0.0).max(0.0),
+                tps_samples: tps_n.unwrap_or(0).clamp(0, u32::MAX as i64) as u32,
+                ttft_ms_sum: ttft_sum.unwrap_or(0.0).max(0.0),
+                ttft_ms_samples: ttft_n.unwrap_or(0).clamp(0, u32::MAX as i64) as u32,
+            };
+            // An all-NULL row and an empty accumulator mean the same thing.
+            if perf.is_empty() { None } else { Some(perf) }
+        }
+    };
+
     Ok(SessionMeta {
         version: version.max(0) as u32,
         session_id: row.get("session_id")?,
@@ -150,6 +177,7 @@ fn row_to_meta(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionMeta> {
         last_active_at,
         tokens,
         llm_call_counter: llm_call_counter.map(|c| c.max(0) as u32),
+        perf,
         model_ratio,
         last_compaction_offset: last_compaction_offset.map(|o| o.max(0) as u64),
         corrupted: corrupted != 0,
@@ -345,7 +373,8 @@ const SELECT_ALL_COLUMNS: &str = "SELECT \
     temperature, context_window, todos, message_count, \
     llm_call_counter, model_ratio, last_compaction_offset, \
     token_last_input, token_last_output, token_total_input, token_total_output, \
-    token_last_cache_read, token_last_cache_write, token_total_cache_read, token_total_cache_write \
+    token_last_cache_read, token_last_cache_write, token_total_cache_read, token_total_cache_write, \
+    perf_tps_sum, perf_tps_samples, perf_ttft_ms_sum, perf_ttft_ms_samples \
 FROM sessions WHERE session_id = ?1";
 
 const SELECT_ALL_COLUMNS_PREFIX: &str = "SELECT \
@@ -355,7 +384,8 @@ const SELECT_ALL_COLUMNS_PREFIX: &str = "SELECT \
     temperature, context_window, todos, message_count, \
     llm_call_counter, model_ratio, last_compaction_offset, \
     token_last_input, token_last_output, token_total_input, token_total_output, \
-    token_last_cache_read, token_last_cache_write, token_total_cache_read, token_total_cache_write \
+    token_last_cache_read, token_last_cache_write, token_total_cache_read, token_total_cache_write, \
+    perf_tps_sum, perf_tps_samples, perf_ttft_ms_sum, perf_ttft_ms_samples \
 FROM sessions";
 
 /// Clamp a `u64` token counter into SQLite's `i64` column.
@@ -386,6 +416,7 @@ fn upsert_row(
             llm_call_counter, model_ratio, last_compaction_offset, \
             token_last_input, token_last_output, token_total_input, token_total_output, \
             token_last_cache_read, token_last_cache_write, token_total_cache_read, token_total_cache_write, \
+            perf_tps_sum, perf_tps_samples, perf_ttft_ms_sum, perf_ttft_ms_samples, \
             version, corrupted, user_id, visibility \
          ) VALUES ( \
             ?1, ?2, ?3, ?4, \
@@ -394,7 +425,8 @@ fn upsert_row(
             ?15, ?16, ?17, \
             ?18, ?19, ?20, ?21, \
             ?22, ?23, ?24, ?25, \
-            ?26, ?27, ?28, ?29 \
+            ?26, ?27, ?28, ?29, \
+            ?30, ?31, ?32, ?33 \
          ) \
          ON CONFLICT(session_id) DO UPDATE SET \
             agent_id = excluded.agent_id, \
@@ -421,6 +453,10 @@ fn upsert_row(
             token_last_cache_write = excluded.token_last_cache_write, \
             token_total_cache_read = excluded.token_total_cache_read, \
             token_total_cache_write = excluded.token_total_cache_write, \
+            perf_tps_sum = excluded.perf_tps_sum, \
+            perf_tps_samples = excluded.perf_tps_samples, \
+            perf_ttft_ms_sum = excluded.perf_ttft_ms_sum, \
+            perf_ttft_ms_samples = excluded.perf_ttft_ms_samples, \
             version = excluded.version, \
             corrupted = excluded.corrupted, \
             user_id = excluded.user_id, \
@@ -451,6 +487,13 @@ fn upsert_row(
             token_to_i64(tokens.last_cache_write),
             token_to_i64(tokens.total_cache_read),
             token_to_i64(tokens.total_cache_write),
+            // Perf is stored as sum + count per figure. `None` writes four
+            // NULLs, which `row_to_meta` reads back as `None` — the "absent,
+            // not zero" round-trip the token counters follow.
+            meta.perf.as_ref().map(|p| p.tps_sum),
+            meta.perf.as_ref().map(|p| p.tps_samples as i64),
+            meta.perf.as_ref().map(|p| p.ttft_ms_sum),
+            meta.perf.as_ref().map(|p| p.ttft_ms_samples as i64),
             meta.version as i64,
             meta.corrupted as i64,
             meta.user_id,

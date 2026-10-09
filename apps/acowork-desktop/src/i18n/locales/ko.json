@@ -794,6 +794,8 @@
     "labelProvider": "공급자",
     "labelApiKeyAlias": "API 키 별칭",
     "labelCharactersPerToken": "글자/토큰",
+    "labelAvgOutputSpeed": "평균 출력 속도 (t/s)",
+    "labelAvgFirstTokenLatency": "평균 첫 토큰 지연 (ms)",
     "labelThinkingLevel": "사고 깊이",
     "labelTemperature": "온도",
     "statePaused": "일시정지됨",

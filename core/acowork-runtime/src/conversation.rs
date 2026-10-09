@@ -26,7 +26,7 @@ use crate::agent::session_state::TodoItem;
 // `crate::agent::session_state` (kept as a thin re-export) and the two
 // surfaces use the same type via `pub use` aliasing.
 pub use acowork_memory::{
-    SessionMeta, SessionMetaStore, SessionScope, SessionTokens, SessionVisibility,
+    SessionMeta, SessionMetaStore, SessionPerf, SessionScope, SessionTokens, SessionVisibility,
 };
 use acowork_core::protocol::ContextUsageSection;
 use acowork_core::providers::traits::UsageInfo;
@@ -509,6 +509,11 @@ pub struct ConversationSession {
     /// [`Self::bump_llm_call_counter`] (mirroring `accumulate_llm_usage`
     /// for tokens); `None` means no LLM call has been recorded yet.
     llm_call_counter: std::sync::Mutex<Option<u32>>,
+    /// Session-level LLM speed / responsiveness accumulators, mirrored from
+    /// `SessionMeta.perf`. The single mutation owner is
+    /// [`Self::record_llm_round`] (via [`Self::apply_llm_perf`]); `None`
+    /// means no call has produced a measurement yet.
+    perf: std::sync::Mutex<Option<SessionPerf>>,
     /// Last calibrated session chars/token ratio, mirrored from
     /// `SessionMeta.model_ratio`. Written by [`Self::set_model_ratio`]
     /// after each reliable usage calibration.
@@ -642,6 +647,7 @@ impl ConversationSession {
             last_active_at: now,
             tokens,
             llm_call_counter,
+            perf: self.perf.lock().ok().and_then(|p| p.clone()),
             model_ratio: self.model_ratio.lock().ok().and_then(|r| *r),
             last_compaction_offset,
             corrupted: false,
@@ -898,6 +904,7 @@ impl ConversationSession {
             visibility: std::sync::Mutex::new(None),
             tokens: std::sync::Mutex::new(None),
             llm_call_counter: std::sync::Mutex::new(None),
+            perf: std::sync::Mutex::new(None),
             model_ratio: std::sync::Mutex::new(None),
             message_count: AtomicU64::new(0),
             last_meta_write: std::sync::Mutex::new(Instant::now()),
@@ -1000,6 +1007,7 @@ impl ConversationSession {
                 visibility: std::sync::Mutex::new(meta.visibility),
                 tokens: std::sync::Mutex::new(meta.tokens.clone()),
                 llm_call_counter: std::sync::Mutex::new(meta.llm_call_counter),
+                perf: std::sync::Mutex::new(meta.perf.clone()),
                 model_ratio: std::sync::Mutex::new(meta.model_ratio),
                 message_count: AtomicU64::new(meta.message_count),
                 last_meta_write: std::sync::Mutex::new(Instant::now()),
@@ -1705,8 +1713,15 @@ impl ConversationSession {
     /// `AgentLoop::process_llm_response_usage` — compaction /
     /// title-generation calls use different paths and must NOT bump.
     pub fn bump_llm_call_counter(&self) -> u32 {
-        let next = self
-            .llm_call_counter
+        let next = self.apply_llm_call_counter();
+        self.write_meta();
+        self.notify_state_change();
+        next
+    }
+
+    /// In-memory half of [`Self::bump_llm_call_counter`].
+    fn apply_llm_call_counter(&self) -> u32 {
+        self.llm_call_counter
             .lock()
             .ok()
             .map(|mut guard| {
@@ -1714,10 +1729,76 @@ impl ConversationSession {
                 *guard = Some(next);
                 next
             })
-            .unwrap_or(0);
+            .unwrap_or(0)
+    }
+
+    /// The session's current LLM speed / responsiveness averages.
+    pub fn perf(&self) -> Option<SessionPerf> {
+        self.perf.lock().ok().and_then(|p| p.clone())
+    }
+
+    /// Record one completed LLM round-trip — token usage, wall-clock speed /
+    /// TTFT, and the per-session call count — in a **single** persisted
+    /// write.
+    ///
+    /// This is the only entry point the dialog path should use. The three
+    /// accumulators describe the same event, so writing them through their
+    /// individual persisting wrappers would issue three full-row
+    /// `INSERT ... ON CONFLICT` upserts and three state-change notifications
+    /// per LLM call, on the hottest path in the runtime. The invariant here
+    /// is deliberate and test-pinned: **one round-trip, one meta write**.
+    ///
+    /// Returns the post-increment 1-based call count, matching
+    /// [`Self::bump_llm_call_counter`], so the caller can stamp it onto the
+    /// live `ContextUsage` push without a second read.
+    ///
+    /// `tps` / `ttft_ms` are this call's measurements; `None` (no output
+    /// produced, no usage reported, the stream cancelled before its first
+    /// token) folds as "no measurement", never as 0.
+    pub fn record_llm_round(
+        &self,
+        usage: &UsageInfo,
+        tps: Option<f64>,
+        ttft_ms: Option<f64>,
+    ) -> u32 {
+        self.apply_llm_usage(usage);
+        self.apply_llm_perf(tps, ttft_ms);
+        let iteration = self.apply_llm_call_counter();
         self.write_meta();
+        // Hot field — the relay task coalesces these behind a 3 s cooldown.
         self.notify_state_change();
-        next
+        iteration
+    }
+
+    /// In-memory half of the perf accumulation: fold one call's measurements
+    /// into the session accumulators without touching storage.
+    ///
+    /// Each figure advances against its own sample count (see
+    /// [`SessionPerf::merged`]), so a call that measured only TTFT still
+    /// yields an honest speed mean.
+    fn apply_llm_perf(&self, tps: Option<f64>, ttft_ms: Option<f64>) {
+        if tps.is_none() && ttft_ms.is_none() {
+            return;
+        }
+        let next = {
+            let Ok(mut guard) = self.perf.lock() else {
+                return;
+            };
+            let merged = guard
+                .clone()
+                .unwrap_or_default()
+                .merged(tps, ttft_ms);
+            *guard = Some(merged.clone());
+            merged
+        };
+        tracing::debug!(
+            session_id = %self.session_id,
+            avg_tps = ?next.avg_tps(),
+            avg_ttft_ms = ?next.avg_ttft_ms(),
+            tps_samples = next.tps_samples,
+            ttft_samples = next.ttft_ms_samples,
+            "Recorded LLM performance sample"
+        );
     }
 
     /// Persist a single LLM call's raw `usage` into the session token
@@ -1739,6 +1820,19 @@ impl ConversationSession {
     /// call. Callers should invoke this once per LLM round-trip, not on
     /// every streaming event.
     pub fn accumulate_llm_usage(&self, usage: &UsageInfo) {
+        self.apply_llm_usage(usage);
+        self.write_meta();
+        // Hot field — the relay task coalesces these behind a 3 s cooldown.
+        self.notify_state_change();
+    }
+
+    /// In-memory half of [`Self::accumulate_llm_usage`]: fold one call's
+    /// usage into the token accumulator without touching storage.
+    ///
+    /// Split out so [`Self::record_llm_round`] can fold a whole LLM
+    /// round-trip (tokens + speed + call count) and pay for exactly one
+    /// meta write. See that method for the persistence invariant.
+    fn apply_llm_usage(&self, usage: &UsageInfo) {
         if let Ok(mut guard) = self.tokens.lock() {
             // ADR-027: zero-skip on the input side.  A Provider fallback
             // returns `prompt_tokens == 0`; treating that as a real call
@@ -1791,9 +1885,6 @@ impl ConversationSession {
                 total_cache_write,
             });
         }
-        self.write_meta();
-        // Hot field — the relay task coalesces these behind a 3 s cooldown.
-        self.notify_state_change();
     }
 
     /// Persist a compaction LLM call's raw `usage` into the session token
@@ -1985,6 +2076,7 @@ impl Clone for ConversationSession {
             llm_call_counter: std::sync::Mutex::new(
                 self.llm_call_counter.lock().ok().and_then(|c| *c),
             ),
+            perf: std::sync::Mutex::new(self.perf.lock().ok().and_then(|p| p.clone())),
             model_ratio: std::sync::Mutex::new(self.model_ratio.lock().ok().and_then(|r| *r)),
             message_count: AtomicU64::new(self.message_count.load(Ordering::Relaxed)),
             last_meta_write: std::sync::Mutex::new(
@@ -3286,6 +3378,7 @@ mod tests {
             last_active_at: last_active_at.to_string(),
             tokens: None,
             llm_call_counter: None,
+            perf: None,
             model_ratio: None,
             last_compaction_offset: None,
             corrupted: false,
@@ -3500,6 +3593,7 @@ mod tests {
                 last_active_at: ts.clone(),
                 tokens: None,
                 llm_call_counter: None,
+            perf: None,
                 model_ratio: None,
                 last_compaction_offset: None,
                 corrupted: false,
@@ -3707,6 +3801,7 @@ mod tests {
             last_active_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
             tokens: None,
             llm_call_counter: None,
+            perf: None,
             model_ratio: None,
             last_compaction_offset: None,
             corrupted: false,
@@ -3835,6 +3930,92 @@ mod tests {
                 ConversationSession::resume(&dir, "tok_acc_iter", committed).unwrap();
             assert_eq!(resumed.llm_call_counter(), Some(2));
             assert_eq!(resumed.bump_llm_call_counter(), 3);
+        });
+    }
+
+    #[test]
+    fn test_record_llm_round_folds_usage_perf_and_counter_once() {
+        // One LLM round = one meta write carrying all three accumulators.
+        // A call that measured only TTFT must not dilute the speed mean —
+        // each field keeps its own sample count.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        rt.block_on(async {
+            let dir = temp_dir.path().to_path_buf();
+            let cfg = SessionConfig {
+                agent_id: "com.test".to_string(),
+                workspace_id: None,
+                model: None,
+                provider: None,
+            };
+            let committed = Arc::new(AtomicUsize::new(0));
+            let (session, _config_rx, _state_rx) =
+                ConversationSession::new(&dir, "perf_round", cfg, 0, committed.clone()).unwrap();
+
+            assert_eq!(
+                session.record_llm_round(
+                    &UsageInfo {
+                        prompt_tokens: 1_000,
+                        completion_tokens: 200,
+                        total_tokens: 1_200,
+                        ..Default::default()
+                    },
+                    Some(100.0),
+                    Some(300.0),
+                ),
+                1
+            );
+            // A TTFT-only round: speed mean stays on its own single sample.
+            assert_eq!(
+                session.record_llm_round(
+                    &UsageInfo {
+                        prompt_tokens: 2_500,
+                        completion_tokens: 0,
+                        total_tokens: 2_500,
+                        ..Default::default()
+                    },
+                    None,
+                    Some(140.0),
+                ),
+                2
+            );
+
+            let tokens = session.tokens().expect("tokens recorded");
+            assert_eq!(tokens.total_input, 3_500);
+            assert_eq!(tokens.total_output, 200);
+            let perf = session.perf().expect("perf recorded");
+            assert_eq!(perf.avg_tps(), Some(100.0), "TTFT-only round dilutes speed");
+            assert_eq!(perf.avg_ttft_ms(), Some(220.0));
+            assert_eq!(session.llm_call_counter(), Some(2));
+
+            // A round with no perf observation still counts the call.
+            assert_eq!(
+                session.record_llm_round(
+                    &UsageInfo {
+                        prompt_tokens: 0,
+                        completion_tokens: 50,
+                        total_tokens: 50,
+                        ..Default::default()
+                    },
+                    None,
+                    None,
+                ),
+                3
+            );
+
+            session.close().await.unwrap();
+            let meta = read_session_meta(&dir.join("conversations"), "perf_round").expect("meta");
+            assert_eq!(meta.llm_call_counter, Some(3));
+            let disk = meta.perf.expect("perf persisted");
+            assert_eq!(disk.tps_samples, 1);
+            assert_eq!(disk.ttft_ms_samples, 2);
+
+            let (resumed, _config_rx, _state_rx) =
+                ConversationSession::resume(&dir, "perf_round", committed).unwrap();
+            let rperf = resumed.perf().expect("perf survives resume");
+            assert_eq!(rperf.avg_tps(), Some(100.0));
+            assert_eq!(rperf.avg_ttft_ms(), Some(220.0));
+            assert_eq!(resumed.llm_call_counter(), Some(3));
         });
     }
 
@@ -4218,6 +4399,12 @@ mod tests {
                 total_cache_write: 4_000,
             }),
             llm_call_counter: Some(7),
+            perf: Some(SessionPerf {
+                tps_sum: 402.5,
+                tps_samples: 7,
+                ttft_ms_sum: 2170.0,
+                ttft_ms_samples: 7,
+            }),
             model_ratio: None,
             last_compaction_offset: None,
             corrupted: false,
@@ -4225,6 +4412,13 @@ mod tests {
         let json = serde_json::to_string(&meta).unwrap();
         let parsed: SessionMeta = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.llm_call_counter, Some(7));
+        // The accumulator round-trips as sum + count, and the derived means
+        // are what the UI reads.
+        assert_eq!(parsed.perf.as_ref().and_then(|p| p.avg_tps()), Some(57.5));
+        assert_eq!(
+            parsed.perf.as_ref().and_then(|p| p.avg_ttft_ms()),
+            Some(310.0)
+        );
         assert_eq!(
             parsed.tokens,
             Some(SessionTokens {
@@ -4534,6 +4728,7 @@ mod tests {
                 last_active_at: "2026-01-02T00:00:00Z".to_string(),
                 tokens: None,
                 llm_call_counter: None,
+            perf: None,
                 model_ratio: None,
                 last_compaction_offset: None,
                 corrupted: false,
@@ -6331,6 +6526,7 @@ mod tests {
             tokens: None,
             corrupted: false,
             llm_call_counter: None,
+            perf: None,
             model_ratio: None,
             last_compaction_offset: None,
         };
@@ -6414,6 +6610,7 @@ mod tests {
                 tokens: None,
                 corrupted: false,
                 llm_call_counter: None,
+            perf: None,
                 model_ratio: None,
                 last_compaction_offset: None,
             }

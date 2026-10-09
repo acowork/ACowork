@@ -1085,6 +1085,8 @@
     "labelProvider": "Provider",
     "labelApiKeyAlias": "API Key Alias",
     "labelCharactersPerToken": "Characters/Token",
+    "labelAvgOutputSpeed": "Avg Output Speed (t/s)",
+    "labelAvgFirstTokenLatency": "Avg First-Token Latency (ms)",
     "labelThinkingLevel": "Thinking Level",
     "labelTemperature": "Temperature",
     "statePaused": "Paused",

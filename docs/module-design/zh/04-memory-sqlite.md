@@ -163,7 +163,7 @@ purged_at TEXT NOT NULL
 ### 4.1 三件套
 
 ```rust
-pub const SCHEMA_VERSION: i64 = 1;                           // 当前版本
+pub const SCHEMA_VERSION: i64 = 3;                           // 当前版本
 pub(crate) const MIGRATIONS: &[(i64, &str)] = &[...];        // [(target, sql)]
 pub(crate) fn apply_migrations(conn: &mut Connection) -> Result<()>;
 ```
@@ -176,15 +176,26 @@ pub(crate) fn apply_migrations(conn: &mut Connection) -> Result<()>;
 2. 对每个 `(target, sql)`，`stored < target` 才执行；
 3. 全部执行后写 `PRAGMA user_version = SCHEMA_VERSION`，整体一个 transaction。
 
-**幂等保证**：每个迁移步的 SQL 自身用 `WHERE NOT EXISTS` / `IF NOT EXISTS` 守卫，重复执行不报错。
+**幂等保证**：幂等来自 `user_version` 版本门（`stored < target` 才执行）+ 单 transaction，而**不是**来自 SQL 自身的守卫。`ALTER TABLE ... ADD COLUMN` 没有 `IF NOT EXISTS` 形式，重复执行必然报错——所以迁移步绝不能被跑两次，版本门是唯一的保护。
 
 ### 4.3 加字段流程（开发者参考）
 
-1. 在 `MIGRATIONS` 加新条目 `(target = SCHEMA_VERSION + 1, sql)`，SQL 中 `ADD COLUMN ... WHERE NOT EXISTS`；
-2. 同步把列加进 `SCHEMA_SQL` 的初始 DDL（让 fresh DB 直接有列，无需迁移）；
-3. 节点结构体加 `#[serde(default)]` 字段（保证旧库读不报错）；
-4. 跑 `tests::round_trip_*` 断言新字段 round-trip 不丢；
-5. 提 PR，bump `SCHEMA_VERSION`。
+1. 在 `MIGRATIONS` 加新条目 `(target = SCHEMA_VERSION + 1, sql)`，SQL 为 `ALTER TABLE ... ADD COLUMN`；
+2. **不要**把该列加进 `SCHEMA_SQL` 的初始 DDL——基表 DDL 只描述 v1 之前的形状，新列一律走 `MIGRATIONS`（见 `schema.rs` 中的显式约定）。fresh DB 从 `user_version = 0` 起，会把整条链跑完，形状与升级库一致，这一点由 `fresh_and_upgraded_databases_share_one_sessions_shape` 钉住；
+3. 新列一律 nullable 且无默认值，让旧行读成 `NULL` = "尚无该数据"，而不是伪造一个 0；
+4. 节点结构体加 `#[serde(default)]` 字段（保证旧库读不报错）；
+5. 跑 `tests::round_trip_*` 断言新字段 round-trip 不丢，并在 `fresh_and_upgraded_*` 的 `DROP COLUMN` 清单里补上新列；
+6. 提 PR，bump `SCHEMA_VERSION`。
+
+### 4.4 迁移史
+
+| target | 内容 | 来源 |
+|--------|------|------|
+| 1 | `sessions.version` / `sessions.corrupted` | ADR-082 D2 |
+| 2 | `sessions.user_id` / `sessions.visibility` | ADR-076 §决策 4（session 归属） |
+| 3 | `sessions.perf_tps_sum` / `perf_tps_samples` / `perf_ttft_ms_sum` / `perf_ttft_ms_samples` | 会话级 LLM 输出速度与首字延迟 |
+
+v3 存 **sum + count** 而非折叠好的均值：两个指标各自统计自己的样本数。一次调用可能只测得出 TTFT（Provider 未上报 completion 数），共用一个分母会把速度均值系统性抬高。
 
 > `acowork-sqlite::SCHEMA_VERSION` 与 trait 层语义版本独立 —— 它是 SQLite 库内 `user_version`，与 `acowork-memory` crate 版本号无耦合。
 
