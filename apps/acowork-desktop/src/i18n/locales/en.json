@@ -484,6 +484,8 @@
     "candidateTitle": "Other reachable Gateways — connect to one?",
     "candidateDetected": "Detected:",
     "candidateKeepWaiting": "Keep waiting",
+    "candidateConnecting": "Connecting...",
+    "connectingToUrl": "Connecting to {{url}}...",
     "bannerLocalStarting": "Starting local Gateway",
     "bannerLocalDown": "Local Gateway is not running",
     "bannerRemoteDown": "Gateway unreachable",
