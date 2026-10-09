@@ -60,6 +60,32 @@ export const toolbarIconButton =
 export const toolbarButtonActive =
   "bg-zinc-200 dark:bg-zinc-700 text-text ";
 
+/**
+ * Menu-item row in a dropdown / popup list (model · account · reasoning
+ * effort · workspace · skills) — the CURRENT selection.
+ *
+ * Selected rows must carry a background, not just accent text: the hover
+ * state on every one of those menus is a neutral grey fill, so a selected
+ * row that only tinted its text reads as *weaker* than the row the mouse
+ * happens to be passing over. Background + accent text + check mark is the
+ * language every other assistant chat composer uses, and it is what makes
+ * "which one is active" readable at a glance in a long model list.
+ *
+ * `bg-[var(--color-accent)]/10` (dark `/20`) follows the tint convention
+ * already used for badges and selected chips app-wide (`common/list/Badge`,
+ * `RemoteFolderPicker`, `DocTreeSidebar`), so the tint tracks whichever
+ * accent preset the user picked instead of hard-coding a blue.
+ *
+ * Includes a slightly stronger hover so the cursor passing *over* the
+ * selected row still acknowledges the hover rather than showing nothing.
+ */
+export const menuItemSelected =
+  "bg-[var(--color-accent)]/10 text-[var(--color-accent)] hover:bg-[var(--color-accent)]/15 dark:bg-[var(--color-accent)]/20 dark:hover:bg-[var(--color-accent)]/25";
+
+/** Menu-item row base — hover fill for a NON-selected row */
+export const menuItemHover =
+  "hover:bg-zinc-50 dark:hover:bg-zinc-700/50";
+
 /** Dialog action button (Cancel/Save) — fixed width */
 export const dialogButton =
   "w-20 rounded px-3 py-[var(--ui-btn-py)] text-xs font-medium text-center";

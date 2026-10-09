@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { Sparkles, FolderPlus, Check, Loader2 } from "lucide-react";
 import { cn } from "../../lib/utils";
+import { menuItemHover, menuItemSelected } from "../../lib/ui-styles";
 import { ToolbarDropdownTrigger } from "../common/ToolbarDropdown";
 import { useSkillStore } from "../../stores/skillStore";
 import { useAgentStore } from "../../stores/agentStore";
@@ -174,7 +175,7 @@ export function SkillsPanel({ textHidden, readOnly }: { textHidden?: boolean; re
                         }}
                         className={cn(
                           "flex w-full items-center gap-2 px-3 py-1.5 text-left transition-colors",
-                          "hover:bg-zinc-50 dark:hover:bg-zinc-700/50",
+                          isActive ? menuItemSelected : menuItemHover,
                         )}
                       >
                         <Sparkles className={cn("h-3.5 w-3.5 shrink-0")} style={isActive ? { color: "var(--color-accent)" } : { color: "" }} />

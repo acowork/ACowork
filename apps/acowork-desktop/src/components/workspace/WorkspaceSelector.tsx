@@ -9,6 +9,7 @@ import { useToast } from "../common/ToastProvider";
 import { FolderOpen, FolderPlus, Trash2, Shield, ShieldOff, Home, Check } from "lucide-react";
 import * as dialog from "@tauri-apps/plugin-dialog";
 import { cn } from "../../lib/utils";
+import { menuItemHover, menuItemSelected } from "../../lib/ui-styles";
 import { ToolbarDropdownTrigger } from "../common/ToolbarDropdown";
 import { Tooltip } from "../common/Tooltip";
 import { RemoteFolderPicker } from "./RemoteFolderPicker";
@@ -228,7 +229,8 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden, readOnly }
                   setOpen(false);
                 }}
                 className={cn(
-                  "flex w-full items-center gap-2 px-3 py-1.5 transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-700/50",
+                  "flex w-full items-center gap-2 px-3 py-1.5 transition-colors",
+                  currentWsId === "__agent_home__" ? menuItemSelected : menuItemHover,
                 )}
               >
                 <Home className="h-3.5 w-3.5 shrink-0 text-text-tertiary" />
@@ -275,7 +277,10 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden, readOnly }
                     return (
                       <div
                         key={dir.id}
-                        className="group flex items-center gap-2 px-3 py-1.5 transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-700/50"
+                        className={cn(
+                          "group flex items-center gap-2 px-3 py-1.5 transition-colors",
+                          isCurrent ? menuItemSelected : menuItemHover,
+                        )}
                       >
                         {/* Select workspace button */}
                         <button

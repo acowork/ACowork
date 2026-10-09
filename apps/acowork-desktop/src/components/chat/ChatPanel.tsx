@@ -13,7 +13,7 @@ import { cn } from "../../lib/utils";
 import { CAPSULE_PANE_CN } from "../common/capsule";
 import { fetchProviderModels } from "../../lib/gateway-api";
 import { startAgentAndSyncUI } from "../../lib/agent-start";
-import { toolbarIconButton } from "../../lib/ui-styles";
+import { menuItemHover, menuItemSelected, toolbarIconButton } from "../../lib/ui-styles";
 import { AddProviderFlow } from "../harness/AddProviderFlow";
 import * as sessionControl from "../../lib/session-control";
 import { useActiveSessionReadOnly } from "../../lib/session-write-access";
@@ -3416,8 +3416,8 @@ function ModelMenu({
                         className={cn(
                           "flex w-full items-center justify-between pl-5 pr-3 py-1.5 text-xs font-medium transition-colors",
                           isActive
-                            ? "text-[var(--color-accent)]"
-                            : "text-text-secondary hover:bg-zinc-50  dark:hover:bg-zinc-700/50",
+                            ? menuItemSelected
+                            : cn("text-text-secondary", menuItemHover),
                         )}
                       >
                         <span className="flex items-center gap-1 min-w-0">
@@ -3514,8 +3514,8 @@ function ModelMenu({
                       className={cn(
                         "flex w-full items-center justify-between px-3 py-1.5 text-xs font-medium transition-colors",
                         isActive
-                          ? "text-[var(--color-accent)]"
-                          : "text-text-secondary hover:bg-zinc-50  dark:hover:bg-zinc-700/50",
+                          ? menuItemSelected
+                          : cn("text-text-secondary", menuItemHover),
                       )}
                     >
                       <span className="flex min-w-0 items-center gap-1">
@@ -3648,8 +3648,8 @@ function ReasoningEffortMenu({
                   className={cn(
                     "flex w-full items-center gap-2 px-3 py-1.5 text-xs font-medium transition-colors",
                     isActive
-                      ? "text-[var(--color-accent)]"
-                      : "text-text-secondary hover:bg-zinc-50  dark:hover:bg-zinc-700/50",
+                      ? menuItemSelected
+                      : cn("text-text-secondary", menuItemHover),
                   )}
                 >
                   <span
