@@ -1385,13 +1385,10 @@ export function ChatPanel() {
       (it) => it.status === "uploading",
     );
 
-    // The button stays enabled when empty so a click can explain itself
-    // instead of a dead (disabled) button that reads as "the app is
-    // broken". Toast, then no-op.
-    if (!content && !hasItems) {
-      addToast({ type: "warning", message: t("chatPanel.emptyMessage") });
-      return;
-    }
+    // The button stays enabled when empty; an empty click is a silent
+    // no-op — no "message is empty" toast, it fired on fast-typing
+    // misclicks and annoyed more than it helped.
+    if (!content && !hasItems) return;
     if (sending || !selectedAgentId || hasUploading) return;
 
     // Collect resolved (success) AttachedItem[] for the optimistic bubble
@@ -2958,8 +2955,8 @@ export function ChatPanel() {
                     //
                     // Empty input is NOT a disable condition: a dead button
                     // has no affordance to explain why, so the button stays
-                    // live and `handleSend` toasts "message is empty" on the
-                    // click. Uploading attachments still disables (the
+                    // live; an empty click in `handleSend` is a silent
+                    // no-op. Uploading attachments still disables (the
                     // payload can't be assembled mid-upload).
                     readOnlySession
                       ? true
