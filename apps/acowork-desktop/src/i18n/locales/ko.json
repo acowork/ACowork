@@ -1298,6 +1298,8 @@
     "candidateTitle": "다른 사용 가능한 게이트웨이를 찾았습니다 — 연결하시겠습니까?",
     "candidateDetected": "감지:",
     "candidateKeepWaiting": "대기 계속",
+    "candidateConnecting": "전환 중...",
+    "connectingToUrl": "{{url}}(으)로 전환 중...",
     "bannerLocalStarting": "로컬 게이트웨이 시작 중",
     "bannerLocalDown": "로컬 게이트웨이가 실행되지 않음",
     "bannerRemoteDown": "게이트웨이에 연결할 수 없음",

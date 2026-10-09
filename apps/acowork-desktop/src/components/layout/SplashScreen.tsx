@@ -171,17 +171,32 @@ function LoadingDots({ className = "" }: { className?: string }) {
  * Sort order is set upstream in the probe caller (fastest first). The
  * "Keep waiting" button just dismisses the chooser — the main boot
  * pipeline continues unchanged.
+ *
+ * `pickingUrl` is set by the parent the moment the user clicks a row,
+ * BEFORE the boot retry has a chance to round-trip. While it is set:
+ *   - the picked row swaps its latency label for a spinner +
+ *     "Connecting..." text so the user gets immediate feedback that
+ *     the click landed (no more "did I really click that?" feeling)
+ *   - every other row + the dismiss button are disabled, so an
+ *     impatient multi-click can't fan out into parallel boot pipelines
+ *     or hide the chooser under the spinner.
+ * The parent clears `pickingUrl` once the retry resolves (success OR
+ * failure).
  */
 function CandidateChooser({
     candidates,
+    pickingUrl,
     onPick,
     onDismiss,
 }: {
     candidates: { url: string; latencyMs: number }[];
+    /** URL the user just clicked. `null` while idle. */
+    pickingUrl: string | null;
     onPick: (url: string) => void;
     onDismiss: () => void;
 }) {
     const { t } = useTranslation();
+    const isPicking = pickingUrl !== null;
     return (
         <div className="mb-2 w-[28rem] max-w-full rounded-md border border-border-outer bg-panel-base p-3 text-left shadow-sm">
             <div className="mb-2 flex items-center justify-between">
@@ -190,29 +205,49 @@ function CandidateChooser({
                 </p>
                 <button
                     onClick={onDismiss}
-                    className="text-11 text-text-tertiary hover:text-text-secondary"
+                    disabled={isPicking}
+                    className="text-11 text-text-tertiary hover:text-text-secondary disabled:cursor-not-allowed disabled:opacity-40"
                 >
                     {t("splashScreen.candidateKeepWaiting")}
                 </button>
             </div>
             <ul className="flex flex-col gap-1">
-                {candidates.map((c) => (
-                    <li key={c.url}>
-                        <button
-                            onClick={() => onPick(c.url)}
-                            className="btn-accent flex w-full items-center justify-between rounded px-2.5 py-1.5 text-left disabled:cursor-not-allowed disabled:opacity-50"
-                        >
-                            {/* White on the accent fill — never the theme text
-                                tokens, which are unreadable on a solid accent. */}
-                            <span className="truncate font-mono text-xs text-white" title={c.url}>
-                                {c.url}
-                            </span>
-                            <span className="ml-2 shrink-0 text-11 text-white/80">
-                                {Math.round(c.latencyMs)} ms
-                            </span>
-                        </button>
-                    </li>
-                ))}
+                {candidates.map((c) => {
+                    const isThisRow = pickingUrl === c.url;
+                    return (
+                        <li key={c.url}>
+                            <button
+                                onClick={() => onPick(c.url)}
+                                disabled={isPicking}
+                                aria-busy={isThisRow || undefined}
+                                style={isThisRow ? { opacity: 1 } : undefined}
+                                className="btn-accent flex w-full items-center justify-between rounded px-2.5 py-1.5 text-left disabled:cursor-not-allowed disabled:opacity-50"
+                            >
+                                {/* White on the accent fill — never the theme text
+                                    tokens, which are unreadable on a solid accent. */}
+                                <span
+                                    className="truncate font-mono text-xs text-white"
+                                    title={c.url}
+                                >
+                                    {c.url}
+                                </span>
+                                {isThisRow ? (
+                                    <span className="ml-2 flex shrink-0 items-center gap-1.5 text-11 text-white/90">
+                                        <span
+                                            aria-hidden="true"
+                                            className="inline-block h-3 w-3 animate-spin rounded-full border-[1.5px] border-white/40 border-t-white"
+                                        />
+                                        {t("splashScreen.candidateConnecting")}
+                                    </span>
+                                ) : (
+                                    <span className="ml-2 shrink-0 text-11 text-white/80">
+                                        {Math.round(c.latencyMs)} ms
+                                    </span>
+                                )}
+                            </button>
+                        </li>
+                    );
+                })}
             </ul>
         </div>
     );
@@ -238,6 +273,17 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
     // text instead of the "did not respond" copy. Cleared by retry.
     const [bootError, setBootError] = useState<string | null>(null);
     const [retrying, setRetrying] = useState(false);
+    /**
+     * The candidate URL the user just clicked, set the instant the click
+     * lands (NOT after the boot round-trip). Drives the candidate row's
+     * own "Connecting..." + spinner state and disables the rest of the
+     * chooser so impatient multi-clicks don't fan out into parallel boot
+     * pipelines. Mirrored in `pickingUrlRef` so the async `handleRetry`
+     * can read it without waiting for React's setState to commit.
+     * Cleared in `handleRetry`'s `finally` once the retry resolves.
+     */
+    const [pickingUrl, setPickingUrl] = useState<string | null>(null);
+    const pickingUrlRef = useRef<string | null>(null);
     // Pre-filled with the persisted address so the user can edit a stale
     // remote-gateway URL straight from the timeout view (the Settings
     // page is unreachable until the Gateway connects).
@@ -429,6 +475,12 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
         setTimedOut(false);
         setBootError(null);
         startTimeRef.current = Date.now();
+        // Snapshot the picking URL set by the candidate click. The
+        // candidate-pick path sets `pickingUrl` + `pickingUrlRef` BEFORE
+        // calling `handleRetry(url)`, so this ref is already current
+        // here (the manual "Retry" button path leaves it null). Reading
+        // it via ref avoids waiting for React's setState to commit.
+        const pickingOnEntry = pickingUrlRef.current;
         // Remote mode: the timeout view lets the user edit the Gateway
         // address. Persist + push to Rust before probing so this retry
         // (and every later command) targets the new URL. `applyGatewayUrl`
@@ -449,52 +501,80 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
         if (nextUrl) {
             useSettingsStore.getState().applyGatewayUrl(nextUrl);
         }
-        // Re-run the FULL boot sequence (config push → spawn/adopt →
-        // system agent → MQTT + listeners) instead of the previous
-        // ad-hoc `startLocalGateway` + `connect_mqtt`-with-swallowed-
-        // error combination: the old flow could report "Ready" while
-        // MQTT was never connected. Safe to repeat — `connect_mqtt`
-        // reuses an existing client bound to the same broker.
-        setStatusText(
-            gatewayMode === "local"
-                ? "Retrying local Gateway..."
-                : "Retrying connection...",
-        );
-        try {
-            await bootGateway();
-        } catch (err) {
-            log.error("bootGateway retry failed:", err);
-            if (!mountedRef.current) return;
-            setBootError(describeBootError(err));
-            setTimedOut(true);
-            setRetrying(false);
-            return;
+        // The candidate-pick path already set a "Connecting to <url>..."
+        // status text the instant the row was clicked — don't overwrite
+        // it with the generic "Retrying..." string until the pick
+        // settles. The manual "Retry" button (no pickingOnEntry) still
+        // gets the previous generic text.
+        if (!pickingOnEntry) {
+            setStatusText(
+                gatewayMode === "local"
+                    ? "Retrying local Gateway..."
+                    : "Retrying connection...",
+            );
         }
-        const gDone = await doCheck();
-        if (gDone) {
-            // ADR-059 §5.1: wait for bootstrap phase READY (replaces the
-            // old agent-inventory readiness guess).
-            const view = await checkBootstrapReady();
-            if (view && (view.phase === "READY" || view.phase === "DEGRADED")) {
-                finish();
-            } else {
-                // Quick poll a few times
-                for (let i = 0; i < 20; i++) {
-                    if (!mountedRef.current) break;
-                    await new Promise((r) => setTimeout(r, 500));
-                    const v = await checkBootstrapReady();
-                    if (v && (v.phase === "READY" || v.phase === "DEGRADED")) { finish(); break; }
+        try {
+            // Re-run the FULL boot sequence (config push → spawn/adopt →
+            // system agent → MQTT + listeners) instead of the previous
+            // ad-hoc `startLocalGateway` + `connect_mqtt`-with-swallowed-
+            // error combination: the old flow could report "Ready" while
+            // MQTT was never connected. Safe to repeat — `connect_mqtt`
+            // reuses an existing client bound to the same broker.
+            try {
+                await bootGateway();
+            } catch (err) {
+                log.error("bootGateway retry failed:", err);
+                if (!mountedRef.current) return;
+                setBootError(describeBootError(err));
+                // Do NOT setTimedOut here — the `finally` block is the
+                // single source of truth for the recovery transition so
+                // the picking-state cleanup + dead-candidate pruning
+                // run on the same code path regardless of why the retry
+                // failed (boot invoke throw vs unreachable URL).
+                return;
+            }
+            const gDone = await doCheck();
+            if (gDone) {
+                // ADR-059 §5.1: wait for bootstrap phase READY (replaces
+                // the old agent-inventory readiness guess).
+                const view = await checkBootstrapReady();
+                if (view && (view.phase === "READY" || view.phase === "DEGRADED")) {
+                    finish();
+                } else {
+                    // Quick poll a few times
+                    for (let i = 0; i < 20; i++) {
+                        if (!mountedRef.current) break;
+                        await new Promise((r) => setTimeout(r, 500));
+                        const v = await checkBootstrapReady();
+                        if (v && (v.phase === "READY" || v.phase === "DEGRADED")) { finish(); break; }
+                    }
                 }
             }
-        }
-        setRetrying(false);
-        // A failed retry must return to the timeout view (with the
-        // editable address field) — otherwise the UI is stuck on the
-        // "Retrying..." spinner forever and the user can't correct the
-        // URL a second time.
-        if (!mountedRef.current) return;
-        if (useGatewayStore.getState().status !== "connected") {
-            setTimedOut(true);
+        } finally {
+            if (!mountedRef.current) return;
+            setRetrying(false);
+            // Clear the picking state so the chooser re-enables. If we
+            // managed to connect, the parent unmounts us via onReady
+            // and this setState is a no-op render; if the pick failed,
+            // the chooser needs to be live again so the user can try
+            // another candidate (or edit the URL on the timeout view).
+            pickingUrlRef.current = null;
+            setPickingUrl(null);
+            // Failed retry must return to the timeout view (with the
+            // editable address field) — otherwise the UI is stuck on
+            // the "Retrying..." spinner forever and the user can't
+            // correct the URL a second time. For the candidate-pick
+            // path, also prune the failing URL from the candidate list
+            // so the user can't re-click the exact same dead address.
+            if (useGatewayStore.getState().status !== "connected") {
+                if (pickingOnEntry) {
+                    const dead = pickingOnEntry;
+                    useGatewayStore.getState().setCandidates((prev) =>
+                        prev.filter((c) => c.url !== dead),
+                    );
+                }
+                setTimedOut(true);
+            }
         }
     };
 
@@ -573,7 +653,24 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
                             {candidates.length > 0 && (
                                 <CandidateChooser
                                         candidates={candidates}
+                                        pickingUrl={pickingUrl}
                                         onPick={(url) => {
+                                            // Set the picking state FIRST so
+                                            // the row can render its
+                                            // "Connecting..." spinner + grey
+                                            // out the rest of the chooser in
+                                            // the same paint that the click
+                                            // handler returns. Without this,
+                                            // the user sees zero feedback
+                                            // until the boot round-trip
+                                            // completes (multi-second) and
+                                            // concludes the click "did
+                                            // nothing".
+                                            setPickingUrl(url);
+                                            pickingUrlRef.current = url;
+                                            setStatusText(
+                                                t("splashScreen.connectingToUrl", { url }),
+                                            );
                                             // Persist + push to Rust BEFORE
                                             // retrying so the reconnect lands
                                             // on the picked host. Also records

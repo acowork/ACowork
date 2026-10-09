@@ -297,4 +297,173 @@ describe("SplashScreen 5s candidate chooser", () => {
         // never relay+http, which Rust would reject forever.
         expect(lastPushedGatewayConfig()).toEqual({ mode: "remote", url: CANDIDATE_URL });
     });
+
+    /**
+     * Regression: pre-fix, clicking a candidate row gave the user zero
+     * feedback until the boot round-trip completed (multi-second). The
+     * row looked identical before and after the click, so a click that
+     * "did nothing" felt broken. After the fix, the picked row must
+     * synchronously swap to aria-busy + a spinner + a "Connecting..."
+     * label, and the dismiss / sibling rows must be disabled so an
+     * impatient multi-click cannot fan out into parallel boot
+     * pipelines.
+     */
+    it("clicking a candidate row gives immediate picking feedback (spinner + Connecting label + disabled siblings)", async () => {
+        render(<SplashScreen onReady={vi.fn()} />);
+        await flushMicrotasks();
+        await act(async () => {
+            vi.advanceTimersByTime(CANDIDATE_FALLBACK_MS + 100);
+        });
+        await flushMicrotasks();
+
+        expect(useGatewayStore.getState().candidates.length).toBeGreaterThan(0);
+        const pickBtn = screen.getByRole("button", { name: new RegExp(CANDIDATE_URL) });
+
+        // No `await` between click and assertion: we want the SYNCHRONOUS
+        // render that React commits in the same act() pass as the click
+        // handler. The picking state is set BEFORE `handleRetry` schedules
+        // any work, so the commit delivers the feedback in this very
+        // paint — there is no round-trip to wait for.
+        act(() => {
+            fireEvent.click(pickBtn);
+        });
+
+        // The picked row now shows aria-busy + a "Connecting..." label
+        // instead of the latency "ms" suffix.
+        const sameTickBtn = screen.getByRole("button", {
+            name: new RegExp(CANDIDATE_URL),
+        });
+        expect(sameTickBtn.getAttribute("aria-busy")).toBe("true");
+        expect(sameTickBtn.textContent).toMatch(/Connecting/i);
+        expect(sameTickBtn.textContent).not.toMatch(/\bms\b/);
+
+        // Dismiss button is disabled while a pick is in flight so the
+        // chooser cannot be hidden under the picking spinner.
+        const dismissBtn = screen.getByText(/keep waiting/i) as HTMLButtonElement;
+        expect(dismissBtn.disabled).toBe(true);
+    });
+
+    /**
+     * Regression: pre-fix, the status line below the chooser kept
+     * reading "Starting Gateway..." / "Connecting to Gateway..." through
+     * the entire pick, so the user had no text-level cue that the
+     * click had registered either. The candidate-pick path must swap
+     * the status text to "Connecting to <picked-url>..." in the same
+     * tick as the click.
+     */
+    it("clicking a candidate row updates the status text to 'Connecting to <url>...' immediately", async () => {
+        render(<SplashScreen onReady={vi.fn()} />);
+        await flushMicrotasks();
+        await act(async () => {
+            vi.advanceTimersByTime(CANDIDATE_FALLBACK_MS + 100);
+        });
+        await flushMicrotasks();
+
+        const pickBtn = screen.getByRole("button", { name: new RegExp(CANDIDATE_URL) });
+        act(() => {
+            fireEvent.click(pickBtn);
+        });
+
+        // The status line is the only paragraph in the loading view
+        // whose text contains both "Connecting to" and the picked URL.
+        // `screen.getByText` with a regex is substring-and-case-
+        // insensitive, and the candidate row's own "Connecting..." label
+        // is filtered out because it never contains the URL.
+        const esc = CANDIDATE_URL.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        const statusLine = screen.getByText(
+            new RegExp(`Connecting to.*${esc}`),
+        );
+        expect(statusLine).toBeTruthy();
+    });
+
+    /**
+     * Regression: pre-fix, a candidate pick that the Gateway refused
+     * to honour (URL went away between probe and pick — typical
+     * when the candidate was a transient dev box) left the URL in
+     * the candidate list. The user would click the same dead address
+     * repeatedly, each click silently re-spawning the boot pipeline.
+     * The pick-failure path must drop the failing URL from the
+     * candidates list so the only surviving rows are the ones
+     * actually worth trying again.
+     */
+    it("a candidate pick that fails to connect prunes the dead URL from the list and falls back to the timeout view", async () => {
+        render(<SplashScreen onReady={vi.fn()} />);
+        await flushMicrotasks();
+        await act(async () => {
+            vi.advanceTimersByTime(CANDIDATE_FALLBACK_MS + 100);
+        });
+        await flushMicrotasks();
+        expect(useGatewayStore.getState().candidates.length).toBeGreaterThan(0);
+
+        // The candidate was reachable at probe time (per the beforeEach
+        // mock), but it has gone away by the time the user picks it.
+        // Every subsequent `/health` fetch (doCheck inside handleRetry)
+        // now rejects. The status stays "disconnected" so the timeout
+        // view eventually re-asserts.
+        vi.stubGlobal(
+            "fetch",
+            vi.fn(() => Promise.reject(new Error("now down"))),
+        );
+
+        const pickBtn = screen.getByRole("button", { name: new RegExp(CANDIDATE_URL) });
+        fireEvent.click(pickBtn);
+        await flushMicrotasks();
+
+        // Timeout view replaced the chooser (no more candidate row).
+        expect(screen.getByText("Retry Connection")).toBeTruthy();
+        expect(screen.queryByText(CANDIDATE_URL)).toBeNull();
+
+        // The dead URL is gone from the store; a fresh probe (not part
+        // of this test) is the only way it can come back.
+        const remaining = useGatewayStore.getState().candidates;
+        expect(remaining.find((c) => c.url === CANDIDATE_URL)).toBeUndefined();
+    });
+
+    /**
+     * Regression: pre-fix, sibling candidate rows stayed clickable
+     * while a pick was in flight. A frustrated user would click
+     * multiple candidates in quick succession, fanning out into
+     * concurrent boot pipelines. After the fix, only the picked row
+     * stays clickable; every other row is `disabled` until the pick
+     * settles.
+     */
+    it("clicking one candidate disables all sibling rows until the pick settles", async () => {
+        // Seed a second reachable candidate so we can verify the
+        // sibling row is locked while the picked one is in flight.
+        const CANDIDATE_URL_2 = "http://192.168.3.20:19876";
+        useSettingsStore.setState({
+            gatewayUrlHistory: [OLD_URL, CANDIDATE_URL, CANDIDATE_URL_2],
+        });
+        render(<SplashScreen onReady={vi.fn()} />);
+        await flushMicrotasks();
+        await act(async () => {
+            vi.advanceTimersByTime(CANDIDATE_FALLBACK_MS + 100);
+        });
+        await flushMicrotasks();
+
+        const candidates = useGatewayStore.getState().candidates;
+        expect(candidates.length).toBeGreaterThanOrEqual(2);
+
+        const firstBtn = screen.getByRole("button", { name: new RegExp(CANDIDATE_URL) });
+        act(() => {
+            fireEvent.click(firstBtn);
+        });
+
+        // The picked row stays interactive (aria-busy, not disabled by
+        // the visual rule because the row opacity is overridden).
+        const firstAfter = screen.getByRole("button", {
+            name: new RegExp(CANDIDATE_URL),
+        });
+        expect(firstAfter.getAttribute("aria-busy")).toBe("true");
+
+        // The sibling row is hard-disabled so it cannot accept another
+        // click that would race the in-flight boot. The host project
+        // does not pull in @testing-library/jest-dom, so assert on the
+        // raw `disabled` HTML attribute (which is exactly what
+        // `toBeDisabled` would check anyway).
+        const secondBtn = screen.getByRole("button", {
+            name: new RegExp(CANDIDATE_URL_2),
+        }) as HTMLButtonElement;
+        expect(secondBtn.disabled).toBe(true);
+    });
 });

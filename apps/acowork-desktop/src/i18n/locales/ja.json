@@ -1297,6 +1297,8 @@
     "candidateTitle": "他の利用可能なゲートウェイが見つかりました — 接続しますか?",
     "candidateDetected": "検出:",
     "candidateKeepWaiting": "待機を続ける",
+    "candidateConnecting": "切り替え中...",
+    "connectingToUrl": "{{url}} に切り替え中...",
     "bannerLocalStarting": "ローカルゲートウェイを起動中",
     "bannerLocalDown": "ローカルゲートウェイが実行されていません",
     "bannerRemoteDown": "ゲートウェイに到達できません",
