@@ -910,7 +910,7 @@ export function AgentList({ width }: AgentListProps) {
                         dot renders solid emerald — same online/offline
                         badge as the group header (gray when offline). */}
                     <span className="h-2 w-2 rounded-full bg-emerald-500" />
-                    {node.node_id}
+                    {node.node_name ?? node.hostname ?? node.node_id}
                     <span className="ml-auto text-text-tertiary">
                       {node.os ?? ""} {node.arch ?? ""}
                     </span>
