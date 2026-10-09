@@ -1708,6 +1708,7 @@
   },
   "permissionDialog": {
     "title": "権限",
+    "nodeSettingsTitle": "設定",
     "displayName": "表示名",
     "displayNameHint": "サイドバーとログに表示されます。小文字・数字・ハイフンのみ。ノードの ID は変更されません。",
     "displayNameInvalid": "2-32 文字の a-z、0-9、重複しないハイフン。「local」は予約済みです。",

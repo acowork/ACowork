@@ -102,6 +102,7 @@ function resetStore() {
     useGatewayStore.setState({
         status: "disconnected",
         gatewayAlive: "unknown",
+        gatewayUnreachable: false,
         health: null,
         localState: "idle",
         localOwnership: "none",

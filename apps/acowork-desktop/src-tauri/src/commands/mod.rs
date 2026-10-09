@@ -8,6 +8,7 @@ pub mod create;
 pub mod debug;
 pub mod effects;
 pub mod gateway;
+pub mod netinfo;
 pub mod publish;
 pub mod reveal;
 pub mod save_attachment;

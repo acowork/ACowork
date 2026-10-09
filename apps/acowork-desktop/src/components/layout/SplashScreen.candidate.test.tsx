@@ -24,7 +24,8 @@ vi.mock("@tauri-apps/api/core", () => ({
 const OLD_URL = "http://192.168.1.10:19876";
 const CANDIDATE_URL = "http://192.168.3.10:19876";
 const RELAY_URL = "https://c8cb2bed-ffd4-4821-a913-718618482157.relay.acowork.ai";
-// Must match CANDIDATE_FALLBACK_MS in SplashScreen.tsx
+// Must mirror `UNREACHABLE_HINT_MS` — the shared boot/runtime budget
+// in lib/connectivity/gatewayConnectivity.ts.
 const CANDIDATE_FALLBACK_MS = 5_000;
 const MAX_WAIT_MS = 30_000;
 
@@ -182,6 +183,21 @@ describe("SplashScreen 5s candidate chooser", () => {
         await flushMicrotasks();
         expect(useGatewayStore.getState().candidates).toHaveLength(0);
         expect(screen.queryByText(CANDIDATE_URL)).toBeNull();
+    });
+
+    it("candidate rows use the global accent button style", async () => {
+        render(<SplashScreen onReady={vi.fn()} />);
+        await flushMicrotasks();
+        await act(async () => {
+            vi.advanceTimersByTime(CANDIDATE_FALLBACK_MS + 100);
+        });
+        await flushMicrotasks();
+
+        const row = screen.getByRole("button", { name: new RegExp(CANDIDATE_URL) });
+        // Solid accent fill, not an outline row — same global button
+        // style the banner pills use.
+        expect(row.className).toContain("btn-accent");
+        expect(row.className).not.toMatch(/\bborder-/);
     });
 
     /**

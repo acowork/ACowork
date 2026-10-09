@@ -89,4 +89,58 @@ describe("probeGateways", () => {
         expect(byUrl["http://404:19876"]).toBe(false);
         expect(byUrl["http://down:19876"]).toBe(false);
     });
+
+    /**
+     * The latency property this whole `onSettled` hook exists for: a live
+     * host must not wait on a black-holed one burning its 1.5s budget.
+     * Measured before the fix at 1580ms; the live host answered in ~2ms.
+     */
+    it("onSettled delivers the live host long before the batch resolves", async () => {
+        vi.stubGlobal(
+            "fetch",
+            vi.fn((url: string, init?: { signal?: AbortSignal }) => {
+                if (url.includes("live")) {
+                    return Promise.resolve({ ok: true, json: async () => ({}) } as Response);
+                }
+                // Black hole — must honour the abort signal like real fetch.
+                return new Promise<Response>((_resolve, reject) => {
+                    init?.signal?.addEventListener("abort", () =>
+                        reject(new DOMException("aborted", "AbortError")),
+                    );
+                });
+            }),
+        );
+        const settledAt: Record<string, number> = {};
+        const t0 = performance.now();
+        await probeGateways(
+            ["http://blackhole:19876", "http://live:19876"],
+            {
+                perProbeTimeoutMs: 800,
+                onSettled: (r) => {
+                    settledAt[r.url] = performance.now() - t0;
+                },
+            },
+        );
+        // The live host is offered to the caller essentially immediately…
+        expect(settledAt["http://live:19876"]).toBeLessThan(300);
+        // …while the black hole only settles once its budget expires.
+        expect(settledAt["http://blackhole:19876"]).toBeGreaterThanOrEqual(700);
+    });
+
+    it("onSettled is optional and does not change the returned batch", async () => {
+        vi.stubGlobal(
+            "fetch",
+            vi.fn(async (url: string) =>
+                url.includes("ok")
+                    ? ({ ok: true, json: async () => ({}) } as Response)
+                    : ({ ok: false, json: async () => ({}) } as Response),
+            ),
+        );
+        const withHook = await probeGateways(["http://ok:19876", "http://bad:19876"], {
+            onSettled: () => {},
+        });
+        const withoutHook = await probeGateways(["http://ok:19876", "http://bad:19876"]);
+        expect(withHook.map((r) => r.ok)).toEqual(withoutHook.map((r) => r.ok));
+        expect(withHook).toHaveLength(2);
+    });
 });

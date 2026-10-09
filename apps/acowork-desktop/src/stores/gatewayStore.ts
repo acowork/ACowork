@@ -25,6 +25,14 @@ import { log } from "../lib/logger";
 //   3. `status` is a DISPLAY channel (ADR-051 semantics, read by the
 //      banner / settings page). Connection gating reads the MQTT
 //      authority — never `status`.
+//
+// The user-facing "unreachable" hint is NOT derived from the classifier:
+// a gateway that stays non-connected for the connectivity module's
+// budget (lib/connectivity/gatewayConnectivity.ts) is an outage the
+// user must see and act on, whatever the cause (black-holed path,
+// refused connection, dead process). The module debounces the MQTT
+// authority into `gatewayUnreachable`; the classifier keeps producing
+// its alive/dead verdict for diagnostics only.
 export type GatewayAlive = "unknown" | "alive" | "dead";
 
 /** `/health` probe budget. Aborting after it is "inconclusive" —
@@ -233,6 +241,16 @@ interface GatewayStore {
    * `applyGatewayTransition` (drop/rise edges) — never by input gating.
    */
   gatewayAlive: GatewayAlive;
+  /**
+   * User-facing outage signal, owned by the connectivity module
+   * (lib/connectivity/gatewayConnectivity.ts): true once the MQTT
+   * authority has been down for its `UNREACHABLE_HINT_MS` budget.
+   * Gates the TitleBar chip (hint + candidates) — deliberately
+   * independent of `status`/`gatewayAlive`, so a black-holed path or a
+   * slow classifier can never hide the outage. Cleared on the next
+   * MQTT rise.
+   */
+  gatewayUnreachable: boolean;
   health: HealthResponse | null;
   localState: LocalGatewayState;
   /**
@@ -288,8 +306,17 @@ interface GatewayStore {
   pollMigrationProgress: () => Promise<boolean>;
   /** Update migration progress for a single agent (from WebSocket event) */
   updateMigrationProgress: (agentId: string, reconstructed: number, totalScanned: number) => void;
-  /** Replace the candidate list (used by SplashScreen probe + recovery). */
-  setCandidates: (candidates: GatewayCandidate[]) => void;
+  /**
+   * Replace the candidate list (used by SplashScreen probe + recovery).
+   *
+   * Accepts a functional updater as well as a value because the title-bar
+   * chip folds probe results in one host at a time (see `probeGateways`'s
+   * `onSettled`) — a plain value setter would drop whatever a concurrently
+   * settling host had already published.
+   */
+  setCandidates: (
+    candidates: GatewayCandidate[] | ((prev: GatewayCandidate[]) => GatewayCandidate[]),
+  ) => void;
   /** Clear candidates — call when a Gateway connects or the user dismisses the chooser. */
   clearCandidates: () => void;
 }
@@ -327,6 +354,7 @@ export const useGatewayStore = create<GatewayStore>((set, get) => ({
   //   startup window regardless of this initial value.
   status: "disconnected",
   gatewayAlive: "unknown",
+  gatewayUnreachable: false,
   health: null,
   localState: "idle",
   localOwnership: "none",
@@ -519,6 +547,9 @@ export const useGatewayStore = create<GatewayStore>((set, get) => ({
     });
   },
 
-  setCandidates: (candidates) => set({ candidates }),
+  setCandidates: (candidates) =>
+    set((s) => ({
+      candidates: typeof candidates === "function" ? candidates(s.candidates) : candidates,
+    })),
   clearCandidates: () => set({ candidates: [] }),
 }));

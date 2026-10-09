@@ -21,6 +21,7 @@ import { act, render, screen, fireEvent } from "@testing-library/react";
 import { TitleBar, RightPanelIcon } from "./TitleBar";
 import { useSearchStore } from "../../stores/searchStore";
 import { useLayoutStore } from "../../stores/layoutStore";
+import { useGatewayStore } from "../../stores/gatewayStore";
 
 // TitleBar calls getCurrentWindow() during render; jsdom has no Tauri IPC.
 vi.mock("@tauri-apps/api/window", () => ({
@@ -31,6 +32,12 @@ vi.mock("@tauri-apps/api/window", () => ({
   }),
 }));
 
+// GatewayStatusChip probes URL history via fetch + Tauri invoke when a
+// drop happens; stub both so the mounting tests stay hermetic.
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: vi.fn(async () => ({})),
+}));
+
 const searchBtn = () => screen.getByRole("button", { name: /Ctrl\+Shift\+F/ });
 const panelBtn = () =>
   screen.getByRole("button", { name: /Right Panel/i });
@@ -39,6 +46,9 @@ describe("TitleBar view toggles", () => {
   beforeEach(() => {
     useSearchStore.setState({ open: false });
     useLayoutStore.setState({ rightPanelCollapsed: true });
+    // ADR-052: the outage chip is steady-state only; start from healthy
+    // so the toggle tests below aren't coupled to a gateway outage.
+    useGatewayStore.setState({ status: "connected", candidates: [] });
   });
 
   it("search button opens the global search dialog", () => {
@@ -91,5 +101,43 @@ describe("TitleBar view toggles", () => {
     act(() => useLayoutStore.setState({ rightPanelCollapsed: true }));
     rerender(<TitleBar />);
     expect(panelBtn().getAttribute("aria-pressed")).toBe("false");
+  });
+});
+
+/**
+ * The Gateway outage chip is mounted by TitleBar (it replaced the
+ * full-width GatewayBanner strip). Worth pinning here because the
+ * wiring is invisible in either file alone: TitleBar only renders it
+ * because it is imported, and it only appears because AppLayout gated
+ * the whole post-boot tree on `gatewayReady`. A dropped import would
+ * silently leave the app with no outage indicator at all.
+ */
+describe("TitleBar Gateway outage chip", () => {
+  beforeEach(() => {
+    useSearchStore.setState({ open: false });
+    useLayoutStore.setState({ rightPanelCollapsed: true });
+    useGatewayStore.setState({ status: "disconnected", gatewayUnreachable: true, candidates: [] });
+    vi.stubGlobal("fetch", vi.fn(() => Promise.reject(new Error("down"))));
+  });
+
+  it("mounts the chip on a steady-state gateway drop", () => {
+    render(<TitleBar />);
+    expect(screen.getByRole("button", { expanded: false })).toBeTruthy();
+  });
+
+  it("renders no chip while the gateway is healthy", () => {
+    act(() => useGatewayStore.setState({ status: "connected", gatewayUnreachable: false }));
+    const { container } = render(<TitleBar />);
+    expect(container.querySelector('[aria-expanded]')).toBeNull();
+  });
+
+  it("stays on the title bar until recovery clears the signal, never auto-hides", () => {
+    const { rerender } = render(<TitleBar />);
+    expect(screen.queryByRole("button", { expanded: false })).toBeTruthy();
+    // Recovery clears it — the connectivity module drops the
+    // `gatewayUnreachable` signal on the MQTT rise; nothing else does.
+    act(() => useGatewayStore.setState({ gatewayUnreachable: false }));
+    rerender(<TitleBar />);
+    expect(screen.queryByRole("button", { expanded: false })).toBeNull();
   });
 });

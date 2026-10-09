@@ -3,7 +3,7 @@
  * then the WiFi-switch follow-up).
  *
  * When the user saves a new Gateway address — SplashScreen timeout view,
- * GatewayBanner candidate pick, OnboardingFlow edit, or the Settings page
+ * GatewayStatusChip candidate pick, OnboardingFlow edit, or the Settings page
  * — `setGatewayUrl` must notify the authStore so the session can be
  * re-validated against the new endpoint:
  *

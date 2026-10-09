@@ -15,6 +15,15 @@
 
 import type { AuthMode, DirectoryUser, TokenPair, UserAccount } from "./types";
 
+/**
+ * Budget for the public auth-policy probe. The probe runs against a
+ * possibly black-holed URL while the UI waits on it, so it must fail
+ * on a product-level clock instead of the OS TCP retransmit schedule
+ * (~21s on Windows). 5s matches the connectivity module's
+ * user-facing unreachable budget.
+ */
+const AUTH_POLICY_TIMEOUT_MS = 5_000;
+
 /** Error carrying the Gateway's HTTP status so callers can branch (401 vs 422). */
 export class AuthApiError extends Error {
   constructor(
@@ -70,6 +79,12 @@ async function postJson(url: string, body: unknown, accessToken?: string): Promi
  * `false` whenever the account system is off (`local`) or after the
  * operator completed setup, so the field is safe to ignore on legacy
  * gateways that predate the flag.
+ *
+ * Bounded by `AUTH_POLICY_TIMEOUT_MS`: a black-holed gateway URL (stale
+ * LAN IP after a Wi-Fi hop) makes the raw fetch hang on the OS TCP
+ * retransmit schedule (~21s on Windows). The AbortSignal turns that
+ * into a fast, catchable rejection so auth probing can never pin the
+ * UI; the connectivity module owns the user-facing recovery flow.
  */
 export async function fetchAuthPolicy(
   gatewayUrl: string,
@@ -78,7 +93,9 @@ export async function fetchAuthPolicy(
   registrationOpen: boolean;
   requiresSetup: boolean;
 }> {
-  const resp = await fetch(`${gatewayUrl}/api/status`);
+  const resp = await fetch(`${gatewayUrl}/api/status`, {
+    signal: AbortSignal.timeout(AUTH_POLICY_TIMEOUT_MS),
+  });
   if (!resp.ok) throw new AuthApiError(resp.status, await readError(resp));
   const data = (await resp.json()) as {
     auth_mode?: AuthMode;
