@@ -327,7 +327,7 @@ pub async fn provider_logo(
     Path(provider): Path<String>,
     Query(src): Query<LogoSource>,
 ) -> Result<Response, ApiError> {
-    let url = logo_upstream_url(&provider, src.source.as_deref())?;
+    let url = logo_upstream_url(&provider, src.src.as_deref())?;
 
     let resp = logo_client()
         .get(url)
@@ -371,10 +371,16 @@ pub async fn provider_logo(
 
 /// `?src=` selector for [`provider_logo`]. Absent or unrecognised falls back
 /// to models.dev, the tier that actually carries marks for most ids.
+///
+/// The field is named `src` because that is what the Desktop sends. It
+/// previously read `source`, which `#[serde(default)]` silently swallowed on
+/// a `?src=si` request — so every tier-1 logo quietly answered from
+/// models.dev (a monochrome `currentColor` mark, invisible on the Desktop's
+/// dark surface) and never reached the `onError` that applies `dark:invert`.
 #[derive(Deserialize)]
 pub struct LogoSource {
     #[serde(default)]
-    pub source: Option<String>,
+    pub src: Option<String>,
 }
 
 /// Build the upstream URL for a logo request, or reject the provider id.
@@ -999,6 +1005,54 @@ mod tests {
         assert_eq!(req.key.as_deref(), Some("sk-rotated"));
     }
 
+
+    #[test]
+    fn logo_source_accepts_the_query_name_the_desktop_actually_sends() {
+        // Regression: the struct field was named `source` but the Desktop
+        // requests `?src=si`. `#[serde(default)]` swallowed the unknown key
+        // instead of erroring, so every tier-1 logo silently came from
+        // models.dev — a black `currentColor` mark, invisible on dark
+        // surfaces, and never reaching the Desktop's `onError` that applies
+        // `dark:invert`. The `logo_upstream_url` unit tests could not catch
+        // this: they call it directly, bypassing the query round trip.
+        //
+        // Parsed through the same `axum::extract::Query` wrapper the handler
+        // uses, so this stays a test — not a new dependency.
+        use axum::extract::Query;
+        use axum::http::Uri;
+
+        let parse = |q: &str| -> LogoSource {
+            let uri: Uri = format!("http://t/logo?{q}").parse().unwrap();
+            Query::<LogoSource>::try_from_uri(&uri)
+                .map(|Query(v)| v)
+                .unwrap_or_else(|e| panic!("{q:?} must deserialize into LogoSource: {e}"))
+        };
+
+        // `amd` is the probe: Simple Icons ships it in brand red (#ED1C24)
+        // while models.dev serves the same shape in `currentColor`, so the
+        // chosen upstream is observable in the returned URL.
+        let si = parse("src=si");
+        assert_eq!(si.src.as_deref(), Some("si"));
+        assert_eq!(
+            logo_upstream_url("amd", si.src.as_deref()).unwrap(),
+            "https://cdn.simpleicons.org/amd"
+        );
+
+        // Absent still means the models.dev default, not an error.
+        let none = parse("");
+        assert!(none.src.is_none());
+        assert_eq!(
+            logo_upstream_url("anthropic", none.src.as_deref()).unwrap(),
+            "https://models.dev/logos/anthropic.svg"
+        );
+
+        // An unrecognised value is not interpolated; it lands on the default.
+        let bogus = parse("src=https://evil.example");
+        assert_eq!(
+            logo_upstream_url("anthropic", bogus.src.as_deref()).unwrap(),
+            "https://models.dev/logos/anthropic.svg"
+        );
+    }
 
     #[test]
     fn logo_upstream_url_only_ever_targets_the_two_known_hosts() {
