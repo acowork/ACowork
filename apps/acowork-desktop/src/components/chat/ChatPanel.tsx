@@ -981,6 +981,14 @@ export function ChatPanel() {
   const lastFirstVisibleBlockIdxRef = useRef<number | null>(null);
   /** Adapter messageOffset at the time of the last scroll event (for snapshot). */
   const lastMessageOffsetRef = useRef<number | null>(null);
+  /**
+   * Viewport height captured while the container was still mounted.  The
+   * snapshot writer runs in a useLayoutEffect CLEANUP, after React detached
+   * the ref and the browser reports clientHeight = 0 for a detached element;
+   * reading it live then would make every row look fully visible, pinning the
+   * restored position to the top.  Both ref-capture sites below refresh this.
+   */
+  const lastClientHeightRef = useRef(0);
   useInsertionEffect(() => {
     // GUARD: only update refs when the current session has rendered blocks.
     // During a session switch the new session's adapter has NO blocks yet
@@ -999,6 +1007,7 @@ export function ChatPanel() {
       if (container) {
         lastScrollTopRef.current = container.scrollTop;
         lastScrollHeightRef.current = container.scrollHeight;
+        lastClientHeightRef.current = container.clientHeight;
       }
       const fvbId = vmlRef.current?.getFirstVisibleBlockId();
       if (fvbId != null) lastFirstVisibleBlockIdRef.current = fvbId;
@@ -1164,9 +1173,28 @@ export function ChatPanel() {
   // (e.g. loadSessionMessages → isLoadingSession → re-render), overwriting the
   // unmount snapshot with a transient scrollOffset=0.
   useLayoutEffect(() => {
+    // This closure is captured when the key CHANGES, so it carries the
+    // OUTGOING session — the one being snapshotted when this cleanup fires.
+    const sessionId = currentSessionId;
+    const agentId = selectedAgentId;
     return () => {
       const key = currentScrollKey;
       if (!key) return;
+
+      // Never snapshot a view the user never saw. If the init-scroll effect
+      // never managed to position the container (remount raced the virtualizer
+      // attaching its scroll element), the refs below hold the pre-position
+      // scroll-top-0 reading; persisting that would pin this session to the
+      // top on every later return.
+      //
+      // ORDERING DEPENDENCY: this reads `isPositioned()` while the outgoing
+      // session's flag is still set, because React runs every layout-effect
+      // CLEANUP of this fiber before any of its bodies — useScrollController's
+      // session-switch reset (which clears the flag) is a body and therefore
+      // lands after this.  That is also why the reset must stay a plain body
+      // and never be refactored into a cleanup: it would then run first and
+      // silently drop the snapshot on every single session switch.
+      if (!scrollController.isPositioned()) return;
 
       // Read from the guarded refs.  These hold the OLD session's
       // last-known values because:
@@ -1176,11 +1204,20 @@ export function ChatPanel() {
       const scrollOffset = lastScrollTopRef.current;
       const scrollHeight = lastScrollHeightRef.current;
       const firstVisibleBlockId = lastFirstVisibleBlockIdRef.current;
-      const container = messagesContainerRef.current;
-      const clientHeight = container?.clientHeight ?? 0;
+      // Captured while the container was still mounted — reading
+      // messagesContainerRef here gives 0 (detached), which would make every
+      // row look fully visible and restore at the top.
+      const clientHeight = lastClientHeightRef.current;
+      // `sending` in this closure is frozen at the moment the key changed, so
+      // a stream started while the user sat in the session is invisible to it.
+      // Read the status from the store by id at write time instead.
+      const status =
+        agentId && sessionId
+          ? useChatStore.getState().agentStates[agentId]?.sessionStates[sessionId]?.sessionStatus
+          : null;
       const distFromBottom = scrollHeight - scrollOffset - clientHeight;
       setScrollSnapshot(key, {
-        atBottom: sending || distFromBottom <= 120,
+        atBottom: isProcessing(status) || distFromBottom <= 120,
         firstVisibleBlockId,
         messageOffset: lastMessageOffsetRef.current,
         firstVisibleBlockIndex: lastFirstVisibleBlockIdxRef.current,
@@ -2174,6 +2211,12 @@ export function ChatPanel() {
         <div
           className="relative flex-1 overflow-hidden"
           onWheel={(e) => {
+            // Any wheel over the message area means the user is driving (or
+            // about to drive) the viewport, so whatever is on screen is now a
+            // reading position worth persisting — and a still-pending
+            // init-scroll retry must stop fighting them for it.  See
+            // ScrollController.noteViewportInteraction.
+            scrollController.noteViewportInteraction();
             // The jump-to-top / jump-to-bottom buttons live as siblings of
             // the scroll container inside this `overflow-hidden` wrapper
             // (see JSX below), so the browser's scrollable-ancestor lookup
@@ -2209,10 +2252,17 @@ export function ChatPanel() {
           )}
           <div
             ref={messagesContainerRef}
+            onPointerDown={() => {
+              // Touch/pen scrolling and scrollbar dragging never produce a
+              // `wheel` event, so they claim viewport ownership here (see the
+              // onWheel handler above for why this matters).
+              scrollController.noteViewportInteraction();
+            }}
             onScroll={() => {
                               setChatScrolledFromTop((messagesContainerRef.current?.scrollTop ?? 0) > CHAT_TOP_SHADOW_THRESHOLD_PX);
                               lastScrollTopRef.current = (messagesContainerRef.current?.scrollTop ?? 0);
                               lastScrollHeightRef.current = (messagesContainerRef.current?.scrollHeight ?? 0);
+                              lastClientHeightRef.current = (messagesContainerRef.current?.clientHeight ?? 0);
                               const fvbId = vmlRef.current?.getFirstVisibleBlockId();
                               if (fvbId != null) lastFirstVisibleBlockIdRef.current = fvbId;
                               const fvbIdx = vmlRef.current?.getFirstVisibleBlockIndex();

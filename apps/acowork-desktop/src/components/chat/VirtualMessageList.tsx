@@ -129,9 +129,11 @@ export interface VirtualMessageListHandle {
   isStreamingBlockInViewport: () => boolean;
   /**
    * Scroll to the last virtual item, using virtualizer.scrollToIndex
-   * (data-driven).  No-op if there are zero virtual items.
+   * (data-driven).  Returns false when nothing moved (zero virtual items, or
+   * the virtualizer has not attached a scroll element yet) so the caller can
+   * tell "positioned" from "no-op" instead of assuming success.
    */
-  scrollToBottom: () => void;
+  scrollToBottom: () => boolean;
   /**
    * Scroll to the first virtual item, using virtualizer.scrollToIndex
    * with align: "start".  No-op if there are zero virtual items.
@@ -145,7 +147,10 @@ export interface VirtualMessageListHandle {
   /**
    * Scroll to the block with the given content-derived blockId.
    * Data-driven replacement for pixel-based restoration.
-   * Returns true if the block was found and scrolled to, false otherwise.
+   * Returns true only when the block was found AND the virtualizer has a
+   * scroll element to move (see `scrollToBottom` for the same precondition);
+   * false means nothing moved, so the caller must not treat the viewport as
+   * positioned.
    */
   scrollToBlockId: (blockId: string) => boolean;
 }
@@ -455,9 +460,9 @@ export const VirtualMessageList = React.forwardRef<
       },
       scrollToBottom: () => {
         const count = virtualizer.options.count;
-        if (count === 0) return;
+        if (count === 0) return false;
         const el = virtualizer.scrollElement;
-        if (!el) return;
+        if (!el) return false;
         // Mount the last item so the virtualizer starts measuring it.  The
         // resulting DOM growth is *asynchronous*: scrollToIndex → browser
         // scroll event → virtualizer re-evaluates visible items → React
@@ -477,10 +482,14 @@ export const VirtualMessageList = React.forwardRef<
         pinDeadlineRef.current = performance.now() + BOTTOM_PIN_MAX_MS;
         lastPinTopRef.current = el.scrollHeight - el.clientHeight;
         el.scrollTop = lastPinTopRef.current;
+        return true;
       },
       scrollToTop: () => {
         const count = virtualizer.options.count;
         if (count === 0) return;
+        // No scroll-element guard here: this method reports nothing.  Every
+        // caller that needs to know whether the viewport actually moved goes
+        // through scrollToBottom / scrollToBlockId, which do return a boolean.
         virtualizer.scrollToIndex(0, { align: "start" });
       },
       scrollToIndex: (index: number) => {
@@ -493,6 +502,14 @@ export const VirtualMessageList = React.forwardRef<
         const blocks = messageBlocksRef.current;
         const idx = blocks.findIndex((b) => b.blockId === blockId);
         if (idx < 0) return false;
+        // Same precondition as scrollToBottom: virtualizer.scrollToIndex is a
+        // SILENT no-op while the virtualizer has not attached its scroll
+        // element, so returning true there would tell the caller the viewport
+        // is positioned when it is still sitting at initialOffset: 0.  The
+        // blockId restore path is the common one (user was browsing), so a
+        // false positive here re-introduces the top-latch this contract
+        // exists to prevent.
+        if (!virtualizer.scrollElement) return false;
         virtualizer.scrollToIndex(idx, { align: "start" });
         return true;
       },

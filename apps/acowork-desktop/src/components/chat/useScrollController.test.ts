@@ -277,10 +277,14 @@ describe("useScrollController: subscription", () => {
 
 describe("useScrollController: data-driven init scroll", () => {
   // Helper: build a vmlRef with the imperative methods the controller calls.
+  // `scrollToBottom`/`scrollToBlockId` return true: the controller now reads
+  // their return value as "the viewport actually moved", so a bare vi.fn()
+  // would silently put every case here on the failed-positioning path (and
+  // leave a retry rAF pending).
   function makeMockVml() {
     return {
       current: {
-        scrollToBottom: vi.fn(),
+        scrollToBottom: vi.fn(() => true),
         scrollToTop: vi.fn(),
         scrollToIndex: vi.fn(),
         scrollToBlockId: vi.fn(() => true),
@@ -404,10 +408,12 @@ describe("useScrollController: data-driven init scroll", () => {
 describe("useScrollController: followMode auto-follow", () => {
   // Helper: build a vmlRef with scrollToBottom + isStreamingBlockInViewport
   // (the two methods the controller invokes during liveUpdate auto-follow).
+  // Returns true from scrollToBottom so init-scroll counts as landed — see
+  // the note on makeMockVml above.
   function makeAutoFollowVml() {
     return {
       current: {
-        scrollToBottom: vi.fn(),
+        scrollToBottom: vi.fn(() => true),
         scrollToTop: vi.fn(),
         scrollToIndex: vi.fn(),
         scrollToBlockId: vi.fn(() => true),
@@ -1003,5 +1009,354 @@ describe("useScrollController: viewport fill", () => {
     await flushRaf();
     expect(loadNextPage).not.toHaveBeenCalled();
     expect(loadPrevPage).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Positioning contract (init scroll).
+ *
+ * The one-shot `initializedRef` gate must be consumed only when a scroll
+ * actually LANDS, and `isPositioned()` must tell the truth to ChatPanel's
+ * snapshot writer.  Both matter because a nav-back remount can race the
+ * virtualizer attaching its scroll element: `scrollToBottom()` then moves
+ * nothing, and if that counted as success ChatPanel would persist the
+ * untouched scroll-top-0 viewport as the session's reading position —
+ * latching the session to the top for every later visit.
+ */
+describe("useScrollController: isPositioned() reflects real positioning", () => {
+  function makeVmlReturning(ok: boolean) {
+    return {
+      current: {
+        scrollToBottom: vi.fn(() => ok),
+        scrollToTop: vi.fn(),
+        scrollToIndex: vi.fn(),
+        scrollToBlockId: vi.fn(() => ok),
+        getFirstVisibleBlockIndex: vi.fn(() => null),
+        getFirstVisibleBlockId: vi.fn(() => null),
+        getLastVisibleBlockIndex: vi.fn(() => null),
+        isStreamingBlockInViewport: vi.fn(() => false),
+      } as any,
+    };
+  }
+
+  const flushRaf = () =>
+    act(async () => {
+      await new Promise<void>((r) => requestAnimationFrame(() => r()));
+    });
+
+  it("true once the requested scroll lands", () => {
+    const vml = makeVmlReturning(true);
+    const { result } = renderHook(() =>
+      useScrollController({
+        containerRef: { current: null },
+        adapter: makeMockAdapter(),
+        vmlRef: vml,
+        sessionKey: "agent:sess",
+        initialAtBottom: true,
+      }),
+    );
+    expect(vml.current.scrollToBottom).toHaveBeenCalledTimes(1);
+    expect(result.current.isPositioned()).toBe(true);
+  });
+
+  it("false while every scroll attempt no-ops (remount race)", () => {
+    const vml = makeVmlReturning(false);
+    const { result } = renderHook(() =>
+      useScrollController({
+        containerRef: { current: null },
+        adapter: makeMockAdapter(),
+        vmlRef: vml,
+        sessionKey: "agent:sess",
+        initialAtBottom: true,
+      }),
+    );
+    // ChatPanel refuses to write a snapshot while this is false, so the
+    // session keeps its previous (real) restore target instead of latching
+    // to the top.
+    expect(result.current.isPositioned()).toBe(false);
+  });
+
+  it("retries across frames instead of giving up after one attempt", async () => {
+    const vml = makeVmlReturning(false);
+    renderHook(() =>
+      useScrollController({
+        containerRef: { current: null },
+        adapter: makeMockAdapter(),
+        vmlRef: vml,
+        sessionKey: "agent:sess",
+        initialAtBottom: true,
+      }),
+    );
+    await flushRaf();
+    await flushRaf();
+    // An idle session produces no further commit, so recovery can only come
+    // from the retry loop — one attempt would silently leave it at the top.
+    expect(vml.current.scrollToBottom.mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("counts the blockId fallback at bottom as positioned", () => {
+    // Compaction can delete the block the user was reading; the controller
+    // must not strand them mid-list.
+    const base = makeVmlReturning(true).current;
+    const vml = { current: { ...base, scrollToBlockId: vi.fn(() => false) } as any };
+    const { result } = renderHook(() =>
+      useScrollController({
+        containerRef: { current: null },
+        adapter: makeMockAdapter(),
+        vmlRef: vml,
+        sessionKey: "agent:sess",
+        initialAtBottom: false,
+        initialFirstVisibleBlockId: "block-removed",
+      }),
+    );
+    expect(vml.current.scrollToBlockId).toHaveBeenCalledWith("block-removed");
+    expect(vml.current.scrollToBottom).toHaveBeenCalledTimes(1);
+    expect(result.current.isPositioned()).toBe(true);
+  });
+
+  it("does not stall pagination when positioning fails", async () => {
+    // The two flags are deliberately separate: initializedRef ("attempted")
+    // gates edge detection, positionedRef ("landed") gates the snapshot
+    // writer.  Conflating them would hold loadPrevPage dead for the whole
+    // retry window on every session whose list mounts late.
+    const loadPrevPage = vi.fn(async () => {});
+    const adapter = makeMockAdapter({ hasOlder: true, loadPrevPage });
+    const container = {
+      scrollTop: 0,
+      scrollHeight: 2000,
+      clientHeight: 400,
+    } as unknown as HTMLDivElement;
+    const { result } = renderHook(() =>
+      useScrollController({
+        containerRef: { current: container },
+        adapter,
+        vmlRef: makeVmlReturning(false),
+        sessionKey: "agent:sess",
+        initialAtBottom: true,
+      }),
+    );
+
+    act(() => {
+      result.current.handleScroll();
+    });
+    await flushRaf();
+
+    expect(result.current.isPositioned()).toBe(false);
+    expect(loadPrevPage).toHaveBeenCalled();
+  });
+
+  it("recovers when the imperative handle appears after the first pass", async () => {
+    // Regression: the init-scroll effect used to bail out on a null handle
+    // AFTER consuming `initializedRef`.  Since that gate is one-shot per
+    // session, the effect never re-ran, so a late-mounting VML left the
+    // session unpositioned forever and permanently disabled the snapshot
+    // writer.  The retry loop must cover the null-handle case too.
+    const vmlRef = { current: null } as { current: any | null };
+    const { result } = renderHook(() =>
+      useScrollController({
+        containerRef: { current: null },
+        adapter: makeMockAdapter(),
+        vmlRef,
+        sessionKey: "agent:sess",
+        initialAtBottom: true,
+      }),
+    );
+    expect(result.current.isPositioned()).toBe(false);
+
+    // VML mounts on a later frame.
+    const vml = makeVmlReturning(true);
+    vmlRef.current = vml.current;
+    await flushRaf();
+
+    expect(vml.current.scrollToBottom).toHaveBeenCalled();
+    expect(result.current.isPositioned()).toBe(true);
+  });
+
+  it("keeps retrying across a data change during the retry window", async () => {
+    // The retry loop is owned by the SESSION, not by one render pass.  A
+    // blocksLen change re-runs the init-scroll effect, whose body then
+    // returns early on `initializedRef`; if that re-run had also torn down
+    // the pending loop, positioning would be abandoned exactly when new
+    // content keeps arriving (streaming, page loads).
+    const vml = makeVmlReturning(false);
+    const { rerender } = renderHook(
+      ({ count }: { count: number }) =>
+        useScrollController({
+          containerRef: { current: null },
+          adapter: makeMockAdapter({
+            blocks: Array.from({ length: count }, (_, i) => ({
+              ...DUMMY_BLOCK,
+              blockId: `block-${i}`,
+            })),
+          }),
+          vmlRef: vml,
+          sessionKey: "agent:sess",
+          initialAtBottom: true,
+        }),
+      { initialProps: { count: 1 } },
+    );
+
+    await flushRaf();
+    const afterFrame1 = vml.current.scrollToBottom.mock.calls.length;
+    expect(afterFrame1).toBeGreaterThanOrEqual(2);
+
+    rerender({ count: 2 });
+    await flushRaf();
+
+    // Still polling after the re-render — the loop survived it.
+    expect(vml.current.scrollToBottom.mock.calls.length).toBeGreaterThan(afterFrame1);
+  });
+
+  it("gives up at the deadline instead of polling forever", async () => {
+    let now = 0;
+    const nowSpy = vi.spyOn(performance, "now").mockImplementation(() => now);
+    try {
+      const vml = makeVmlReturning(false);
+      const { result } = renderHook(() =>
+        useScrollController({
+          containerRef: { current: null },
+          adapter: makeMockAdapter(),
+          vmlRef: vml,
+          sessionKey: "agent:sess",
+          initialAtBottom: true,
+        }),
+      );
+      const first = vml.current.scrollToBottom.mock.calls.length;
+
+      // Jump past INIT_SCROLL_MAX_MS and give the loop one more frame.
+      now = 10_000;
+      await flushRaf();
+
+      expect(vml.current.scrollToBottom.mock.calls.length).toBe(first + 1);
+      expect(result.current.isPositioned()).toBe(false);
+
+      // No further frames are scheduled: the loop is done.
+      const settled = vml.current.scrollToBottom.mock.calls.length;
+      await flushRaf();
+      await flushRaf();
+      expect(vml.current.scrollToBottom.mock.calls.length).toBe(settled);
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  it("noteViewportInteraction() makes the view recordable and stops the loop", async () => {
+    // A session whose init-scroll gave up must not stay permanently
+    // un-snapshottable: once the user scrolls somewhere themselves, that IS
+    // a reading position worth persisting.  Their input also has to end the
+    // retry loop, or the next attempt yanks the viewport back to the tail.
+    const vml = makeVmlReturning(false);
+    const { result } = renderHook(() =>
+      useScrollController({
+        containerRef: { current: null },
+        adapter: makeMockAdapter(),
+        vmlRef: vml,
+        sessionKey: "agent:sess",
+        initialAtBottom: true,
+      }),
+    );
+    expect(result.current.isPositioned()).toBe(false);
+
+    act(() => {
+      result.current.noteViewportInteraction();
+    });
+    expect(result.current.isPositioned()).toBe(true);
+
+    const calls = vml.current.scrollToBottom.mock.calls.length;
+    await flushRaf();
+    await flushRaf();
+    expect(vml.current.scrollToBottom.mock.calls.length).toBe(calls);
+  });
+
+  it("does not record an interaction at the unpositioned origin as a reading position", () => {
+    // The hole noteViewportInteraction must not re-open: positioning failed,
+    // so the list sits at scrollTop 0.  A stray click there is not "where the
+    // user was reading" — recording it would latch the session to the top on
+    // every later visit, which is the exact symptom being fixed.
+    const container = { scrollTop: 0 } as unknown as HTMLDivElement;
+    const vml = makeVmlReturning(false);
+    const { result } = renderHook(() =>
+      useScrollController({
+        containerRef: { current: container },
+        adapter: makeMockAdapter(),
+        vmlRef: vml,
+        sessionKey: "agent:sess",
+        initialAtBottom: true,
+      }),
+    );
+    expect(result.current.isPositioned()).toBe(false);
+
+    act(() => {
+      result.current.noteViewportInteraction();
+    });
+
+    // Still not recordable — ChatPanel will therefore keep this session's
+    // previous snapshot instead of persisting the bogus top position.
+    expect(result.current.isPositioned()).toBe(false);
+
+    // Once the viewport actually moves, the same interaction does open it up.
+    container.scrollTop = 640;
+    act(() => {
+      result.current.noteViewportInteraction();
+    });
+    expect(result.current.isPositioned()).toBe(true);
+  });
+
+  it("still positions the session when the user interacts before data lands", () => {
+    // Interaction marks the view recordable; it must NOT be read as "the
+    // viewport is already where it should be".  A click or wheel over an
+    // empty, still-loading viewport happens all the time — the init scroll
+    // still owes that session its restore.
+    const vml = makeVmlReturning(true);
+    const { rerender, result } = renderHook(
+      ({ count }: { count: number }) =>
+        useScrollController({
+          containerRef: { current: null },
+          adapter: makeMockAdapter({
+            blocks: Array.from({ length: count }, (_, i) => ({
+              ...DUMMY_BLOCK,
+              blockId: `block-${i}`,
+            })),
+          }),
+          vmlRef: vml,
+          sessionKey: "agent:sess",
+          initialAtBottom: true,
+        }),
+      { initialProps: { count: 0 } },
+    );
+
+    act(() => {
+      result.current.noteViewportInteraction();
+    });
+    rerender({ count: 3 });
+
+    expect(vml.current.scrollToBottom).toHaveBeenCalled();
+    expect(result.current.isPositioned()).toBe(true);
+  });
+
+  it("resets positioning when the session changes", () => {
+    // positionedRef is per-session.  Without the reset, the flag set by
+    // session A would let session B's never-positioned (scroll-top-0)
+    // viewport be snapshotted as B's reading position — the original latch.
+    const vml = makeVmlReturning(true);
+    const { rerender, result } = renderHook(
+      ({ sessionKey }: { sessionKey: string }) =>
+        useScrollController({
+          containerRef: { current: null },
+          adapter: makeMockAdapter(),
+          vmlRef: vml,
+          sessionKey,
+          initialAtBottom: true,
+        }),
+      { initialProps: { sessionKey: "agent:sess" } },
+    );
+    expect(result.current.isPositioned()).toBe(true);
+
+    // B cannot be positioned (every scroll no-ops), so the flag must be back
+    // to false — proving A's true did not leak across the session switch.
+    vml.current.scrollToBottom.mockImplementation(() => false);
+    rerender({ sessionKey: "agent:sess2" });
+
+    expect(result.current.isPositioned()).toBe(false);
   });
 });

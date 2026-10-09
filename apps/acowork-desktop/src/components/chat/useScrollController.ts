@@ -64,6 +64,7 @@
  * "jump to latest" button re-anchors at any time.
  */
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { log } from "../../lib/logger";
 import type { ChatListAdapterV2 } from "./chatListAdapter";
 import type { VirtualMessageListHandle } from "./VirtualMessageList";
 
@@ -94,6 +95,14 @@ const FILL_MIN_RANGE_VIEWPORTS = 1;
  */
 const MAX_FILL_PAGES = 10;
 
+/**
+ * Deadline for the init-scroll positioning retry loop (see the init-scroll
+ * effect).  The virtualizer attaches its scroll element during the child's
+ * layout phase, so one or two frames is normally enough; the cap exists only
+ * so a permanently unusable container cannot spin rAF forever.
+ */
+const INIT_SCROLL_MAX_MS = 500;
+
 // ── Public types ───────────────────────────────────────────────────────────
 
 export interface ScrollController {
@@ -109,6 +118,39 @@ export interface ScrollController {
   jumpToTop: () => void;
   /** Whether the user is viewing the latest content (at tail, no pending). */
   isAtLatest: () => boolean;
+  /**
+   * Whether the viewport currently shows a position that is WORTH RECORDING
+   * for the current session — either the init-scroll landed where we asked,
+   * or the user has since interacted with the viewport themselves.
+   *
+   * ChatPanel's scroll-snapshot writer MUST refuse to record a reading
+   * position while this is false.  An unpositioned virtualizer sits at its
+   * `initialOffset: 0` (the TOP); persisting that as "where the user was
+   * reading" is what made a session latch to the top: every later nav-back
+   * faithfully restored block 0, and `onScroll` then re-confirmed the bogus
+   * position.  Restoring to the tail is the safe default, so refusing to
+   * record costs nothing and breaks the lock.
+   */
+  isPositioned: () => boolean;
+  /**
+   * Declare that the user has directly interacted with the message viewport
+   * (wheel over the container, pointer-down inside it).  Two effects:
+   *
+   *   1. Marks the viewport as worth recording.  Without this, a session
+   *      whose init-scroll gave up (see `isPositioned`) could never persist
+   *      a position even after the user scrolled somewhere and read it for
+   *      minutes — the snapshot writer would keep refusing.
+   *   2. Stops the init-scroll retry loop, so a still-pending positioning
+   *      attempt cannot yank the viewport back to the tail underneath a user
+   *      who has already taken manual control.
+   *
+   * Deliberately NOT driven from `handleScroll`: when a session switches,
+   * the old content is removed, scrollHeight shrinks, and the browser fires
+   * a synthetic scroll event to clamp `scrollTop`.  Treating that as "the
+   * user saw this viewport" is exactly the bogus reading position this gate
+   * exists to reject.  Only genuine input events qualify.
+   */
+  noteViewportInteraction: () => void;
 }
 
 export interface ScrollControllerConfig {
@@ -235,6 +277,35 @@ export function useScrollController(config: ScrollControllerConfig): ScrollContr
   // initialOffset) and mistakes it for "user scrolled to top" —
   // cascading loadPrevPage until all messages are loaded.
   const initializedRef = useRef(false);
+  /**
+   * True once the viewport holds a position worth recording for this
+   * session: either the init-scroll landed, or the user directly interacted
+   * with the viewport (see `noteViewportInteraction`).  Kept apart from
+   * `initializedRef` (the pagination gate) because that gate must open even
+   * when positioning gives up — otherwise pagination dies — while the
+   * snapshot writer must keep refusing in that case.
+   */
+  const positionedRef = useRef(false);
+  /**
+   * The live init-scroll retry loop, if any.  `null` when nothing is pending.
+   * Held in a ref (not an effect local) so it outlives a single render pass:
+   * the init-scroll effect re-runs on every data change, and the loop must
+   * survive that churn until it either lands or hits its deadline.
+   */
+  const initRetryRef = useRef<{ raf: number; cancelled: boolean } | null>(null);
+
+  /**
+   * Cancels a pending init-scroll retry loop.  Owned by the SESSION rather
+   * than by one render pass — see `initRetryRef` above for why the loop has
+   * to survive the init-scroll effect's dep-driven re-runs.
+   */
+  const stopInitRetry = useCallback(() => {
+    const loop = initRetryRef.current;
+    if (!loop) return;
+    loop.cancelled = true;
+    if (loop.raf) cancelAnimationFrame(loop.raf);
+    initRetryRef.current = null;
+  }, []);
 
   // Reset on session switch.  Also reset prepend-tracking refs so the
   // scroll-preservation effect doesn't misfire across sessions.
@@ -243,12 +314,33 @@ export function useScrollController(config: ScrollControllerConfig): ScrollContr
   // React fires them in definition order.  If this were useEffect it
   // would fire AFTER the init-scroll, leaving initializedRef=true
   // when the init-scroll checks it (skipping the scroll restoration).
+  //
+  // ORDERING CONTRACT with ChatPanel's scroll-snapshot writer: that writer
+  // reads `isPositioned()` from a useLayoutEffect CLEANUP, and React runs
+  // every layout-effect cleanup of a fiber before any of its bodies.  So the
+  // outgoing session is still seen as positioned here — this reset lands only
+  // afterwards.  Do NOT move the `positionedRef` write into a cleanup
+  // function: it would then run before the snapshot writer's cleanup and
+  // silently drop the snapshot of every session switch.
   useLayoutEffect(() => {
     initializedRef.current = false;
+    positionedRef.current = false;
     setIsNearBottom(true); // fresh session starts at bottom
     setIsNearTop(false);   // ...not at top
     setFollowModeSync(true); // new session → auto-follow by default
   }, [sessionKey, setFollowModeSync]);
+
+  // Tear the positioning loop down when the session changes or the component
+  // unmounts.  Two constraints on this effect:
+  //   - keyed on `sessionKey` ALONE: the init-scroll effect cannot own the
+  //     teardown, because it re-runs on every data change (blocksLen) and
+  //     would kill a loop that is still trying to land.
+  //   - useLayoutEffect, declared BEFORE the init-scroll effect: React runs
+  //     all layout cleanups of a fiber before any layout body, so the old
+  //     session's loop is stopped before the new session's loop starts.  As a
+  //     passive effect its cleanup would run in a LATER phase — after the new
+  //     loop had already been created — and would cancel the wrong loop.
+  useLayoutEffect(() => () => stopInitRetry(), [sessionKey, stopInitRetry]);
 
   // ── Init-scroll effect (useLayoutEffect — before paint) ──
   // Data-driven restoration: the saved snapshot carries a stable
@@ -257,31 +349,91 @@ export function useScrollController(config: ScrollControllerConfig): ScrollContr
   // measurement cache; pixel offsets land in the middle of the list.
   // useLayoutEffect (not useEffect) so the scroll is applied BEFORE
   // the browser paints — no top→position flash.
-  // The initializedRef guard makes it a one-shot per session.
+  // Two separate one-shot flags, because two different things depend on them:
+  //   - initializedRef = "the init scroll has been ATTEMPTED".  Gates edge
+  //     detection (loadPrevPage) and must open immediately, exactly as before —
+  //     waiting on positioning would stall pagination for the retry window.
+  //   - positionedRef  = "the viewport holds a position worth recording".
+  //     Gates the snapshot writer in ChatPanel; set by a scroll that LANDS or
+  //     by direct user interaction with the viewport.
   const blocksLen = adapter.blocks.length;
   useLayoutEffect(() => {
     if (initializedRef.current) return;
     if (blocksLen === 0) return;
-    const vml = vmlRefRef.current.current;
-    if (!vml) {
-      initializedRef.current = true;
-      return;
-    }
-    if (initialAtBottom) {
-      // User left at the tail — show the latest content.
-      vml.scrollToBottom();
-    } else if (initialFirstVisibleBlockId) {
-      // User was browsing - restore the first visible block by stable id.
-      // If the block isn't in the loaded page (e.g. compaction removed it),
-      // fall back to bottom so the user isn't stuck at an arbitrary position.
-      if (!vml.scrollToBlockId(initialFirstVisibleBlockId)) {
-        vml.scrollToBottom();
-      }
-    } else {
-      // Fresh open / no useful snapshot — scroll to bottom.
-      vml.scrollToBottom();
-    }
+
     initializedRef.current = true;
+
+    // Bounded rAF retry.  `vml.scrollToBottom()` reports failure when the
+    // virtualizer has not attached its scroll element yet (fresh mount after a
+    // top-level nav) or when there is nothing to scroll.  An IDLE session
+    // produces no further commit, so relying on this effect re-running on a
+    // data change is not enough to recover — poll for a few frames instead.
+    //
+    // The handle itself may still be null on this pass (VML not mounted),
+    // which is exactly why the loop re-reads `vmlRefRef.current.current`
+    // EVERY frame instead of capturing it here.  An early return on a null
+    // handle would be unrecoverable: `initializedRef` is already consumed,
+    // so this effect never re-runs for this session, and `positionedRef`
+    // would stay false forever — silently disabling the snapshot writer.
+    //
+    // The loop lives in `initRetryRef`, not in this closure: this effect
+    // re-runs whenever `blocksLen` changes (streaming, page loads), and a
+    // dep-driven re-run must not cancel a loop that is still trying.
+    const loop = { raf: 0, cancelled: false };
+    initRetryRef.current = loop;
+    const deadline = performance.now() + INIT_SCROLL_MAX_MS;
+
+    const attempt = () => {
+      // Bail when the loop was stopped (session change / unmount) or replaced
+      // by a newer session's loop.  NOTE: this deliberately does NOT check
+      // `positionedRef` — a user interaction can set that flag BEFORE any
+      // data arrived (a click or wheel over an empty viewport), and the
+      // first attempt must still position the session.  Landing clears
+      // `initRetryRef` itself, so the identity check above covers it.
+      if (loop.cancelled || initRetryRef.current !== loop) return;
+      const cur = vmlRefRef.current.current;
+      let landed = false;
+      if (cur) {
+        if (initialAtBottom) {
+          // User left at the tail — show the latest content.
+          landed = cur.scrollToBottom();
+        } else if (initialFirstVisibleBlockId) {
+          // User was browsing — restore the first visible block by stable id.
+          // If the block is not in the loaded page (e.g. compaction removed
+          // it), fall back to bottom so the user isn't stranded mid-list.
+          landed =
+            cur.scrollToBlockId(initialFirstVisibleBlockId) ||
+            cur.scrollToBottom();
+        } else {
+          // Fresh open / no useful snapshot — scroll to bottom.
+          landed = cur.scrollToBottom();
+        }
+      }
+      if (landed) {
+        positionedRef.current = true;
+        initRetryRef.current = null;
+        return;
+      }
+      if (performance.now() >= deadline) {
+        // Give up.  Pagination stays open (initializedRef was opened on the
+        // first attempt); only the snapshot writer cares about positionedRef,
+        // and it stays FALSE here, so a viewport the user never saw is never
+        // recorded as their reading position.  This visit may show the top;
+        // the next one still gets a correct target instead of latching to it.
+        // The user can still rescue the position by interacting with the
+        // viewport — that routes through noteViewportInteraction.
+        log.warn("[useScrollController] init-scroll could not position", {
+          sessionKey,
+          initialAtBottom,
+          initialFirstVisibleBlockId,
+        });
+        initRetryRef.current = null;
+        return;
+      }
+      loop.raf = requestAnimationFrame(attempt);
+    };
+
+    attempt();
   }, [blocksLen, sessionKey, initialAtBottom, initialFirstVisibleBlockId, adapter]);
 
   // ── Scroll preservation on prepend (useLayoutEffect) ──
@@ -652,6 +804,35 @@ export function useScrollController(config: ScrollControllerConfig): ScrollContr
     return adapter.isAtTail() && !adapter.hasPendingFlush();
   }, [adapter]);
 
+  const isPositioned = useCallback((): boolean => positionedRef.current, []);
+
+  // See the ScrollController interface for why this is driven by INPUT
+  // events rather than by `handleScroll`.
+  const noteViewportInteraction = useCallback(() => {
+    // The user has taken manual control — a still-pending positioning
+    // attempt must not yank the viewport back to the tail.  This applies
+    // even when the interaction happens at the very top.
+    stopInitRetry();
+    // Marking the viewport as recordable is a separate, stricter question:
+    // only a viewport that is demonstrably NOT at the unpositioned origin
+    // counts as something the user read.  Without this, a stray click, or a
+    // wheel that cannot move anything (positioning failed, so the list sits
+    // at `initialOffset: 0`), would record the bogus top position as the
+    // reading position and re-introduce the very latch this gate exists to
+    // prevent.
+    //
+    // The flag is sticky, so a user who scrolls down and then back to the
+    // very top is still recorded correctly — the first non-zero position
+    // already opened the gate.  A session short enough to never scroll is
+    // already "at bottom" and its init-scroll reports success, so nothing is
+    // lost here.
+    const container = containerRefRef.current.current;
+    // No container to inspect (SSR / test harness): there is no evidence of
+    // the bogus state, so keep the permissive behaviour.  In a real browser
+    // an interaction always has a live container.
+    if (!container || container.scrollTop > 0) positionedRef.current = true;
+  }, [stopInitRetry]);
+
   return {
     showScrollToBottom,
     showScrollToTop,
@@ -659,5 +840,7 @@ export function useScrollController(config: ScrollControllerConfig): ScrollContr
     jumpToBottom,
     jumpToTop,
     isAtLatest,
+    isPositioned,
+    noteViewportInteraction,
   };
 }
