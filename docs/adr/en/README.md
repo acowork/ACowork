@@ -108,6 +108,7 @@ ADRs are not a sequence to be read front to back. Suggested entry points:
 | 80 | [ADR-087](./ADR-087-node-agent-owner-permissions.md) | The Node and Agent Owner Permission Model — Plugging the Hole Where "the Whole Machine Is Writable by Every User by Def… | Draft (v2 revision; Q1/Q2/Q4 and the "single owner + multiple guests"… | [zh](../zh/ADR-087-node-agent-owner-permissions.md) |
 | 81 | [ADR-088](./ADR-088-cloud-hub-application-layer-remote-access.md) | Adding the Cloud Hub Application-Layer Remote-Access Mode, Coexisting Permanently with the Thin Relay | Decided (not yet implemented; Phase 0 not started) | [zh](../zh/ADR-088-cloud-hub-application-layer-remote-access.md) |
 | 82 | [ADR-089](./ADR-089-lsp-relay-reachability-vs-exposure.md) | LSP Relay Reachability vs. Exposure — Desktop Accesses the Relay Through a Gateway Reverse Proxy | Proposed (pending architecture review) | [zh](../zh/ADR-089-lsp-relay-reachability-vs-exposure.md) |
+| 83 | [ADR-090](./ADR-090-mcp-lsp-install-ownership-node.md) | MCP/LSP Server Install Ownership Moves to the Node — Read-only Presets, Runtime File as the Single Source of Truth | Proposed (pending architecture review) | [zh](../zh/ADR-090-mcp-lsp-install-ownership-node.md) |
 
 ---
 
