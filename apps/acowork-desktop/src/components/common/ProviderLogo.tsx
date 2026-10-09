@@ -37,22 +37,42 @@ const BUNDLED_URLS: Record<string, string> = Object.fromEntries(
 );
 
 /**
- * Bundled marks that are pure black (either `fill="#000000"` or
- * `fill="currentColor"`), so they need the dark-mode invert to stay legible.
- * Brand-tinted marks must NOT be listed — their color is the brand.
+ * Slugs whose mark is near-black, so it needs the dark-mode invert to stay
+ * legible. Brand-tinted marks must NOT be listed — their color is the brand.
  *
- * ponytail: a hand-maintained set, because an <img> can't inherit color and
- * an svg can only be tinted by editing the asset. A new black mark needs one
- * line here; the audit command is in the commit that added this table.
+ * One set serves both remote tiers because both key on the Simple Icons slug:
+ * the bundled files are named after that same slug, so a mark can arrive from
+ * either place and look identical.
+ *
+ * The Simple Icons entries are the ones that used to vanish: tier 1 was
+ * rendered without an invert on the assumption that "Simple Icons = brand
+ * colored", which holds for most of the catalog but not for the ~1.7k
+ * monochrome brands in it (`opencode` #000000, `github` #181717,
+ * `scaleway` #4F0599, `hetzner` #D50C2D, `cline` #18181B).
+ *
+ * ponytail: hand-maintained, because an `<img>` can't inherit color and an
+ * svg can only be tinted by editing the asset. Kept honest by the asset
+ * audit in ProviderLogo.test.tsx, which measures each bundled file's actual
+ * fill brightness and fails if this table and the files disagree.
  */
-const MONOCHROME_BUNDLED = new Set([
+const MONOCHROME_SLUGS = new Set([
+  // Bundled marks that are pure black (fill="#000000" or fill="currentColor").
+  "anthropic", // #191919 — the brand really is near-black; on the dark
+               // panel-inset surface (L≈20) it was invisible until inverted.
   "groq", "kimi", "lmstudio", "moonshotai", "ollama", "openai",
   "siliconflow", "togetherai", "vercel", "xai", "zhipuai",
   // Generic custom-provider mark (see custom.svg). Any provider id starting
   // with `custom-` lands here via the split rule, so this entry is what makes
   // user-defined gateways resolve offline instead of two 404 round-trips.
   "custom",
+  // Simple Icons marks that ship near-black — tier 1 rendered these un-inverted.
+  "cline", "github", "hetzner", "hyper", "opencode", "scaleway",
 ]);
+
+/** Does this Simple Icons slug need the dark-mode invert? */
+export function isMonochromeSlug(slug: string): boolean {
+  return MONOCHROME_SLUGS.has(slug);
+}
 
 interface ProviderLogoProps {
   /** Canonical models.dev provider id (e.g. "anthropic", "openai"). */
@@ -223,7 +243,7 @@ export function ProviderLogo({ providerId, modelId, size = 14, className }: Prov
         width={size}
         height={size}
         decoding="async"
-        className={cn("shrink-0", MONOCHROME_BUNDLED.has(slug) && "dark:invert", className)}
+        className={cn("shrink-0", isMonochromeSlug(slug) && "dark:invert", className)}
       />
     );
   }
@@ -236,13 +256,14 @@ export function ProviderLogo({ providerId, modelId, size = 14, className }: Prov
   // `immutable`, so the browser serves the second open from its own cache and
   // never asks again.
   //
-  // `?src=si` picks the Simple Icons upstream, whose marks are brand-tinted;
-  // the default is models.dev, whose marks are `currentColor` (black) and so
-  // need the dark-mode invert the `onError` below applies. The Gateway can't
-  // tell the client which upstream answered — an `<img>` never reads response
-  // headers — so the tier has to be visible in the URL itself.
+  // `?src=si` picks the Simple Icons upstream and the default is models.dev.
+  // Neither is reliably monochrome: models.dev marks are `currentColor`
+  // (black), and ~1/8 of the Simple Icons catalog is near-black too. So both
+  // tiers take the invert from the slug table, and the `onError` swap adds it
+  // for tier 2 as a fallback for the ids the table doesn't carry.
+  const primarySlug = simpleIconsSlug(providerId);
   const primarySrc = `${getGatewayUrl()}/api/providers/${encodeURIComponent(
-    simpleIconsSlug(providerId),
+    primarySlug,
   )}/logo?src=si`;
   const fallbackSrc = `${getGatewayUrl()}/api/providers/${encodeURIComponent(
     providerId,
@@ -258,7 +279,7 @@ export function ProviderLogo({ providerId, modelId, size = 14, className }: Prov
       loading="lazy"
       // decode=async avoids blocking the menu open animation on the network.
       decoding="async"
-      className={cn("shrink-0", className)}
+      className={cn("shrink-0", isMonochromeSlug(primarySlug) && "dark:invert", className)}
       onError={(e) => {
         // Ponytail: simple two-tier fallback chain via dataset flag so the
         // second src swap doesn't loop. Both sources 404 → hide.
@@ -267,8 +288,8 @@ export function ProviderLogo({ providerId, modelId, size = 14, className }: Prov
           el.dataset.fallback = "1";
           el.src = fallbackSrc;
           // models.dev SVGs use fill="currentColor" which defaults to black;
-          // black-on-dark is invisible. Add invert only here (after the
-          // fallback fires) so the Simple Icons brand tint stays intact.
+          // black-on-dark is invisible. Adding it here (rather than only in
+          // className) covers the ids the slug table doesn't carry.
           el.classList.add("dark:invert");
         } else {
           el.style.display = "none";

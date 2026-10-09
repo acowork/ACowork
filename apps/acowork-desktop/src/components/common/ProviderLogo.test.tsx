@@ -21,7 +21,7 @@ import { render, fireEvent } from "@testing-library/react";
 import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
-import { ProviderLogo, resolveBundledSlug } from "./ProviderLogo";
+import { ProviderLogo, resolveBundledSlug, isMonochromeSlug } from "./ProviderLogo";
 import { getGatewayUrl } from "../../lib/config";
 
 // vitest serves modules over http, so import.meta.url isn't a file:// URL —
@@ -42,6 +42,35 @@ function bundledAsset(check: "stroke-only" | "duplicate"): string[] {
     byHash.set(hash, [...(byHash.get(hash) ?? []), a.name]);
   }
   return [...byHash.values()].filter((g) => g.length > 1).flat();
+}
+
+/**
+ * Perceived brightness (0-255) of an svg's *brightest* paint, which is what
+ * decides whether it survives on the dark panel-inset surface (L≈20).
+ * `currentColor` inside an `<img>` resolves to black, so it counts as 0.
+ */
+function brightestFill(body: string): number {
+  const cols = [
+    ...new Set(
+      [...body.matchAll(/(?:fill|stroke)="([^"]+)"/g)]
+        .map((m) => m[1])
+        .filter((c) => !/^(none|transparent)$/i.test(c)),
+    ),
+  ];
+  if (cols.length === 0) return 0; // no paint attribute at all -> default black
+  const lum = (c: string) => {
+    const h = c.replace(/^#/, "");
+    const [r, g, b] = (h.length === 3 ? [...h].map((x) => x + x) : [h.slice(0, 2), h.slice(2, 4), h.slice(4, 6)]).map(
+      (p) => parseInt(p, 16),
+    );
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  };
+  let brightest = 0;
+  for (const c of cols) {
+    if (/^currentcolor$/i.test(c)) continue; // black
+    if (/^#[0-9a-f]{3,6}$/i.test(c)) brightest = Math.max(brightest, lum(c));
+  }
+  return brightest;
 }
 
 describe("resolveBundledSlug — model name decides", () => {
@@ -171,8 +200,15 @@ describe("ProviderLogo rendering", () => {
       expect(container.querySelector("img")?.className, id).toContain("dark:invert");
     }
     // Brand-colored marks must NOT be inverted (their tint is the brand).
-    const { container } = render(<ProviderLogo providerId="anthropic" />);
-    expect(container.querySelector("img")?.className).not.toContain("dark:invert");
+    // Note: this used to name `anthropic` as the example of a safe mark, but
+    // its real fill is #191919 (L=25) against a dark surface of L≈20 — the one
+    // bundled mark that was both a near-black brand *and* missing from the
+    // table, so it disappeared in dark mode. The brand being dark does not
+    // mean the mark is legible.
+    for (const id of ["deepseek", "nvidia", "qwen", "xiaomi"]) {
+      const { container } = render(<ProviderLogo providerId={id} />);
+      expect(container.querySelector("img")?.className, id).not.toContain("dark:invert");
+    }
   });
 
   it("ships no stroke-only asset (invisible at 12px)", () => {
@@ -189,6 +225,39 @@ describe("ProviderLogo rendering", () => {
     // download succeeded" proves nothing — byte-identical files do. models.dev
     // served the same 1421-byte sparkle for seed, doubao and seedance.
     expect(bundledAsset("duplicate")).toEqual([]);
+  });
+
+  it("inverts a bundled mark iff the file is actually dark", () => {
+    // The regression: MONOCHROME_SLUGS is hand-maintained, so a new or
+    // recoloured asset silently drifts out of sync with the table. This reads
+    // the real fills and asserts the table matches the disk — which is how
+    // `anthropic` (#191919) was found missing, invisible on the dark panel.
+    // Threshold 60 sits between the dark surface (L≈20) and the darkest
+    // brand tint we ship (nvidia #76B900, L≈157).
+    const drifted: string[] = [];
+    for (const f of fs.readdirSync(LOGO_DIR).filter((f) => f.endsWith(".svg"))) {
+      const slug = f.slice(0, -".svg".length);
+      const isDark = brightestFill(fs.readFileSync(path.join(LOGO_DIR, f), "utf8")) < 60;
+      if (isDark !== isMonochromeSlug(slug)) drifted.push(`${slug} (dark=${isDark})`);
+    }
+    expect(drifted).toEqual([]);
+  });
+
+  it("inverts the monochrome Simple Icons marks on tier 1", () => {
+    // These answered 200 from Simple Icons, so `onError` never fired and the
+    // invert was never applied — they rendered black-on-black. Regression:
+    // tier 1 was assumed to be always brand-colored, but ~1/8 of the catalog
+    // is monochrome. Brand-tinted tier-1 marks must stay un-inverted.
+    for (const id of ["hyper", "opencode", "github-copilot", "hetzner", "scaleway", "cline-pass"]) {
+      const { container } = render(<ProviderLogo providerId={id} />);
+      expect(container.querySelector("img")?.className, id).toContain("dark:invert");
+    }
+    // Genuinely colored tier-1 slugs must be left alone — an over-broad
+    // invert would flip a brand tint into its negative.
+    for (const id of ["perplexity-agent", "cloudflare-workers-ai", "sambanova"]) {
+      const { container } = render(<ProviderLogo providerId={id} />);
+      expect(container.querySelector("img")?.className, id).not.toContain("dark:invert");
+    }
   });
 
   it("falls back to the remote chain when nothing is bundled", () => {
