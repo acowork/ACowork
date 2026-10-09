@@ -1166,8 +1166,8 @@
     }
   },
   "sessionVisibility": {
-    "public": "Public",
-    "private": "Private",
+    "public": "Public session",
+    "private": "Private session",
     "hintToggle": "click to toggle",
     "toastNowPrivate": "Session is now private",
     "toastNowPublic": "Session is now public",

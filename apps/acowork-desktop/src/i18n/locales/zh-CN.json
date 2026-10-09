@@ -983,8 +983,8 @@
     }
   },
   "sessionVisibility": {
-    "public": "公开",
-    "private": "私有",
+    "public": "公开会话",
+    "private": "私有会话",
     "hintToggle": "点击切换",
     "toastNowPrivate": "已设为私有",
     "toastNowPublic": "已设为公开",
