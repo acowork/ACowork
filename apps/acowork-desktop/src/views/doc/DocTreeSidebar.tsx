@@ -30,6 +30,7 @@ import { useDocHealthStore } from "../../stores/doc/healthStore";
 import { useToast } from "../../components/common/ToastProvider";
 import { ConfirmDialog } from "../../components/common/ConfirmDialog";
 import { cn } from "../../lib/utils";
+import { listRowHover } from "../../lib/ui-styles";
 import { CAPSULE_PANE_CN } from "../../components/common/capsule";
 import { DOC_ROOT_DIR_ID } from "../../lib/doc-types";
 import type { DirMeta, DocMeta } from "../../lib/doc-types";
@@ -166,7 +167,7 @@ export function DocTreeSidebar({ width }: { width?: number }) {
           type="button"
           onClick={() => setTrashOpen(true)}
           disabled={healthy === false}
-          className="flex w-full items-center gap-1.5 rounded-md px-2 py-1 text-text-tertiary transition-colors hover:bg-nav-item-hover hover:text-zinc-700 disabled:opacity-40 dark:hover:text-zinc-200"
+          className={cn("flex w-full items-center gap-1.5 rounded-md px-2 py-1 text-text-tertiary transition-colors disabled:opacity-40", listRowHover)}
         >
           <Trash2 className="h-3.5 w-3.5" aria-hidden />
           <span>{t("doc.trash")}</span>
@@ -394,7 +395,7 @@ function DirRow({
     <div role="treeitem" aria-expanded={isOpen} aria-selected={false}>
       <div
         className={cn(
-          "group flex cursor-pointer items-center gap-0.5 rounded-md py-1 pr-1 text-text-secondary hover:bg-nav-item-hover ",
+          cn("group flex cursor-pointer items-center gap-0.5 rounded-md py-1 pr-1 text-text-secondary", listRowHover),
         )}
         style={{ paddingLeft: depth * 14 + 4 }}
       >
@@ -546,7 +547,7 @@ function DocRow({
     <div role="treeitem" aria-selected={selected}>
       <div
         className={cn(
-          "group flex items-center gap-1 rounded-md py-1 pr-1 text-text-secondary hover:bg-nav-item-hover ",
+          cn("group flex items-center gap-1 rounded-md py-1 pr-1 text-text-secondary", listRowHover),
           selected &&
             "bg-[var(--color-accent)]/10 text-[var(--color-accent)] hover:bg-[var(--color-accent)]/15 dark:bg-[var(--color-accent)]/20",
         )}

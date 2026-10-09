@@ -16,6 +16,7 @@ import { useEffect, useRef, useState } from "react";
 import { ChevronDown } from "lucide-react";
 import { AgentAvatar } from "../common/AgentAvatar";
 import type { AgentInfo } from "../../lib/types";
+import { listRowHover, listRowSelected } from "../../lib/ui-styles";
 
 export interface AgentPickerChipProps {
     agents: AgentInfo[];
@@ -100,8 +101,8 @@ export function AgentPickerChip({ agents, value, onChange }: AgentPickerChipProp
                                 }}
                                 className={`flex cursor-pointer items-center gap-2 px-3 py-1.5 text-xs ${
                                     isSel
-                                        ? "bg-zinc-100 text-text dark:bg-zinc-700/60"
-                                        : "text-text-secondary hover:bg-zinc-50 dark:hover:bg-zinc-700/40"
+                                        ? `${listRowSelected} text-text`
+                                        : `text-text-secondary ${listRowHover}`
                                 }`}
                             >
                                 <AgentAvatar

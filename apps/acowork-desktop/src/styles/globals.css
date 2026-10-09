@@ -203,7 +203,13 @@
   --color-nav-control-hover: hsl(240 5% 82%);
   /* = #C8C9CC — primary action hover (light) */
   --color-nav-item-hover: hsl(240 6% 90%);
-  /* = #E2E3E6 — list-item row hover (light) */
+  /* = #E2E3E6 — neutral icon-button / control hover fill (light).
+     *NOT* the list-row hover: every list in the app now shares the
+     `listRowHover` accent-tint family in `lib/ui-styles.ts` (menu
+     popups, side panels, search results, file tree, etc.). This token
+     is kept for icon-only controls whose hover should not be a tint
+     (e.g. settings cog on a node row) and for the few static backgrounds
+     that happen to need this grey. */
   --color-nav-divider: hsl(0 0% 78%);
   /* = #C8C8C8 — list separator (light) */
   /* Border radius — 4-tier unified scale
@@ -647,7 +653,9 @@
   --color-nav-control-hover: hsl(0 0% 28%);
   /* = #474749 — primary action hover (dark) */
   --color-nav-item-hover: hsl(0 0% 22%);
-  /* = #38383A — list-item row hover (dark) */
+  /* = #38383A — neutral icon-button / control hover fill (dark).
+     See the light-mode note above: this is for icon controls and a few
+     static backgrounds, NOT for list rows (those use `listRowHover`). */
   --color-nav-divider: hsl(240 4% 35%);
   /* ≈ zinc-600, #52525b — list separator (dark) */
   /* Shimmer gradient stops (dark) */

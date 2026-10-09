@@ -229,13 +229,13 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden, readOnly }
                   setOpen(false);
                 }}
                 className={cn(
-                  "flex w-full items-center gap-2 px-3 py-1.5 transition-colors",
+                  "flex w-full items-center gap-2 px-3 py-1.5 text-text transition-colors",
                   currentWsId === "__agent_home__" ? menuItemSelected : menuItemHover,
                 )}
               >
                 <Home className="h-3.5 w-3.5 shrink-0 text-text-tertiary" />
                 <div className="min-w-0 flex-1 text-left">
-                  <div className={cn("truncate text-xs", currentWsId === "__agent_home__" ? "font-semibold" : "text-text ")} style={currentWsId === "__agent_home__" ? { color: "var(--color-accent)" } : {}}>
+                  <div className={cn("truncate text-xs", currentWsId === "__agent_home__" && "font-semibold")}>
                     Agent Home
                   </div>
                   <div className="truncate text-10 text-text-tertiary ">
@@ -289,7 +289,7 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden, readOnly }
                         >
                           <FolderOpen className="h-3.5 w-3.5 shrink-0 text-text-tertiary" />
                           <div className="min-w-0 flex-1">
-                            <div className={cn("truncate text-xs font-medium", isCurrent ? "text-[var(--color-accent)]" : "text-text-secondary ")}>
+                            <div className="truncate text-xs font-medium text-text-secondary ">
                               {displayName}
                             </div>
                             <Tooltip content={dir.path} variant="plain" position="bottom">

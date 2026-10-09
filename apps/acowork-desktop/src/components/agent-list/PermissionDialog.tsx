@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useTranslation } from "../../i18n/useTranslation";
 import { cn } from "../../lib/utils";
+import { listRowHover } from "../../lib/ui-styles";
 import { getGatewayUrl } from "../../lib/config";
 import { useAuthStore } from "../../stores/authStore";
 import { useEscapeClose } from "../../hooks/useEscapeClose";
@@ -617,7 +618,7 @@ export function PermissionDialog({ open, target, onClose, onRenamedNode }: Permi
                       <label
                         key={u.user_id}
                         className={cn(
-                          "flex cursor-pointer items-center gap-2 rounded px-1.5 py-1 hover:bg-nav-item-hover",
+                          cn("flex cursor-pointer items-center gap-2 rounded px-1.5 py-1", listRowHover),
                           !editable && "cursor-not-allowed opacity-60 hover:bg-transparent",
                         )}
                       >
@@ -639,7 +640,7 @@ export function PermissionDialog({ open, target, onClose, onRenamedNode }: Permi
                     {orphanGuests.map((g) => (
                       <label
                         key={g}
-                        className="flex cursor-pointer items-center gap-2 rounded px-1.5 py-1 hover:bg-nav-item-hover"
+                        className={cn("flex cursor-pointer items-center gap-2 rounded px-1.5 py-1", listRowHover)}
                         title={t("permissionDialog.guestUnavailable")}
                       >
                         <input

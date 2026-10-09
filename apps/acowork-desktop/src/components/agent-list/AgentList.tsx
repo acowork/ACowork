@@ -13,6 +13,7 @@ import { AgentAvatar } from "../common/AgentAvatar";
 import { Tooltip } from "../common/Tooltip";
 import { useTranslation } from "../../i18n/useTranslation";
 import { cn } from "../../lib/utils";
+import { listRowHover } from "../../lib/ui-styles";
 import { Play, Square, Trash2, Info, Copy, Plus, Search, Package, Sparkles, Bug, ChevronRight, UserCog, Settings, Server } from "lucide-react";
 import { StyledInput } from "../common/StyledInput";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -584,7 +585,7 @@ export function AgentList({ width }: AgentListProps) {
           isCollapsed ? "gap-0" : "gap-3",
           selectedAgentId === id
             ? "bg-[var(--color-accent)]/90 text-white"
-            : "hover:bg-nav-item-hover",
+            : listRowHover,
           index < total - 1 && "row-divider-b"
         )}
         onClick={() => selectAgent(id)}
@@ -903,7 +904,7 @@ export function AgentList({ width }: AgentListProps) {
                       setInstallNodes(null);
                       void doInstall(node.node_id);
                     }}
-                    className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-text-secondary transition-colors hover:bg-zinc-50  dark:hover:bg-zinc-700/50"
+                    className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-text-secondary transition-colors hover:bg-[var(--color-accent)]/5 dark:hover:bg-[var(--color-accent)]/10"
                   >
                     {/* Node install picker only lists online nodes, so the
                         dot renders solid emerald — same online/offline
@@ -917,7 +918,7 @@ export function AgentList({ width }: AgentListProps) {
                 ))}
                 <button
                   onClick={() => setInstallNodes(null)}
-                  className="flex w-full items-center gap-2 border-t border-border-divider px-3 py-1.5 text-xs text-text-tertiary transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-700/50"
+                  className="flex w-full items-center gap-2 border-t border-border-divider px-3 py-1.5 text-xs text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/5 dark:hover:bg-[var(--color-accent)]/10"
                 >
                   {t("agentList.back")}
                 </button>
@@ -929,7 +930,7 @@ export function AgentList({ width }: AgentListProps) {
                     setAddMenuOpen(false);
                     setShowCreateWizard(true);
                   }}
-                  className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-text-secondary transition-colors hover:bg-zinc-50  dark:hover:bg-zinc-700/50"
+                  className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-text-secondary transition-colors hover:bg-[var(--color-accent)]/5 dark:hover:bg-[var(--color-accent)]/10"
                 >
                   <Sparkles className="h-3.5 w-3.5" />
                   {t("agentList.createAgent")}
@@ -939,7 +940,7 @@ export function AgentList({ width }: AgentListProps) {
                     void handleInstall();
                   }}
                   disabled={installing}
-                  className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-text-secondary transition-colors hover:bg-zinc-50  dark:hover:bg-zinc-700/50"
+                  className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-text-secondary transition-colors hover:bg-[var(--color-accent)]/5 dark:hover:bg-[var(--color-accent)]/10"
                 >
                   <Plus className="h-3.5 w-3.5" />
                   {t("agentList.installAgent")}
@@ -953,7 +954,7 @@ export function AgentList({ width }: AgentListProps) {
                       void handleCreateLocalNode();
                     }}
                     disabled={creatingNode}
-                    className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-text-secondary transition-colors hover:bg-zinc-50  dark:hover:bg-zinc-700/50"
+                    className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-text-secondary transition-colors hover:bg-[var(--color-accent)]/5 dark:hover:bg-[var(--color-accent)]/10"
                   >
                     <Server className="h-3.5 w-3.5" />
                     {t("agentList.createLocalNode")}
@@ -966,7 +967,7 @@ export function AgentList({ width }: AgentListProps) {
                       userListRef.current?.openCreate();
                     }}
                     data-testid="add-menu-create-user"
-                    className="flex w-full items-center gap-2 border-t border-border-divider px-3 py-1.5 text-xs text-text-secondary transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-700/50"
+                    className="flex w-full items-center gap-2 border-t border-border-divider px-3 py-1.5 text-xs text-text-secondary transition-colors hover:bg-[var(--color-accent)]/5 dark:hover:bg-[var(--color-accent)]/10"
                   >
                     <Plus className="h-3.5 w-3.5" />
                     {t("account.createAccount")}

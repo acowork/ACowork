@@ -34,6 +34,7 @@ import { useContextMenu, ContextMenu } from "../../common/ContextMenu";
 import { ConfirmDialog } from "../../common/ConfirmDialog";
 import { showToast } from "../../common/ToastProvider";
 import { cn } from "../../../lib/utils";
+import { listRowHoverInset } from "../../../lib/ui-styles";
 
 // Pagination: a workspace with a stray `node_modules/` or `target/`
 // under version control can balloon the changed-file list to 5000+
@@ -365,7 +366,7 @@ export function GitStatusPanel({ agentId, workspaceId }: GitStatusPanelProps) {
                 // row width — combined with the scroller's overflow-auto
                 // it surfaces a horizontal scrollbar instead of `…`.
                 "file-tree-row flex min-w-max cursor-pointer items-center gap-1.5 py-[0.2em] pr-3 pl-4 select-none",
-                "hover:bg-zinc-100 dark:hover:bg-zinc-800",
+                listRowHoverInset,
               )}
               onDoubleClick={() => {
                 // Double-click opens the file (or its diff if unavailable on

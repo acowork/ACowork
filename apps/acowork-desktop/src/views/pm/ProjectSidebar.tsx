@@ -17,6 +17,7 @@ import { ConfirmDialog } from "../../components/common/ConfirmDialog";
 import { StyledInput } from "../../components/common/StyledInput";
 import { showToast } from "../../components/common/ToastProvider";
 import { cn } from "../../lib/utils";
+import { listRowHover } from "../../lib/ui-styles";
 import { CAPSULE_PANE_CN } from "../../components/common/capsule";
 import { useTranslation } from "../../i18n/useTranslation";
 import type { PmProject } from "../../lib/pm-types";
@@ -127,7 +128,7 @@ export function ProjectSidebar({ width }: { width?: number }) {
                 "relative flex w-full items-center gap-2 rounded-md px-3 py-2.5 text-left transition-colors duration-150",
                 active
                   ? "bg-[var(--color-accent)]/90 text-white"
-                  : "text-text-secondary hover:bg-nav-item-hover ",
+                  : cn("text-text-secondary ", listRowHover),
                 !isLast &&
                   "row-divider-b",
               )}

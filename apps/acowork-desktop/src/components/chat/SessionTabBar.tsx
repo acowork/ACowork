@@ -4,6 +4,7 @@ import { useAgentStore } from "../../stores/agentStore";
 import { useChatStore } from "../../stores/chatStore";
 import { isProcessing } from "../../lib/types";
 import { cn } from "../../lib/utils";
+import { listRowHover } from "../../lib/ui-styles";
 import {
   ContextMenu,
   useContextMenu,
@@ -199,7 +200,7 @@ function SessionListDropdown({ agentId, activeSessionId, onClose }: SessionListD
           return (
             <div
               key={session.session_id}
-              className="group flex items-center gap-2 px-3 py-2 transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-700/50"
+              className={`group flex items-center gap-2 px-3 py-2 transition-colors ${listRowHover}`}
             >
               <button
                 onClick={() => handleSelect(session.session_id)}

@@ -61,30 +61,65 @@ export const toolbarButtonActive =
   "bg-zinc-200 dark:bg-zinc-700 text-text ";
 
 /**
- * Menu-item row in a dropdown / popup list (model · account · reasoning
- * effort · workspace · skills) — the CURRENT selection.
+ * List-row tokens.
  *
- * Selected rows must carry a background, not just accent text: the hover
- * state on every one of those menus is a neutral grey fill, so a selected
- * row that only tinted its text reads as *weaker* than the row the mouse
- * happens to be passing over. Background + accent text + check mark is the
- * language every other assistant chat composer uses, and it is what makes
- * "which one is active" readable at a glance in a long model list.
+ * One tint family drives every list in the app — popups (model · account
+ * · reasoning · workspace · skills), panels (`ListRow` / `ExpandableRow`
+ * over `ListBox`), the todo/queued-message rows above the input, the
+ * file tree, the ask-question options, the search results, etc. — so the
+ * cursor passing over a row reads the same way everywhere.
  *
- * `bg-[var(--color-accent)]/10` (dark `/20`) follows the tint convention
- * already used for badges and selected chips app-wide (`common/list/Badge`,
- * `RemoteFolderPicker`, `DocTreeSidebar`), so the tint tracks whichever
- * accent preset the user picked instead of hard-coding a blue.
+ * The four states step on one accent scale (`--color-accent` is the
+ * preset the user picked; the percentages below keep the tint legible on
+ * both light and dark surfaces without re-defining a separate dark tone):
  *
- * Includes a slightly stronger hover so the cursor passing *over* the
- * selected row still acknowledges the hover rather than showing nothing.
+ *   listRowHover         — cursor passing over an unselected row
+ *   listRowHoverInset    — same, on the darker sub-surface revealed by
+ *                          an expanded card (one step stronger so it
+ *                          still reads on the inset body)
+ *   listRowSelected      — the current selection
+ *   listRowSelectedInset — same, on the inset sub-surface
+ *
+ * The selected state is always at least one step louder than the
+ * unselected hover, so "which row is active" is the first thing the eye
+ * picks out in a long list. The tokens only set the background — the
+ * LABEL keeps the unselected rows' own foreground so we don't stamp
+ * accent text on top of an accent wash (that reads as "warning", not
+ * as "this one"). The check mark / leading icon stays accent, and
+ * carries the "selected" semantic by itself.
+ *
+ * `menuItemHover` / `menuItemSelected` are kept as aliases for the popup
+ * menus so the call sites that imported them by their old names still
+ * typecheck. New code should reach for `listRow*` directly.
  */
-export const menuItemSelected =
-  "bg-[var(--color-accent)]/10 text-[var(--color-accent)] hover:bg-[var(--color-accent)]/15 dark:bg-[var(--color-accent)]/20 dark:hover:bg-[var(--color-accent)]/25";
 
-/** Menu-item row base — hover fill for a NON-selected row */
-export const menuItemHover =
-  "hover:bg-zinc-50 dark:hover:bg-zinc-700/50";
+// Cursor over an unselected row on the raised list surface (default).
+export const listRowHover =
+  "hover:bg-[var(--color-accent)]/5 dark:hover:bg-[var(--color-accent)]/10";
+
+// Cursor over an unselected row on the inset sub-surface (one step deeper).
+export const listRowHoverInset =
+  "hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15";
+
+// The current selection on the raised list surface.
+export const listRowSelected =
+  "bg-[var(--color-accent)]/10 hover:bg-[var(--color-accent)]/15 dark:bg-[var(--color-accent)]/15 dark:hover:bg-[var(--color-accent)]/20";
+
+// The current selection on the inset sub-surface.
+export const listRowSelectedInset =
+  "bg-[var(--color-accent)]/15 hover:bg-[var(--color-accent)]/15 dark:bg-[var(--color-accent)]/20 dark:hover:bg-[var(--color-accent)]/20";
+
+/**
+ * @deprecated use `listRowSelected` — kept as an alias so the popup
+ * call sites that imported `menuItemSelected` keep working.
+ */
+export const menuItemSelected = listRowSelected;
+
+/**
+ * @deprecated use `listRowHover` — kept as an alias so the popup call
+ * sites that imported `menuItemHover` keep working.
+ */
+export const menuItemHover = listRowHover;
 
 /** Dialog action button (Cancel/Save) — fixed width */
 export const dialogButton =

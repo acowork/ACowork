@@ -4,6 +4,7 @@ import type { AskQuestionEvent } from "../../lib/types";
 import { StyledTextarea } from "../common/StyledInput";
 import { useTranslation } from "../../i18n/useTranslation";
 import { useChatStore } from "../../stores/chatStore";
+import { listRowHover, listRowSelected } from "../../lib/ui-styles";
 
 interface AskQuestionCardProps {
   event: AskQuestionEvent;
@@ -105,8 +106,8 @@ export function AskQuestionCard({ event, agentId, sessionId, onAnswer }: AskQues
           <label
             key={idx}
             className={`flex items-center gap-1.5 rounded px-2 py-1 text-xs transition-colors cursor-pointer
-              ${submitted ? "opacity-60 pointer-events-none" : "hover:bg-zinc-100 dark:hover:bg-zinc-700/50"}
-              ${selected === opt.label ? "bg-zinc-100 dark:bg-zinc-700/50" : ""}`}
+              ${submitted ? "opacity-60 pointer-events-none" : listRowHover}
+              ${selected === opt.label ? listRowSelected : ""}`}
           >
             <input
               type="radio"
@@ -128,8 +129,8 @@ export function AskQuestionCard({ event, agentId, sessionId, onAnswer }: AskQues
         {/* Other option */}
         <label
           className={`flex items-center gap-1.5 rounded px-2 py-1 text-xs transition-colors cursor-pointer
-            ${submitted ? "opacity-60 pointer-events-none" : "hover:bg-zinc-100 dark:hover:bg-zinc-700/50"}
-            ${isOtherSelected ? "bg-zinc-100 dark:bg-zinc-700/50" : ""}`}
+            ${submitted ? "opacity-60 pointer-events-none" : listRowHover}
+            ${isOtherSelected ? listRowSelected : ""}`}
         >
           <input
             type="radio"

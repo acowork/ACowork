@@ -17,6 +17,7 @@ import { useDocHealthStore } from "../../stores/doc/healthStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { useToast } from "../../components/common/ToastProvider";
 import { cn } from "../../lib/utils";
+import { listRowHover } from "../../lib/ui-styles";
 import type { UpdateRequest } from "../../lib/doc-types";
 
 /** 解析 instance_id → 显示名（meta.display_name ?? meta.name ?? id）。
@@ -142,7 +143,7 @@ export function ReviewQueue() {
             requests.map((req) => (
               <div
                 key={req.request_id}
-                className="group flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-zinc-50 dark:hover:bg-zinc-800/60"
+                className={cn("group flex items-center gap-2 rounded-md px-2 py-1.5", listRowHover)}
               >
                 <button
                   type="button"

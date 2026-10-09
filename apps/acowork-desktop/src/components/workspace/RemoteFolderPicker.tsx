@@ -5,6 +5,7 @@ import { useTranslation } from "../../i18n/useTranslation";
 import { ErrorBox } from "../common/ErrorBox";
 import { Switch } from "../common/Switch";
 import { cn } from "../../lib/utils";
+import { listRowHover, listRowSelected } from "../../lib/ui-styles";
 import { DEFAULT_GATEWAY_URL } from "../../lib/config";
 
 interface FsBrowseEntry {
@@ -227,8 +228,8 @@ export function RemoteFolderPicker({ onSelect, onCancel, target }: RemoteFolderP
                     className={cn(
                         "flex items-center gap-1 px-2 py-1 cursor-pointer transition-colors text-xs",
                         isSelected
-                            ? "bg-[var(--color-accent)]/10 text-[var(--color-accent)]"
-                            : "hover:bg-zinc-100 dark:hover:bg-zinc-700/50 text-text-secondary ",
+                            ? listRowSelected
+                            : `${listRowHover} text-text-secondary `,
                     )}
                     style={{ paddingLeft: `${depth * 16 + 8}px` }}
                     onClick={() => handleSelectDir(entry)}

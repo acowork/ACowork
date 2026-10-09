@@ -32,6 +32,7 @@ import { SplitHandle } from "../components/common/SplitHandle";
 import { StyledInput } from "../components/common/StyledInput";
 import { useDragResize } from "../hooks/useDragResize";
 import { cn } from "../lib/utils";
+import { listRowHover } from "../lib/ui-styles";
 
 interface Extension {
     id: string;
@@ -130,7 +131,7 @@ export function ExtensionsView() {
                                     "relative flex w-full items-center gap-2 rounded-md px-3 py-2.5 text-left transition-colors duration-150",
                                     active
                                         ? "bg-[var(--color-accent)]/90 text-white"
-                                        : "text-text-secondary hover:bg-nav-item-hover",
+                                        : cn("text-text-secondary ", listRowHover),
                                     !isLast &&
                                         "row-divider-b",
                                 )}

@@ -174,13 +174,13 @@ export function SkillsPanel({ textHidden, readOnly }: { textHidden?: boolean; re
                           setOpen(false);
                         }}
                         className={cn(
-                          "flex w-full items-center gap-2 px-3 py-1.5 text-left transition-colors",
+                          "flex w-full items-center gap-2 px-3 py-1.5 text-left text-text-secondary transition-colors",
                           isActive ? menuItemSelected : menuItemHover,
                         )}
                       >
-                        <Sparkles className={cn("h-3.5 w-3.5 shrink-0")} style={isActive ? { color: "var(--color-accent)" } : { color: "" }} />
+                        <Sparkles className="h-3.5 w-3.5 shrink-0 text-text-tertiary" />
                         <div className="min-w-0 flex-1">
-                          <div className={cn("truncate text-xs font-medium", isActive ? "text-[var(--color-accent)]" : "text-text-secondary ")}>
+                          <div className="truncate text-xs font-medium">
                             {skill.name}
                           </div>
                           {skill.description && (

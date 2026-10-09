@@ -14,6 +14,7 @@ import { getFileIcon } from "./FileTree/fileIcons";
 import { useTranslation } from "../../i18n/useTranslation";
 import { Tooltip } from "../common/Tooltip";
 import { cn } from "../../lib/utils";
+import { listRowHover, listRowSelected } from "../../lib/ui-styles";
 import { log } from "../../lib/logger";
 import { useToast } from "../common/ToastProvider";
 import { GitStatusBar } from "./git/GitStatusBar";
@@ -897,8 +898,8 @@ export function WorkspaceExplorer() {
                                             className={cn(
                                                 "group flex items-center gap-2 px-3 py-1.5 transition-colors cursor-pointer",
                                                 focused
-                                                    ? "bg-[var(--color-accent)]/10 text-text "
-                                                    : "hover:bg-zinc-50 dark:hover:bg-zinc-700/50",
+                                                    ? `${listRowSelected} text-text `
+                                                    : listRowHover,
                                             )}
                                         >
                                             <div className="h-3.5 w-3.5 shrink-0 flex items-center justify-center">

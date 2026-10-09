@@ -4,23 +4,23 @@
 //! full-width flex layout, uniform padding, the hover / selected fills,
 //! keyboard semantics when clickable, and the disabled (50% opacity) state.
 //!
-//! Fill tones step one level deeper per surface (light mode shown; the
-//! dark scale is the zinc-700/800 translucent fills further below):
-//!   card  — hover zinc-50  / selected zinc-100
-//!   inset — hover zinc-100 / selected zinc-200
+//! Fills come from the `listRowHover` / `listRowSelected` family in
+//! `lib/ui-styles.ts` — the same tokens every popup menu, the file tree,
+//! the todo/queued rows, and the inline ask-question options use, so the
+//! cursor passing over any row in the app reads the same way.
 //!
 //! The caller owns the middle column (`children`) — single-line label
 //! rows, two-line title+description rows, and rich master-detail rows
 //! (memory) all compose on top of the same base. `leading` and
 //! `trailing` slots keep icons and switches aligned across every list.
-//!
-//! `surface` keeps hover/selected fills legible on the surface the row
-//! sits on: "card" (default) is the raised list surface; "inset" is the
-//! expanded sub-surface revealed by a collapsed card, where the card
-//! fills would not read on the darker inset body — so the same zinc
-//! scale steps one level deeper (see the tone table above).
 import type { ReactNode } from "react";
 import { cn } from "../../../lib/utils";
+import {
+  listRowHover,
+  listRowHoverInset,
+  listRowSelected,
+  listRowSelectedInset,
+} from "../../../lib/ui-styles";
 
 export interface ListRowProps {
   /** Leading icon / dot / avatar. Auto-shrinks, left of the content. */
@@ -72,11 +72,11 @@ export function ListRow({
     disabled && "opacity-50",
     !disabled && surface === "inset"
       ? selected
-        ? "bg-zinc-200 hover:bg-zinc-200 dark:bg-zinc-700/60 dark:hover:bg-zinc-700/60"
-        : "hover:bg-zinc-100 dark:hover:bg-zinc-700/40"
+        ? listRowSelectedInset
+        : listRowHoverInset
       : !disabled && (selected
-        ? "bg-zinc-100 hover:bg-zinc-100 dark:bg-zinc-800 dark:hover:bg-zinc-800"
-        : "hover:bg-zinc-50 dark:hover:bg-zinc-800/50"),
+        ? listRowSelected
+        : listRowHover),
     className,
   );
 

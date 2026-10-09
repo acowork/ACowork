@@ -49,6 +49,7 @@ import { SetiIcon } from "../common/SetiIcon";
 import { getFileIcon } from "../workspace/FileTree/fileIcons";
 import { log } from "../../lib/logger";
 import { useTranslation } from "../../i18n/useTranslation";
+import { listRowHover, listRowSelected } from "../../lib/ui-styles";
 import { AgentPickerChip } from "./AgentPickerChip";
 import { PreviewPane } from "./PreviewPane";
 
@@ -898,8 +899,8 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
                                     }}
                                     className={`flex cursor-pointer items-center gap-2 border-t border-border-divider px-3 py-1.5 text-xs first:border-t-0 ${
                                         i === focusedIdx
-                                            ? "bg-zinc-100 text-text dark:bg-zinc-700/60"
-                                            : "text-text-secondary hover:bg-zinc-50 dark:hover:bg-zinc-700/40"
+                                            ? `${listRowSelected} text-text`
+                                            : `text-text-secondary ${listRowHover}`
                                     }`}
                                 >
                                     <HitIcon type={h.type} title={h.title} focused={i === focusedIdx} />

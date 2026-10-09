@@ -3,6 +3,7 @@ import { useAgentStore } from "../../stores/agentStore";
 import { useChatStore } from "../../stores/chatStore";
 import { MessageSquarePlus, Clock, MessageCircle, ChevronDown, Loader2, Trash2 } from "lucide-react";
 import { cn } from "../../lib/utils";
+import { listRowHover } from "../../lib/ui-styles";
 import { isProcessing } from "../../lib/types";
 import { useTranslation } from "../../i18n/useTranslation";
 import { Tooltip } from "../common/Tooltip";
@@ -143,7 +144,7 @@ export function SessionPanel({ agentId }: SessionPanelProps) {
               return (
                 <div
                   key={session.session_id}
-                  className="group flex items-center gap-2 px-3 py-2 transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-700/50"
+                  className={`group flex items-center gap-2 px-3 py-2 transition-colors ${listRowHover}`}
                 >
                   {/* Select session button */}
                   <button

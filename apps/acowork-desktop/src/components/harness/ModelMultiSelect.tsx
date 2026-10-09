@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { ModelInfo, ModelCapabilitiesInfo, ModelCapabilitiesMap } from "../../lib/types";
 import { cn } from "../../lib/utils";
+import { listRowHover } from "../../lib/ui-styles";
 import { StyledInput } from "../common/StyledInput";
 import { Dropdown } from "../common/Dropdown";
 import { ModelCapEditor } from "./ModelCapEditor";
@@ -287,7 +288,7 @@ export function ModelMultiSelect({
           visibleModels.map((m) => (
             <label
               key={m.id}
-              className="flex cursor-pointer items-center gap-2 px-3 py-1.5 text-xs hover:bg-zinc-50 dark:hover:bg-zinc-700"
+              className={cn("flex cursor-pointer items-center gap-2 px-3 py-1.5 text-xs", listRowHover)}
             >
               <input
                 type="checkbox"

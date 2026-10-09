@@ -118,12 +118,15 @@ describe("SectionPane", () => {
       expect(row.className).toContain("py-2.5");
     }
 
-    // 2. Selection — solid accent wash + white text, NOT the lighter
-    //    accent/10 that used to make this list read as a different
-    //    component family from pm / extensions.
+    // 2. Selection — solid accent wash + white text. The unselected row
+    //    takes the same accent family at listRowHover strength (per the
+    //    app-wide "list rows share one tint" rule), so we no longer
+    //    pin "no accent on unselected" — instead we pin that the
+    //    selected wash is a SOLID /90 (not a tint), which keeps the
+    //    selected row the loudest one on screen.
     expect(selected.className).toContain("bg-[var(--color-accent)]/90");
     expect(selected.className).toContain("text-white");
-    expect(unselected.className).not.toContain("accent");
+    expect(unselected.className).not.toContain("bg-[var(--color-accent)]/90");
 
     // 3. Hairline divider between rows, drawn on every row but the last.
     expect(unselected.className).toContain("row-divider-b");

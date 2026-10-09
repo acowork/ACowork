@@ -13,7 +13,7 @@ import { cn } from "../../lib/utils";
 import { CAPSULE_PANE_CN } from "../common/capsule";
 import { fetchProviderModels } from "../../lib/gateway-api";
 import { startAgentAndSyncUI } from "../../lib/agent-start";
-import { menuItemHover, menuItemSelected, toolbarIconButton } from "../../lib/ui-styles";
+import { listRowHover, menuItemHover, menuItemSelected, toolbarIconButton } from "../../lib/ui-styles";
 import { AddProviderFlow } from "../harness/AddProviderFlow";
 import * as sessionControl from "../../lib/session-control";
 import { useActiveSessionReadOnly } from "../../lib/session-write-access";
@@ -2591,7 +2591,7 @@ export function ChatPanel() {
                   return (
                     <div
                       key={item.id}
-                      className="flex items-start gap-1.5 px-2.5 py-1.5 hover:bg-zinc-100 dark:hover:bg-zinc-700/40 border-b border-border-divider last:border-b-0"
+                      className={`flex items-start gap-1.5 px-2.5 py-1.5 border-b border-border-divider last:border-b-0 ${listRowHover}`}
                     >
                       <span className={cn(
                         "shrink-0 mt-0.5 select-none",
@@ -2643,7 +2643,7 @@ export function ChatPanel() {
               {queuedMessages.map((msg, i) => (
                 <div
                   key={i}
-                  className="group flex items-start gap-1.5 px-2.5 py-1.5 hover:bg-zinc-100 dark:hover:bg-zinc-700/40 border-b border-border-divider last:border-b-0"
+                  className={`group flex items-start gap-1.5 px-2.5 py-1.5 border-b border-border-divider last:border-b-0 ${listRowHover}`}
                 >
                   <span className="shrink-0 text-10 mt-0.5 text-text-tertiary  select-none">{i + 1}.</span>
                   <span className="flex-1 min-w-0 text-xs text-text-secondary  truncate leading-relaxed">
@@ -3029,7 +3029,7 @@ function UnsupportedImageDialog({
               onClick={() => {
                 onSelect(m.name, m.provider);
               }}
-              className="flex w-full items-center justify-between px-2.5 py-1.5 text-xs transition-colors rounded-md hover:bg-zinc-50 dark:hover:bg-zinc-700/50 text-text-secondary "
+              className={`flex w-full items-center justify-between px-2.5 py-1.5 text-xs transition-colors rounded-md text-text-secondary  ${listRowHover}`}
             >
               <span className="flex items-center gap-1.5 min-w-0">
                 <Image size={12} className="shrink-0 text-blue-400" />
@@ -3428,9 +3428,7 @@ function ModelMenu({
                         onMouseLeave={drillsDown ? scheduleClose : undefined}
                         className={cn(
                           "flex w-full items-center justify-between pl-5 pr-3 py-1.5 text-xs font-medium transition-colors",
-                          isActive
-                            ? menuItemSelected
-                            : cn("text-text-secondary", menuItemHover),
+                          isActive ? menuItemSelected : menuItemHover,
                         )}
                       >
                         <span className="flex items-center gap-1 min-w-0">
@@ -3440,7 +3438,7 @@ function ModelMenu({
                               distinct mark per row instead of one wrong mark for
                               all of them. */}
                           <ProviderLogo providerId={m.provider} modelId={m.name} size={12} />
-                          <span className={cn("font-medium truncate")} style={isActive ? { color: "var(--color-accent)" } : undefined}>
+                          <span className="font-medium truncate">
                             {/* Strip provider prefix from model name if format is provider/model and model is longer */}
                             {(() => {
                               if (!m.name.includes('/')) return m.name;
@@ -3530,15 +3528,13 @@ function ModelMenu({
                       key={a.accountId}
                       type="button"
                       onClick={() => pickAccount(a.accountId)}
-                      className={cn(
-                        "flex w-full items-center justify-between px-3 py-1.5 text-xs font-medium transition-colors",
-                        isActive
-                          ? menuItemSelected
-                          : cn("text-text-secondary", menuItemHover),
-                      )}
-                    >
-                      <span className="flex min-w-0 items-center gap-1">
-                        <span className="truncate font-medium">{a.alias}</span>
+                        className={cn(
+                          "flex w-full items-center justify-between px-3 py-1.5 text-xs font-medium transition-colors",
+                          isActive ? menuItemSelected : menuItemHover,
+                        )}
+                      >
+                        <span className="flex min-w-0 items-center gap-1">
+                          <span className="truncate font-medium">{a.alias}</span>
                         {isLastUsed && !isActive && (
                           <span
                             title={t("chatPanel.modelMenuLastUsed")}
@@ -3666,20 +3662,14 @@ function ReasoningEffortMenu({
                   }}
                   className={cn(
                     "flex w-full items-center gap-2 px-3 py-1.5 text-xs font-medium transition-colors",
-                    isActive
-                      ? menuItemSelected
-                      : cn("text-text-secondary", menuItemHover),
+                    isActive ? menuItemSelected : menuItemHover,
                   )}
                 >
                   <span
                     className="h-2 w-2 rounded-full shrink-0"
                     style={{ backgroundColor: opt.color }}
                   />
-                  <span
-                    className={cn("font-medium", isActive && "text-[var(--color-accent)]")}
-                  >
-                    {opt.label}
-                  </span>
+                  <span className="font-medium">{opt.label}</span>
                   {isActive && <Check size={12} className="ml-auto text-[var(--color-accent)]" />}
                 </button>
               );

@@ -14,6 +14,7 @@ import { ConfirmDialog } from "../../components/common/ConfirmDialog";
 import { useDocTreeStore } from "../../stores/doc/treeStore";
 import { useDocEditorStore } from "../../stores/doc/editorStore";
 import type { TrashEntry } from "../../lib/doc-types";
+import { listRowHover } from "../../lib/ui-styles";
 
 interface TrashDialogProps {
   open: boolean;
@@ -125,7 +126,7 @@ export function TrashDialog({ open, onClose, disabled }: TrashDialogProps) {
             list.map((entry) => (
               <div
                 key={entry.trash_id}
-                className="group flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+                className={`group flex items-center gap-2 rounded-md px-2 py-1.5 ${listRowHover}`}
               >
                 <div className="min-w-0 flex-1">
                   <div className="truncate text-xs text-text-secondary ">

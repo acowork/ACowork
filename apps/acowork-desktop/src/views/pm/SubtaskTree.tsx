@@ -16,6 +16,7 @@ import { usePmBoardStore } from "../../stores/pm/boardStore";
 import { useTranslation } from "../../i18n/useTranslation";
 import { TaskTypeIcon } from "./TaskTypeIcon";
 import { cn } from "../../lib/utils";
+import { listRowHover } from "../../lib/ui-styles";
 import type { PmTaskResponse, TaskStatus } from "../../lib/pm-types";
 
 const STATUS_STYLE: Partial<Record<TaskStatus, string>> = {
@@ -54,7 +55,8 @@ function SubtaskRow({ task, depth, byId, childrenByParent, onSelect }: SubtaskRo
     <li className="space-y-0.5">
       <div
         className={cn(
-          "flex w-full cursor-pointer items-center gap-1.5 rounded px-1.5 py-1 text-left text-xs hover:bg-zinc-100 dark:hover:bg-zinc-800",
+          "flex w-full cursor-pointer items-center gap-1.5 rounded px-1.5 py-1 text-left text-xs",
+          listRowHover,
           depth > 0 && "ml-3",
         )}
         style={{ paddingLeft: 6 + depth * 14 }}

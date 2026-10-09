@@ -41,6 +41,7 @@ import {
 } from "../../lib/auth-api";
 import type { DirectoryUser, UserAccount } from "../../lib/types";
 import { cn } from "../../lib/utils";
+import { listRowHover } from "../../lib/ui-styles";
 import { UserAvatar } from "../common/UserAvatar";
 import { ConfirmDialog } from "../common/ConfirmDialog";
 import {
@@ -485,7 +486,7 @@ function UserRow({
       className={cn(
         "relative flex items-center rounded-md px-3 py-1.5 transition-colors duration-150",
         "gap-3",
-        !isSelf && "cursor-pointer hover:bg-nav-item-hover",
+        !isSelf && `cursor-pointer ${listRowHover}`,
         active && "bg-[var(--color-accent)]/90 text-white hover:bg-[var(--color-accent)]",
         // Same hairline the agent rows carry, so the two groups read as one
         // list. `isLast` is passed in rather than derived here: the rows are
