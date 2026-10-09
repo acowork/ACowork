@@ -308,7 +308,7 @@ export function AgentList({ width }: AgentListProps) {
   // enrolled node, prompt for the explicit action here. The state is read
   // from the Rust side (identity.json + Gateway node-list reconciliation),
   // not from the node list, because an unenrolled machine has no row to
-  // look up. Amber banner style mirrors GatewayBanner (translucent bg +
+  // look up. Amber banner style mirrors the app's reminder language (translucent bg +
   // 1px border) — the app's shared non-modal reminder language.
   const [localNode, setLocalNode] = useState<{ enrolled: boolean; running: boolean } | null>(null);
   const refreshLocalNode = useCallback(() => {

@@ -5,6 +5,7 @@ import { useSearchStore } from "../../stores/searchStore";
 import { useLayoutStore } from "../../stores/layoutStore";
 import { useTranslation } from "../../i18n/useTranslation";
 import { Tooltip } from "../common/Tooltip";
+import { GatewayStatusChip } from "./GatewayStatusChip";
 
 /**
  * Right-panel toggle — VS Code's "layout panel" glyph: one outer frame with
@@ -98,6 +99,11 @@ export function TitleBar() {
         <span className="text-xs font-medium text-text-secondary ">
           ACowork
         </span>
+        {/* Steady-state Gateway outage indicator. Lives here (not in a
+            full-width banner) because a drop after a sleep/wake network
+            switch persists until the user acts — a title-bar chip keeps
+            it visible on every view without stealing content height. */}
+        <GatewayStatusChip />
       </div>
 
       {/* Right: view toggles + window controls (Windows/Linux only).

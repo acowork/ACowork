@@ -713,6 +713,8 @@ pub fn run() {
             // TEMP DEBUG: frontend logger bridge (mqtt reconnect
             // investigation). See `fe_log` above.
             fe_log,
+            // Connectivity guard: this machine's own IPv4 addresses.
+            commands::netinfo::get_local_ipv4_addresses,
         ])
         .setup(|app| {
             tray::setup(app)?;

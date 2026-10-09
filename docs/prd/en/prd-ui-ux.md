@@ -183,21 +183,25 @@ Located at the very bottom of the window, carrying global status signals:
 | MQTT debug controls | `MqttDebugControls` (developer use, shows MQTT connection status) |
 | File status cluster | When file editor is open, positioned absolutely below the file panel, shows cursor position / LSP status, etc. |
 
-**Gateway disconnection signal**: when Gateway status is `error`, the bottom status bar shows a red status pill, and the main content area renders a `GatewayBanner` at the top (see §3.5).
+**Gateway disconnection signal**: when Gateway status is `error`, the bottom status bar shows a red status pill, and the title bar renders a `GatewayStatusChip` (see §3.5).
 
-### 3.5 Gateway Disconnection Banner (`GatewayBanner.tsx`)
+### 3.5 Gateway Disconnection Chip (`GatewayStatusChip.tsx`)
 
-Rendered only when `gatewayStatus === "error"` (steady‑state offline; startup is handled by SplashScreen):
+Rendered only when `gatewayStatus === "error"` (steady‑state offline; startup is handled by SplashScreen), pinned to the right of "ACowork" in the title bar:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│ ⚠ Gateway disconnected…                 [Start Gateway] [Retry] │
+│ ACowork  (◉ Gateway unreachable  2 ▾)           [search][win] │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-- Amber‑coloured banner, `border‑amber‑200 bg‑amber‑50` (dark flipped accordingly)
-- Local mode (`gatewayMode === "local"`): shows "Local Gateway is not running." / starting shows "Starting local Gateway…", provides **[Start Gateway]** + **[Retry]**
-- Remote mode: shows "Gateway not connected. Please check your connection settings.", only provides **[Retry]**
+- Solid amber pill (`bg-amber-500`, dark `bg-amber-600`) with white text, `h-6`, darkens on hover
+- **Breathing animation**: the Wifi icon carries `animate-pulse` (icon only — pulsing the label would flicker the text)
+- **Never auto-dismisses** — a sleep/wake network switch leaves the gateway down until the user picks an address or a retry succeeds, so a fading toast would under-report a live problem
+- Shows a candidate count badge when reachable alternatives were found, so there is something to click without opening the popover
+- Click opens a popover (`w-80`, closes on outside click / Esc): status line → candidate list (one solid `btn-accent` row per address with its latency in ms, `max-h-56` vertical scroll) → action row
+- Local mode (`gatewayMode === "local"`): shows "本地网关未运行" / starting shows "正在启动本地网关", provides **[Start]** + **[Retry]**
+- Remote mode: shows "网关不可达", provides **[Retry]**
 
 ---
 
@@ -551,7 +555,7 @@ All non‑fatal errors and successes are shown via Toast.
 
 ### 8.3 Network / Connection Errors
 
-- Gateway `error` → `GatewayBanner` (§3.5) + red status pill in bottom bar
+- Gateway `error` → `GatewayStatusChip` in the title bar (§3.5) + red status pill in bottom bar
 - MQTT disconnected (while Agent running) → warning pill in bottom bar ("Realtime connection lost, retrying…"); sleeping Agents do not show this (expected behaviour)
 - Any async operation failure → Toast + error details
 

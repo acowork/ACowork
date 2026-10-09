@@ -7,7 +7,7 @@ import { initMqttListener } from "../../stores/chatStore";
 import { initWorkspaceFsListener } from "../../lib/workspaceFsEvents";
 import { initDocTreeChangeListener } from "../../lib/docFsEvents";
 import { getGatewayUrl } from "../../lib/config";
-import { probeGateways } from "../../lib/gateway-probe";
+import { UNREACHABLE_HINT_MS, probeKnownCandidates } from "../../lib/connectivity/gatewayConnectivity";
 import { useTranslation } from "../../i18n/useTranslation";
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import pkg from "../../../package.json";
@@ -21,12 +21,13 @@ const MAX_WAIT_MS = 30_000;
 /**
  * Fallback-window: how long SplashScreen waits before giving up on the
  * persisted Gateway URL and surfacing alternative reachable URLs from
- * the URL history (laptop moved to a new LAN). The happy path is
- * unaffected — once the Gateway connects, the candidate UI is
- * immediately dismissed. 30s still acts as the hard upper bound for
- * the underlying boot pipeline.
+ * the URL history (laptop moved to a new LAN). Shared with the runtime
+ * unreachable hint — boot and runtime use ONE number
+ * (`UNREACHABLE_HINT_MS`, see lib/connectivity/gatewayConnectivity.ts).
+ * The happy path is unaffected — once the Gateway connects, the
+ * candidate UI is immediately dismissed. 30s still acts as the hard
+ * upper bound for the underlying boot pipeline.
  */
-const CANDIDATE_FALLBACK_MS = 5_000;
 
 /**
  * Push the persisted settings into Rust and (for local mode) boot the
@@ -199,12 +200,14 @@ function CandidateChooser({
                     <li key={c.url}>
                         <button
                             onClick={() => onPick(c.url)}
-                            className="flex w-full items-center justify-between rounded border border-border-divider bg-page-bg px-2.5 py-1.5 text-left hover:border-[var(--color-accent)] hover:bg-panel-inset"
+                            className="btn-accent flex w-full items-center justify-between rounded px-2.5 py-1.5 text-left disabled:cursor-not-allowed disabled:opacity-50"
                         >
-                            <span className="truncate font-mono text-xs text-text-secondary" title={c.url}>
+                            {/* White on the accent fill — never the theme text
+                                tokens, which are unreadable on a solid accent. */}
+                            <span className="truncate font-mono text-xs text-white" title={c.url}>
                                 {c.url}
                             </span>
-                            <span className="ml-2 shrink-0 text-11 text-text-tertiary">
+                            <span className="ml-2 shrink-0 text-11 text-white/80">
                                 {Math.round(c.latencyMs)} ms
                             </span>
                         </button>
@@ -219,7 +222,6 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
     const { t } = useTranslation();
     const checkHealth = useGatewayStore((s) => s.checkHealth);
     const candidates = useGatewayStore((s) => s.candidates);
-    const setCandidates = useGatewayStore((s) => s.setCandidates);
     const clearCandidates = useGatewayStore((s) => s.clearCandidates);
     const gatewayMode = useSettingsStore((s) => s.gatewayMode);
     /**
@@ -250,22 +252,11 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
         requestAnimationFrame(() => setFadeIn(true));
     }, []);
 
-    // Connection-lifecycle effects:
-//
-//   - On CONNECTED: dismiss the candidate chooser (the URL we just
-//     connected to IS the persisted URL now — no chooser needed).
-//
-// History recording is owned by App.tsx (top-level subscriber so it
-// covers both boot-time and runtime disconnects). Keeping it out of
-// here avoids the same status transition firing twice during boot.
-    useEffect(() => {
-        const unsub = useGatewayStore.subscribe((state, prev) => {
-            if (state.status === "connected" && prev.status !== "connected") {
-                clearCandidates();
-            }
-        });
-        return unsub;
-    }, [clearCandidates]);
+    // Candidate dismissal on a CONNECTED transition and URL-history
+    // recording are both owned by top-level subscribers now
+    // (lib/connectivity/gatewayConnectivity.ts and App.tsx) — one
+    // implementation shared by the boot and runtime paths, instead of
+    // the same status transition being handled in two places.
 
     /**
      * Check bootstrap readiness via `GET /api/bootstrap` (ADR-059 §5.1)
@@ -366,40 +357,20 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
                 setStatusText("Connecting to Gateway...");
             }
 
-            // 5s fallback: if the persisted URL hasn't connected by now,
-            // probe the rest of the URL history and surface reachable
-            // candidates (laptop moved LAN). Fires on a parallel track;
-            // doesn't cancel the main boot pipeline. Skipped in local
-            // mode (always 127.0.0.1) and when there's no history to
-            // probe. Applies to both off-site modes (remote LAN and
-            // relay — the relay device domain can change too).
-            if (gatewayMode !== "local" && !candidatesOffered) {
-                const history = useSettingsStore.getState().gatewayUrlHistory;
-                const currentUrl = useSettingsStore.getState().gatewayUrl;
-                const others = history.filter((u) => u !== currentUrl);
-                if (others.length > 0) {
-                    candidateTimer = setTimeout(async () => {
-                        if (!mountedRef.current) return;
-                        // Re-read at fire time — `handleRetry` may have
-                        // already changed the persisted URL by now.
-                        const liveUrl = useSettingsStore.getState().gatewayUrl;
-                        const liveHistory = useSettingsStore.getState().gatewayUrlHistory;
-                        if (useGatewayStore.getState().status === "connected") return;
-                        const toProbe = liveHistory.filter((u) => u !== liveUrl);
-                        if (toProbe.length === 0) return;
-                        const results = await probeGateways(toProbe);
-                        if (!mountedRef.current) return;
-                        if (useGatewayStore.getState().status === "connected") return;
-                        const reachable = results
-                            .filter((r) => r.ok)
-                            .sort((a, b) => a.latencyMs - b.latencyMs)
-                            .map((r) => ({ url: r.url, latencyMs: r.latencyMs }));
-                        if (reachable.length > 0) {
-                            setCandidates(reachable);
-                            setCandidatesOffered(true);
-                        }
-                    }, CANDIDATE_FALLBACK_MS);
-                }
+            // Fallback: if the persisted URL hasn't connected within the
+            // shared budget, probe the URL history through the
+            // connectivity module — the SAME candidate probe the runtime
+            // chip uses (lib/connectivity/gatewayConnectivity.ts). Fires
+            // on a parallel track; doesn't cancel the main boot pipeline.
+            // The helper re-reads the store at fire time (a retry may
+            // have moved the URL), skips local mode / an already-connected
+            // Gateway, and folds results in per host.
+            if (!candidatesOffered) {
+                candidateTimer = setTimeout(async () => {
+                    if (!mountedRef.current) return;
+                    const found = await probeKnownCandidates();
+                    if (mountedRef.current && found > 0) setCandidatesOffered(true);
+                }, UNREACHABLE_HINT_MS);
             }
 
             // Push persisted settings into Rust and (for local mode)

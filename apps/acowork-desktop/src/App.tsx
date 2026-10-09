@@ -16,6 +16,7 @@ import { useGatewayStore } from "./stores/gatewayStore";
 import { useSettingsStore } from "./stores/settingsStore";
 import { log } from "./lib/logger";
 import { isRecoveryReload, clearRecoveryReload } from "./lib/recoveryReload";
+import { initGatewayConnectivity } from "./lib/connectivity/gatewayConnectivity";
 
 function App() {
   // On sleep-recovery reload, skip splash screen — gateway is already running
@@ -83,6 +84,13 @@ function App() {
     }
   }, [isRecoveryReload]);
 
+  // Unified connectivity handling — boot fallback, runtime unreachable
+  // hint, wake/Wi-Fi auto-heal all live in ONE module so the splash,
+  // the runtime UI and the sleep/wake paths never re-implement the
+  // logic (see lib/connectivity/gatewayConnectivity.ts). Root-mounted,
+  // so it also covers the splash phase.
+  useEffect(() => initGatewayConnectivity(), []);
+
   // Show the window after first render. The window starts hidden (visible:false
   // in tauri.conf.json) so the user never sees the empty/transparent window or
   // the decoration flicker that occurs before React mounts. By the time this
@@ -126,7 +134,7 @@ function App() {
   }, []);
 
   // Steady-state drop (laptop woke from sleep / switched Wi-Fi) →
-  // probe the rest of URL history so the GatewayBanner can offer
+  // probe the rest of URL history so the GatewayStatusChip can offer
   // reachable candidates.
   //
   // We probe on EVERY `connected → *` transition into a non-connected
@@ -135,7 +143,7 @@ function App() {
   // `connecting` because that's the user mid-edit. To stay robust
   // against the case where /health stays "ok" while the network is
   // actually dead (caching, intermediate proxy) we also probe on the
-  // banner's own trigger — see GatewayBanner.
+  // chip's own trigger — see GatewayStatusChip.
   //
   // The banner component drives its own probe lifecycle (on mount +
   // on retry click), which is the simpler and more reliable hook than

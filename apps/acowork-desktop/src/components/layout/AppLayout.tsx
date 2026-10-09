@@ -20,7 +20,6 @@ import { RightNavBar } from "./RightNavBar";
 // a failed load requires building a new one (see editorLoadAttempt below).
 const loadFileEditorPanel = () =>
     import("../editor/FileEditorPanel").then((m) => ({ default: m.FileEditorPanel }));
-import { GatewayBanner } from "./GatewayBanner";
 import {
   useGatewayStore,
   cancelHealthProbe,
@@ -568,7 +567,7 @@ export function AppLayout() {
   // effect runs `status` should already be `connected`. This single probe
   // is only a safety net for edge cases (remote-gateway mode, an older
   // Rust binary that skipped the probe, store state reset) and cannot
-  // flicker the banner - <GatewayBanner /> only renders for `error`.
+  // flicker the indicator - <GatewayStatusChip /> only renders for `error`.
   useEffect(() => {
     checkHealth();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -992,13 +991,18 @@ export function AppLayout() {
           disabled in Rust setup() so this is the only title bar. */}
       <TitleBar />
 
-      {/* ADR-052: GatewayBanner only renders for *steady-state* drops.
-          AppLayout is gated by `gatewayReady` in App.tsx, so by the time we
-          get here SplashScreen has already pushed `status` to `connected`.
-          Showing the banner for any state other than `error` would re-introduce
-          the pre-SplashScreen-era flicker where the banner appeared during the
-          boot window despite SplashScreen orchestrating the startup correctly. */}
-      {gatewayStatus === "error" && <GatewayBanner />}
+      {/* ADR-052: the Gateway outage indicator only renders for
+          *steady-state* drops. AppLayout is gated by `gatewayReady` in
+          App.tsx, so by the time we get here SplashScreen has already
+          pushed `status` to `connected`. Showing it for any state other
+          than `error` would re-introduce the pre-SplashScreen-era flicker
+          where the indicator appeared during the boot window despite
+          SplashScreen orchestrating the startup correctly.
+
+          It renders inside <TitleBar /> as a status chip — a drop after a
+          sleep/wake network switch persists until the user acts, so the
+          affordance must be permanent, but a full-width strip across the
+          top of every view out-shouted the content it was reporting. */}
 
       {/* Main content area */}
       <div className="flex flex-1 overflow-hidden">

@@ -183,21 +183,25 @@
 | MQTT 调试控件 | `MqttDebugControls`（开发者用，显示 MQTT 连接状态） |
 | 文件状态簇 | 文件编辑器打开时，绝对定位在文件面板下方，显示光标位置 / LSP 状态等 |
 
-**Gateway 断连信号**：Gateway 状态为 `error` 时，底部状态栏显示红色状态药丸，同时主内容顶部渲染 `GatewayBanner`（见 §3.5）。
+**Gateway 断连信号**：Gateway 状态为 `error` 时，底部状态栏显示红色状态药丸，同时标题栏渲染 `GatewayStatusChip`（见 §3.5）。
 
-### 3.5 Gateway 断连横幅（`GatewayBanner.tsx`）
+### 3.5 Gateway 断连指示芯片（`GatewayStatusChip.tsx`）
 
-仅在 `gatewayStatus === "error"` 时渲染（稳态掉线；启动期由 SplashScreen 负责）：
+仅在 `gatewayStatus === "error"` 时渲染（稳态掉线；启动期由 SplashScreen 负责），挂在标题栏 "ACowork" 右侧：
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│ ⚠ Gateway 未连接…                    [Start Gateway] [Retry] │
+│ ACowork  (◉ 网关不可达  2 ▾)                    [搜索][窗口] │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-- 琥珀色条，`border-amber-200 bg-amber-50`（dark 对应翻转）
-- 本地模式（`gatewayMode === "local"`）：显示 "Local Gateway is not running." / 启动中显示 "Starting local Gateway..."，提供 **[Start Gateway]** + **[Retry]**
-- 远程模式：显示 "Gateway not connected. Please check your connection settings."，仅提供 **[Retry]**
+- 琥珀色实心胶囊（`bg-amber-500`，dark `bg-amber-600`）+ 白字，`h-6`，hover 加深
+- **呼吸动画**：Wifi 图标 `animate-pulse`（只作用于图标，标签不闪）
+- **常驻不自动消失** —— 休眠唤醒换网络后断线会持续存在，直到用户切换地址或重试成功
+- 有候选地址时显示数量角标，不展开浮层也知道"有东西可点"
+- 点击展开浮层（`w-80`，点外部 / Esc 关闭）：状态文案 → 候选地址纵向列表（每行一个 `btn-accent` 实心按钮，右侧显示延迟 ms，`max-h-56` 纵向滚动）→ 底部操作条
+- 本地模式（`gatewayMode === "local"`）：显示 "本地网关未运行" / 启动中显示 "正在启动本地网关"，提供 **[启动]** + **[重试]**
+- 远程模式：显示 "网关不可达"，提供 **[重试]**
 
 ---
 
@@ -552,7 +556,7 @@ Step 1: 欢迎 ──→ Step 2: Gateway ──→ Step 3: API Key ──→ Ste
 
 ### 8.3 网络/连接错误
 
-- Gateway `error` → `GatewayBanner`（§3.5）+ 底部状态栏红色药丸
+- Gateway `error` → 标题栏 `GatewayStatusChip`（§3.5）+ 底部状态栏红色药丸
 - MQTT 断开（Agent 运行中）→ 底部状态栏 warning 药丸（"Realtime connection lost, retrying..."），休眠中的 Agent 不提示（预期行为）
 - 各异步操作失败 → Toast + 错误详情
 
