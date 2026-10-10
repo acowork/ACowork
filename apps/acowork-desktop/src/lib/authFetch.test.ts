@@ -16,6 +16,8 @@ vi.mock("./logger", () => ({
 
 import { installAuthFetchInterceptor } from "./authFetch";
 import { useAuthStore } from "../stores/authStore";
+import { adopt, clear, __resetForTests } from "./session/tokens";
+import { installTokenTransport } from "./session/wiring";
 
 function response(status = 200): Response {
   return {
@@ -30,18 +32,22 @@ let uninstall: () => void;
 
 beforeEach(() => {
   original = globalThis.fetch;
+  // The 401→refresh→replay case drives a real rotation, which needs the
+  // module's transport. It is wired explicitly now (not as an authStore
+  // module side effect), so install it here.
+  installTokenTransport();
   uninstall = installAuthFetchInterceptor();
-  useAuthStore.setState({
-    mode: "multi_user",
-    status: "logged_in",
-    accessToken: "at",
-    refreshToken: "rt",
-    _refreshPromise: null,
-  });
+  useAuthStore.setState({ mode: "multi_user", status: "logged_in" });
+  // The interceptor takes tokens from the session module, so that is where
+  // a test puts one. `at` is not a JWT, which keeps the scheduled rotation
+  // out of these cases — they are about the request path, not the timer.
+  __resetForTests();
+  adopt({ access_token: "at", refresh_token: "rt" });
 });
 
 afterEach(() => {
   uninstall();
+  __resetForTests();
   globalThis.fetch = original;
 });
 
@@ -114,7 +120,7 @@ describe("installAuthFetchInterceptor", () => {
   });
 
   it("does not attach a token when there is none", async () => {
-    useAuthStore.setState({ accessToken: null });
+    clear();
     const spy = vi.fn(async () => response(200));
     globalThis.fetch = spy as unknown as typeof fetch;
     uninstall = installAuthFetchInterceptor();

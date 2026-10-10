@@ -1,4 +1,4 @@
-<h1 align="center">ACowork.AI — 和你的 agent 同事一起工作</h1>
+<h1 align="center">ACowork.AI — AI与人的协作平台</h1>
 
 <p align="center">
   <img src="assets/brand-mark.svg" alt="ACowork" width="360">
@@ -30,7 +30,7 @@
       <td width="50%" align="center" valign="top">
         <img src="./assets/1.jpg" alt="多 Agent 协作与记忆系统" width="100%" />
         <br />
-        <em>与多位 AI 同事协作——每位 Agent 拥有独立记忆、实时上下文感知和工具执行能力。</em>
+        <em>人与AI协作——每位 Agent 拥有独立运行环境、记忆存储、实时上下文感知和工具执行能力。</em>
       </td>
       <td width="50%" align="center" valign="top">
         <img src="./assets/2.jpg" alt="调试面板与上下文快照" width="100%" />
@@ -45,21 +45,21 @@
 
 ## ACowork.AI 是什么？
 
-ACowork.AI 是一个**多用户、分布式、AI 原生的协作平台**。它把团队成员、AI 同事、项目与文档统一装进同一个
+ACowork.AI 是一个**多用户、分布式、AI 原生的协作平台**。它把团队成员、AI agent、项目与文档统一装进同一个
 运行时——规划工作、撰写文档、评审代码、交付功能，都可以像和人类队友协作一样和 Agent 并肩完成。
 
 - **多用户优先**。真实的账号、角色、会话与按用户的审计轨迹，不再是单 actor 的 demo 形态。
 - **分布式优先**。Gateway 作为唯一控制面；Node Agent 跑在每台需要承载 Runtime 的机器上——你的 GPU 主机、
   你的笔记本、你的云上 VM——Gateway 都通过同一条协议路径与它们对话。
 - **AI 原生的项目 & 文档管理**。项目管理（`acowork-pm`）与在线文档库（`acowork-doc`）是一等公民服务——
-  Agent 通过 REST + MCP 像普通同事一样读、写、协作，并支持实时多人编辑。
+  Agent 通过 REST + MCP 读、写、协作，并支持实时多人编辑。
 - **用户 ↔ AI 无缝沟通协作**。人和 Agent 在同一个聊天面板里协作；Agent 订阅项目/文档事件；Intent 在
   任意两个 actor 之间路由。
 - **Standalone 与集群通吃**。单机自用就开 standalone；翻一个开关，同一套二进制就成为横跨整个团队的
   集群——一条协议路径，代码里没有「本地 / 远程」分支。
 
 每个 Agent 依然是独立的**"数字伙伴"**：拥有自己的运行时进程、私有记忆、工作区和配置——
-完全独立的个性化认知。**调优 Prompt、Tools、Memory = 构建 AI 同事。** Personal/Sensitive 数据在打包时
+完全独立的个性化认知。**调优 Prompt、Tools、Memory = 构建 AI agent** Personal/Sensitive 数据在打包时
 自动剥离，你可以自由分享 Agent 的能力，而不必担心泄露私有记忆。
 
 ---
@@ -70,9 +70,9 @@ ACowork.AI 是一个**多用户、分布式、AI 原生的协作平台**。它�
 
 | | |
 |---|---|
-| 👥 **多用户，而不是单 actor** | 真实账号、角色、会话、按用户审计。人和 AI 同事共享同一个聊天、项目与文档面板。 |
+| 👥 **多用户，而不是单 actor** | 真实账号、角色、会话、按用户审计。人和 AI agent共享同一个聊天、项目与文档面板。 |
 | 🌐 **分布式 Agent，一个控制面** | Gateway 负责 MQTT + HTTP 反代，Node Agent 跑在每台主机上。GPU 主机、工位机、云 VM 在 Gateway 眼里长得一样。 |
-| 🗂️ **AI 原生的项目 & 文档管理** | `acowork-pm` 和 `acowork-doc` 是一等公民服务，对外暴露 REST + MCP。Agent 像同事一样读写任务与文档，并支持实时多人编辑（Yjs CRDT）。 |
+| 🗂️ **AI 原生的项目 & 文档管理** | `acowork-pm` 和 `acowork-doc` 是一等公民服务，对外暴露 REST + MCP。Agent 和团队成员一样读写任务与文档，并支持实时多人编辑（Yjs CRDT）。 |
 | 🤝 **人与 AI 在同一段对话里** | 同一个聊天、同一个项目树、同一个文档库。Agent 订阅事件、抛出 Intent、与人类一起交付工作，没有「AI 侧边栏」这种孤岛。 |
 | 🚀 **Standalone 或集群——同一份二进制** | 单机自用就开 standalone；想扩展成团队集群就用同一份二进制，Gateway 代码里没有「本地 / 远程」分支。 |
 
@@ -82,7 +82,7 @@ ACowork.AI 是一个**多用户、分布式、AI 原生的协作平台**。它�
 
 | | |
 |---|---|
-| 👥 **多用户，而不是单 actor** | 真实账号、角色、会话、按用户审计。人和 AI 同事共享同一个聊天 / 项目 / 文档面板。 |
+| 👥 **多用户，而不是单 actor** | 真实账号、角色、会话、按用户审计。人和 AI agent共享同一个聊天 / 项目 / 文档面板。 |
 | 🌐 **分布式 Agent，一个控制面** | Gateway 负责 MQTT + HTTP 反代；Node Agent 跑在每台需要承载 Runtime 的主机（GPU 机 / 工位 / 云 VM）上——单机与多机走同一条协议路径。 |
 | 🗂️ **AI 原生的项目 & 文档管理** | `acowork-pm` 和 `acowork-doc` 是一等公民服务；Agent 通过 REST + MCP 读写任务与文档，并支持实时多人编辑（Yjs CRDT）。 |
 | 🤝 **人与 AI 在同一段对话里** | 同一个聊天、同一个项目树、同一个文档库。AI 订阅项目 / 文档事件、与人类一起交付工作——没有「AI 侧边栏」这种孤岛。 |
@@ -357,6 +357,6 @@ Apache-2.0 —— 详见 [`LICENSE`](./LICENSE)。
 ---
 
 <p align="center">
-  <b>ACowork.AI — 与你的 AI 同事协作</b><br>
+  <b>ACowork.AI — AI与人的协作平台</b><br>
   <i>像组建团队一样构建和协作 AI 伙伴。</i>
 </p>

@@ -30,6 +30,15 @@ use crate::auth::issuer::{
 /// Invite-token lifetime (ADR-076 §决策 6: "一次性 invite_token（24h 过期）").
 pub const INVITE_TTL_SECS: i64 = 24 * 3600;
 
+/// How long after a successful rotation a replay of the same family is
+/// treated as a client race or a retried request rather than token theft
+/// (ADR-076 §5.5, §10.1 #3).
+///
+/// Sized to one HTTP round-trip plus a retry, well under the 15-minute
+/// access TTL, so a real thief is still locked out on their *next* attempt.
+/// Widening this trades reuse-detection sharpness for replay tolerance.
+pub const REFRESH_REUSE_GRACE_SECS: i64 = 10;
+
 /// Password policy (ADR-076 §决策 6, `[multi_user].password_policy`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -340,17 +349,40 @@ impl AuthService {
             .map_err(AuthError::Token)?;
         let family = claims.family.clone().ok_or(AuthError::Revoked)?;
 
-        if self.revoked().is_rotated(&family) {
+        // Read the stamp behind its own scope: `if let` keeps the scrutinee's
+        // temporaries alive through the body, and the body re-locks this same
+        // mutex — holding the guard across it deadlocks.
+        let rotated_at = self.revoked().rotated_at(&family);
+        if let Some(rotated_at) = rotated_at {
+            // A replay inside the grace window is a client racing itself or
+            // retrying a response it never received — not evidence of theft.
+            // Reject the attempt, but do **not** escalate: `revoke_user` here
+            // would turn one duplicated request into a full sign-out of every
+            // device the user owns. Observed live: two `/api/auth/refresh`
+            // calls 3 ms apart, one 200 and one 401, and the 401 nuked the
+            // account. RFC 9700 §4.14.2 permits this window.
+            if now - rotated_at <= REFRESH_REUSE_GRACE_SECS {
+                tracing::warn!(
+                    user_id = %claims.sub,
+                    age_secs = now - rotated_at,
+                    "refresh token replayed inside the grace window — rejecting without escalation"
+                );
+                return Err(AuthError::Revoked);
+            }
             tracing::warn!(
                 user_id = %claims.sub,
-                "refresh token reuse detected — revoking every family for this user"
+                age_secs = now - rotated_at,
+                "refresh token reuse detected — revoking every family this user held"
             );
             self.revoked()
-                .revoke_user(&claims.sub)
+                .revoke_user(&claims.sub, now)
                 .map_err(AuthError::Store)?;
             return Err(AuthError::Revoked);
         }
-        if self.revoked().is_revoked(&claims.sub, &family) {
+        if self
+            .revoked()
+            .is_revoked(&claims.sub, &family, claims.iat)
+        {
             return Err(AuthError::Revoked);
         }
 
@@ -366,7 +398,7 @@ impl AuthService {
         }
 
         self.revoked()
-            .mark_rotated(&family)
+            .mark_rotated(&family, now)
             .map_err(AuthError::Store)?;
         Ok(self.mint(&account.user_id, account.role, now))
     }
@@ -383,7 +415,7 @@ impl AuthService {
             Ok(claims) => {
                 if let Some(family) = claims.family {
                     self.revoked()
-                        .revoke_family(&family)
+                        .revoke_family(&family, now)
                         .map_err(AuthError::Store)?;
                 }
                 Ok(())
@@ -431,7 +463,7 @@ impl AuthService {
         self.save_accounts(&list).map_err(AuthError::Store)?;
 
         self.revoked()
-            .revoke_user(user_id)
+            .revoke_user(user_id, now)
             .map_err(AuthError::Store)
     }
 
@@ -800,7 +832,7 @@ impl AuthService {
         list.version += 1;
         self.save_accounts(&list).map_err(AuthError::Store)?;
         self.revoked()
-            .revoke_user(user_id)
+            .revoke_user(user_id, now)
             .map_err(AuthError::Store)
     }
 
@@ -821,7 +853,7 @@ impl AuthService {
         list.version += 1;
         self.save_accounts(&list).map_err(AuthError::Store)?;
         self.revoked()
-            .revoke_user(user_id)
+            .revoke_user(user_id, now)
             .map_err(AuthError::Store)?;
         Ok(token)
     }
@@ -1132,7 +1164,7 @@ mod tests {
     }
 
     #[test]
-    fn refresh_rotates_and_reuse_kills_the_whole_chain() {
+    fn refresh_rotates_and_replay_inside_grace_spares_the_chain() {
         let (svc, uid) = service_with_user("refresh-rot", "carol", "s3cret123");
         let now = 1_700_000_000;
         let first = svc.login("carol", "s3cret123", now).unwrap();
@@ -1146,16 +1178,75 @@ mod tests {
             uid
         );
 
-        // Replaying the spent token is the leak signal: it kills every
-        // family for the user, including the live descendant.
+        // Replaying the spent token inside the grace window is a client race
+        // or a retried request, not a leak: the attempt is refused, but the
+        // live descendant survives. Escalating here would sign every device
+        // out of the account because two requests landed 3 ms apart.
         assert_eq!(
             svc.refresh(&first.refresh_token, now + 2).unwrap_err(),
             AuthError::Revoked
         );
+        assert!(
+            svc.refresh(&second.refresh_token, now + 3).is_ok(),
+            "a replay inside the grace window must not revoke the user's other sessions"
+        );
+    }
+
+    #[test]
+    fn refresh_replay_outside_grace_kills_the_whole_chain() {
+        // Past the grace window the same replay is the leak signal RFC 9700
+        // §4.14.2 describes: the thief refreshed first, so the victim's
+        // whole chain goes down.
+        let (svc, uid) = service_with_user("refresh-reuse-late", "carol", "s3cret123");
+        let now = 1_700_000_000;
+        let first = svc.login("carol", "s3cret123", now).unwrap();
+        let second = svc.refresh(&first.refresh_token, now + 1).unwrap();
         assert_eq!(
-            svc.refresh(&second.refresh_token, now + 3).unwrap_err(),
+            svc.verify_access(&second.access_token, now + 1)
+                .unwrap()
+                .user_id,
+            uid
+        );
+
+        // rotated_at = now + 1, so the window closes at now + 11.
+        assert_eq!(
+            svc.refresh(&first.refresh_token, now + 12)
+                .unwrap_err(),
             AuthError::Revoked
         );
+        assert_eq!(
+            svc.refresh(&second.refresh_token, now + 13)
+                .unwrap_err(),
+            AuthError::Revoked
+        );
+    }
+
+    #[test]
+    fn a_misjudged_replay_recovers_on_the_next_login() {
+        // The blast-radius ceiling: even when reuse detection escalates, the
+        // revocation is time-bounded, so a fresh login is not locked out.
+        // Before this, one duplicate refresh was an unrecoverable account
+        // lock that needed hand-editing revoked_families.txt to clear.
+        let (svc, _) = service_with_user("replay-recover", "carol", "s3cret123");
+        let now = 1_700_000_000;
+        let first = svc.login("carol", "s3cret123", now).unwrap();
+        let second = svc.refresh(&first.refresh_token, now + 1).unwrap();
+
+        // Outside the window → full revocation of what existed at that point.
+        assert_eq!(
+            svc.refresh(&first.refresh_token, now + 12)
+                .unwrap_err(),
+            AuthError::Revoked
+        );
+        assert_eq!(
+            svc.refresh(&second.refresh_token, now + 13)
+                .unwrap_err(),
+            AuthError::Revoked
+        );
+
+        // The user signs back in and the session is healthy again.
+        let revived = svc.login("carol", "s3cret123", now + 14).unwrap();
+        assert!(svc.refresh(&revived.refresh_token, now + 15).is_ok());
     }
 
     #[test]

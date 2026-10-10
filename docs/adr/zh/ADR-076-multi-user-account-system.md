@@ -322,6 +322,12 @@ pub async fn auth_middleware(
 - **`AuthContext`**：`{ user_id, role: Role, as_user: Option<String> }`，`effective_user_id()` 仅在 `is_admin()` 为真时才吃 `as_user`。`as_user` 的校验前移到**中间件**：非 admin 携带 `as_user` 直接 403（而非静默忽略），杜绝"看起来生效了"的错觉。
 - **access token 校验是无状态的**（仅验签 + `exp`，不读 `accounts.json`）：这个选择把"账号被禁用后 token 还能用"的窗口上界钉死在 `ACCESS_TTL_SECS`（15 分钟），换掉每个反代请求一次磁盘解析。**refresh 是强一致执行点**：`AuthService::refresh` 每次都重读 `accounts.json` 并校验 `is_login_capable()`，所以禁用账号最多苟活 15 分钟。
 - **refresh 轮换 + 复用检测（RFC 9700 §4.14.2）**：refresh token **单次使用**——每次刷新把"呈现的 family"标记为 `rotated`（`revoked_families.txt` 里 `r:{family}` 前缀）并铸造新 family。若再收到一个已 `rotated` 的 family，即判定为**泄漏或客户端重放**，**撤销该 user 的全部 family**（`{user_id}.*`），让"先刷新的窃贼"也会在受害者下一次刷新时被踢下线。`x:{family}` 前缀表示**显式撤销**（登出）——重放它只返回 401，**不**连坐该 user 的其他设备（登出手机不该杀死桌面端）。两种前缀必须区分，这是"登出"与"轮换"语义的分水岭。
+- **宽限窗口 + 时间基准撤销（实施记录，修"登录后约 13 分钟必被踢下线"）**：上述严格模式有两个已在本轮收口的缺陷——① 丢包重试被判复用（原 `ponytail:` 项），② `{user_id}.*` 是**无界**条目，一旦写入就永久生效，而 `login()` 只铸造不清除登记簿，于是误判一次就**循环锁死**：登录 → 13 分钟后 refresh 401 → 弹登录 → 再登录 → 再 401。实测触发者是同一 webview 内相隔 3 ms 的两个 refresh（定时器与 401 兜底路径撞车），不是多设备。修法：
+  - `revoked_families.txt` 每条条目改为 `entry\t{unix秒}`，无时间戳的 legacy 行按文件 mtime 继承（**fail closed**，存量撤销不失效），旧文件无需迁移。
+  - `{user_id}.*` 的语义从"永远"改为"**撤销 `iat <= cutoff` 的全部 family**"。新登录的 `iat` 必然晚于 cutoff，因此通配条目对"下一次登录"天然免疫——误判不再需要人工清理，登录本身就是恢复路径（回归测试 `a_misjudged_replay_recovers_on_the_next_login`）。
+  - `r:` 条目带时间戳，`REFRESH_REUSE_GRACE_SECS = 10` 内的重复呈现只拒绝**这一次**请求，不连坐整条链；超窗才 `revoke_user`。宽限不能无限延长：合法轮换间隔约 13 分钟 ≫ 10 秒，攻击者重放旧 token 仍会落在窗外（`refresh_rotates_and_replay_inside_grace_spares_the_chain` / `refresh_replay_outside_grace_kills_the_whole_chain`）。
+  - `r:` 标记**必须前进**（last write wins）：每次轮换铸造的是同一 family 的后继 token，把标记冻在第一次轮换时间戳上，会让*下一次*轮换的并发重复对上一个陈旧时间戳求差、被判超窗而连坐——正是要防的假阳性。它不可能被拖成永久宽限（同上，13 分钟 ≫ 10 秒）。回归测试 `rotation_stamp_tracks_the_latest_spend`。
+  - `revoke_user` / `revoke_family` 签名新增 `now`；四处调用点（改密 / 禁用 / 重置 / 复用连坐）全部显式传 `now`。
 
 **`AuthContext` 注入后下游 handler 的写法**：
 
@@ -991,7 +997,7 @@ require_mixed_case = false
 > 本节混放**变更记录**（标 已结清 / 已实现）与**未结清的 ceiling**。只看"还剩什么没做"请直接跳 [§10 遗留清单](#10-遗留清单仍未做全集)——那一节是本节加上 §7.2 / §9 的**索引**，按"触发条件"排序，并单列了**已否决**的方案。
 
 - **ponytail: access token 校验无状态**（只验签 + `exp`，不读 `accounts.json`），所以"账号被禁用后 token 仍可用"的窗口 = `ACCESS_TTL_SECS`（15 分钟）。这是**有意的上界**，不是遗漏：代价是每请求一次磁盘解析，收益只有 15 分钟。真正的强一致点在 `refresh`（每次重读 store）。要即时生效 → 加一个内存 `user_id → revoked_at` 集合在 `verify_access` 里查（无磁盘 I/O）。用户量 > 100 或需要即时踢人时再上 RS256 + 撤销名单。
-- **ponytail: refresh token 单次使用 + 复用检测会误伤重试**。若客户端发出 refresh、服务端处理成功、但响应在网络上丢失，客户端重试同一 token 会被判为"复用"→ 整个用户全线下线。RFC 9700 认可这种严格模式；主流实现多给一个几秒的宽限窗口（grace window）。本期不实现宽限窗口（YAGNI，Desktop 单客户端场景重试窗口极窄），升级路径 = 在 `revoked_families.txt` 的 `r:` 条目上加时间戳 + 宽限判定。
+- **✅ 已结清：refresh token 单次使用的复用检测会误伤重试**（原 `ponytail:` 项）。原缺陷：客户端发出 refresh、服务端处理成功、但响应在网络上丢失，客户端重试同一 token 被判"复用"→ 连坐撤销该用户全部 family；且 `{user_id}.*` 无界，`login()` 不清除登记簿，于是**循环锁死**（登录 → 约 13 分钟必 401 → 弹登录 → 再登录 → 再 401）。实测触发者是同一 webview 内相隔 3 ms 的两个 refresh，不是多设备——见 §决策 3「Desktop token 单一所有者」。实现 = 原升级路径：`r:` 条目加时间戳 + 10 秒宽限判定，通配条目改为 `iat <= cutoff` 时间基准（新登录天然免疫，登录即恢复路径）。详见 §决策 3 实施记录与 `core/acowork-user/src/auth/revoked.rs` 模块文档。
 - **ponytail: `revoked_families.txt` 是扁平文件、无 GC**，每次 refresh 追加一行。目标规模（< 100 用户）无问题；超过需要 SQLite 表 + 过期列。
 - **ponytail: 用户聊天列表是 fs 扫描**，O(n) on `data_dir/users/`。n < 1000 时可接受；超过需要 SQLite 索引。
 - **ponytail: `as_user` query 在反代链路上是字符串透传**，未来如果引入 proto 升级需要结构化字段。
@@ -1093,8 +1099,14 @@ require_mixed_case = false
 
 **已实现（Phase 2 残留 + Phase 5，本次）**：
 - 新增 `src/lib/auth-api.ts`：`/api/auth/*` + `/api/users` 的薄 HTTP 封装（登录 / 刷新 / 登出 / 改密 / me / 账号列表 / 软删除），错误统一为 `AuthApiError(status, message)`
-- 新增 `src/lib/authFetch.ts`：**全局 `fetch` 拦截器**（替代原稿的 `src/lib/api/auth.ts` 逐调用点包装）——只对 Gateway origin 注入 `Authorization`，跳过 `/api/auth/*`，401 → 单飞 refresh → 重放一次；`AUTH_MODE=local` 下纯透传。取舍理由：Desktop 有 ~170 处裸 `fetch(` 调用点，逐点包装极易漏一处（漏点 = multi_user 下静默 401），拦截器保证零遗漏
-- 新增 `src/stores/authStore.ts`：token 管理（`localStorage["acowork.auth.tokens"]`）+ 模式解析（`/api/status` 的 `auth_mode`）+ 单飞 `refreshTokens`；账号切换 / 退出 / 注销 / 改密均**清 token + `window.location.reload()`**（§9 问题 6 的"已登出未登入"中间态 = 重载落 LoginView，沿用仓库既有 `location.reload` 恢复范式，替掉原稿的逐 store reset）
+- 新增 `src/lib/session/tokens.ts`：**token 对的唯一所有者**（事后重构，修"登录后约 13 分钟必被踢下线"）。原实现把 token 生命周期**碎片化**在四个调用点——`authStore` 的 proactive 定时器、`authStore.init()` 的 401 分支、`authFetch` 拦截器的 401 分支、`gatewayAuthBridge` 的 `AUTH_REQUIRED_EVENT` 分支——每个都是 token 的**需求方**却同时在做**管理动作**（直接调 `refreshTokens()`）。后果：同一 webview 内相隔 3 ms 的两个 refresh 必然发生，第二个被服务端判成重放 → 连坐撤销 → 弹登录 → 循环。单飞字段（`_refreshPromise`）当时**只覆盖** `refreshTokens()` 这一个入口，跨入口的并发完全没被串行化——不变量写在数据结构里，却没有被架构守住。
+  - **边界**：模块拥有持久化、`exp` 记账、proactive 定时轮换、单飞、以及"这个会话已死"的判定；需求方只有两个动作——`acquire()`（取一个还能用的 token）与 `reportRejected(token)`（上报"这个被拒了"这一**事实**，拿回一个可用 token）。需求方**永远不命令轮换**，也拿不到 refresh token（`refreshToken` 已从 `authStore` 移除）。
+  - **高内聚 / 低耦合**：模块零 store 依赖，轮换传输由 `configure({ refresh, logout })` 注入（在 `authStore` 模块加载处接线）。直接 import `lib/config` 会成环（config → settingsStore → authStore → 本模块），注入把这条边断掉，同时给出唯一的可测接缝——单测不需要任何 store。
+  - **开闭**：新增 token 需求方（未来的移动端 / 新拦截器）只调 `acquire()`，不需要新增任何轮换逻辑；新增**轮换策略**（改宽限、改提前量、换退避）只动模块内部，需求方零改动。
+  - **proactive 定时器保留且必须保留**：relay 模式 MQTT 的 CONNECT 密码**就是** access token，坏凭证被 `rumqttd` 无 CONNACK 丢弃，401 惰性路径对它完全无效——那个消费者只能靠"过期前就新鲜"。
+  - `authStore` 净减约 150 行；四个 refresh 入口 → **0 个**（唯一入口在模块内部）。测试迁移：删除 `authStore.proactive.test.ts`，其覆盖面（提前量 / 重挂 / 停滞上限 / 不可读 `exp`）连同新增的单飞合并、`reportRejected` 去重、会话终结信号，落到 `src/lib/session/tokens.test.ts`（22 例，纯模块、无 store）。
+- 新增 `src/lib/authFetch.ts`：**全局 `fetch` 拦截器**（替代原稿的 `src/lib/api/auth.ts` 逐调用点包装）——只对 Gateway origin 注入 `Authorization`，跳过 `/api/auth/*`，401 → `reportRejected` → 重放一次；`AUTH_MODE=local` 下纯透传。取舍理由：Desktop 有 ~170 处裸 `fetch(` 调用点，逐点包装极易漏一处（漏点 = multi_user 下静默 401），拦截器保证零遗漏
+- 新增 `src/stores/authStore.ts`：模式解析（`/api/status` 的 `auth_mode`）+ 登录门禁状态 + 账号 UI 状态；账号切换 / 退出 / 注销 / 改密均**清 token + `window.location.reload()`**（§9 问题 6 的"已登出未登入"中间态 = 重载落 LoginView，沿用仓库既有 `location.reload` 恢复范式，替掉原稿的逐 store reset）。**token 不在此处管理**（原稿的 `localStorage` 读写 + 单飞 `refreshTokens` 已迁出，见上条 `lib/session/tokens.ts`）；`accessToken` 只是模块的**只读镜像**，因为十余个组件绑定它并需要在轮换时重渲染
 - 新增 `src/components/account/`：`LoginView`（App 门禁）+ `AccountMenu`（复用 `common/ContextMenu` 弹层：切换账号 / 改密 / 注销 / 用户偏好 / 退出）+ `ChangePasswordModal`
 - 新增 `src/components/user-list/UserList.tsx` + `partitionAccounts.ts`：侧栏 "Users (N)" 折叠分组（admin 列全部账号，普通用户只列自己）；admin 点账号 → `authStore.viewAsUserId` → `agentStore.fetchSessions` 追加 `?as_user=`（只读视图）
 - 修改 `src/components/layout/NavBar.tsx`：头像入口改用 `AccountMenu`（local / 未登录回退到旧"编辑资料"行为）
@@ -1320,7 +1332,7 @@ grep -nE '"/sessions' core/acowork-runtime/src/http/server.rs
 |---|---|---|---|
 | 1 | **MQTT 事件面无 per-user 订阅 ACL**——能连上 broker 的客户端理论上可 SUBSCRIBE 任意 `agents/{id}/sessions/{sid}/messages/#` | 部署从"本机回路"变成"跨机 / 多租户"；或在 `rumqttd` 上找到 ACL 能力 | §5.5 + [`mqtt.md §10`](../../protocols/zh/mqtt.md)（已标注"暂缓 / 已知缺口"） |
 | 2 | **access token 校验无状态**——账号被禁用后旧 token 仍可用，窗口 = `ACCESS_TTL_SECS`（15 分钟） | 用户量 > 100，或需要"立刻踢下线" | §5.5（升级路径：内存 `user_id → revoked_at` 集合） |
-| 3 | **refresh 无 grace window**——响应丢包后的重试会被判成"复用"，连坐撤销该用户全部 family | 出现真实的多客户端 / 弱网重试场景 | §5.5（升级路径：`r:` 条目加时间戳 + 宽限判定） |
+| 3 | **✅ 已结清（原：refresh 无 grace window）**——响应丢包后的重试被判"复用"连坐全部 family；且 `{user_id}.*` 无界 + `login()` 不清登记簿 → **循环锁死**（登录 → 约 13 分钟必 401 → 弹登录 → 再登录）。触发条件已成立，但成立的方式与原预测不同：不是多客户端，是同一 webview 内相隔 3 ms 的两个 refresh（碎片化的 token 管理自撞） | — | §决策 3 实施记录（宽限窗口 + `iat <= cutoff` 时间基准撤销）+ §5.5 |
 | 4 | **`revoked_families.txt` 是扁平文件、无 GC** | 历史上万次 refresh | §5.5（升级路径：SQLite 表 + 过期列） |
 | 5 | **聊天列表是 fs 全扫（O(pairs)）** | 会话对数接近 1000 | §6.4（`chat.rs` 已知 ceiling）+ 代码内 `ponytail:` |
 | 6 | **翻页要读整个 `messages.jsonl`** | 单会话消息上万 | §6.4（同上） |

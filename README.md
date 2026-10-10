@@ -1,4 +1,4 @@
-<h1 align="center">ACowork.AI — Collaborate with your AI Colleagues</h1>
+<h1 align="center">ACowork.AI — Collaborate with your colleagues and agents</h1>
 
 <p align="center">
   <img src="assets/brand-mark.svg" alt="ACowork" width="360">
@@ -6,9 +6,9 @@
 
 <p align="center">
   🏗️ <strong>Declarative Agent Platform · Decentralized · High-Security · Scalable</strong><br>
-  ⚡️ <strong>Easy to build an agent colleague.</strong><br>
-  ⚡️ <strong>Easy to share an agent colleague.</strong><br>
-  ⚡️ <strong>Easy to deploy agent colleagues.</strong>
+  ⚡️ <strong>Easy to build an agent.</strong><br>
+  ⚡️ <strong>Easy to share an agent.</strong><br>
+  ⚡️ <strong>Easy to deploy agent.</strong>
 </p>
 
 <p align="center">
@@ -30,7 +30,7 @@
       <td width="50%" align="center" valign="top">
         <img src="./assets/1.jpg" alt="Multi-Agent Collaboration &amp; Memory" width="100%" />
         <br />
-        <em>Collaborate with multiple AI colleagues — each with private memory, real-time context awareness, and tool execution.</em>
+        <em>Collaborate with multiple agents — each with private memory, real-time context awareness, and tool execution.</em>
       </td>
       <td width="50%" align="center" valign="top">
         <img src="./assets/2.jpg" alt="Debug Panel &amp; Context Snapshots" width="100%" />
@@ -46,7 +46,7 @@
 ## What is ACowork.AI?
 
 ACowork.AI is a **multi-user, distributed, AI-native collaboration platform**. It brings together people, AI
-colleagues, projects, and documents into one runtime — so a team can plan work, write specs, review code, and ship
+agents, projects, and documents into one runtime — so a team can plan work, write specs, review code, and ship
 features alongside their agents the same way they would alongside a human teammate.
 
 - **Multi-user by default.** Real accounts, roles, sessions, and per-user audit trails. No more single-actor demo mode.
@@ -61,7 +61,7 @@ features alongside their agents the same way they would alongside a human teamma
   cluster spanning every machine in your team — one protocol, no code branches.
 
 Every Agent is still an independent **"digital being"**: its own runtime process, private memory, workspace, and
-configuration. **Tune prompt, tools, and memory = build an AI colleague.** Personal and sensitive data is
+configuration. **Tune prompt, tools, and memory = build an agent.** Personal and sensitive data is
 automatically stripped during packaging, so you can share an agent's capabilities freely without leaking your
 private memories.
 
@@ -73,7 +73,7 @@ These are the bets ACowork is built around — and the reasons to choose it over
 
 | | |
 |---|---|
-| 👥 **Multi-user, not single-actor** | Real accounts, roles, sessions, audit. The same chat / project / document surface is shared by humans and AI colleagues. |
+| 👥 **Multi-user, not single-actor** | Real accounts, roles, sessions, audit. The same chat / project / document surface is shared by humans and agents. |
 | 🌐 **Distributed agents, one control plane** | Gateway brokers MQTT + HTTP reverse proxy; Node Agents run on every host. A GPU box, a workstation, and a cloud VM all look the same to the Gateway. |
 | 🗂️ **AI-native project & document management** | `acowork-pm` and `acowork-doc` are first-class services with REST + MCP. Agents read, write, and edit them like any other teammate — including real-time multi-user editing (Yjs CRDT). |
 | 🤝 **Humans and AI in one conversation** | One chat surface, one project tree, one doc library. AI subscribes to events, raises intents, and ships work alongside humans — no "AI side panel" silo. |
@@ -85,7 +85,7 @@ These are the bets ACowork is built around — and the reasons to choose it over
 
 | | |
 |---|---|
-| 👥 **Multi-user, not single-actor** | Real accounts, roles, sessions, per-user audit. Humans and AI colleagues share the same chat / project / doc surface. |
+| 👥 **Multi-user, not single-actor** | Real accounts, roles, sessions, per-user audit. Humans and agents share the same chat / project / doc surface. |
 | 🌐 **Distributed agents, one control plane** | Gateway brokers MQTT + HTTP reverse proxy; Node Agents run on every host that hosts Runtimes (GPU box / workstation / cloud VM) — single-host and multi-host share one protocol path. |
 | 🗂️ **AI-native project & document management** | `acowork-pm` and `acowork-doc` are first-class services; agents read, write, and collaborate on tasks and documents through REST + MCP — including real-time multi-user editing (Yjs CRDT). |
 | 🤝 **Human ↔ AI in one conversation** | One chat surface, one project tree, one doc library. AI subscribes to project / doc events and ships work alongside humans — no "AI side panel" silo. |
@@ -368,6 +368,6 @@ Apache-2.0 — see [`LICENSE`](./LICENSE) for details.
 ---
 
 <p align="center">
-  <b>ACowork.AI — Collaborate with your AI Colleagues</b><br>
+  <b>ACowork.AI — Collaborate with your colleagues and agents</b><br>
   <i>Build and collaborate with AI agents like team members.</i>
 </p>
