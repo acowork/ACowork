@@ -465,24 +465,28 @@ impl ContextBuilder {
 
     /// Build the complete ChatRequest for the LLM.
     ///
-    /// ADR-060 v2: output is reorganized into three cache-friendly blocks:
+    /// ADR-060 v2 (with §5.5 erratum): output is reorganized into two
+    /// cache-friendly blocks:
     /// - Block A: static system kernel (single SystemMessage + ephemeral breakpoint)
     /// - Block B: append-only conversation history — carries real
     ///   `todo_write` tool results, which are the canonical todo state
     ///   source (a full todo list embedded as a Block C tail snapshot
     ///   would shift every turn and never hit the cache).
-    /// - Block D: current user message, passed explicitly by the caller
-    ///   (`None` during tool-loop iterations / debug replay — see §5.5).
     ///
-    /// Note: Block C (dynamic todo snapshot at tail) was removed in
-    /// ADR-060 v2. Todos survive compaction via the
-    /// `HistoryManager::inject_todo_write_round_after_marker` post-step
-    /// applied in `loop_context.rs::compact_history_if_needed`.
+    /// The current user message is carried by Block B's tail — `run_inner`
+    /// appends it to history before calling `build`. There is NO separate
+    /// "Block D" duplicate: a message already in Block B has already been
+    /// sent to the LLM, so re-pushing it at the tail is a pure duplicate
+    /// (extra tokens + makes the model see the same user turn twice). The
+    /// only legitimate "copy from history to tail" case is compaction's
+    /// `inject_todo_write_round_after_marker`, which restores a round the
+    /// summary replaced — that is a recovery, not a duplicate, and lives
+    /// in `loop_context.rs::compact_history_if_needed`, independent of
+    /// `build`.
     pub fn build(
         &self,
         manifest: &AgentManifest,
         history: &HistoryManager,
-        current_user_message: Option<&ChatMessage>,
         gateway_capabilities: Option<&ModelCapabilitiesInfo>,
         max_output_tokens_limit: u64,
     ) -> ChatRequest {
@@ -578,14 +582,12 @@ impl ContextBuilder {
         // tool results in history) and survive compaction via the
         // `inject_todo_write_round_after_marker` post-step.
 
-        // ── Block D: current user message (ADR-060 §5.5) ──
-        // Explicitly passed by the caller — never inferred from the history
-        // tail (tool iterations leave Tool messages at the tail). Note the
-        // message is ALSO part of Block B (it is persisted in history); Block
-        // D is its duplicate clone at the end of the request.
-        if let Some(user_msg) = current_user_message {
-            messages.push(user_msg.clone());
-        }
+        // ADR-060 §5.5 erratum: the former "Block D" (a caller-passed
+        // duplicate of the current user message pushed at the tail) is
+        // removed. The current user message is already at Block B's tail
+        // (run_inner appends it to history before build), so the duplicate
+        // added no cache value (the stable prefix is A+B, unaffected) and
+        // cost tokens + made the model see the same turn twice.
 
         // 7.5 Sanitize messages before sending to LLM
         // This fixes corrupted tool_call data that would cause 400 errors
@@ -937,7 +939,7 @@ mod tests {
 
         let builder = ContextBuilder::new("You are a helpful assistant.".to_string())
             .with_override_model("gpt-4".to_string());
-        let request = builder.build(&manifest, &history, None, None, 32_768);
+        let request = builder.build(&manifest, &history, None, 32_768);
 
         assert_eq!(request.model, "gpt-4");
         assert_eq!(request.messages.len(), 2); // system + user
@@ -969,7 +971,7 @@ mod tests {
         ] {
             let mut builder = ContextBuilder::new("You are a helper.".to_string());
             builder.set_temperature(Some(input));
-            let request = builder.build(&manifest, &history, None, None, 32_768);
+            let request = builder.build(&manifest, &history, None, 32_768);
             let wire = serde_json::json!(request.temperature);
             assert_eq!(wire.to_string(), expected, "input {input}");
         }
@@ -983,7 +985,7 @@ mod tests {
         let builder = ContextBuilder::new("You are a helper.".to_string())
             .with_identity(Some("Name: Alice, City: Shanghai".to_string()));
 
-        let request = builder.build(&manifest, &history, None, None, 32_768);
+        let request = builder.build(&manifest, &history, None, 32_768);
         assert!(request.messages[0].content.contains("Alice"));
     }
 
@@ -1001,7 +1003,7 @@ mod tests {
         let builder =
             ContextBuilder::new("You are a helper.".to_string()).with_identity(Some(identity));
 
-        let request = builder.build(&manifest, &history, None, None, 32_768);
+        let request = builder.build(&manifest, &history, None, 32_768);
         let system = &request.messages[0].content;
         assert!(
             system.contains("Language field above"),
@@ -1057,7 +1059,7 @@ mod tests {
         // build() must omit the cleared sections entirely.
         let manifest = test_manifest();
         let history = HistoryManager::new(10000);
-        let request = builder.build(&manifest, &history, None, None, 32_768);
+        let request = builder.build(&manifest, &history, None, 32_768);
         let system = &request.messages[0].content;
         assert!(
             !system.contains("Memory Conflicts Needing Confirmation"),
@@ -1072,9 +1074,11 @@ mod tests {
     // ── ADR-060: Block A/B/C/D layout ──
 
     #[test]
-    fn test_build_block_layout_a_b_d() {
-        // ADR-060 v2: Block C removed — output is A/B/D only (todo state lives
-        // in Block B's real `todo_write` tool results).
+    fn test_build_block_layout_a_b_current_in_b_tail() {
+        // ADR-060 v2 + §5.5 erratum: Block C and Block D are both removed.
+        // Output is A/B only; the current user message lives at Block B's
+        // tail (run_inner appends it to history before build) and appears
+        // EXACTLY ONCE — no tail duplicate.
         let manifest = test_manifest();
         let mut history = HistoryManager::new(10000);
         history.append(ChatMessage::user("First turn"));
@@ -1083,9 +1087,10 @@ mod tests {
         let builder =
             ContextBuilder::new("Kernel".to_string()).with_override_model("gpt-4".to_string());
 
-        // Block D: current user message (explicitly passed).
+        // Current user message is part of history (Block B), not a separate arg.
         let current = ChatMessage::user("Second turn");
-        let request = builder.build(&manifest, &history, Some(&current), None, 32_768);
+        history.append(current.clone());
+        let request = builder.build(&manifest, &history, None, 32_768);
 
         // [0] Block A (System + ephemeral breakpoint)
         assert_eq!(request.messages[0].role, MessageRole::System);
@@ -1098,25 +1103,34 @@ mod tests {
         // Block A must NOT contain the ambiguous hint section.
         assert!(!request.messages[0].content.contains("Memory Conflicts"));
 
-        // [1..2] Block B: history turns (user + assistant)
+        // [1..3] Block B: history turns (user + assistant + current user)
         assert_eq!(request.messages[1].role, MessageRole::User);
         assert_eq!(request.messages[1].content, "First turn");
         assert_eq!(request.messages[2].role, MessageRole::Assistant);
         assert_eq!(request.messages[2].content, "First reply");
+        assert_eq!(request.messages[3].role, MessageRole::User);
+        assert_eq!(request.messages[3].content, "Second turn");
 
-        // [3] Block D: exact duplicate of the current user message.
+        // The current user message appears exactly ONCE (Block B tail), not
+        // duplicated as a trailing Block D.
         assert_eq!(request.messages.len(), 4);
-        let block_d = &request.messages[3];
-        assert_eq!(block_d.role, MessageRole::User);
-        assert_eq!(block_d.content, current.content);
-        assert_eq!(block_d.cache_control, current.cache_control);
+        assert_eq!(
+            request
+                .messages
+                .iter()
+                .filter(|m| m.role == MessageRole::User && m.content == "Second turn")
+                .count(),
+            1,
+            "current user message must appear exactly once (Block B tail, no Block D duplicate)"
+        );
     }
 
     #[test]
-    fn test_build_block_d_none_in_tool_iteration() {
+    fn test_build_no_duplicate_in_tool_iteration() {
         use acowork_core::providers::traits::{FunctionCall, ToolCall};
 
-        // Tool-loop iterations pass `None`: request has no Block D.
+        // Tool-loop iterations: history tail is a Tool message; the earlier
+        // user turn appears once (in Block B), no tail duplicate.
         let manifest = test_manifest();
         let mut history = HistoryManager::new(10000);
         history.append(ChatMessage::user("Turn"));
@@ -1138,11 +1152,20 @@ mod tests {
         let builder =
             ContextBuilder::new("Kernel".to_string()).with_override_model("gpt-4".to_string());
 
-        let request = builder.build(&manifest, &history, None, None, 32_768);
-        // [0] A, [1..3] B — no D, no C (ADR-060 v2).
+        let request = builder.build(&manifest, &history, None, 32_768);
+        // [0] A, [1..3] B — no D, no C (ADR-060 v2 + §5.5 erratum).
         assert_eq!(request.messages.len(), 4);
         assert_eq!(request.messages[3].role, MessageRole::Tool);
         assert_eq!(request.messages[3].content, "ok");
+        // The user turn appears exactly once (in Block B), no tail duplicate.
+        assert_eq!(
+            request
+                .messages
+                .iter()
+                .filter(|m| m.role == MessageRole::User && m.content == "Turn")
+                .count(),
+            1
+        );
     }
 
     // ── G9: Abstention guidance injection ──
@@ -1158,7 +1181,7 @@ mod tests {
         // Normal path: no abstention prompt set → Block A unchanged.
         let builder =
             ContextBuilder::new("Kernel".to_string()).with_override_model("gpt-4".to_string());
-        let request = builder.build(&manifest, &history, None, None, 32_768);
+        let request = builder.build(&manifest, &history, None, 32_768);
         assert!(
             !request.messages[0]
                 .content
@@ -1170,7 +1193,7 @@ mod tests {
             ContextBuilder::new("Kernel".to_string()).with_override_model("gpt-4".to_string());
         builder
             .set_abstention_prompt("When you are not confident, say you're not sure.".to_string());
-        let request = builder.build(&manifest, &history, None, None, 32_768);
+        let request = builder.build(&manifest, &history, None, 32_768);
         assert!(
             request.messages[0]
                 .content
@@ -1187,7 +1210,7 @@ mod tests {
             ContextBuilder::new("Kernel".to_string()).with_override_model("gpt-4".to_string());
         builder.set_abstention_prompt("prompt".to_string());
         builder.clear_retrieved_memory(); // clears memory + hint + abstention
-        let request = builder.build(&manifest, &history, None, None, 32_768);
+        let request = builder.build(&manifest, &history, None, 32_768);
         assert!(
             !request.messages[0]
                 .content

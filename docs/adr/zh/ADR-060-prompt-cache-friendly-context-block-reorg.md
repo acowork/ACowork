@@ -36,7 +36,7 @@
 
 1. **Block A:静态内核(永远稳定)**——单一 SystemMessage,带 `cache_control: ephemeral` 标记。包含 package prompts、identity、workspace meta、retrieved memory、environment、workspace prompt file。
 2. **Block B:对话历史(append-only)**——`history.messages()` 的 user/assistant/tool turns,占比 ~90%,**是 cache 命中率的真正战场**。todos 由其中的真实 `todo_write` 工具结果承载(含完整列表,缓存命中)。
-3. **Block D:当前用户消息**——由调用方**显式传入**,不再从 history 反推(§5.5)。
+3. ~~**Block D:当前用户消息**——由调用方**显式传入**,不再从 history 反推(§5.5)。~~ **已废弃(§5.5 勘误)**:当前用户消息由 Block B 尾部承载,不再有独立的 Block D 副本。
 4. **压缩注入(替代原 Block C)**——压缩时从 history 复用最后一次真实 `todo_write` 轮,插入 summary marker 之后,todos 无损穿越压缩(§5.4)。
 
 并对相关持久化与可观测性做对应改造:
@@ -217,23 +217,21 @@ Block A 末尾一个 `cache_control: ephemeral` 即是最小可行方案(v2 修�
 
 ---
 
-## 5. 设计:四块结构(Block A/B/C/D)
+## 5. 设计:Block A/B + 压缩注入(原 Block C/D 已移除)
 
 ### 5.1 总体结构
 
 ```mermaid
 graph TD
-    A["Block A: 静态内核<br/>SystemMessage<br/>带 cache_control: ephemeral"] --> B["Block B: 对话历史<br/>append-only turns<br/>~90% tokens<br/>含真实 todo_write 结果(缓存命中)"]
-    B --> D["Block D: 当前用户消息<br/>UserMessage(调用方显式传入)"]
+    A["Block A: 静态内核<br/>SystemMessage<br/>带 cache_control: ephemeral"] --> B["Block B: 对话历史<br/>append-only turns<br/>~90% tokens<br/>含真实 todo_write 结果(缓存命中)<br/>当前 user 消息位于尾部"]
     B -. "压缩时: 复用最后一次 todo_write 轮<br/>插入 summary marker 之后" .-> T["todos 无损穿越压缩"]
 
     style A fill:#c8e6c9
     style B fill:#c8e6c9
-    style D fill:#ffccbc
     style T fill:#fff9c4
 ```
 
-**Block A + B 是稳定的 cache 主体**;Block D 必然新;todos 由 Block B 中的真实 todo_write 结果承载(缓存命中),压缩时注入保证无损穿越压缩。
+**Block A + B 是全部,也是稳定的 cache 主体**;当前 user 消息就是 Block B 的尾部(见 §5.5 勘误);todos 由 Block B 中的真实 todo_write 结果承载(缓存命中),压缩时注入保证无损穿越压缩。
 
 ### 5.2 Block A 内容(静态内核)
 
@@ -318,42 +316,51 @@ messages.extend(
 
 **架构原则**:压缩摘要(lossy,记录"发生了什么")与 todos(lossless,记录"接下来做什么")分离——过程可蒸馏,状态必须保真。
 
-### 5.5 Block D 内容(当前用户消息)—— 显式传参,不从 history 反推
+### 5.5 勘误:Block D 已移除(当前用户消息由 Block B 尾部承载)
+
+> **勘误(实现修订)**:本节原方案(显式传入 `current_user_message` 并在 `build()` 末尾 push 一份)已被推翻并删除。以下先记录原方案与其被废弃的前置假设,再给出修订后的结论。
 
 **早期草稿方案(废弃)**:`build()` 内从 `history.messages()` 末尾 pop——依赖"history 最后一条就是当前 user message"的隐式假设。**该假设不成立**:工具循环迭代中 history 末尾是 `Tool` 消息(常态,非异常),`[System Notification]`(session_task.rs:1432-1434)、ask_user 答复、debug replay 等变体也会破坏 pop 语义;且 pop 使 request 与 debug 快照(`messages_arc()`)内容不一致。
 
-**本 ADR 方案**:由调用方**显式传入**当前 user message。
+**原方案(已废弃)**:由调用方**显式传入**当前 user message,在 `build()` 末尾 push 一份。
 
 ```rust
+// 已删除
 pub fn build(
     &self,
     manifest: &AgentManifest,
     history: &HistoryManager,
-    current_user_message: Option<&ChatMessage>,  // 新增显式参数:None=工具迭代
+    current_user_message: Option<&ChatMessage>,  // 已删除
     gateway_capabilities: Option<&ModelCapabilitiesInfo>,
     max_output_tokens_limit: u64,
 ) -> ChatRequest
 ```
 
-调用方改动([loop_context.rs:984](core/acowork-runtime/src/agent/loop_context.rs#L984) `build_chat_request`):
-- `AgentLoop` 新增 `pending_user_message: Option<ChatMessage>` 字段
-- `run_inner()` 收到新 user 输入时([loop_.rs:697-700](core/acowork-runtime/src/agent/loop_.rs#L697-L700))暂存该消息;工具循环迭代、debug replay 场景置 `None`
-- `build_chat_request` 取出传入;传入 `Some` 时可用 `debug_assert!(history 末尾 == 该消息)` 做一致性校验
+配套曾引入 `AgentLoop::pending_user_message: Option<ChatMessage>` 暂存字段,也一并删除。
+
+**为什么原方案是错的**
+
+原方案的全部必要性只建立在一个未明说的前提上:**"当前用户消息不在 Block B 里"**——即 history 是"截至上一轮"的,本轮 user 消息尚未落进 `history.messages()`,所以必须在末尾补一次,否则请求里根本没有它。
+
+实现里这个前提**不成立**。`run_inner()` 在调用 `build()` **之前**就把当前 user 消息 append 进了 history,因此 Block B 已经全量包含它。于是原方案的实际效果不是"补齐缺失",而是**把同一条消息发送两次**。
+
+而"重复发送"在任何场景下都没有正当性:
+
+1. **缓存收益为零**:稳定前缀是 A + B。在 B 之后追加一条消息只会让末尾多出一段必然 miss 的新内容,前缀命中不受影响——即纯增成本。
+2. **模型侧噪声**:agent 视角里每条 user 消息连续出现两次,模型可能将其读作用户重复强调,或据此判断上一轮未获答复。
+3. **与"Block B 永远追加"的语义自相矛盾**:本轮消息进入下一轮即成为 Block B 历史。若 Block D 存在,同一条消息会在"末尾副本"与"历史正文"两个位置各出现一次,而 Block B 的存在本身即证明该消息已送达 LLM——再拷一份没有需求点。
+
+**唯一合法的"从历史拷到末尾"场景是压缩**,而它不属于 Block D:压缩后旧历史被 summary marker 替换,被替换掉的内容**不再出现**在请求里,因此把最后一次 `todo_write` 整轮(assistant tool_use + tool_result + 邻近 user 消息)重新注入 marker 之后,是**恢复**而非**重复**——孤儿 tool_use 会报错,故必须连带整轮。该机制独立实现于 `loop_context.rs::compact_history_if_needed` 的 `inject_todo_write_round_after_marker` 后处理步骤,与 `build()` 无关,不受本节修订影响。
+
+**修订后的结论**
 
 ```rust
-let mut history_msgs: Vec<_> = history.messages().iter()
-    .filter(|m| !matches!(m.role, MessageRole::System))
-    .cloned()
-    .collect();
-
-messages.extend(history_msgs);            // Block B(含当前 user 消息在内,append-only 位置不变)
+messages.extend(history_msgs);            // Block B(含当前 user 消息,位于末尾)
 // todos 不在此处注入——由 Block B 中的真实 todo_write 结果承载,压缩时注入(§5.4)
-if let Some(user_msg) = current_user_message {
-    messages.push(user_msg);              // Block D
-}
+// 无 Block D:当前 user 消息已在 Block B 尾部,不重复 push
 ```
 
-注意:Block B 包含当前 user 消息,Block D 是其**副本**(同一 `ChatMessage` 的 clone,字节一致)——这是必要的:历史必须完整持久化与展示,请求中它在最末位置。debug 快照展示 history 全量(含该消息),request 中它在 Block D——两者内容一致,仅展示位置不同。
+debug 快照与 request 内容自此完全一致(均为 history 全量),不再存在"仅展示位置不同"的特例。
 
 ### 5.6 `cache_control` 字段
 
@@ -430,7 +437,7 @@ todo_write 工具 → SessionState::update_todos() (内存,运行时所有权)
 
 **结论**:debug 面板不会"自动跟上",需要显式调整:
 - `todo_context` 段语义从"system prompt 子项"改为"history 中的 todo_write 工具结果 + 压缩注入轮"——保留该段内容,更新分组/标签;压缩注入的合成轮可加 `synthetic` 标记便于识别;
-- `messages` 段展示 history 全量快照(含当前 user 消息),与 request 中 Block D 的关系见 §5.5,展示不变;
+- `messages` 段展示 history 全量快照(含当前 user 消息),与 request 内容一致(§5.5 勘误:无 Block D 副本),展示不变;
 - Block A 拆分后各段顺序与 `build_block_a()` 拼接顺序保持一致(现状已对齐,无需改顺序)。
 
 ### 6.3 `auto_inject_enabled` 触发策略(未来开启时)
@@ -494,7 +501,7 @@ pub fn detect_environment_text() -> &'static str {
 
 1. **(2) `ChatMessage.cache_control` 字段**——其他改造都依赖此字段
 2. **(3) Provider 映射**——保证 cache_control 字段不会破坏现有协议;**先完成 Anthropic system 字段升级**(避免中间态 System 覆盖)
-3. **(1) `ContextBuilder::build()` 重排 + Block D 显式传参 + 移除 Block C**——核心改动
+3. **(1) `ContextBuilder::build()` 重排 + 移除 Block C**(原计划的 Block D 显式传参后经 §5.5 勘误删除)——核心改动
 4. **(4-6) SessionMeta.todos 三件套**——配套持久化
 5. **(7) 压缩注入**——压缩时复用最后一次 todo_write 轮(§5.4)
 6. **(8) Debug 面板对齐**——展示层
@@ -503,8 +510,8 @@ pub fn detect_environment_text() -> &'static str {
 
 ### 7.3 测试要求
 
-- **单元测试**:Block A 拼接函数字节稳定性、`set_todo_context` 内容比较、`build_chat_request` 输出顺序(Block B 含当前 user 消息 + Block D 副本一致)、**压缩注入后 todo_write 轮存在于 marker 之后且无重复 tool_call_id**
-- **集成测试**:session 重启后 todos 恢复、`auto_inject_enabled=true` 时首次 user message 触发、后续不触发、工具迭代中 Block D=None、**压缩后 todos 无损保留**
+- **单元测试**:Block A 拼接函数字节稳定性、`set_todo_context` 内容比较、`build_chat_request` 输出顺序(当前 user 消息在 Block B 尾部**且仅出现一次**)、**压缩注入后 todo_write 轮存在于 marker 之后且无重复 tool_call_id**
+- **集成测试**:session 重启后 todos 恢复、`auto_inject_enabled=true` 时首次 user message 触发、后续不触发、工具迭代末条为 tool result 而非 user 副本、**压缩后 todos 无损保留**
 - **回归测试**:Anthropic(含 system 提升回归:Block A 不得被中段消息覆盖)/ OpenAI / Ollama 三个 provider 的 `cache_control` 序列化正确、**压缩注入轮通过 sanitize_messages 不被删除**
 
 ---
@@ -562,8 +569,7 @@ pub fn detect_environment_text() -> &'static str {
 本 ADR 用**单一原则**——"稳定前缀 + 末尾追加"——解决了当前架构的核心 cache 效率问题:
 
 - **Block A**:静态内核,带 `cache_control: ephemeral`,一次性 cache write
-- **Block B**:对话历史,append-only,占比 ~90%,**是 cache 命中率的主体**;todos 由其中的真实 `todo_write` 工具结果承载(缓存命中)
-- **Block D**:当前 user message,**调用方显式传入**,放在最末
+- **Block B**:对话历史,append-only,占比 ~90%,**是 cache 命中率的主体**;todos 由其中的真实 `todo_write` 工具结果承载(缓存命中);**当前 user 消息位于其尾部**(§5.5 勘误:不再有 Block D 副本)
 - **压缩注入**:压缩时复用最后一次真实 `todo_write` 轮插入 marker 之后,todos 无损穿越压缩(§5.4)
 
 **附带的工程改进**:
@@ -606,8 +612,7 @@ graph TD
     subgraph After["改动后"]
         A1["ContextBuilder.build()"] --> A2["Block A 静态内核<br/>(SystemMessage + cache_control)"]
         A2 --> A3["Block B history append-only<br/>(~90% tokens, cache 主体)<br/>含真实 todo_write 结果"]
-        A3 --> A5["Block D 当前 user message<br/>(显式传入)"]
-        A5 --> A6["LLM call"]
+        A3 --> A6["LLM call<br/>(当前 user 消息即 Block B 尾部)"]
         A3 -. "压缩时: 复用最后一次 todo_write 轮<br/>插入 summary marker 之后" .-> A7["todos 无损穿越压缩"]
     end
 

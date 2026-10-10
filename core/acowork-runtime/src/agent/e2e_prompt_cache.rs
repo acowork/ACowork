@@ -480,24 +480,39 @@ fn roles(msgs: &[ChatMessage]) -> Vec<&'static str> {
 }
 
 /// Assert the classic prompt-cache layout of one request:
-/// ADR-060 v2 §5.4: the request layout is now A → B → D only. Todo state
-/// lives in Block B as the most recent `todo_write` tool result — there is
-/// no Block C tail snapshot. This helper asserts that contract.
+/// ADR-060 v2 §5.4 + §5.5 erratum: the request layout is A → B only, with
+/// the current user message at Block B's tail. Todo state lives in Block B
+/// as the most recent `todo_write` tool result — there is no Block C tail
+/// snapshot and no Block D duplicate. This helper asserts that contract.
+///
+/// NOTE: the "appears exactly once" check compares `content` strings, so it
+/// assumes each test turn uses a distinct message text (all callers do).
 fn assert_block_v2_layout(msgs: &[ChatMessage], current: &str) {
     let n = msgs.len();
-    assert!(n >= 3, "expected A + B + D, got {n} messages");
+    assert!(n >= 2, "expected A + B(current user at tail), got {n} messages");
     // Block A — system message at index 0.
     assert_eq!(msgs[0].role, MessageRole::System, "Block A is system role");
     assert!(
         !msgs[0].content.contains("## Todo Task List"),
         "Block A must NOT contain the todo snapshot — it lives in Block B"
     );
-    // Block D — the current user message (explicitly passed, cloned copy).
-    assert_eq!(msgs[n - 1].role, MessageRole::User, "Block D is user role");
+    // Block B tail — the current user message is the last message. ADR-060
+    // §5.5 erratum: there is no separate "Block D" duplicate; the current
+    // turn lives at Block B's tail and appears exactly once.
+    assert_eq!(
+        msgs[n - 1].role,
+        MessageRole::User,
+        "current user message is at Block B tail"
+    );
     assert_eq!(
         msgs[n - 1].content,
         current,
-        "Block D carries the current turn"
+        "Block B tail carries the current turn"
+    );
+    assert_eq!(
+        msgs.iter().filter(|m| m.content == current).count(),
+        1,
+        "current turn appears exactly once (no Block D duplicate)"
     );
     // ADR-060 v2: no Block C. The "## Todo Task List" header must NOT appear
     // anywhere in the request — todo state is carried by the most recent
@@ -549,7 +564,7 @@ async fn todo_write_roundtrip_v2_layout_and_restart_recovery() {
     let mut h1 = spawn_harness(work_dir, provider.clone(), None).await;
     let sid = h1.sid.clone();
 
-    // ── Turn 1: no todos yet → layout is A + B(u1) + D(u1') ──
+    // ── Turn 1: no todos yet → layout is A + B(u1), u1 at Block B tail ──
     h1.send("First turn", "m1").await;
     let captured = provider.captured();
     assert_eq!(
@@ -560,8 +575,8 @@ async fn todo_write_roundtrip_v2_layout_and_restart_recovery() {
     let msgs = &captured[0].messages;
     assert_eq!(
         roles(msgs),
-        ["system", "user", "user"],
-        "A + B(u1) + D(u1')"
+        ["system", "user"],
+        "A + B(u1) — current user message appears once, no Block D duplicate"
     );
     assert!(
         msgs[0].content.contains(SYSTEM_PROMPT),
@@ -573,9 +588,8 @@ async fn todo_write_roundtrip_v2_layout_and_restart_recovery() {
     );
     assert_eq!(
         msgs[1].content, "First turn",
-        "Block B holds the original turn"
+        "Block B tail holds the current turn (appears exactly once)"
     );
-    assert_eq!(msgs[2].content, "First turn", "Block D is the cloned copy");
 
     // ── Turn 2: LLM returns a todo_write tool call ──
     h1.send("Second turn", "m2").await;
@@ -627,7 +641,7 @@ async fn todo_write_roundtrip_v2_layout_and_restart_recovery() {
     assert_eq!(todos[0].id, "t1");
     assert_eq!(todos[0].content, "Implement Block C");
 
-    // ── Turn 3: layout is A + B(...) + D(u3'), Block B carries todo ──
+    // ── Turn 3: layout is A + B(..., u3), u3 at Block B tail, todo carried ──
     h1.send("Third turn", "m3").await;
     let captured = provider.captured();
     assert_eq!(captured.len(), 4);
@@ -637,7 +651,7 @@ async fn todo_write_roundtrip_v2_layout_and_restart_recovery() {
     assert_eq!(
         msgs.last().unwrap().content,
         "Third turn",
-        "Block D is cloned current turn"
+        "current turn is at Block B tail (no Block D duplicate)"
     );
 
     // ── Prefix stability: Block A byte-identical across every call ──
@@ -779,7 +793,7 @@ async fn compression_injects_removed_todo_round_after_marker() {
         "compaction request must have seen the todo_write turn"
     );
 
-    // ── Post-compress request: A + B(marker, A2, T2, u3) + D(u4) ──
+    // ── Post-compress request: A + B(marker, A2, T2, u3, u4), u4 at tail ──
     let msgs = &captured.last().unwrap().messages;
     assert_block_v2_layout(msgs, "Fourth turn after compress");
     assert_block_b_carries_todo_state(msgs, "toolu_01");
@@ -944,9 +958,9 @@ async fn block_c_never_in_any_request_output_full_flow() {
     // Property-style invariant: across a complex flow (todo_write + compress
     // + multiple turns + restart), the v1 "## Todo Task List" Block C
     // header MUST NEVER appear in ANY captured ChatRequest — neither in
-    // Block A, nor in Block B, nor in the marker, nor in Block D. This is
+    // Block A, nor in Block B, nor in the marker. This is
     // the cache-correctness guarantee of ADR-060 v2: the static prefix
-    // (Block A) and the dynamic tail (Block D) are both free of todo
+    // (Block A) and the dynamic tail (Block B's current user message) are both free of todo
     // content; todo state is purely a Block B phenomenon.
     let dir = tempfile::tempdir().expect("tempdir");
     let work_dir = dir.path();

@@ -1430,12 +1430,12 @@ mod tests {
     fn test_convert_messages_tool_iteration_block_c_d_layout() {
         use acowork_core::providers::traits::CacheControl;
 
-        // ADR-060 §5.4/§5.5: the real tool-loop wire shape after a
+        // ADR-060 §5.4: the real tool-loop wire shape after a
         // `todo_write` call — [assistant(tool_use), user(tool_result),
-        // user(Block C todo snapshot)]. Consecutive user messages are
+        // user(todo snapshot)]. Consecutive user messages are
         // accepted by Anthropic (auto-merged); the tool_result message
-        // must NEVER carry cache_control, while Block C keeps its
-        // ephemeral breakpoint. Block D is absent on tool iterations.
+        // must NEVER carry cache_control, while the snapshot keeps its
+        // ephemeral breakpoint.
         let asst = ChatMessage::assistant_with_tools(
             "",
             vec![ToolCall {
