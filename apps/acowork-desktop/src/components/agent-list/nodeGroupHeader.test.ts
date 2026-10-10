@@ -60,3 +60,29 @@ describe("NodeGroupHeader", () => {
     expect(header).not.toMatch(/bg-panel-block[^\n]*dark:bg-/);
   });
 });
+
+describe("agent working dot", () => {
+  // Anchor on the JSX comment, not the bare "IM-style" phrase — the same
+  // wording appears in the `activeAgentIds` memo further up, and
+  // indexOf would silently slice that one instead.
+  const dot = src.slice(
+    src.indexOf('IM-style "needs attention" indicator dot'),
+    src.indexOf('IM-style "needs attention" indicator dot') + 2000,
+  );
+
+  it("uses the same emerald as the node online dot", () => {
+    // Two dots, one meaning ("something is live"). Matching the node
+    // header's literal is deliberate: a new `bg-emerald-600` variant here
+    // would look like a different state at 8px.
+    expect(dot).toContain("bg-emerald-500");
+  });
+
+  it("hides on the selected row", () => {
+    // The selection fill already marks the row; an emerald dot over it
+    // reads as a smudge. Assert the full guard so dropping any single
+    // clause (e.g. the offline carve-out) also fails here.
+    expect(dot).toMatch(
+      /agent\.alive\s*&&\s*activeAgentIds\.has\(id\)\s*&&\s*selectedAgentId\s*!==\s*id/,
+    );
+  });
+});
