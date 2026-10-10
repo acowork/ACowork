@@ -15,6 +15,7 @@ vi.mock("../lib/logger", () => ({
 }));
 
 import { useAuthStore } from "./authStore";
+import { __resetForTests, adopt, current } from "../lib/session/tokens";
 import type { UserAccount } from "../lib/types";
 
 const TOKENS_KEY = "acowork.auth.tokens";
@@ -53,15 +54,14 @@ function stubFetch(routes: Record<string, () => Response>) {
 
 beforeEach(() => {
   localStorage.clear();
+  __resetForTests();
   useAuthStore.setState({
     mode: "unknown",
     status: "unknown",
     account: null,
     accessToken: null,
-    refreshToken: null,
     error: null,
     viewAsUserId: null,
-    _refreshPromise: null,
     setupRequired: false,
     registrationOpen: false,
     _setupPollHandle: null,
@@ -166,35 +166,28 @@ describe("authStore.firstLogin", () => {
   });
 });
 
-describe("authStore.refreshTokens", () => {  it("is single-flight: concurrent calls rotate once", async () => {
-    useAuthStore.setState({ refreshToken: "rt-old", status: "logged_in" });
-    const spy = stubFetch({
-      "/api/auth/refresh": () =>
-        json({ access_token: "at-new", refresh_token: "rt-new", token_type: "Bearer", expires_in: 900 }),
-    });
-
-    const [a, b] = await Promise.all([
-      useAuthStore.getState().refreshTokens(),
-      useAuthStore.getState().refreshTokens(),
-    ]);
-
-    expect(a).toBe(true);
-    expect(b).toBe(true);
-    expect(spy).toHaveBeenCalledTimes(1);
-    expect(useAuthStore.getState().accessToken).toBe("at-new");
-    expect(useAuthStore.getState().refreshToken).toBe("rt-new");
+describe("authStore mirrors the token module", () => {
+  // The store no longer owns the pair; these pin the two directions of the
+  // wiring — a new token appears as `accessToken`, and the module's
+  // dead-session verdict lands as `logged_out`.
+  it("reflects an adopted token without being told to", () => {
+    adopt({ access_token: "at-x", refresh_token: "rt-x" });
+    expect(useAuthStore.getState().accessToken).toBe("at-x");
+    expect(current()).toBe("at-x");
   });
 
-  it("drops the session when the refresh is rejected", async () => {
-    useAuthStore.setState({ refreshToken: "rt-old", status: "logged_in", accessToken: "at" });
-    stubFetch({ "/api/auth/refresh": () => json({ detail: "revoked" }, 401) });
+  it("clears every piece of session state when the module ends the session", () => {
+    useAuthStore.setState({ status: "logged_in", account: acct, viewAsUserId: "u-2" });
+    adopt({ access_token: "at-x", refresh_token: "rt-x" });
 
-    const ok = await useAuthStore.getState().refreshTokens();
+    useAuthStore.getState().clearLocalSession();
 
-    expect(ok).toBe(false);
     const state = useAuthStore.getState();
     expect(state.status).toBe("logged_out");
+    expect(state.account).toBeNull();
     expect(state.accessToken).toBeNull();
+    expect(state.viewAsUserId).toBeNull();
+    expect(current()).toBeNull();
     expect(localStorage.getItem(TOKENS_KEY)).toBeNull();
   });
 });
@@ -211,12 +204,8 @@ describe("authStore.onGatewayUrlChanged", () => {
   });
 
   it("keeps the session when the new URL is an alias for the same Gateway", async () => {
-    useAuthStore.setState({
-      refreshToken: "rt",
-      accessToken: "at",
-      status: "logged_in",
-      account: acct,
-    });
+    adopt({ access_token: "at", refresh_token: "rt" });
+    useAuthStore.setState({ status: "logged_in", account: acct });
     const meSpy = vi.fn(() => json(acct));
     stubFetch({
       "/api/auth/me": meSpy,
@@ -234,12 +223,8 @@ describe("authStore.onGatewayUrlChanged", () => {
   });
 
   it("drops the session when the new Gateway rejects the token with 401", async () => {
-    useAuthStore.setState({
-      refreshToken: "rt",
-      accessToken: "at",
-      status: "logged_in",
-      account: acct,
-    });
+    adopt({ access_token: "at", refresh_token: "rt" });
+    useAuthStore.setState({ status: "logged_in", account: acct });
     stubFetch({
       "/api/auth/me": () => json({ detail: "invalid token" }, 401),
       "/api/status": () => json({ auth_mode: "multi_user" }),
@@ -252,17 +237,12 @@ describe("authStore.onGatewayUrlChanged", () => {
     const state = useAuthStore.getState();
     expect(state.status).toBe("logged_out");
     expect(state.accessToken).toBeNull();
-    expect(state.refreshToken).toBeNull();
-    expect(localStorage.getItem(TOKENS_KEY)).toBeNull();
+        expect(localStorage.getItem(TOKENS_KEY)).toBeNull();
   });
 
   it("keeps the session when the probe fails with a network error", async () => {
-    useAuthStore.setState({
-      refreshToken: "rt",
-      accessToken: "at",
-      status: "logged_in",
-      account: acct,
-    });
+    adopt({ access_token: "at", refresh_token: "rt" });
+    useAuthStore.setState({ status: "logged_in", account: acct });
     globalThis.fetch = vi.fn(async () => {
       throw new TypeError("Failed to fetch");
     }) as unknown as typeof fetch;
@@ -279,8 +259,7 @@ describe("authStore.onGatewayUrlChanged", () => {
   it("skips the probe when there is no session and just re-inits", async () => {
     useAuthStore.setState({
       status: "logged_out",
-      accessToken: null,
-      refreshToken: null,
+      accessToken: null, 
     });
     stubFetch({ "/api/status": () => json({ auth_mode: "multi_user" }) });
 

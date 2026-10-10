@@ -7,9 +7,15 @@ import { initMonaco } from "./lib/monacoBootstrap";
 import { installMainThreadProbe, installLongTaskObserver } from "./lib/mainThreadProbe";
 import { installAuthFetchInterceptor } from "./lib/authFetch";
 import { installGatewayAuthBridge } from "./lib/gatewayAuthBridge";
+import { installTokenTransport } from "./lib/session/wiring";
 // ponytail: diagnostic — remove once the slow-start report is root-caused.
 installMainThreadProbe();
 installLongTaskObserver();
+
+// ADR-076 §决策 3: give the session module its rotation transport BEFORE any
+// consumer is installed. Both the interceptor and the bridge rotate through it;
+// wiring it from a store's module side effect made them depend on import order.
+installTokenTransport();
 
 // ADR-076 §决策 3: attach the login token to every Gateway request and
 // rotate it on 401. Installed before App renders so no child fetch escapes.

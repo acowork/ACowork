@@ -40,7 +40,7 @@ This ADR decides to reorganize the `ContextBuilder` output, by cache impact, int
 
 1. **Block A: the static kernel (always stable)** — a single SystemMessage carrying `cache_control: ephemeral`. Contains package prompts, identity, workspace meta, retrieved memory, environment, workspace prompt file.
 2. **Block B: the conversation history (append-only)** — the user/assistant/tool turns of `history.messages()`, ~90% of the bytes, **the real battleground for cache hit rate**. todos are carried by the real `todo_write` tool result inside it (containing the full list, cache hit).
-3. **Block D: the current user message** — passed in **explicitly by the caller**, no longer reverse-derived from the history (§5.5).
+3. ~~**Block D: the current user message** — passed in **explicitly by the caller**, no longer reverse-derived from the history (§5.5).~~ **Abandoned (§5.5 erratum)**: the current user message is carried by the tail of Block B; there is no separate Block D copy.
 4. **Compaction injection (replacing the original Block C)** — at compaction time reuse the last real `todo_write` turn from the history and insert it after the summary marker, so todos cross compaction losslessly (§5.4).
 
 And make the corresponding changes to the related persistence and observability:
@@ -222,23 +222,21 @@ One `cache_control: ephemeral` at the end of Block A is the minimal viable solut
 
 ---
 
-## 5. Design: the Four-Block Structure (Block A/B/C/D)
+## 5. Design: the Block A/B structure plus compaction injection (former Blocks C/D removed)
 
 ### 5.1 The overall structure
 
 ```mermaid
 graph TD
-    A["Block A: static kernel<br/>SystemMessage<br/>with cache_control: ephemeral"] --> B["Block B: conversation history<br/>append-only turns<br/>~90% tokens<br/>including the real todo_write result (cache hit)"]
-    B --> D["Block D: current user message<br/>UserMessage (passed in explicitly by the caller)"]
+    A["Block A: static kernel<br/>SystemMessage<br/>with cache_control: ephemeral"] --> B["Block B: conversation history<br/>append-only turns<br/>~90% tokens<br/>including the real todo_write result (cache hit)<br/>current user message at the tail"]
     B -. "At compaction: reuse the last todo_write turn<br/>insert after the summary marker" .-> T["todos cross compaction losslessly"]
 
     style A fill:#c8e6c9
     style B fill:#c8e6c9
-    style D fill:#ffccbc
     style T fill:#fff9c4
 ```
 
-**Block A + B are the stable cache body**; Block D is necessarily new; todos are carried by the real `todo_write` result inside Block B (cache hit), and compaction-time injection guarantees they cross compaction losslessly.
+**Block A + B are the whole request, and the stable cache body**; the current user message simply *is* the tail of Block B (see §5.5 erratum); todos are carried by the real `todo_write` result inside Block B (cache hit), and compaction-time injection guarantees they cross compaction losslessly.
 
 ### 5.2 Block A content (the static kernel)
 
@@ -322,42 +320,51 @@ messages.extend(
 
 **Architectural principle**: the compaction summary (lossy, recording "what happened") and todos (lossless, recording "what to do next") are separated — the process can be distilled, the state must stay faithful.
 
-### 5.5 Block D content (the current user message) — passed in explicitly, not reverse-derived from the history
+### 5.5 Erratum: Block D is removed (the current user message is carried by the tail of Block B)
+
+> **Erratum (implementation revision)**: the original approach in this section (explicitly passing `current_user_message` and pushing a copy at the end of `build()`) has been overturned and deleted. Below we first record the original approach and the assumption it rested on, then give the revised conclusion.
 
 **Early draft approach (abandoned)**: pop from the end of `history.messages()` inside `build()` — relying on the implicit assumption that "the last entry of the history is the current user message". **That assumption does not hold**: during tool-loop iterations the end of the history is a `Tool` message (the normal case, not an exception), and `[System Notification]` (session_task.rs:1432-1434), ask_user answers, and debug replay variants all break pop semantics; and popping makes the request inconsistent with the debug snapshot (`messages_arc()`).
 
-**This ADR's approach**: the caller **explicitly passes in** the current user message.
+**Original approach (now abandoned)**: the caller **explicitly passes in** the current user message and `build()` pushes a copy at the end.
 
 ```rust
+// removed
 pub fn build(
     &self,
     manifest: &AgentManifest,
     history: &HistoryManager,
-    current_user_message: Option<&ChatMessage>,  // new explicit parameter: None = tool iteration
+    current_user_message: Option<&ChatMessage>,  // removed
     gateway_capabilities: Option<&ModelCapabilitiesInfo>,
     max_output_tokens_limit: u64,
 ) -> ChatRequest
 ```
 
-Caller changes ([loop_context.rs:984](../../../core/acowork-runtime/src/agent/loop_context.rs#L984) `build_chat_request`):
-- `AgentLoop` gains a `pending_user_message: Option<ChatMessage>` field
-- `run_inner()` stashes that message when it receives new user input ([loop_.rs:697-700](../../../core/acowork-runtime/src/agent/loop_.rs#L697-L700)); sets `None` for tool-loop iterations and debug replay
-- `build_chat_request` takes it out and passes it in; when `Some` it can use `debug_assert!(history end == that message)` as a consistency check
+The accompanying `AgentLoop::pending_user_message: Option<ChatMessage>` stash field is also deleted.
+
+**Why the original approach was wrong**
+
+The entire necessity of the original approach rested on one unstated premise: **"the current user message is NOT in Block B"** — i.e. history is "up to the previous turn", the current user message has not yet landed in `history.messages()`, so it must be appended once at the end or the request would not contain it at all.
+
+In the implementation that premise **does not hold**. `run_inner()` appends the current user message into history **before** calling `build()`, so Block B already contains it in full. The actual effect of the original approach was therefore not "filling a gap" but **sending the same message twice**.
+
+And "sending it twice" has no justification in any scenario:
+
+1. **Zero cache benefit**: the stable prefix is A + B. Appending a message after B only adds a tail that is guaranteed to miss; prefix hits are unaffected — pure added cost.
+2. **Model-side noise**: from the agent's perspective every user message appears twice in a row, which the model may read as the user repeating themselves, or as evidence that the previous turn went unanswered.
+3. **It contradicts the semantics of "Block B is append-only"**: this turn's message becomes Block B history next turn. If Block D exists, the same message appears once as a "tail copy" and once as "history body" — yet the presence of the message in Block B is itself proof that it was already delivered to the LLM, so copying it again has no requirement behind it.
+
+**The only legitimate "copy from history to the tail" case is compaction**, and it is not Block D: after compaction the old history is replaced by a summary marker and the replaced content **no longer appears** in the request, so re-injecting the last `todo_write` round (assistant tool_use + tool_result + the neighbouring user message) after the marker is a **restoration**, not a duplicate — an orphan tool_use would error, so the whole round must come along. That mechanism lives independently in `loop_context.rs::compact_history_if_needed` as the `inject_todo_write_round_after_marker` post-step, is unrelated to `build()`, and is unaffected by this revision.
+
+**Revised conclusion**
 
 ```rust
-let mut history_msgs: Vec<_> = history.messages().iter()
-    .filter(|m| !matches!(m.role, MessageRole::System))
-    .cloned()
-    .collect();
-
-messages.extend(history_msgs);            // Block B (including the current user message, append-only position unchanged)
+messages.extend(history_msgs);            // Block B (includes the current user message, at the tail)
 // todos are not injected here — they are carried by the real todo_write result in Block B, plus injection at compaction (§5.4)
-if let Some(user_msg) = current_user_message {
-    messages.push(user_msg);              // Block D
-}
+// no Block D: the current user message is already at the tail of Block B; it is never pushed twice
 ```
 
-Note: Block B includes the current user message, and Block D is its **copy** (a clone of the same `ChatMessage`, byte-identical) — this is necessary: the history must be persisted and displayed in full, while in the request it sits at the very last position. The debug snapshot shows the full history (including that message); in the request it appears as Block D — the content is consistent, only the display position differs.
+The debug snapshot and the request content are now identical (both the full history); the special case of "same content, different display position" no longer exists.
 
 ### 5.6 The `cache_control` field
 
@@ -434,7 +441,7 @@ Verified against `capture_context_snapshot` ([core/acowork-runtime/src/debug/obs
 
 **Conclusion**: the debug panel will not "follow along automatically"; explicit adjustment is required:
 - The `todo_context` segment changes semantics from "a system prompt sub-item" to "the todo_write tool result in the history + the compaction-injected turn" — keep the segment content, update the grouping/label; the compaction-injected synthetic turn can carry a `synthetic` marker for identification;
-- The `messages` segment shows the full history snapshot (including the current user message); its relation to Block D in the request is described in §5.5, and the display is unchanged;
+- The `messages` segment shows the full history snapshot (including the current user message), which is now identical to the request content (§5.5 erratum: no Block D copy), and the display is unchanged;
 - After Block A is split, the order of each segment stays consistent with the `build_block_a()` assembly order (already aligned today, no order change needed).
 
 ### 6.3 The `auto_inject_enabled` trigger policy (for when it is enabled in the future)
@@ -498,7 +505,7 @@ pub fn detect_environment_text() -> &'static str {
 
 1. **(2) The `ChatMessage.cache_control` field** — every other change depends on it
 2. **(3) Provider mapping** — ensures the cache_control field does not break existing protocols; **complete the Anthropic system field upgrade first** (avoiding a half-done state where System gets overwritten)
-3. **(1) `ContextBuilder::build()` reorganization + explicit Block D parameter + removal of Block C** — the core change
+3. **(1) `ContextBuilder::build()` reorganization + removal of Block C** (the originally planned explicit Block D parameter was deleted per the §5.5 erratum) — the core change
 4. **(4-6) The three-part `SessionMeta.todos`** — supporting persistence
 5. **(7) Compaction injection** — reuse the last `todo_write` turn at compaction time (§5.4)
 6. **(8) Debug panel alignment** — the presentation layer
@@ -507,8 +514,8 @@ pub fn detect_environment_text() -> &'static str {
 
 ### 7.3 Testing requirements
 
-- **Unit tests**: byte stability of the Block A assembly function, `set_todo_context` content comparison, the `build_chat_request` output order (Block B including the current user message + a byte-identical Block D copy), **after compaction injection the `todo_write` turn exists after the marker with no duplicate tool_call_id**
-- **Integration tests**: todos restored after a session restart, the first user message firing when `auto_inject_enabled=true` and later turns not firing, Block D=None during tool iterations, **todos preserved losslessly after compaction**
+- **Unit tests**: byte stability of the Block A assembly function, `set_todo_context` content comparison, the `build_chat_request` output order (the current user message at the tail of Block B, **appearing exactly once**), **after compaction injection the `todo_write` turn exists after the marker with no duplicate tool_call_id**
+- **Integration tests**: todos restored after a session restart, the first user message firing when `auto_inject_enabled=true` and later turns not firing, the last request message being a tool result rather than a user copy during tool iterations, **todos preserved losslessly after compaction**
 - **Regression tests**: correct `cache_control` serialization for all three providers — Anthropic (including the system-promotion regression: Block A must not be overwritten by a mid-sequence message) / OpenAI / Ollama, **and the compaction-injected turn surviving `sanitize_messages` without being deleted**
 ---
 
@@ -565,8 +572,7 @@ pub fn detect_environment_text() -> &'static str {
 This ADR uses a **single principle** — "stable prefix + append at the tail" — to solve the core cache-efficiency problem of the current architecture:
 
 - **Block A**: the static kernel, carrying `cache_control: ephemeral`, written to cache once
-- **Block B**: the conversation history, append-only, ~90% of the bytes, **the body of the cache hit rate**; todos are carried by the real `todo_write` tool result inside it (cache hit)
-- **Block D**: the current user message, **passed in explicitly by the caller**, placed at the very end
+- **Block B**: the conversation history, append-only, ~90% of the bytes, **the body of the cache hit rate**; todos are carried by the real `todo_write` tool result inside it (cache hit); **the current user message sits at its tail** (§5.5 erratum: there is no longer a Block D copy)
 - **Compaction injection**: at compaction time reuse the last real `todo_write` turn and insert it after the summary marker, so todos cross compaction losslessly (§5.4)
 
 **The accompanying engineering improvements**:
@@ -610,8 +616,7 @@ graph TD
     subgraph After["After"]
         A1["ContextBuilder.build()"] --> A2["Block A static kernel<br/>(SystemMessage + cache_control)"]
         A2 --> A3["Block B history append-only<br/>(~90% tokens, the cache body)<br/>including the real todo_write result"]
-        A3 --> A5["Block D current user message<br/>(passed in explicitly)"]
-        A5 --> A6["LLM call"]
+        A3 --> A6["LLM call<br/>(the current user message is the tail of Block B)"]
         A3 -. "At compaction: reuse the last todo_write turn<br/>insert after the summary marker" .-> A7["todos cross compaction losslessly"]
     end
 

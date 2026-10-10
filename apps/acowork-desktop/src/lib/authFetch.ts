@@ -13,16 +13,19 @@
  *      refresh call must never recurse into the 401→refresh path),
  *   3. adds `Authorization: Bearer <access_token>` unless the caller
  *      already set one,
- *   4. on a 401, rotates the token pair once (single-flight, so parallel
- *      401s cannot double-rotate and trip the Gateway's reuse detection)
- *      and replays the request; if the refresh fails, the session is
- *      dropped and the original 401 is returned.
+ *   4. on a 401, reports the rejection to the session module and replays
+ *      the request with the token it hands back; when there is nothing to
+ *      hand back, the session is gone and the original 401 is returned.
+ *
+ * This is a *consumer*: it takes tokens and reports rejections, it never
+ * decides when to rotate — all of that lives in `lib/session/tokens.ts`.
  *
  * Under `AUTH_MODE=local` the store's mode is never `multi_user`, so the
  * interceptor is a pure pass-through (§决策 12).
  */
 
 import { useAuthStore } from "../stores/authStore";
+import { acquire, reportRejected } from "./session/tokens";
 import { getGatewayUrl } from "./config";
 import { log } from "./logger";
 
@@ -86,18 +89,20 @@ export function installAuthFetchInterceptor(): () => void {
       return original(input, init);
     }
 
-    const token = auth.accessToken;
+    // Take a token; never manage one. The session module rotates on its own
+    // schedule, so the common case is a cached read.
+    const token = await acquire();
     if (!token) return original(input, init);
 
     let response = await original(...withToken(input, init, token));
 
     if (response.status === 401) {
-      const ok = await useAuthStore.getState().refreshTokens();
-      if (!ok) return response;
-
-      const fresh = useAuthStore.getState().accessToken;
-      if (!fresh) return response;
-      log.debug("[authFetch] replayed request after token refresh:", url);
+      // Report the fact and replay with whatever comes back. Concurrent 401s
+      // from one expired token collapse inside the module — only the first
+      // actually rotates.
+      const fresh = await reportRejected(token);
+      if (!fresh || fresh === token) return response;
+      log.debug("[authFetch] replayed request after token rotation:", url);
       response = await original(...withToken(input, init, fresh));
     }
 

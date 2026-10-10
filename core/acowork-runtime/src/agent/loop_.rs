@@ -408,26 +408,7 @@ pub struct AgentLoop {
     /// retained across iterations).
     pub(crate) pending_transient_tool_msgs: Vec<ChatMessage>,
 
-    /// ADR-060: The current user message, staged by `run_inner` and passed
-    /// explicitly to `ContextBuilder::build()` as Block D (see ADR-060 §5.5).
-    ///
-    /// ## Lifecycle
-    ///
-    /// 1. **Staged** at the top of `run_inner` when a new user message is
-    ///    appended to history (non-replay path).
-    /// 2. **Consumed** by `build_chat_request` calls before any tool executes:
-    ///    the message is passed to `build()` as Block D (a clone), while the
-    ///    original stays in history as part of Block B.
-    /// 3. **Cleared** once tool results are appended to history during the
-    ///    request's tool loop (ADR-060 §5.5: later iterations carry NO
-    ///    Block D — the user message already lives in Block B), and on the
-    ///    debug-replay path (`replay=true`), where the message is already
-    ///    in history. The next `run_inner` (new user input) re-stages it.
-    pub(crate) pending_user_message: Option<ChatMessage>,
-
-    /// The current turn's user message text, kept for the WHOLE turn
-    /// (unlike `pending_user_message`, which is cleared once the request
-    /// is built — ADR-060 §5.5 Block D semantics).
+    /// The current turn's user message text, kept for the WHOLE turn.
     ///
     /// Injected into [`acowork_core::tools::traits::ToolContext`] at every
     /// tool dispatch so session-scoped tools (memory recall) can use the
@@ -518,7 +499,6 @@ impl AgentLoop {
             pending_interrupt: None,
             pending_tool_cancels: std::collections::HashMap::new(),
             pending_transient_tool_msgs: Vec::new(),
-            pending_user_message: None,
             current_turn_user_message: None,
             memory_retrieved_for_session: false,
             compress_action_rx: None,
@@ -588,7 +568,6 @@ impl AgentLoop {
             pending_interrupt: None,
             pending_tool_cancels: std::collections::HashMap::new(),
             pending_transient_tool_msgs: Vec::new(),
-            pending_user_message: None,
             current_turn_user_message: None,
             memory_retrieved_for_session: false,
             compress_action_rx: None,
@@ -808,13 +787,10 @@ impl AgentLoop {
         // request begins.
         let _cancel_handle = self.session_core.begin_new_request();
 
-        // ADR-060 §5.5: the debug-replay path (user message already in
-        // history) must NOT carry a Block D — clear any stale staging.
+        // Replay is a debug path over existing history; the staged turn
+        // message from the live run is not re-embedded (memory tools fall
+        // back to keyword-only recall).
         if replay {
-            self.pending_user_message = None;
-            // Replay is a debug path over existing history; the staged
-            // turn message from the live run is not re-embedded (memory
-            // tools fall back to keyword-only recall).
             self.current_turn_user_message = None;
         }
 
@@ -829,21 +805,18 @@ impl AgentLoop {
             // Add user message to history
             // ADR-011: reset compaction flag — new user input means new content since last compaction
             self.session.is_compacted = false;
-            // Per-turn text for ToolContext (kept for the WHOLE turn,
-            // unlike pending_user_message which is cleared after the
-            // request is built). Lives on this per-session loop, never on
-            // agent-shared tool instances.
+            // Per-turn text for ToolContext (kept for the WHOLE turn).
+            // Lives on this per-session loop, never on agent-shared tool
+            // instances.
             self.current_turn_user_message = Some(user_message.to_string());
+            // ADR-060 §5.5 erratum: the message is appended to history only.
+            // It is NOT re-staged as a "Block D" tail duplicate — `build()`
+            // reads the current user message from Block B's tail.
             if let Some(parts) = content_parts {
                 let msg = ChatMessage::user_multimodal(user_message, parts);
-                // ADR-060 §5.5: stage the current user message so
-                // `build_chat_request` can pass it as Block D.
-                self.pending_user_message = Some(msg.clone());
                 self.session.history.append(msg);
             } else {
                 let msg = ChatMessage::user(user_message);
-                // ADR-060 §5.5: stage the current user message (Block D).
-                self.pending_user_message = Some(msg.clone());
                 self.session.history.append(msg);
             }
 
@@ -1821,12 +1794,6 @@ impl AgentLoop {
                 self.session.history.append(msg);
             }
         }
-
-        // ── ⑧.9 Clear the staged user message (ADR-060 §5.5) ──
-        // Tool results now form the request tail; later tool-loop iterations
-        // build WITHOUT Block D (the current user message stays in Block B
-        // only). The next `run_inner` with a new user input re-stages it.
-        self.pending_user_message = None;
 
         // ── ⑨ Post-execution loop detection ──
         self.post_check_loop_detection(&deduped_calls, &tool_contents, &blocked_info)?;

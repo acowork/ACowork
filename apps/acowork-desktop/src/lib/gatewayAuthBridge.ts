@@ -9,14 +9,14 @@
  *
  * So Rust only *mirrors* the access token:
  *
- *   1. every change of `authStore.accessToken` is pushed to Rust through the
- *      `set_gateway_access_token` command,
+ *   1. every change of the session module's access token is pushed to Rust
+ *      through the `set_gateway_access_token` command,
  *   2. a Rust request that answers 401 emits `gateway-auth-required`
  *      (`gateway_client.rs`), which lands here,
- *   3. this side rotates once via the store's single-flight `refreshTokens()`
- *      — the very same call the fetch interceptor uses, so parallel 401s from
- *      both clients share one rotation — and step 1 mirrors the result,
- *      releasing the paused Rust request so it replays with the new token.
+ *   3. this side reports the rejection to `lib/session/tokens.ts` — the very
+ *      same call the fetch interceptor uses, so parallel 401s from both
+ *      clients share one rotation — and step 1 mirrors the result, releasing
+ *      the paused Rust request so it replays with the new token.
  *
  * A failed rotation mirrors `null`, which also releases the waiter (the
  * original 401 is surfaced instead of stalling for the full renew timeout).
@@ -26,7 +26,12 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { useAuthStore, peekStoredTokens } from "../stores/authStore";
+import {
+  current,
+  onTokenChange,
+  reportRejected,
+  restore,
+} from "./session/tokens";
 import { isRecoveryReload } from "./recoveryReload";
 import { log } from "./logger";
 
@@ -48,20 +53,11 @@ export function installGatewayAuthBridge(): void {
 
   // Adopt the persisted pair before `authStore.init()` gets to run. The boot
   // commands (SplashScreen → `init_local_gateway` / `connect_mqtt`, agent
-  // installs) execute
-  // before the App-level auth gate resolves, and under `multi_user` they must
-  // carry a token — otherwise every one of them answers 401. The same
-  // reasoning applies to `refreshTokens()`: the rotation path has to be
-  // usable from the very first 401, and it reads the refresh token from the
-  // store. `init()` later re-reads the same values, so this only moves the
-  // adoption earlier.
-  const stored = peekStoredTokens();
-  if (stored) {
-    useAuthStore.setState({
-      accessToken: stored.accessToken,
-      refreshToken: stored.refreshToken,
-    });
-  }
+  // installs) execute before the App-level auth gate resolves, and under
+  // `multi_user` they must carry a token — otherwise every one of them
+  // answers 401. `init()` later re-reads the same values, so this only moves
+  // the adoption earlier.
+  restore();
 
   let mirrored: string | null | undefined;
   /**
@@ -97,17 +93,26 @@ export function installGatewayAuthBridge(): void {
   // endpoint). EXCEPTION: after a recovery reload the SplashScreen never
   // runs (see recoveryReload.ts — the boot is skipped by design), so
   // nothing else would ever connect; keep the install-time trigger there.
-  mirror(useAuthStore.getState().accessToken, isRecoveryReload);
-  useAuthStore.subscribe((state) => mirror(state.accessToken, true));
+  mirror(current(), isRecoveryReload);
+  onTokenChange((token) => mirror(token, true));
 
-  // Rust stopped on a 401 and is waiting for a newer token (10s budget).
+  // Rust stopped on a 401 and is waiting for a newer token (10s budget). It
+  // reports the rejection like any other consumer; the session module owns
+  // the decision of what to do about it.
   void listen(AUTH_REQUIRED_EVENT, () => {
     void (async () => {
-      const ok = await useAuthStore.getState().refreshTokens();
-      if (ok) return; // the subscription above mirrors the new token
-      // Rotation failed (session gone / no refresh token): release the
-      // waiter explicitly. `mirror` would dedupe a `null` that is already
-      // mirrored, and Rust only wakes on an epoch bump — so bypass it.
+      const rejected = current();
+      const fresh = rejected ? await reportRejected(rejected) : null;
+      // Release the waiter unless the module actually handed back a *different*
+      // token. On a real rotation the subscription above mirrors it and wakes
+      // Rust; but `null` (session gone) or the *same* token (no rotation
+      // possible — transport not yet wired, nothing to rotate) must fall
+      // through here, or the waiter stalls for the full 10s renew budget.
+      // Mirrors the interceptor's `!fresh || fresh === token` guard.
+      if (fresh && fresh !== rejected) return;
+      // No replacement (session gone / no refresh token): release the waiter
+      // explicitly. `mirror` would dedupe a `null` that is already mirrored,
+      // and Rust only wakes on an epoch bump — so bypass it.
       mirrored = null;
       pushAccessToken(null);
     })();

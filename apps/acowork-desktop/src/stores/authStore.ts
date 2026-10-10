@@ -1,13 +1,14 @@
 /**
  * Account session state (ADR-076 §决策 3 / 6 / 7).
  *
- * Owns the token pair and the resolved deployment auth mode, and drives
- * the App-level login gate. Tokens are persisted to `localStorage` under
- * a single key so a webview reload keeps the session; every other store
- * is treated as derived state and rebuilt after a reload (ADR-076 §9
- * open question 6 endorses the "logged out but not logged in" mid-state
- * over a transactional switch — here that mid-state is simply a reload
- * landin on LoginView).
+ * Owns the *UI-facing* session: resolved deployment auth mode, the current
+ * account, the login gate, and the error/setup states the views bind to.
+ *
+ * It deliberately does NOT own the token pair. That lives in
+ * `lib/session/tokens.ts`, the single rotation source; this store keeps a
+ * read-only mirror of the access token because a dozen components bind to
+ * `accessToken` and need to re-render when it changes. `refreshToken` is not
+ * mirrored — nothing outside the module has any business holding it.
  *
  * `AUTH_MODE=local` (the default loopback deployment) is a full no-op
  * (§决策 12): the store resolves to `disabled` and the UI never gates.
@@ -15,7 +16,6 @@
 
 import { create } from "zustand";
 import { getGatewayUrl } from "../lib/config";
-import { jwtExpMs } from "../lib/jwt";
 import { log } from "../lib/logger";
 import {
   AuthApiError,
@@ -25,49 +25,20 @@ import {
   fetchMe,
   firstLoginRequest,
   loginRequest,
-  logoutRequest,
-  refreshRequest,
 } from "../lib/auth-api";
+import {
+  acquire,
+  adopt,
+  clear,
+  onSessionEnd,
+  onTokenChange,
+  reportRejected,
+  restore,
+  signOut,
+} from "../lib/session/tokens";
 import type { AuthMode, AuthState, TokenPair, UserAccount } from "../lib/types";
 import { useUserProfileStore } from "./userProfileStore";
 import { RECOVERY_RELOAD_FLAG } from "../lib/recoveryReload";
-
-const TOKENS_KEY = "acowork.auth.tokens";
-
-interface StoredTokens {
-  accessToken: string;
-  refreshToken: string;
-}
-
-function loadTokens(): StoredTokens | null {
-  try {
-    const raw = localStorage.getItem(TOKENS_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as Partial<StoredTokens>;
-    if (parsed.accessToken && parsed.refreshToken) {
-      return { accessToken: parsed.accessToken, refreshToken: parsed.refreshToken };
-    }
-  } catch {
-    // corrupted / unavailable storage — treat as logged out
-  }
-  return null;
-}
-
-function saveTokens(tokens: StoredTokens): void {
-  try {
-    localStorage.setItem(TOKENS_KEY, JSON.stringify(tokens));
-  } catch {
-    // persistence failure is non-fatal — session stays in-memory
-  }
-}
-
-function clearStoredTokens(): void {
-  try {
-    localStorage.removeItem(TOKENS_KEY);
-  } catch {
-    // ignore
-  }
-}
 
 /** Reload the webview so every store + MQTT listener reboots clean (§决策 7).
  *  Sets the `acowork_recovery_reload` flag so `App.tsx` skips the
@@ -86,22 +57,6 @@ function reloadApp(): void {
   } catch (err) {
     log.warn("[reloadApp] reload failed:", err);
   }
-}
-
-/**
- * The persisted token pair, read straight from storage.
- *
- * `init()` is the only caller that needs the tokens for the auth gate itself,
- * but the Tauri auth bridge (`lib/gatewayAuthBridge.ts`) needs the pair
- * *before* `init()` runs: boot-time Rust commands (SplashScreen →
- * `init_local_gateway` / `connect_mqtt`, agent installs) only carry
- * credentials if the access token is already mirrored, and the 401 rotation
- * path reads the
- * refresh token from the store. Exposed read-only on purpose — adopting the
- * pair is `init()`'s job.
- */
-export function peekStoredTokens(): { accessToken: string; refreshToken: string } | null {
-  return loadTokens();
 }
 
 interface AuthStore {
@@ -124,8 +79,11 @@ interface AuthStore {
   status: AuthState;
   /** The caller's own account (redacted), once known. */
   account: UserAccount | null;
+  /**
+   * Read-only mirror of the module's access token. Components bind to it and
+   * must re-render on rotation; nothing here decides when it changes.
+   */
   accessToken: string | null;
-  refreshToken: string | null;
   /** Last login error message, for the LoginView. */
   error: string | null;
   /**
@@ -135,8 +93,6 @@ interface AuthStore {
    */
   viewAsUserId: string | null;
   setViewAsUserId: (userId: string | null) => void;
-  /** Single-flight guard so concurrent 401s do not double-rotate. */
-  _refreshPromise: Promise<boolean> | null;
   /** ADR-076 §决策 12 v2: timer handle for the `/api/status` poll that
    * waits out first-boot setup on the Gateway host. `null` = no poll
    * in flight. */
@@ -203,9 +159,7 @@ interface AuthStore {
   changePassword: (oldPassword: string, newPassword: string) => Promise<void>;
   /** Soft-delete own account (§决策 6), then reload into LoginView. */
   deleteSelf: () => Promise<void>;
-  /** Rotate the token pair (single-flight). Returns `false` if the session is dead. */
-  refreshTokens: () => Promise<boolean>;
-  /** Drop the in-memory session without touching the server (used by the interceptor). */
+  /** Drop the in-memory session without touching the server. */
   clearLocalSession: () => void;
 }
 
@@ -227,10 +181,8 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
   status: "unknown",
   account: null,
   accessToken: null,
-  refreshToken: null,
   error: null,
   viewAsUserId: null,
-  _refreshPromise: null,
   _setupPollHandle: null,
 
   init: async () => {
@@ -266,32 +218,35 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
       return;
     }
 
-    const stored = loadTokens();
-    if (!stored) {
+    if (!restore()) {
+      set({ mode, status: "logged_out" });
+      return;
+    }
+    set({ mode });
+
+    // Ask the module for a token that is usable *now* — it rotates first if
+    // the stored one is about to expire, so a boot at minute 14 of the TTL
+    // does not walk straight into a 401.
+    const token = await acquire();
+    if (!token) {
       set({ mode, status: "logged_out" });
       return;
     }
 
-    set({
-      mode,
-      accessToken: stored.accessToken,
-      refreshToken: stored.refreshToken,
-    });
-
     try {
-      const account = await fetchMe(url, stored.accessToken);
+      const account = await fetchMe(url, token);
       set({ account, status: "logged_in" });
       app(account);
     } catch (err) {
       if (err instanceof AuthApiError && err.status === 401) {
-        const ok = await get().refreshTokens();
-        if (!ok) return; // clearLocalSession already ran
+        const fresh = await reportRejected(token);
+        if (!fresh) return; // the module ended the session; see below
         try {
-          const account = await fetchMe(url, get().accessToken!);
+          const account = await fetchMe(url, fresh);
           set({ account, status: "logged_in" });
           app(account);
         } catch (retryErr) {
-          log.warn("[authStore] /me failed after refresh:", retryErr);
+          log.warn("[authStore] /me failed after rotation:", retryErr);
           get().clearLocalSession();
         }
       } else {
@@ -360,14 +315,10 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
       set({ error: message });
       throw err;
     }
-    saveTokens({ accessToken: pair.access_token, refreshToken: pair.refresh_token });
-    set({
-      mode: "multi_user",
-      status: "logged_in",
-      accessToken: pair.access_token,
-      refreshToken: pair.refresh_token,
-      error: null,
-    });
+    // Hand the pair to the module; `accessToken` below is only the mirror
+    // that `onTokenChange` keeps in sync.
+    adopt(pair);
+    set({ mode: "multi_user", status: "logged_in", error: null });
     try {
       const account = await fetchMe(url, pair.access_token);
       set({ account });
@@ -389,14 +340,8 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
       set({ error: message });
       throw err;
     }
-    saveTokens({ accessToken: pair.access_token, refreshToken: pair.refresh_token });
-    set({
-      mode: "multi_user",
-      status: "logged_in",
-      accessToken: pair.access_token,
-      refreshToken: pair.refresh_token,
-      error: null,
-    });
+    adopt(pair);
+    set({ mode: "multi_user", status: "logged_in", error: null });
     try {
       const account = await fetchMe(url, pair.access_token);
       set({ account });
@@ -407,9 +352,12 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
   },
 
   logout: async () => {
-    const refreshToken = get().refreshToken;
-    clearStoredTokens();
-    set({ status: "logged_out", account: null, accessToken: null, refreshToken: null });
+    // The module owns revocation. `signOut()` drops the local pair
+    // synchronously (which mirrors `accessToken` to null through the
+    // subscription below) and fires the server revoke without awaiting it —
+    // which is what the synchronous reload here needs anyway.
+    void signOut();
+    set({ status: "logged_out", account: null });
     // Reload FIRST, before any await: the set() above already scheduled a
     // React re-render that will briefly hit the SplashScreen/LoginView
     // before window.location.reload() can take over. Calling reloadApp()
@@ -421,11 +369,6 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
     // Refresh-token TTL bounds the risk window. Upgrade path: move revoke
     // to a Tauri Rust command that survives the webview reload.
     reloadApp();
-    if (refreshToken) {
-      logoutRequest(getGatewayUrl(), refreshToken).catch((err) =>
-        log.warn("[authStore] logout revoke failed (ignored):", err)
-      );
-    }
   },
 
   switchAccount: async () => {
@@ -443,8 +386,8 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
     // — setState schedules an interim React render that the synchronous
     // reloadApp() overrides, so App.tsx's recovery branch lands directly on
     // LoginView with a single paint.
-    clearStoredTokens();
-    set({ status: "logged_out", account: null, accessToken: null, refreshToken: null });
+    clear();
+    set({ status: "logged_out", account: null });
     reloadApp();
   },
 
@@ -453,48 +396,16 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
     if (!accessToken || !account) throw new AuthApiError(401, "not logged in");
     await deleteAccount(getGatewayUrl(), accessToken, account.user_id);
     // Clear local tokens before reload — see comment in changePassword.
-    clearStoredTokens();
-    set({ status: "logged_out", account: null, accessToken: null, refreshToken: null });
+    clear();
+    set({ status: "logged_out", account: null });
     reloadApp();
   },
 
-  refreshTokens: async () => {
-    const inFlight = get()._refreshPromise;
-    if (inFlight) return inFlight;
-
-    const refreshToken = get().refreshToken;
-    if (!refreshToken) return false;
-
-    const promise = (async () => {
-      try {
-        const pair = await refreshRequest(getGatewayUrl(), refreshToken);
-        saveTokens({ accessToken: pair.access_token, refreshToken: pair.refresh_token });
-        set({
-          accessToken: pair.access_token,
-          refreshToken: pair.refresh_token,
-          status: "logged_in",
-        });
-        return true;
-      } catch (err) {
-        log.warn("[authStore] token refresh failed — session ended:", err);
-        get().clearLocalSession();
-        return false;
-      } finally {
-        set({ _refreshPromise: null });
-      }
-    })();
-
-    set({ _refreshPromise: promise });
-    return promise;
-  },
-
   clearLocalSession: () => {
-    clearStoredTokens();
+    clear();
     set({
       status: "logged_out",
       account: null,
-      accessToken: null,
-      refreshToken: null,
       viewAsUserId: null,
     });
   },
@@ -546,117 +457,32 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
   },
 }));
 
-// ── Proactive token rotation ──────────────────────────────────────────
+// ── Token-module wiring ───────────────────────────────────────────────
 //
-// The access token lives 15 minutes (`acowork_core::auth::ACCESS_TTL_SECS`)
-// and, until this existed, it was only ever rotated *lazily* — by a 401
-// from an authenticated request. That is fine for HTTP (the request that
-// discovers the expiry replays with the new token) but NOT for relay-mode
-// MQTT: its CONNECT password IS the access token, and the strict remote
-// listener drops a bad credential WITHOUT CONNACK (rumqttd `InvalidAuth`).
-// The MQTT client therefore sees only "Connection closed by peer abruptly"
-// — indistinguishable from a network drop — and retries the same expired
-// password forever. Observed live: after a hotspot switch the relay tunnel
-// came back but MQTT stayed red for minutes, until an unrelated HTTP 401
-// happened to trigger a rotation.
+// The token pair itself — persistence, expiry bookkeeping, rotation timing,
+// the single-flight guard, and the dead-session verdict — lives in
+// `lib/session/tokens.ts`. This store is a *subscriber*: it mirrors the
+// access token for the components that bind to it, and drops the session
+// state when the module declares it over.
 //
-// Rotating shortly BEFORE `exp` keeps the mirrored token valid, so every
-// (re)connect has a fresh password. The webview still owns the rotation —
-// this only decides when to call the existing single-flight
-// `refreshTokens()` (ADR-076 §决策 3: no second rotation source).
+// The rotation transport is NOT wired here. Installing it as a module-load
+// side effect made every other consumer depend on this store being imported
+// first; it is now wired explicitly in `main.tsx` via
+// `lib/session/wiring.ts`. These two subscriptions are safe as side effects
+// because they only concern this store's own state.
 
-/** How long before `exp` the rotation fires. Comfortably covers a slow
- *  `/api/auth/refresh` round-trip plus clock skew, while staying well
- *  inside the 15-minute TTL. */
-export const PROACTIVE_REFRESH_LEAD_MS = 120_000;
-
-/** Floor for the re-check delay. Prevents a spin if the issued token is
- *  already inside the lead window (clock skew, short TTL). */
-export const PROACTIVE_REFRESH_MIN_DELAY_MS = 15_000;
-
-/**
- * Consecutive rotations where the replacement token was already inside the
- * lead window. After this many, stop scheduling and fall back to the lazy
- * 401 path rather than hammering the Gateway.
- */
-export const MAX_STALLED_ROTATIONS = 3;
-
-let proactiveRefreshHandle: ReturnType<typeof setTimeout> | null = null;
-let stalledRotations = 0;
-
-/** Cancel any pending proactive rotation and forget the stall count.
- *  Exported for tests/teardown. Note this is the *full* reset — arming
- *  clears only the timer, so consecutive stalled rotations can still be
- *  counted. */
-export function disarmProactiveRefresh(): void {
-  if (proactiveRefreshHandle !== null) {
-    clearTimeout(proactiveRefreshHandle);
-    proactiveRefreshHandle = null;
+// Read-only mirror — rotation decisions are not this store's.
+onTokenChange((token) => {
+  if (useAuthStore.getState().accessToken !== token) {
+    useAuthStore.setState({ accessToken: token });
   }
-  stalledRotations = 0;
-}
+});
 
-/** Clear only the pending timer (internal arming step). */
-function clearProactiveTimer(): void {
-  if (proactiveRefreshHandle !== null) {
-    clearTimeout(proactiveRefreshHandle);
-    proactiveRefreshHandle = null;
-  }
-}
-
-/**
- * (Re)arm the proactive rotation for `token` — `null` disarms (logged out).
- *
- * Called from the store subscription below, so every path that lands a new
- * token (init / login / first-login / refresh / logout) is covered without
- * touching each call site.
- */
-export function armProactiveRefresh(token: string | null): void {
-  clearProactiveTimer();
-  if (!token) {
-    // Logged out / session cleared: the counter starts fresh next login.
-    stalledRotations = 0;
-    return;
-  }
-
-  const expMs = jwtExpMs(token);
-  if (expMs === null) {
-    // Unreadable payload: keep the lazy 401 path as the safety net rather
-    // than scheduling against a guess.
-    log.warn("[authStore] token has no readable exp — proactive refresh off");
-    return;
-  }
-
-  const remainingMs = expMs - Date.now();
-  if (remainingMs <= PROACTIVE_REFRESH_LEAD_MS) {
-    stalledRotations += 1;
-    if (stalledRotations > MAX_STALLED_ROTATIONS) {
-      log.warn(
-        `[authStore] proactive refresh gave up after ${MAX_STALLED_ROTATIONS} rotations that ` +
-          "did not extend the token — relying on the 401 path",
-      );
-      return;
-    }
-  } else {
-    // A token with real headroom means the previous cycle worked.
-    stalledRotations = 0;
-  }
-
-  const delay = Math.max(
-    PROACTIVE_REFRESH_MIN_DELAY_MS,
-    remainingMs - PROACTIVE_REFRESH_LEAD_MS,
-  );
-  proactiveRefreshHandle = setTimeout(() => {
-    proactiveRefreshHandle = null;
-    log.debug(`[authStore] proactive token rotation (exp in ${Math.round(remainingMs / 1000)}s)`);
-    void useAuthStore.getState().refreshTokens();
-  }, delay);
-}
-
-// Armed from the token itself so no call site has to remember: a rotation
-// lands a new `accessToken`, which re-arms for the next cycle.
-useAuthStore.subscribe((state, prev) => {
-  if (state.accessToken !== prev.accessToken) {
-    armProactiveRefresh(state.accessToken);
-  }
+// The module's verdict: the rotation was refused and no retry will help.
+// Everything that a dead session invalidates — status, account, the admin
+// view-as filter — is dropped here, once, instead of at each call site that
+// used to discover it independently.
+onSessionEnd(() => {
+  log.info("[authStore] session ended by the token module — clearing local state");
+  useAuthStore.getState().clearLocalSession();
 });

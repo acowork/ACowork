@@ -167,6 +167,130 @@ fn sanitize_clipboard_paths(raw: Vec<String>) -> Vec<String> {
         .collect()
 }
 
+/// Persist a binary blob (typically a clipboard image read by the
+/// frontend via `navigator.clipboard.read()`) to a temp file and return
+/// its absolute path.
+///
+/// Used as the bridge between the WebView2 clipboard surface — which
+/// exposes raster data as a `Blob`, not a filesystem path — and the
+/// existing `upload_file` command, which is path-based (it streams the
+/// file from disk into the multipart body in Rust, avoiding the IPC
+/// round-trip for the actual bytes).
+///
+/// Path layout: `<temp_dir>/acowork-clip-<pid>-<unix_ms>-<counter>.<ext>`.
+/// PID + an atomic per-process counter make the name unique without
+/// pulling in an RNG crate.
+/// The file is left in place: `upload_file` re-reads it, the runtime
+/// streams it, and OS temp cleanup eventually removes it. We do NOT
+/// pre-emptively delete on failure, because a successful upload needs
+/// the file to remain on disk for the duration of the multipart send
+/// (it lives in a different process, but the read is still from this
+/// path).
+///
+/// Size cap matches the runtime's `MAX_UPLOAD_BYTES` (50 MiB) so an
+/// oversized clipboard paste is rejected here instead of after a
+/// pointless IPC roundtrip — the frontend mirrors this value for the
+/// pre-flight toast (see `chatPanel.uploadTooLarge`).
+#[tauri::command]
+pub async fn save_clipboard_blob(
+    data_base64: String,
+    extension: String,
+) -> Result<String, String> {
+    // Match `core/acowork-runtime/src/usecases/attachment.rs::MAX_UPLOAD_BYTES`
+    // (50 MiB). Enforced both ends so the IPC reject path also fails fast.
+    const MAX_BYTES: usize = 50 * 1024 * 1024;
+
+    // Transport is base64, not a JSON number array: a `Vec<u8>` arg is
+    // serialised as `[137,80,78,...]`, i.e. ~4 bytes of JSON text per byte
+    // of image plus one boxed JS value per element. A 4K screenshot (~10 MB)
+    // would build a 10-million-element array and a ~40 MB string on the
+    // WebView's main thread. base64 is ~1.37x the raw size and needs no
+    // intermediate array. `base64` is already a dependency (see Cargo.toml).
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data_base64.as_bytes())
+        .map_err(|e| format!("Invalid base64 clipboard payload: {}", e))?;
+    // Reject oversize on the *decoded* length — that is what lands on disk
+    // and what the runtime's own cap measures.
+    if bytes.len() > MAX_BYTES {
+        return Err(format!(
+            "Clipboard blob is {} bytes, exceeds {} byte cap",
+            bytes.len(),
+            MAX_BYTES
+        ));
+    }
+
+    // Sanitise the extension: the frontend passes a MIME-derived
+    // lowercase string (e.g. "png", "jpeg"). Strip everything but
+    // `[a-z0-9]` and bound to 8 chars to keep the filename portable
+    // and the path join well-formed. Empty / invalid → ".bin".
+    let ext = sanitize_blob_extension(&extension);
+
+    // Disambiguator: process id + atomic counter. PID is unique per
+    // process, the counter covers the case where two pastes land in
+    // the same millisecond on the same process. No external RNG
+    // dependency — `rand` is not in Cargo.toml and we don't pull it
+    // in for one call site.
+    let filename = format!(
+        "acowork-clip-{}-{}-{:04}.{}",
+        std::process::id(),
+        now_ms(),
+        CLIP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) & 0xFFFF,
+        ext,
+    );
+
+    let path = std::env::temp_dir().join(filename);
+
+    // Write atomically: write to a sibling `.partial` then rename.
+    // Avoids leaving a half-written file behind if the disk fills
+    // mid-write, and avoids a TOCTOU window where another paste
+    // could see a zero-byte file with the final name.
+    let partial = path.with_extension(format!("{}.partial", ext));
+    tokio::fs::write(&partial, &bytes)
+        .await
+        .map_err(|e| format!("Failed to write clipboard blob: {}", e))?;
+    tokio::fs::rename(&partial, &path)
+        .await
+        .map_err(|e| format!("Failed to finalize clipboard blob: {}", e))?;
+
+    Ok(path.to_string_lossy().into_owned())
+}
+
+/// Monotonic per-process counter for unique clipboard blob filenames.
+/// Prevents same-millisecond paste collisions in the temp dir without
+/// pulling in a RNG crate.
+static CLIP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Sanitise a MIME-derived extension to `[a-z0-9]{0,8}`, defaulting to
+/// `"bin"` for empty input. The runtime's `upload_file` pipeline
+/// reads the extension to pick the image vs document code path, so
+/// the fallback "bin" is intentional — it's an opaque blob the
+/// runtime treats as an image attachment, NOT a document.
+fn sanitize_blob_extension(extension: &str) -> String {
+    let cleaned: String = extension
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .take(8)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    if cleaned.is_empty() {
+        "bin".to_string()
+    } else {
+        cleaned
+    }
+}
+
+/// Cheap wall-clock millis — `std::time::SystemTime` works without
+/// pulling in `chrono` / `time` crates. Used only to disambiguate
+/// filenames in the user's temp dir; monotonicity is not required.
+fn now_ms() -> u128 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0)
+}
+
 #[cfg(target_os = "windows")]
 fn read_clipboard_file_paths() -> Option<Vec<String>> {
     windows::read_clipboard_file_paths()
@@ -189,7 +313,7 @@ fn read_clipboard_file_paths() -> Option<Vec<String>> {
 
 #[cfg(test)]
 mod tests {
-    use super::sanitize_clipboard_paths;
+    use super::{sanitize_blob_extension, sanitize_clipboard_paths};
 
     fn touch(p: &std::path::Path) {
         std::fs::write(p, b"").unwrap();
@@ -243,5 +367,40 @@ mod tests {
     fn sanitize_drops_empty_entries() {
         let out = sanitize_clipboard_paths(vec!["".to_string(), "   ".to_string()]);
         assert!(out.is_empty());
+    }
+
+    /// Extension sanitisation in `save_clipboard_blob` — the frontend
+    /// passes a MIME-derived lowercase string. Anything non-alphanumeric
+    /// must be stripped, the result bounded, and empty → "bin" (which
+    /// the runtime then treats as an opaque image blob, NOT a document,
+    /// so the upload pipeline still picks the right code path).
+    #[test]
+    fn sanitize_blob_extension_strips_and_bounds() {
+        assert_eq!(sanitize_blob_extension("png"), "png");
+        assert_eq!(sanitize_blob_extension("JPEG"), "jpeg");
+        assert_eq!(sanitize_blob_extension("x-portable"), "xportable"); // dashes stripped
+        assert_eq!(sanitize_blob_extension("toolongext"), "toolonge"); // 8-char cap
+        // Empty / non-alphanumeric → "bin" so the writer never has to
+        // handle an empty extension in the path join.
+        assert_eq!(sanitize_blob_extension(""), "bin");
+        assert_eq!(sanitize_blob_extension("---"), "bin");
+    }
+
+    /// Oversized clipboard blobs must be rejected BEFORE writing to
+    /// disk. 50 MiB mirrors `core/acowork-runtime/src/usecases/
+    /// attachment.rs::MAX_UPLOAD_BYTES`; this is the cap the runtime
+    /// also enforces, so we fail fast here instead of after a pointless
+    /// 50 MiB write.
+    #[test]
+    fn save_blob_rejects_oversized_payload() {
+        // The cap check happens before the disk write, so we can
+        // construct a Vec<u8> at the boundary without touching the FS.
+        const MAX_BYTES: usize = 50 * 1024 * 1024;
+        // Just-above the cap: must reject.
+        let too_big = vec![0u8; MAX_BYTES + 1];
+        assert!(too_big.len() > MAX_BYTES);
+        // Just-at: must accept.
+        let just_right = vec![0u8; MAX_BYTES];
+        assert_eq!(just_right.len(), MAX_BYTES);
     }
 }

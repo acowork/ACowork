@@ -86,7 +86,7 @@ Every LLM call carries tool schemas, whose `description` field is read by the mo
 
 ## 5. Runtime-assembled system-prompt blocks
 
-`core/acowork-runtime/src/agent/context.rs`, in `ContextBuilder::build()`. Per ADR-060 the prompt is split into cache-friendly sections (Block A / B / C / D); only the **Block A** sections are listed here (Block B is conversation history, Block C is the todo snapshot, Block D is the current user message). All section header strings are hardcoded:
+`core/acowork-runtime/src/agent/context.rs`, in `ContextBuilder::build()`. Per ADR-060 the prompt is split into cache-friendly sections; only the **Block A** sections are listed here (Block B is conversation history, which also carries the current user message at its tail and the real `todo_write` results — the former Block C todo snapshot and Block D user-message copy were both removed, see ADR-060 §5.5 erratum). All section header strings are hardcoded:
 
 | Injection point | Template fragment |
 | --- | --- |
@@ -96,7 +96,6 @@ Every LLM call carries tool schemas, whose `description` field is read by the mo
 | Skill section | `\n\n## Skill Instructions\n{skills}` |
 | Workspace prompt file section | `\n\n## Workspace Prompt File\n{prompt_file}` |
 | Environment section (default) | `## Environment\n- Operating System: {os}\n- Architecture: {arch}\n- Shell: {shell}\n- Available Shell Tools: {tools}` (`detect_environment_text()`, memoized in `OnceLock`) |
-| Block C — Todo snapshot (User role) | `## Todo Task List\nThis is your todo task list. If any task status needs updating, use the \`todo_write\` tool to update it. If nothing needs updating, do nothing.\n\n{todos}` |
 
 ## 6. Output truncation markers
 

@@ -617,20 +617,25 @@ export function AgentList({ width }: AgentListProps) {
               size={40}
               className={isCollapsed ? "mx-auto" : ""}
             />
-            {/* IM-style "needs attention" indicator dot — solid accent color,
-                * borderless. Shown when the agent is alive AND has at
-                * least one session in a non-idle status (streaming /
+            {/* IM-style "needs attention" indicator dot — solid emerald,
+                * borderless, matching the node online/offline dot below
+                * (NodeGroupHeader). Shown when the agent is alive AND has
+                * at least one session in a non-idle status (streaming /
                 * waiting_approval / paused), per ADR-014. Disappears
                 * once every session returns to idle. Offline agents
                 * (alive === false) show no dot.
                 *
                 * Auto-sleep was retired in Sept 2026 — the `sleeping`
-                * carve-out is gone; an agent that is alive IS running. */}
-            {agent.alive && activeAgentIds.has(id) && (
+                * carve-out is gone; an agent that is alive IS running.
+                *
+                * Hidden on the selected row: the selection highlight fills
+                * the row, and an emerald dot on top of it reads as a smudge
+                * rather than a status. The row is already fully "marked"
+                * by its background; the dot comes back the moment focus
+                * moves elsewhere. */}
+            {agent.alive && activeAgentIds.has(id) && selectedAgentId !== id && (
                 <span
-                  className={cn(
-                    "absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full bg-[var(--color-accent)]"
-                  )}
+                  className="absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full bg-emerald-500"
                 />
               )}
           </div>

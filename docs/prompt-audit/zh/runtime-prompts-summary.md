@@ -96,7 +96,6 @@ graph LR
 | Skill 段 | `\n\n## Skill Instructions\n{skills}` |
 | Workspace prompt file 段 | `\n\n## Workspace Prompt File\n{prompt_file}` |
 | Environment 段（默认） | `## Environment\n- Operating System: {os}\n- Architecture: {arch}\n- Shell: {shell}\n- Available Shell Tools: {tools}`（`detect_environment_text()`，memoized in `OnceLock`） |
-| Block C（Todo 快照，User role） | `## Todo Task List\nThis is your todo task list. If any task status needs updating, use the \`todo_write\` tool to update it. If nothing needs updating, do nothing.\n\n{todos}` |
 
 ## 6. 输出截断 marker
 
@@ -115,7 +114,7 @@ ADR-063 把"包级文件名覆盖"推广到全部指令性 prompt，但**以下�
 
 | 模板 | 为什么不覆盖 |
 | --- | --- |
-| Identity / Memory / Abstention / Skill / Workspace prompt file / Environment / Todo Task List | 模板含**结构性占位符**（`{identity}` / `{memory}` / `{todos}` 等），位置与顺序是 prompt cache 锚点（[ADR-060](../../adr/zh/ADR-060-prompt-cache-friendly-context-block-reorg.md) 的 Block A 稳定前缀）；模板边界被下游解析逻辑依赖（如 `<conversation>` 包裹、`## Environment` 段落被压缩规则识别）。"改指令内容"与"改骨架"必须分离。 |
+| Identity / Memory / Abstention / Skill / Workspace prompt file / Environment | 模板含**结构性占位符**（`{identity}` / `{memory}` 等），位置与顺序是 prompt cache 锚点（[ADR-060](../../adr/zh/ADR-060-prompt-cache-friendly-context-block-reorg.md) 的 Block A 稳定前缀）；模板边界被下游解析逻辑依赖（如 `<conversation>` 包裹、`## Environment` 段落被压缩规则识别）。"改指令内容"与"改骨架"必须分离。 |
 
 ### 7.2 工具 description（22 个 ToolSpec.description）
 

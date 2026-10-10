@@ -484,9 +484,10 @@ impl AgentLoop {
                             let mut chat_request = context_builder.unwrap().build(
                                 &self.core.manifest,
                                 &self.session.history,
-                                // ADR-060 §5.5: compaction retry keeps the
-                                // same staged user message as Block D.
-                                self.pending_user_message.as_ref(),
+                                // ADR-060 §5.5 erratum: no Block D arg. The
+                                // current user message survives compaction in
+                                // the retained tail (Block B), so it is still
+                                // present exactly once after the 8-level trim.
                                 caps.as_ref(),
                                 max_output_limit,
                             );

@@ -229,7 +229,7 @@ impl CompressionPlan {
 [Block inside B: summary marker (User, name=compaction_summary,
   content = level metadata + <summary> + <user_intent>)]   ← insertion point; the suffix after it is invalidated
 [Block B: tail-retained user/assistant + tools]            ← cache hit 3 (tail raw text)
-[Block C: todo snapshot] / [Block D: current user message] ← handled by ADR-060
+[current user message]                                     ← i.e. the tail of Block B (ADR-060 §5.5 erratum: no Block C/D)
 ```
 
 Note: the summary marker lives **inside** Block B (the middle-replacement semantics are unchanged, the existing behavior of `replace_middle_with_summary`); it is not a standalone SystemMessage — this is the key difference from the early draft (see §2.3).
@@ -653,7 +653,7 @@ pub fn plan_compression(history: &HistoryState, summary_tokens: u64, min_ratio: 
 }
 ```
 
-**Note**: the "current user message" of level 8 is defined as the last `MessageRole::User` message in history; Block D (ADR-060's `pending_user_message`) is passed in explicitly by the caller and does not participate in the in-history determination.
+**Note**: the "current user message" of level 8 is defined as the last `MessageRole::User` message in history. ~~Block D (ADR-060's `pending_user_message`) is passed in explicitly by the caller and does not participate in the in-history determination.~~ **(ADR-060 §5.5 erratum: both Block D and `pending_user_message` have been removed; the current user message simply is the history tail, so the level-8 determination hits it directly.)**
 
 ### 19.2 The Selection Rule and Threshold Semantics (revising §6.1/§13.1)
 
@@ -711,7 +711,7 @@ impl CompressionPlan {
 | Item | Cited in the main body | The actual code |
 |---|---|---|
 | summary max_tokens | not mentioned | `compact_via_llm` → `compact_with_llm(..., 2048, ...)` (history.rs:776) — **already replaced by `SUMMARY_TOKEN_BUDGET = 4096` per 19-1** |
-| the location of the queue definitions | loop_.rs:383-395 | loop_.rs:383-395 is actually ADR-060's `pending_user_message` (Block D); `AbandonQueue`/`RetrieveQueue` are defined in `context_compression.rs` (§15 item 13 cites it correctly) |
+| the location of the queue definitions | loop_.rs:383-395 | loop_.rs:383-395 was actually ADR-060's `pending_user_message` (Block D) — **since removed per the ADR-060 §5.5 erratum**; `AbandonQueue`/`RetrieveQueue` are defined in `context_compression.rs` (§15 item 13 cites it correctly) |
 | `drain_abandon_queue` | loop_.rs:1722 | loop_.rs:1768 |
 | `trim_history_to_budget` call sites | 927/946/1194/1444 | 967/986/1234/1484 (4 sites consistent, offset by ~40 lines) |
 | paired cleanup | not mentioned | `sanitize_messages` (history.rs:630-697) does bidirectional cleanup on every `build()`: step 4 removes tool_calls with no corresponding result, step 5 drops empty assistants — after the 8-level strategy deletes tool messages, **no new pairing mechanism is needed**; the token deviation between projection and the actual request (sanitize deleting one more layer) is explicitly accepted |
@@ -737,7 +737,7 @@ The original diagram's "cache hit 3 (tail raw text)" label is **wrong**: after t
 [Block B: retained user/assistant + retained tools]        ← cache hit 2 (before the marker)
 [Block inside B: summary marker (User, name=compaction_summary)] ← insertion point
 [Block B: tail-retained user/assistant + tools]            ← cache miss (the suffix is invalidated)
-[Block C: todo snapshot] / [Block D: current user message]  ← handled by ADR-060
+[current user message]                                     ← i.e. the tail of Block B (ADR-060 §5.5 erratum: no Block C/D)
 ```
 
 ### 19.9 Implementation Status (2026-08-31)

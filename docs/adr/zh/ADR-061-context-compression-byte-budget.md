@@ -274,7 +274,7 @@ impl CompressionPlan {
 [Block B 内: summary marker（User, name=compaction_summary,
   内容 = level 元数据 + <summary> + <user_intent>）]        ← 插入点，其后 suffix 失效
 [Block B: 尾部保留的 user/assistant + 工具]                ← cache hit 3（尾部原文）
-[Block C: todo 快照] / [Block D: 当前 user message]        ← 由 ADR-060 负责
+[当前 user message]                                        ← 即 Block B 尾部（ADR-060 §5.5 勘误：无 Block C/D）
 ```
 
 注意：summary marker 位于 Block B **内部**（中间替换语义不变，`replace_middle_with_summary` 的既有行为），不是独立的 SystemMessage——这是与早期草稿的关键差异（见 §2.3）。
@@ -690,7 +690,7 @@ pub fn plan_compression(history: &HistoryState, summary_tokens: u64, min_ratio: 
 }
 ```
 
-**注意**：级 8 的"当前 user message"定义为 history 中最后一条 `MessageRole::User` 消息；Block D（ADR-060 的 `pending_user_message`）由调用方显式传入，不参与 history 内判定。
+**注意**：级 8 的"当前 user message"定义为 history 中最后一条 `MessageRole::User` 消息。~~Block D（ADR-060 的 `pending_user_message`）由调用方显式传入，不参与 history 内判定。~~ **（ADR-060 §5.5 勘误：Block D 与 `pending_user_message` 均已移除，当前 user message 就是 history 尾部，级 8 的判定即命中它。）**
 
 ### 19.2 选择规则与阈值语义（修订 §6.1/§13.1）
 
@@ -748,7 +748,7 @@ impl CompressionPlan {
 | 项 | 正文原引用 | 实际代码 |
 |---|---|---|
 | 摘要 max_tokens | 未提及 | `compact_via_llm` → `compact_with_llm(..., 2048, ...)`（history.rs:776）——**已按 19-1 替换为 `SUMMARY_TOKEN_BUDGET = 4096`** |
-| 队列定义位置 | loop_.rs:383-395 | loop_.rs:383-395 实为 ADR-060 `pending_user_message`（Block D）；`AbandonQueue`/`RetrieveQueue` 定义在 `context_compression.rs`（§15 清单 13 引用正确） |
+| 队列定义位置 | loop_.rs:383-395 | loop_.rs:383-395 实为 ADR-060 `pending_user_message`（Block D）**（已随 ADR-060 §5.5 勘误删除）**；`AbandonQueue`/`RetrieveQueue` 定义在 `context_compression.rs`（§15 清单 13 引用正确） |
 | `drain_abandon_queue` | loop_.rs:1722 | loop_.rs:1768 |
 | `trim_history_to_budget` 调用点 | 927/946/1194/1444 | 967/986/1234/1484（4 处一致，偏移 ~40 行） |
 | 配对清理 | 未提及 | `sanitize_messages`（history.rs:630-697）在每次 `build()` 时双向清理：Step 4 移除无对应结果的 tool_calls、Step 5 删空 assistant——8 级策略删除 tool 消息后**无需新增配对机制**；投影与实际请求的 token 偏差（sanitize 再删一层）显式接受 |
@@ -774,7 +774,7 @@ impl CompressionPlan {
 [Block B: 保留的 user/assistant + 保留的工具]              ← cache hit 2（marker 之前）
 [Block B 内: summary marker（User, name=compaction_summary）] ← 插入点
 [Block B: 尾部保留的 user/assistant + 工具]                ← cache miss（suffix 失效）
-[Block C: todo 快照] / [Block D: 当前 user message]        ← 由 ADR-060 负责
+[当前 user message]                                        ← 即 Block B 尾部（ADR-060 §5.5 勘误：无 Block C/D）
 ```
 
 ### 19.9 实施状态（2026-08-31）

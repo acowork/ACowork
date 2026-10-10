@@ -1446,10 +1446,8 @@ impl AgentLoop {
         let mut chat_request = context_builder.build(
             &self.core.manifest,
             &self.session.history,
-            // ADR-060 §5.5: Block D — the current user message staged by
-            // `run_inner`. `None` on the debug-replay path and for direct
-            // loop usages without a staged message.
-            self.pending_user_message.as_ref(),
+            // ADR-060 §5.5 erratum: no Block D arg — the current user
+            // message is carried by Block B's tail (history).
             caps.as_ref(),
             max_output_limit,
         );
@@ -2179,11 +2177,11 @@ mod tests {
     // ── resolve_distill_model: three-tier fallback ─────────────────────
 
     #[test]
-    fn build_chat_request_block_layout_b_contains_current_and_d_duplicate() {
-        // ADR-060 v2 §5.5/§7.3: Block B is the full append-only history —
-        // it INCLUDES the current user message — and Block D is a
-        // byte-identical duplicate staged by `run_inner`. Request order:
-        // A → B → D (Block C removed in v2).
+    fn build_chat_request_current_user_message_appears_once_in_block_b() {
+        // ADR-060 v2 §5.5 + erratum: Block B is the full append-only history
+        // — it INCLUDES the current user message at its tail. There is NO
+        // Block D duplicate. Request order: A → B (Block C and Block D both
+        // removed). The current user message must appear EXACTLY ONCE.
         let mut loop_ = build_loop();
         loop_
             .session
@@ -2195,7 +2193,6 @@ mod tests {
             .append(ChatMessage::assistant("First reply"));
         let current = ChatMessage::user("Second turn");
         loop_.session.history.append(current.clone());
-        loop_.pending_user_message = Some(current.clone());
         // ADR-060 v2: setting todos via SessionState no longer affects the
         // request layout (todo state lives in Block B history, surfaced by
         // the most recent `todo_write` tool result). Kept commented for
@@ -2232,28 +2229,28 @@ mod tests {
             "ADR-060 v2: no Block C — todo state lives in Block B"
         );
 
-        // Block D (last): byte-identical duplicate of the staged message.
-        let block_d = request.messages.last().unwrap();
-        assert_eq!(block_d.role, MessageRole::User);
-        assert_eq!(block_d.content, current.content);
+        // The current user message is at Block B's tail (last message) and
+        // appears EXACTLY ONCE — no trailing Block D duplicate.
+        let last = request.messages.last().unwrap();
+        assert_eq!(last.role, MessageRole::User);
+        assert_eq!(last.content, current.content);
         assert_eq!(
             request
                 .messages
                 .iter()
                 .filter(|m| m.content == "Second turn")
                 .count(),
-            2,
-            "current user message appears exactly twice: Block B copy + Block D duplicate"
+            1,
+            "current user message appears exactly once (Block B tail, no Block D)"
         );
     }
 
     #[test]
-    fn build_chat_request_block_d_none_in_tool_iteration() {
+    fn build_chat_request_no_duplicate_in_tool_iteration() {
         use acowork_core::providers::traits::{FunctionCall, ToolCall};
 
-        // ADR-060 §5.5/§7.3: tool-loop iterations have no staged message
-        // (`run_inner` clears it) — the request ends with the tool result
-        // and the original user turn appears only once (Block B).
+        // ADR-060 §5.5 erratum: tool-loop iterations end with the tool
+        // result; the original user turn appears only once (in Block B).
         let mut loop_ = build_loop();
         loop_.session.history.append(ChatMessage::user("Turn"));
         // A REAL tool_call on the assistant turn keeps the tool result
@@ -2276,7 +2273,6 @@ mod tests {
             .session
             .history
             .append(ChatMessage::tool("toolu_1", "ok"));
-        loop_.pending_user_message = None;
 
         let mut builder = ContextBuilder::new("Kernel".to_string());
         let request = loop_.build_chat_request(&mut builder, "test-model");
