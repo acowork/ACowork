@@ -19,8 +19,11 @@ export interface ListBoxProps extends HTMLAttributes<HTMLDivElement> {
   variant?: "box" | "plain";
   /** Render hairline dividers between row children. Default: true. */
   dividers?: boolean;
-  /** Cap the list height (px) and make it scroll internally. */
-  maxHeight?: number;
+  /** Cap the list height and make it scroll internally. A number is px; a
+   *  string is any CSS length — pass a `calc()` against `--ui-font-size` when
+   *  the rows are text-sized, so "3 rows" stays 3 rows at every font step
+   *  (a frozen px cap shows 2 at XXL and 4 at S). */
+  maxHeight?: number | string;
 }
 
 export function ListBox({

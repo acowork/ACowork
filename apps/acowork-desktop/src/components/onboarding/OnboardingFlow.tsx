@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useGatewayStore } from "../../stores/gatewayStore";
@@ -7,17 +7,18 @@ import { useUserProfileStore } from "../../stores/userProfileStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { useAuthStore } from "../../stores/authStore";
 import { cn } from "../../lib/utils";
-import { needsApiKey, keyPlaceholder } from "../../lib/providers";
-import { fetchProviderModels, fetchProviders } from "../../lib/gateway-api";
+import { fetchProviders } from "../../lib/gateway-api";
 import { saveOnboardedIdentity } from "../../lib/selfProfile";
 import { DEFAULT_GATEWAY_URL, getGatewayUrl } from "../../lib/config";
-import type { GatewayMode, ModelInfo, BootstrapStateView, OperationAck } from "../../lib/types";
+import type { GatewayMode, ProviderListEntry, VaultKeyEntry, BootstrapStateView, OperationAck } from "../../lib/types";
 import { RadioGroup } from "../common/RadioGroup";
 import { StyledInput } from "../common/StyledInput";
 import { ErrorBox } from "../common/ErrorBox";
 import { Dropdown } from "../common/Dropdown";
+import { ProviderLogo } from "../common/ProviderLogo";
 import { useTranslation } from "../../i18n/useTranslation";
-import { ModelMultiSelect } from "../harness/ModelMultiSelect";
+import { ProviderPicker } from "../harness/ProviderPicker";
+import { AddProviderFlow } from "../harness/AddProviderFlow";
 import brandMark from "../../../../../assets/brand-mark.svg";
 import { log } from "../../lib/logger";
 
@@ -159,10 +160,14 @@ export function OnboardingFlow({ onComplete }: { onComplete?: () => void }) {
   if (state.completed) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-page-bg">
-      <div className="w-full max-w-md px-8">
+    // `overflow-y-auto` is load-bearing: the steps are content-sized, and
+    // step 3 (providers) and step 5 (agent list) exceed the viewport at the
+    // larger font steps. Without it the fixed shell clips the bottom of the
+    // card — including the Next/Save buttons.
+    <div className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-page-bg py-8">
+      <div className="w-full max-w-lg px-8">
         {/* Progress bar */}
-        <div className="mb-8">
+        <div className="mb-6">
           <div className="flex items-center gap-1">
             {Array.from({ length: TOTAL_STEPS }, (_, i) => (
               <div
@@ -204,19 +209,19 @@ function WelcomeStep({ onNext, onSkip }: { onNext: () => void; onSkip: () => voi
   const { t } = useTranslation();
   return (
     <div className="text-center">
-      <div className="text-4xl">🎉🎉🎉</div>
-      <h1 className="mt-4 text-2xl font-bold flex items-center justify-center gap-2"><span>{t("onboarding.welcome.title")}</span><img src={brandMark} alt="ACowork" className="h-10" /></h1>
-      <p className="mt-2 text-sm text-text-tertiary">{t("onboarding.welcome.subtitle")}</p>
-      <div className="mt-8 space-y-3">
+      <div className="text-xl">🎉🎉🎉</div>
+      <h1 className="mt-3 text-lg font-semibold flex items-center justify-center gap-2"><span>{t("onboarding.welcome.title")}</span><img src={brandMark} alt="ACowork" className="h-7" /></h1>
+      <p className="mt-2 text-xs text-text-tertiary">{t("onboarding.welcome.subtitle")}</p>
+      <div className="mt-6 space-y-2">
         <button
           onClick={onNext}
-          className="w-full rounded btn-solid py-2.5 text-sm font-medium"
+          className="w-full rounded btn-solid py-[var(--ui-btn-py)] text-xs font-medium"
         >
           {t("onboarding.welcome.startSetup")}
         </button>
         <button
           onClick={onSkip}
-          className="w-full py-2 text-xs text-text-tertiary hover:text-zinc-600 dark:hover:text-zinc-300"
+          className="w-full py-1.5 text-xs text-text-tertiary hover:text-zinc-600 dark:hover:text-zinc-300"
         >
           {t("onboarding.welcome.skip")}
         </button>
@@ -288,18 +293,26 @@ function GatewayStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => voi
 
   return (
     <div>
-      <h2 className="text-lg font-semibold">{t("onboarding.gateway.title")}</h2>
-      <p className="mt-1 text-sm text-text-tertiary">{t("onboarding.gateway.subtitle")}</p>
+      <h2 className="text-sm font-semibold">{t("onboarding.gateway.title")}</h2>
+      <p className="mt-1 text-xs text-text-tertiary">{t("onboarding.gateway.subtitle")}</p>
 
-      <div className="mt-6 space-y-4">
+      <div className="mt-4 space-y-3">
         {/* Mode selection */}
-        <div className="rounded-md border border-border-outer p-4">
+        <div className="rounded-md border border-border-outer p-3">
           <label className="mb-2 block text-xs text-text-tertiary">{t("onboarding.gateway.modeLabel")}</label>
+          {/* Bare mode names + `noWrap`: the wizard column is narrower than
+              Settings' card column, so the qualified labels ("Local
+              (recommended)", "Relay (public internet)") wrapped the group onto
+              a broken second line — and the break point moved with the locale
+              and the global font-size step. The qualifiers belong to the mode
+              itself, so they live in the hint line below, which is already
+              per-mode and only renders for the selected one. */}
           <RadioGroup
             name="gatewayMode"
             value={gatewayMode}
+            noWrap
             options={[
-              { label: <span className="font-medium">{t("onboarding.gateway.modeLocalRecommended")}</span>, value: "local" as GatewayMode },
+              { label: t("onboarding.gateway.modeLocal"), value: "local" as GatewayMode },
               { label: t("onboarding.gateway.modeRemote"), value: "remote" as GatewayMode },
               { label: t("onboarding.gateway.modeRelay"), value: "relay" as GatewayMode },
             ]}
@@ -324,8 +337,8 @@ function GatewayStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => voi
 
         {/* Local mode: auto-start status */}
         {gatewayMode === "local" && (
-          <div className="rounded-md border border-border-outer p-4">
-            <div className="flex items-center gap-2 text-sm">
+          <div className="rounded-md border border-border-outer p-3">
+            <div className="flex items-center gap-2 text-xs">
               <span className="text-text-tertiary">{t("onboarding.gateway.status")}</span>
               {starting ? (
                 <span className="text-text-tertiary">{t("onboarding.gateway.starting")}</span>
@@ -351,8 +364,7 @@ function GatewayStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => voi
             {!localConnected && !starting && (
               <button
                 onClick={handleStartLocal}
-                className="mt-3 rounded-md px-3 py-1.5 text-xs font-medium text-white hover:opacity-90"
-                style={{ backgroundColor: "var(--color-accent)" }}
+                className="mt-3 rounded-md btn-accent px-3 py-[var(--ui-btn-py)] text-xs font-medium"
               >
                 Start Local Gateway
               </button>
@@ -362,28 +374,27 @@ function GatewayStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => voi
 
         {/* Off-site modes (remote LAN / relay): URL config + test */}
         {gatewayMode !== "local" && (
-          <div className="rounded-md border border-border-outer p-4">
+          <div className="rounded-md border border-border-outer p-3">
             <label className="mb-1 block text-xs text-text-tertiary">{t("onboarding.gateway.urlLabel")}</label>
             <div className="flex gap-2">
-              <input
+              <StyledInput
                 type="text"
                 value={urlDraft}
                 onChange={(e) => setUrlDraft(e.target.value)}
                 placeholder={gatewayMode === "relay" ? "https://<gw-id>.relay.example.com" : DEFAULT_GATEWAY_URL}
-                className="flex-1 rounded-md border border-input-border bg-input-bg px-3 py-2 text-sm"
+                className="flex-1"
               />
               {urlDraft !== gatewayUrl && (
                 <button
                   onClick={() => { setGatewayUrl(urlDraft.trim()); checkHealth(); }}
-                  className="rounded-md px-3 py-2 text-xs font-medium text-white hover:opacity-90"
-                  style={{ backgroundColor: "var(--color-accent)" }}
+                  className="rounded-md btn-accent px-3 py-[var(--ui-btn-py)] text-xs font-medium"
                 >
                   {t("onboarding.gateway.apply")}
                 </button>
               )}
             </div>
 
-            <div className="mt-3 flex items-center gap-2 text-sm">
+            <div className="mt-3 flex items-center gap-2 text-xs">
               <span className="text-text-tertiary">{t("onboarding.gateway.status")}</span>
               {checking ? (
                 <span className="text-text-tertiary">{t("onboarding.gateway.checking")}</span>
@@ -404,7 +415,7 @@ function GatewayStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => voi
               <button
                 onClick={handleTestRemote}
                 disabled={checking || !urlDraft.trim()}
-                className="mt-3 rounded btn-solid px-3 py-1.5 text-xs font-medium disabled:opacity-50"
+                className="mt-3 rounded btn-solid px-3 py-[var(--ui-btn-py)] text-xs font-medium disabled:opacity-50"
               >
                 {checking ? t("onboarding.gateway.startingShort") : t("onboarding.gateway.testConnection")}
               </button>
@@ -413,14 +424,14 @@ function GatewayStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => voi
         )}
       </div>
 
-      <div className="mt-8 flex justify-between">
-        <button onClick={onPrev} className="rounded-md px-4 py-2 text-xs text-text-tertiary hover:text-zinc-700 dark:hover:text-zinc-300">
+      <div className="mt-6 flex justify-between">
+        <button onClick={onPrev} className="rounded-md px-3 py-[var(--ui-btn-py)] text-xs text-text-tertiary hover:text-zinc-700 dark:hover:text-zinc-300">
           {t("onboarding.gateway.back")}
         </button>
         <button
           onClick={onNext}
           disabled={!canProceed || starting}
-          className="rounded btn-solid px-4 py-2 text-xs font-medium disabled:opacity-50"
+          className="rounded btn-solid px-3 py-[var(--ui-btn-py)] text-xs font-medium disabled:opacity-50"
         >
           {starting ? t("onboarding.gateway.startingShort") : t("onboarding.gateway.next")}
         </button>
@@ -429,182 +440,136 @@ function GatewayStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => voi
   );
 }
 
-/** Step 3: API Key */
+/** Step 3: API Key
+ *
+ * Provider setup reuses the Harness pair — `ProviderPicker` (Custom / Local /
+ * Remote groups, each with a working Connect button) plus the `AddProviderFlow`
+ * dialog — instead of a wizard-private form.
+ *
+ * The hand-rolled copy that used to live here was a partial re-implementation
+ * of that flow and could not do the two things a first-run user needs most:
+ * the "Local Providers" card was read-only text (no `onConnect`, so Ollama /
+ * LM Studio were not selectable) and there was no custom-provider path at all,
+ * let alone model discovery, per-account aliases or a compact model. Keeping
+ * one implementation also means the wizard picks up provider-catalog work for
+ * free rather than drifting behind Settings.
+ */
 function ApiKeyStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => void }) {
   const { t } = useTranslation();
-  const [provider, setProvider] = useState("openai");
-  const [dynamicProviders, setDynamicProviders] = useState<Array<{ id: string; name: string; api?: string }>>([]);
-  const [apiKey, setApiKey] = useState("");
-  const [baseUrl, setBaseUrl] = useState("");
-  const [selectedModels, setSelectedModels] = useState<string[]>([]);
-  const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
-  const [modelsLoading, setModelsLoading] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
+  const [providers, setProviders] = useState<ProviderListEntry[]>([]);
+  const [keys, setKeys] = useState<VaultKeyEntry[]>([]);
+  const [showAddFlow, setShowAddFlow] = useState(false);
+  const [addFlowProvider, setAddFlowProvider] = useState<string | undefined>(undefined);
+  const [addFlowEntry, setAddFlowEntry] = useState<ProviderListEntry | undefined>(undefined);
 
-  // Fetch dynamic providers from Gateway API
+  const loadProviders = useCallback(async () => {
+    try {
+      setProviders(await fetchProviders());
+    } catch {
+      setProviders([]);
+    }
+  }, []);
+
+  const loadKeys = useCallback(async () => {
+    try {
+      setKeys(await invoke<VaultKeyEntry[]>("list_keys"));
+    } catch {
+      /* Gateway may not be reachable yet — step 2 gates on `connected`, but
+         the vault call can still fail while it is warming up. */
+    }
+  }, []);
+
   useEffect(() => {
-    const loadProviders = async () => {
-      try {
-        const providers = await fetchProviders();
-        setDynamicProviders(providers);
-      } catch {
-        setDynamicProviders([]);
-      }
-    };
     loadProviders();
-  }, []);
+    loadKeys();
+  }, [loadProviders, loadKeys]);
 
-  const loadModels = useCallback(async (providerId: string) => {
-    setModelsLoading(true);
-    try {
-      const data = await fetchProviderModels(providerId);
-      setAvailableModels(data.models ?? []);
-    } catch {
-      setAvailableModels([]);
-    }
-    setModelsLoading(false);
-  }, []);
+  // One entry per provider that has at least one account. The picker hides
+  // configured providers, so without this strip the step would look untouched
+  // right after a successful connection — and `keys` is also what the Next
+  // affordance reasons about.
+  const configuredProviders = useMemo(
+    () => Array.from(new Set(keys.map((k) => k.provider))),
+    [keys],
+  );
 
-  // Update base URL when provider changes
-  const handleProviderChange = (id: string) => {
-    setProvider(id);
-    setSaved(false);
-    setSelectedModels([]);
-    const dynamicProvider = dynamicProviders.find((p) => p.id === id);
-    setBaseUrl(dynamicProvider?.api ?? "");
-    loadModels(id);
+  const openAddFlow = (providerId?: string, entry?: ProviderListEntry) => {
+    setAddFlowProvider(providerId);
+    setAddFlowEntry(entry);
+    setShowAddFlow(true);
   };
 
-  // Load initial models
-  useEffect(() => {
-    loadModels(provider);
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const handleSave = async () => {
-    // Missing key for a remote provider: do not save an empty key into
-    // the vault — surface the same hint AddProviderFlow shows instead of
-    // silently allowing it (the save button must stay enabled for this
-    // to fire).
-    if (needsApiKey(provider) && !apiKey.trim()) {
-      alert(t("harness.pleaseEnterApiKey"));
-      return;
-    }
-    setSaving(true);
-    try {
-      await invoke("add_key", {
-        provider,
-        key: apiKey,
-        baseUrl: baseUrl || undefined,
-        defaultModel: selectedModels.length > 0 ? selectedModels[0] : undefined,
-        // Persist the FULL model selection — not just the default. The
-        // chat input's model switcher only renders when >1 model is
-        // configured (availableModels.length > 1 in ChatPanel), so saving
-        // only `defaultModel` silently dropped the user's multi-select
-        // and left the switcher missing after onboarding.
-        models: selectedModels.length > 0 ? selectedModels : undefined,
-      });
-      setSaved(true);
-      // Same shared "keys saved" signal Harness dispatches — ChatPanel
-      // listens for it and reloads its model list immediately.
-      window.dispatchEvent(new CustomEvent("models-added"));
-    } catch {
-      // Continue anyway
-    } finally {
-      setSaving(false);
-    }
+  const handleAddFlowSuccess = async () => {
+    await loadKeys();
+    await loadProviders();
+    // Same shared signal Harness dispatches — ChatPanel listens for it and
+    // reloads its model list immediately.
+    window.dispatchEvent(new CustomEvent("models-added"));
   };
-
-  const needsKey = needsApiKey(provider);
 
   return (
     <div>
-      <h2 className="text-lg font-semibold">{t("onboarding.apiKey.title")}</h2>
-      <p className="mt-1 text-sm text-text-tertiary">{t("onboarding.apiKey.subtitle")}</p>
+      <h2 className="text-sm font-semibold">{t("onboarding.apiKey.title")}</h2>
+      <p className="mt-1 text-xs text-text-tertiary">{t("onboarding.apiKey.subtitle")}</p>
 
-      <div className="mt-6 space-y-4">
-        {/* Provider selector */}
-        <div className="rounded-md border border-border-outer p-4">
-          <div className="flex items-center gap-2">
-            <span className="text-lg">🔑</span>
-            <Dropdown
-              value={provider}
-              onChange={(v) => handleProviderChange(v)}
-              options={dynamicProviders.map((p) => ({ value: p.id, label: p.name }))}
-            />
+      <div className="mt-4 space-y-3">
+        {configuredProviders.length > 0 && (
+          <div className="rounded-md border border-border-outer p-3">
+            <p className="text-11 font-medium">{
+              t("harness.configuredProviders", { count: configuredProviders.length })
+            }</p>
+            <div className="mt-1.5 flex flex-wrap gap-1.5">
+              {configuredProviders.map((id) => (
+                <span
+                  key={id}
+                  className="flex items-center gap-1 rounded bg-zinc-100 px-1.5 py-0.5 text-10 text-text-secondary dark:bg-zinc-700"
+                >
+                  <ProviderLogo providerId={id} size={12} />
+                  {providers.find((p) => p.id === id)?.name ?? id}
+                </span>
+              ))}
+            </div>
           </div>
+        )}
 
-          {/* API Key input */}
-          {needsKey && (
-            <input
-              type="password"
-              value={apiKey}
-              onChange={(e) => { setApiKey(e.target.value); setSaved(false); }}
-              placeholder={keyPlaceholder(provider)}
-              className="mt-2 w-full rounded-md border border-input-border bg-input-bg px-3 py-2 text-sm"
-            />
-          )}
-
-          {/* Base URL input (if editable) */}
-          {true && (
-            <input
-              type="text"
-              value={baseUrl}
-              onChange={(e) => { setBaseUrl(e.target.value); setSaved(false); }}
-              placeholder={t("onboarding.apiKey.baseUrlPlaceholder")}
-              className="mt-2 w-full rounded-md border border-input-border bg-input-bg px-3 py-2 text-xs font-mono"
-            />
-          )}
-
-          {/* Model selection (shared multi-select component) */}
-          <div className="mt-2">
-            <ModelMultiSelect
-              models={availableModels}
-              loading={modelsLoading}
-              selected={selectedModels}
-              onSelectedChange={setSelectedModels}
-              showCapabilityFilter={true}
-              showMetadata={false}
-              showCustomInput={true}
-              showModelCapEditor={false}
-              showCompactModel={false}
-            />
-          </div>
-
-
-
-          <button
-            onClick={handleSave}
-            // Keep the button enabled on a missing API key: a greyed-out
-            // button with no feedback made users believe selecting a
-            // provider was enough (nothing was ever saved). handleSave
-            // guards the key and alerts the user.
-            disabled={saving}
-            className="mt-2 rounded btn-solid px-3 py-1.5 text-xs font-medium disabled:opacity-50"
-          >
-            {saving ? t("onboarding.apiKey.saving") : saved ? t("onboarding.apiKey.saved") : t("onboarding.apiKey.save")}
-          </button>
-        </div>
-
-        {/* Local providers info */}
-        <div className="rounded-md border border-border-outer p-4">
-          <div className="flex items-center gap-2">
-            <span className="text-lg">🏠</span>
-            <span className="text-sm font-medium">{t("onboarding.apiKey.localProvidersLabel")}</span>
-          </div>
-          <p className="mt-1 text-xs text-text-tertiary">
-            {dynamicProviders.filter(p => !needsApiKey(p.id)).map((p) => p.name).join(", ") || t("onboarding.apiKey.localProvidersFallback")}
-          </p>
+        <div className="rounded-md border border-border-outer p-3">
+          <ProviderPicker
+            providers={providers}
+            keys={keys}
+            onConnect={(providerId, entry) => openAddFlow(providerId, entry)}
+            onAddCustom={() => openAddFlow(undefined, undefined)}
+            onCatalogRefreshed={async () => {
+              // A catalog refresh re-derives the capabilities of already-
+              // configured providers too, so both lists are re-read.
+              await loadProviders();
+              await loadKeys();
+            }}
+          />
         </div>
       </div>
 
-      <div className="mt-8 flex justify-between">
-        <button onClick={onPrev} className="rounded-md px-4 py-2 text-xs text-text-tertiary hover:text-zinc-700 dark:hover:text-zinc-300">
+      {/* Add / connect dialog — `initialStep` skips the picker when the user
+          clicked a specific provider (same contract Harness uses). */}
+      <AddProviderFlow
+        open={showAddFlow}
+        initialStep={addFlowProvider ? "add" : "custom"}
+        initialProvider={addFlowProvider}
+        initialProviderEntry={addFlowEntry}
+        onClose={() => {
+          setShowAddFlow(false);
+          setAddFlowProvider(undefined);
+          setAddFlowEntry(undefined);
+        }}
+        onSuccess={handleAddFlowSuccess}
+      />
+
+      <div className="mt-6 flex justify-between">
+        <button onClick={onPrev} className="rounded-md px-3 py-[var(--ui-btn-py)] text-xs text-text-tertiary hover:text-zinc-700 dark:hover:text-zinc-300">
           {t("onboarding.apiKey.back")}
         </button>
         <button
           onClick={onNext}
-          className="rounded btn-solid px-4 py-2 text-xs font-medium"
+          className="rounded btn-solid px-3 py-[var(--ui-btn-py)] text-xs font-medium"
         >
           {t("onboarding.apiKey.next")}
         </button>
@@ -627,10 +592,10 @@ function IdentityStep({
 
   return (
     <div>
-      <h2 className="text-lg font-semibold">{t("onboarding.identity.title")}</h2>
-      <p className="mt-1 text-sm text-text-tertiary">{t("onboarding.identity.subtitle")}</p>
+      <h2 className="text-sm font-semibold">{t("onboarding.identity.title")}</h2>
+      <p className="mt-1 text-xs text-text-tertiary">{t("onboarding.identity.subtitle")}</p>
 
-      <div className="mt-6 space-y-4">
+      <div className="mt-4 space-y-3">
         <div>
           <label className="mb-1 block text-xs text-text-tertiary">{t("onboarding.identity.nameLabel")}</label>
           <StyledInput
@@ -638,7 +603,6 @@ function IdentityStep({
             value={name}
             onChange={(e) => onUpdate({ name: e.target.value })}
             placeholder={t("onboarding.identity.namePlaceholder")}
-            className="rounded-md border border-input-border bg-input-bg px-3 py-2 text-sm"
           />
         </div>
         <div>
@@ -672,32 +636,30 @@ function IdentityStep({
         </div>
         <div>
           <label className="mb-1 block text-xs text-text-tertiary">{t("onboarding.identity.cityLabel")}</label>
-          <input
+          <StyledInput
             type="text"
             value={city}
             onChange={(e) => onUpdate({ city: e.target.value })}
-            className="w-full rounded-md border border-input-border bg-input-bg px-3 py-2 text-sm "
           />
         </div>
         <div>
           <label className="mb-1 block text-xs text-text-tertiary">{t("onboarding.identity.occupationLabel")}</label>
-          <input
+          <StyledInput
             type="text"
             value={occupation}
             onChange={(e) => onUpdate({ occupation: e.target.value })}
-            className="w-full rounded-md border border-input-border bg-input-bg px-3 py-2 text-sm "
           />
         </div>
       </div>
 
-      <div className="mt-8 flex justify-between">
-        <button onClick={onPrev} className="rounded-md px-4 py-2 text-xs text-text-tertiary hover:text-zinc-700 dark:hover:text-zinc-300">
+      <div className="mt-6 flex justify-between">
+        <button onClick={onPrev} className="rounded-md px-3 py-[var(--ui-btn-py)] text-xs text-text-tertiary hover:text-zinc-700 dark:hover:text-zinc-300">
           {t("onboarding.identity.back")}
         </button>
         <button
           onClick={onNext}
           disabled={!requiredFilled}
-          className="rounded-md bg-zinc-200 px-4 py-2 text-xs font-medium text-text hover:bg-zinc-300 disabled:opacity-50 dark:bg-zinc-700 dark:hover:bg-zinc-600"
+          className="rounded btn-solid px-3 py-[var(--ui-btn-py)] text-xs font-medium disabled:opacity-50"
         >
           {t("onboarding.identity.next")}
         </button>
@@ -918,10 +880,10 @@ function InstallAgentStep({ onComplete, onPrev }: { onComplete: () => void; onPr
 
   return (
     <div>
-      <h2 className="text-lg font-semibold">{t("onboarding.installAgent.title")}</h2>
-      <p className="mt-1 text-sm text-text-tertiary">{t("onboarding.installAgent.subtitle")}</p>
+      <h2 className="text-sm font-semibold">{t("onboarding.installAgent.title")}</h2>
+      <p className="mt-1 text-xs text-text-tertiary">{t("onboarding.installAgent.subtitle")}</p>
 
-      <div className="mt-6 space-y-3">
+      <div className="mt-4 space-y-3">
         {/* Bootstrap readiness status (ADR-059 §5.2) */}
         {installing !== null && bootstrap && bootstrap.phase !== "READY" && bootstrap.phase !== "DEGRADED" && (
           <p className="text-xs text-text-tertiary">
@@ -929,11 +891,11 @@ function InstallAgentStep({ onComplete, onPrev }: { onComplete: () => void; onPr
           </p>
         )}
 
-        <div className="rounded-md border border-border-outer p-4">
-          <div className="mb-3 flex items-center justify-between">
+        <div className="rounded-md border border-border-outer p-3">
+          <div className="mb-2 flex items-center justify-between">
             <div>
-              <h3 className="text-sm font-medium">{t("onboarding.installAgent.recommendedTitle")}</h3>
-              <p className="mt-1 text-xs text-text-tertiary">{t("onboarding.installAgent.recommendedSubtitle")}</p>
+              <h3 className="text-11 font-medium">{t("onboarding.installAgent.recommendedTitle")}</h3>
+              <p className="mt-0.5 text-10 text-text-tertiary">{t("onboarding.installAgent.recommendedSubtitle")}</p>
             </div>
             <button
               onClick={() => setSelectedAgents(selectedAgents.length === RECOMMENDED_AGENTS.length ? [] : RECOMMENDED_AGENTS.map((agent) => agent.resourceName))}
@@ -948,7 +910,7 @@ function InstallAgentStep({ onComplete, onPrev }: { onComplete: () => void; onPr
               return (
                 <label
                   key={agent.resourceName}
-                  className="flex cursor-pointer gap-3 rounded-md border border-zinc-100 p-3 hover:bg-zinc-50 dark:border-zinc-800 dark:hover:bg-zinc-800"
+                  className="flex cursor-pointer gap-2 rounded-md border border-zinc-100 p-2.5 hover:bg-zinc-50 dark:border-zinc-800 dark:hover:bg-zinc-800"
                 >
                   <input
                     type="checkbox"
@@ -958,12 +920,12 @@ function InstallAgentStep({ onComplete, onPrev }: { onComplete: () => void; onPr
                     className="mt-0.5 h-4 w-4 rounded border-zinc-300"
                   />
                   <span className="flex-1">
-                    <span className="block text-sm font-medium">{agent.name} · {agent.role}</span>
-                    <span className="mt-0.5 block text-xs text-text-tertiary">{agent.description}</span>
+                    <span className="block text-xs font-medium">{agent.name} · {agent.role}</span>
+                    <span className="mt-0.5 block text-10 text-text-tertiary">{agent.description}</span>
                   </span>
                   {/* Per-operation status badge (ADR-059 §6: operation_id tracking) */}
                   {op && (
-                    <span className="self-center text-xs">
+                    <span className="self-center text-10">
                       {op.state === "pending" && <span className="text-text-tertiary">{t("onboarding.installAgent.opPending")}</span>}
                       {op.state === "submitted" && op.operationId && (
                         <span className="text-blue-600 dark:text-blue-400">
@@ -985,7 +947,7 @@ function InstallAgentStep({ onComplete, onPrev }: { onComplete: () => void; onPr
             // is false there and the button would stay clickable — a
             // double-click re-submits the whole batch. Test against null.
             disabled={installing !== null || selectedAgents.length === 0}
-            className="mt-4 w-full rounded btn-solid py-2 text-xs font-medium disabled:opacity-50"
+            className="mt-3 w-full rounded btn-solid py-[var(--ui-btn-py)] text-xs font-medium disabled:opacity-50"
           >
             {installing
               ? totalCount > 0 && completedCount > 0
@@ -998,10 +960,10 @@ function InstallAgentStep({ onComplete, onPrev }: { onComplete: () => void; onPr
         <button
           onClick={handleInstallFromFile}
           disabled={!!installing}
-          className="w-full rounded-md border border-zinc-200 p-4 text-left transition-colors hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
+          className="w-full rounded-md border border-zinc-200 p-3 text-left transition-colors hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
         >
-          <span className="text-sm font-medium">{t("onboarding.installAgent.fromFileTitle")}</span>
-          <p className="mt-1 text-xs text-text-tertiary">{t("onboarding.installAgent.fromFileSubtitle")}</p>
+          <span className="text-11 font-medium">{t("onboarding.installAgent.fromFileTitle")}</span>
+          <p className="mt-0.5 text-10 text-text-tertiary">{t("onboarding.installAgent.fromFileSubtitle")}</p>
         </button>
 
         {installing && !bootstrap && (
@@ -1012,13 +974,13 @@ function InstallAgentStep({ onComplete, onPrev }: { onComplete: () => void; onPr
         )}
       </div>
 
-      <div className="mt-8 flex justify-between">
-        <button onClick={onPrev} className="rounded-md px-4 py-2 text-xs text-text-tertiary hover:text-zinc-700 dark:hover:text-zinc-300">
+      <div className="mt-6 flex justify-between">
+        <button onClick={onPrev} className="rounded-md px-3 py-[var(--ui-btn-py)] text-xs text-text-tertiary hover:text-zinc-700 dark:hover:text-zinc-300">
           {t("onboarding.installAgent.back")}
         </button>
         <button
           onClick={onComplete}
-          className="rounded-md bg-zinc-200 px-4 py-2 text-xs font-medium text-text hover:bg-zinc-300 dark:bg-zinc-700 dark:hover:bg-zinc-600"
+          className="rounded btn-solid px-3 py-[var(--ui-btn-py)] text-xs font-medium"
         >
           {t("onboarding.installAgent.complete")}
         </button>

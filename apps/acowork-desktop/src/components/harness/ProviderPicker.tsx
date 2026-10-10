@@ -6,8 +6,22 @@ import { ListBox, ListRow, ExpandableRow } from "../common/list";
 import { useTranslation } from "../../i18n/useTranslation";
 import { getGatewayUrl } from "../../lib/config";
 import { cn } from "../../lib/utils";
-import { Search, Plus, ChevronsDown, RefreshCw, Check, AlertCircle } from "lucide-react";
+import { Search, Plus, RefreshCw, Check, AlertCircle } from "lucide-react";
 import { ProviderLogo } from "../common/ProviderLogo";
+
+/** Scroll cap for a provider group's body: three rows tall however many
+ *  providers (or search hits) the group actually holds.
+ *
+ *  The alternative this replaces was a `slice(0, 5)` + "Show all (N)" button:
+ *  clicking it expanded the group to the full catalog height, pushing the
+ *  Local / Remote groups and the wizard content below it off screen — and the
+ *  hits from a search landed under a different rule (no cap at all).
+ *
+ *  Bound to `--ui-font-size`, not a fixed px, because the rows themselves are
+ *  text-sized: one two-line remote row is ~3.4 × the base (12px label + 10px
+ *  model count + 12px of `py-1.5`), so 3 rows ≈ 10.2 × base. A frozen height
+ *  would show 2 rows at XXL and 4 at S. */
+const GROUP_BODY_MAX_HEIGHT = "calc(var(--ui-font-size, 0.875rem) * 10.2)";
 
 interface ProviderPickerProps {
   providers: ProviderListEntry[];
@@ -28,7 +42,6 @@ interface ProviderPickerProps {
 export function ProviderPicker({ providers, keys, onConnect, onAddCustom, onCatalogRefreshed }: ProviderPickerProps) {
   const { t } = useTranslation();
   const [providerSearchTerm, setProviderSearchTerm] = useState("");
-  const [showAllRemote, setShowAllRemote] = useState(false);
   // Tools-tab style level-1 collapsible groups, default open
   const [customOpen, setCustomOpen] = useState(true);
   const [localOpen, setLocalOpen] = useState(true);
@@ -219,12 +232,12 @@ export function ProviderPicker({ providers, keys, onConnect, onAddCustom, onCata
       )
     : remoteAvailable;
 
-  // Providers per group + remote display window (first 5 when >5).
+  // Providers per group. Every group body is capped at three rows and scrolls
+  // (see GROUP_BODY_MAX_HEIGHT), so the full list is rendered — no display
+  // window and no "show all" step.
   const availableCustom = customProviders.filter((p) => configuredCount(p.id) === 0);
   const availableLocal = localProviders.filter((p) => configuredCount(p.id) === 0);
   const availableRemote = remoteAvailable.length;
-  const remoteLimitReached = !providerSearchTerm.trim() && !showAllRemote && filteredRemoteProviders.length > 5;
-  const displayedRemote = remoteLimitReached ? filteredRemoteProviders.slice(0, 5) : filteredRemoteProviders;
 
   if (providers.length === 0) {
     return (
@@ -244,7 +257,7 @@ export function ProviderPicker({ providers, keys, onConnect, onAddCustom, onCata
           ariaLabel={t("harness.customProviders", { count: availableCustom.length })}
           bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset"
         >
-          <ListBox variant="plain">
+          <ListBox variant="plain" maxHeight={GROUP_BODY_MAX_HEIGHT}>
             {availableCustom.map((item) => {
               const providerId = item.id;
               const providerName = item.name || providerId;
@@ -294,7 +307,7 @@ export function ProviderPicker({ providers, keys, onConnect, onAddCustom, onCata
           ariaLabel={t("harness.localProviders", { count: availableLocal.length })}
           bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset"
           >
-            <ListBox variant="plain">
+            <ListBox variant="plain" maxHeight={GROUP_BODY_MAX_HEIGHT}>
               {availableLocal.map((item) => {
                 const providerId = item.id;
                 const providerName = item.name || providerId;
@@ -422,8 +435,8 @@ export function ProviderPicker({ providers, keys, onConnect, onAddCustom, onCata
               </div>
             ) : (
               <>
-                <ListBox variant="plain">
-                  {displayedRemote.map((item) => {
+                <ListBox variant="plain" maxHeight={GROUP_BODY_MAX_HEIGHT}>
+                  {filteredRemoteProviders.map((item) => {
                     const providerId = item.id;
                     const providerName = item.name || providerId;
                     const modelCount = item.model_count;
@@ -452,18 +465,6 @@ export function ProviderPicker({ providers, keys, onConnect, onAddCustom, onCata
                     );
                   })}
                 </ListBox>
-                {remoteLimitReached && (
-                  <div className="px-3 pb-2 pt-1.5">
-                    <button
-                      type="button"
-                      onClick={() => setShowAllRemote(true)}
-                      className="flex w-full items-center justify-center gap-1 rounded-md border border-dashed border-zinc-300 py-2 text-xs text-text-tertiary transition-colors hover:border-zinc-400 hover:text-zinc-700 dark:border-zinc-600  dark:hover:border-zinc-500 dark:hover:text-zinc-300"
-                    >
-                      <ChevronsDown className="h-4 w-4" />
-                      <>Show all ({filteredRemoteProviders.length})</>
-                    </button>
-                  </div>
-                )}
               </>
             )}
           </ExpandableRow>
