@@ -103,7 +103,13 @@ export function installGatewayAuthBridge(): void {
     void (async () => {
       const rejected = current();
       const fresh = rejected ? await reportRejected(rejected) : null;
-      if (fresh) return; // the subscription above mirrors the new token
+      // Release the waiter unless the module actually handed back a *different*
+      // token. On a real rotation the subscription above mirrors it and wakes
+      // Rust; but `null` (session gone) or the *same* token (no rotation
+      // possible — transport not yet wired, nothing to rotate) must fall
+      // through here, or the waiter stalls for the full 10s renew budget.
+      // Mirrors the interceptor's `!fresh || fresh === token` guard.
+      if (fresh && fresh !== rejected) return;
       // No replacement (session gone / no refresh token): release the waiter
       // explicitly. `mirror` would dedupe a `null` that is already mirrored,
       // and Rust only wakes on an epoch bump — so bypass it.
