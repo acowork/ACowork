@@ -17,7 +17,7 @@ import { CAPSULE_PANE_CN } from "../common/capsule";
 export function EmptyChatPane() {
   const { t } = useTranslation();
   return (
-    <div className={cn(CAPSULE_PANE_CN, "min-w-[288px] flex-1 bg-chat-body")}>
+    <div className={cn(CAPSULE_PANE_CN, "min-w-[338px] flex-1 bg-chat-body")}>
       <div className="flex flex-1 flex-col items-center justify-center gap-3 p-8 text-center">
         <Bot className="h-10 w-10 text-text-tertiary" aria-hidden="true" />
         <p className="text-xs text-text-tertiary">{t("chatPanel.selectAgentOrPeer")}</p>

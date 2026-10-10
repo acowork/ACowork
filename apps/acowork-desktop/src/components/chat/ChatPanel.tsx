@@ -102,7 +102,7 @@ const EMPTY_MESSAGES: ChatMessage[] = [];
 // panel slot as the chat view, so when the session finally hydrates there is
 // no transparent gap to "fill in". Mirrors the file-editor suspense shell in
 // AppLayout.tsx for the same reason.
-const CHAT_PANEL_SHELL_CN = cn(CAPSULE_PANE_CN, "min-w-[288px] flex-1 bg-chat-body");
+const CHAT_PANEL_SHELL_CN = cn(CAPSULE_PANE_CN, "min-w-[338px] flex-1 bg-chat-body");
 
 // Monaco-style top-edge shadow: the messages area shows a soft gradient
 // under the session tab bar's hairline whenever it is scrolled away from
@@ -564,14 +564,27 @@ export function ChatPanel() {
         const totalGaps = (els.length - 1) * GAP;
 
         // Layout constants: container padding (px-3 = 12px each side),
-        // gap-2 between the left cluster and right cluster, and the
-        // right cluster (visibility + usage + attachment + send:
-        // 4 × 28px buttons + 3 × gap-1).
+        // gap-2 between the left cluster and right cluster.
+        // The right cluster's width is MEASURED, not counted: it is
+        // a row of icon-only buttons whose own width is whatever the
+        // DOM gives it, so reading `offsetWidth` covers "added a new
+        // button", "button label changes", "icon-only stays icon-only
+        // under all conditions" without anyone editing a number here.
+        // The left cluster is the one with a foldable text-vs-icon
+        // delta, so it stays in the per-button loop below.
         const PAD_X = 24;
         const FLEX_GAP = 8;
-        const RIGHT_CLUSTER = 4 * 28 + 3 * 4;
+        const rightCluster = node.querySelector<HTMLElement>(
+          '[data-toolbar-cluster="right"]',
+        );
+        // ponytail: ceiling — if the right cluster is missing (early
+        // mount race), fall back to 0 so the fold still has a valid
+        // available width. The next ResizeObserver / MutationObserver
+        // tick re-measures. Upgrade: hoist this into a ResizeObserver
+        // on the right cluster itself so it never races.
+        const RIGHT_CLUSTER_W = rightCluster?.offsetWidth ?? 0;
         const available = node.offsetWidth
-                        - PAD_X - FLEX_GAP - RIGHT_CLUSTER;
+                        - PAD_X - FLEX_GAP - RIGHT_CLUSTER_W;
 
         // Progressive collapse from LEFT to RIGHT (matches the
         // documented product behavior: model hides first, then effort,
@@ -2903,8 +2916,16 @@ export function ChatPanel() {
               </div>
             </div>
 
-            {/* Right: session visibility + usage + attachment + send */}
-            <div className="flex shrink-0 items-center gap-1">
+            {/* Right: session visibility + usage + attachment + send.
+                `data-toolbar-cluster="right"` marks the cluster so the
+                collapse algorithm can MEASURE its offsetWidth (instead
+                of counting buttons × 28 + gaps × 4 by hand). Adding a
+                new icon-only button to this cluster changes the
+                measured width on the next frame; the fold math picks
+                it up with no code change. The left cluster keeps the
+                per-button fold because its text-vs-icon delta is what
+                progressive collapse is for. */}
+            <div data-toolbar-cluster="right" className="flex shrink-0 items-center gap-1">
               {/* ADR-076 §决策 4: per-session read visibility (owner only).
                   Icon-only, so it rides with the other icon-only right-cluster
                   controls and stays out of the collapsible text row. */}

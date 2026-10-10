@@ -36,8 +36,19 @@
 export const MIN_FILE_WIDTH = 200;
 /** Narrowest usable right panel. */
 export const MIN_RIGHT_WIDTH = 200;
-/** ChatPanel's `min-w-[...]` — below this the collapsed toolbar breaks. */
-export const MIN_CHAT_WIDTH = 288;
+/** ChatPanel's `min-w-[...]` — below this the collapsed toolbar breaks.
+ *
+ * 338 = toolbar's own `min-w-[264px]` (everything in the left cluster
+ * folded to icon-only) + 24 of `px-3` inside the toolbar + 50 of
+ * `mx-6` (24px each side) + 1px border on each side of the input
+ * container. Below this the toolbar overflows the input container
+ * and the right cluster gets clipped by the panel's `overflow-hidden`.
+ * Kept in lock-step with `CHAT_PANEL_SHELL_CN` in ChatPanel.tsx —
+ * the right cluster's own width is now MEASURED at runtime (see
+ * `data-toolbar-cluster="right"`), so future right-cluster buttons
+ * no longer require editing either of these numbers; only an outer
+ * chrome change does. */
+export const MIN_CHAT_WIDTH = 338;
 
 /**
  * Horizontal cost of everything in the row that is neither a pane nor sized by
