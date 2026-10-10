@@ -328,6 +328,16 @@ export function useScrollController(config: ScrollControllerConfig): ScrollContr
     setIsNearBottom(true); // fresh session starts at bottom
     setIsNearTop(false);   // ...not at top
     setFollowModeSync(true); // new session → auto-follow by default
+    // handleScroll's direction test ("programmatic scrolls only move down,
+    // so scrollTop < prev means the user scrolled up") is only valid
+    // WITHIN one session.  Carried across a switch, the baseline is the
+    // outgoing session's absolute scrollTop: restoring the new session to
+    // its (smaller) bottom reads as a user scroll-up and cancels
+    // followMode — sticky, since neither liveUpdate following nor the
+    // contradiction resolver runs without it, leaving the session parked
+    // mid-page.  Reset the baseline so the first post-switch event is
+    // judged against the new session's own position.
+    prevScrollTopRef.current = 0;
   }, [sessionKey, setFollowModeSync]);
 
   // Tear the positioning loop down when the session changes or the component

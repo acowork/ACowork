@@ -1194,11 +1194,23 @@ export function ChatPanel() {
       const key = currentScrollKey;
       if (!key) return;
 
+      // `sending` in this closure is frozen at the moment the key changed, so
+      // a stream started while the user sat in the session is invisible to it.
+      // Read the status from the store by id at write time instead.
+      const status =
+        agentId && sessionId
+          ? useChatStore.getState().agentStates[agentId]?.sessionStates[sessionId]?.sessionStatus
+          : null;
       // Never snapshot a view the user never saw. If the init-scroll effect
       // never managed to position the container (remount raced the virtualizer
       // attaching its scroll element), the refs below hold the pre-position
       // scroll-top-0 reading; persisting that would pin this session to the
       // top on every later return.
+      // Exception: a session left while processing always restores to the
+      // bottom (atBottom is forced true below), so writing it is safe even
+      // when this visit's init-scroll gave up — otherwise one give-up keeps
+      // an older, possibly atBottom=false snapshot alive for every later
+      // visit (a stale-restore loop that makes the bug self-reinforcing).
       //
       // ORDERING DEPENDENCY: this reads `isPositioned()` while the outgoing
       // session's flag is still set, because React runs every layout-effect
@@ -1207,7 +1219,7 @@ export function ChatPanel() {
       // lands after this.  That is also why the reset must stay a plain body
       // and never be refactored into a cleanup: it would then run first and
       // silently drop the snapshot on every single session switch.
-      if (!scrollController.isPositioned()) return;
+      if (!scrollController.isPositioned() && !isProcessing(status)) return;
 
       // Read from the guarded refs.  These hold the OLD session's
       // last-known values because:
@@ -1221,13 +1233,6 @@ export function ChatPanel() {
       // messagesContainerRef here gives 0 (detached), which would make every
       // row look fully visible and restore at the top.
       const clientHeight = lastClientHeightRef.current;
-      // `sending` in this closure is frozen at the moment the key changed, so
-      // a stream started while the user sat in the session is invisible to it.
-      // Read the status from the store by id at write time instead.
-      const status =
-        agentId && sessionId
-          ? useChatStore.getState().agentStates[agentId]?.sessionStates[sessionId]?.sessionStatus
-          : null;
       const distFromBottom = scrollHeight - scrollOffset - clientHeight;
       setScrollSnapshot(key, {
         atBottom: isProcessing(status) || distFromBottom <= 120,
@@ -1267,6 +1272,9 @@ export function ChatPanel() {
     if (prevAgentIdRef.current !== null && prevAgentIdRef.current !== selectedAgentId) {
       useAgentStore.getState().reset();
     }
+    // Capture the outgoing agent BEFORE overwriting the ref — the release
+    // block below needs it (the session being left belongs to that agent).
+    const prevAgent = prevAgentIdRef.current ?? selectedAgentId;
     prevAgentIdRef.current = selectedAgentId;
 
     // Release the previous session's resources (memory cleanup).
@@ -1282,12 +1290,20 @@ export function ChatPanel() {
     //      the live preview when the user switches back. Once stream ends,
     //      `record_complete` lands in `messages[]` and the next switch-away
     //      will release the (now-stale) adapter entry.
+    // The session being left belongs to the PREVIOUS agent, not
+    // `selectedAgentId` — on an agent switch this effect already runs with
+    // the new agent id, so keying the release by `selectedAgentId` made it
+    // a no-op on (newAgent, oldSessionId): the outgoing session's messages
+    // and adapter blocks survived.  Coming back then hit the init-scroll
+    // effect with blocksLen > 0 on the very first commit, opening the
+    // handleScroll gate while the switch's scroll-event storm was still
+    // in flight (the probabilistic "doesn't restore to bottom" race).
     const prevId = prevSessionIdRef.current;
     if (prevId && prevId !== currentSessId) {
-      useChatStore.getState().clearSessionMessages(selectedAgentId, prevId);
-      const prevAdapter = getChatAdapterSession(selectedAgentId, prevId);
+      useChatStore.getState().clearSessionMessages(prevAgent, prevId);
+      const prevAdapter = getChatAdapterSession(prevAgent, prevId);
       if (!prevAdapter.isAssistantReplying && !prevAdapter.isThinking) {
-        releaseAdapterSession(selectedAgentId, prevId);
+        releaseAdapterSession(prevAgent, prevId);
       }
     }
     prevSessionIdRef.current = currentSessId;

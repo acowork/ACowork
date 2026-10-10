@@ -688,6 +688,55 @@ describe("useScrollController: followMode auto-follow", () => {
     expect(result.current.showScrollToBottom).toBe(true);
   });
 
+  it("session switch does not inherit the old session's scrollTop baseline", () => {
+    // Regression: `prevScrollTopRef` is the baseline for handleScroll's
+    // "programmatic scrolls only move down" direction test.  Carried across
+    // a session switch, the baseline was the OUTGOING session's absolute
+    // scrollTop — restoring the new (shorter) session to its bottom then
+    // read as a user scroll-up, cancelling followMode stickily (neither
+    // liveUpdate following nor the contradiction resolver runs without it).
+    const vml = makeAutoFollowVml();
+    const { subscribe, fire } = makeDeferredSubscribe();
+    const adapter = makeMockAdapter({ subscribe });
+    const container = {
+      scrollTop: 5000,
+      scrollHeight: 6000,
+      clientHeight: 400, // dist 1600 — mid-page in the long session
+    } as unknown as HTMLDivElement;
+    const { result, rerender } = renderHook(
+      ({ sessionKey }) =>
+        useScrollController({
+          containerRef: { current: container },
+          adapter,
+          vmlRef: vml,
+          sessionKey,
+        }),
+      { initialProps: { sessionKey: "agent:sess1" } },
+    );
+
+    // Session 1: establish the large baseline.
+    act(() => {
+      result.current.handleScroll(); // 5000 > 0 → down, no cancel
+    });
+
+    // Switch to a shorter session whose bottom sits at scrollTop 800.
+    // Virtualizer measurement has not fully landed, so distFromBottom is
+    // still above the cancel threshold when the restore's scroll event
+    // arrives.
+    container.scrollTop = 800;
+    container.scrollHeight = 1000;
+    container.clientHeight = 50; // dist 150 > 50
+    rerender({ sessionKey: "agent:sess2" });
+    act(() => {
+      result.current.handleScroll();
+    });
+
+    // followMode must have survived: a liveUpdate still auto-scrolls.
+    vml.current.scrollToBottom.mockClear();
+    fire({ type: "liveUpdate" });
+    expect(vml.current.scrollToBottom).toHaveBeenCalled();
+  });
+
   it("bug repro: click arrow → programmatic scroll → liveUpdate keeps auto-scrolling", async () => {
     const vml = makeAutoFollowVml();
     const { subscribe, fire } = makeDeferredSubscribe();
