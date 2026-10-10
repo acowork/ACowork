@@ -83,6 +83,10 @@ export function AddProviderFlow({
   const [customTesting, setCustomTesting] = useState(false);
   const [customModelCaps, setCustomModelCaps] = useState<Record<string, ModelCapabilitiesInfo>>({});
   const [customExpandedModels, setCustomExpandedModels] = useState<Set<string>>(new Set());
+  /** Compact (summarization) model for this custom provider. Mirrors
+   *  `newCompactModel` on the add step — separate state so stepping
+   *  picker → add → back → custom never leaks a pick across steps. */
+  const [customCompactModel, setCustomCompactModel] = useState("");
   // Manual JSON import — escape hatch when the upstream base URL has no
   // /models endpoint. Mirrors the offline_providers.json model-spec shape
   // so the user can paste entries from the model vendor's docs verbatim.
@@ -158,6 +162,7 @@ export function AddProviderFlow({
     setCustomTesting(false);
     setCustomModelCaps({});
     setCustomExpandedModels(new Set());
+    setCustomCompactModel("");
     setCustomJsonInput("");
     setCustomJsonError(null);
 
@@ -208,6 +213,7 @@ export function AddProviderFlow({
     setCustomDiscoverError(null);
     setCustomModelCaps({});
     setCustomExpandedModels(new Set());
+    setCustomCompactModel("");
     setCustomJsonInput("");
     setCustomJsonError(null);
     setStep("custom");
@@ -381,6 +387,7 @@ export function AddProviderFlow({
         baseUrl: url,
         models: customModels.length > 0 ? customModels : undefined,
         modelCapabilities: customModels.length > 0 ? customModelCaps : undefined,
+        compactModel: customCompactModel || undefined,
         custom: true,
       });
       window.dispatchEvent(new CustomEvent('models-added'));
@@ -741,7 +748,9 @@ export function AddProviderFlow({
                   }
                   showModelCapEditor={true}
                   showCapabilityFilter={false}
-                  showCompactModel={false}
+                  compactModel={customCompactModel}
+                  onCompactModelChange={setCustomCompactModel}
+                  showCompactModel={true}
                 />
               )}
             </div>
