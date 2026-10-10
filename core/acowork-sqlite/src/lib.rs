@@ -1128,7 +1128,12 @@ fn embedding_to_blob(embedding: &[f32]) -> Vec<u8> {
 // while remote nodes and desktop machines are on 1.96 — so the workspace MSRV
 // stays at 1.95 and we keep `chunks_exact` here rather than force every machine
 // to upgrade rustc for one helper. Revisit once the fleet MSRV reaches 1.99.
-#[allow(clippy::chunks_exact_to_as_chunks)]
+//
+// `unknown_lints` rides along because the asymmetry cuts both ways: on the
+// 1.96 end of the fleet the lint name itself does not exist, and `cargo
+// clippy -- -D warnings` (dev/ci.sh) would fail the build on the attribute
+// rather than on the code it suppresses.
+#[allow(unknown_lints, clippy::chunks_exact_to_as_chunks)]
 fn blob_to_embedding(blob: &[u8]) -> Vec<f32> {
     blob.chunks_exact(4)
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))

@@ -164,6 +164,10 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 enrolled_at: None,
             })),
+            // Not under test here: an empty registry over the fixture home and
+            // a relay handle on an unused port.
+            lsp: crate::lsp_registry::for_tests(home, None),
+            lsp_relay: crate::state::LspRelayControl::detached("127.0.0.1", 1),
         }
     }
 

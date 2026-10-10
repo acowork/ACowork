@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, mpsc};
 
 use crate::error::Result;
 use crate::identity::NodeIdentity;
@@ -264,6 +264,56 @@ impl NodeState {
 /// Thread-safe shared NodeState.
 pub type SharedNodeState = std::sync::Arc<RwLock<NodeState>>;
 
+/// A request to restart the node-local LSP relay because the registry it
+/// reads changed (ADR-091 §5.6, D12).
+///
+/// The relay has no hot reload (`OnceLock`, one config read per process), so
+/// propagating a server-list change costs a restart — which drops the
+/// editors' LSP Websockets. That is why this is a message to the supervisor
+/// rather than something the write handler does inline: the supervisor
+/// coalesces a burst into one restart and owns the kill/respawn pairing.
+#[derive(Debug, Clone)]
+pub struct LspRelayRestartRequest {
+    /// What asked for it, for the log line only.
+    pub reason: &'static str,
+}
+
+/// The node HTTP layer's handle on the LSP relay sidecar (ADR-091 §5.5/§5.6).
+///
+/// Carries the bind host + port so the admin routes probe the SAME address
+/// the supervisor spawned and health-checks (the ADR-089 §2.2 class of bug is
+/// exactly this pair diverging), and the restart sender so a registry write
+/// can reach the supervisor without the handler knowing anything about
+/// process lifecycle.
+#[derive(Clone)]
+pub struct LspRelayControl {
+    /// Address the relay binds and is reached at — [`crate::sidecar::lsp_relay::relay_bind_host`].
+    pub bind_host: String,
+    /// Port the relay listens on (`--lsp-relay-port`).
+    pub port: u16,
+    /// Config-restart requests for the supervisor.
+    pub restart: mpsc::UnboundedSender<LspRelayRestartRequest>,
+}
+
+impl LspRelayControl {
+    /// A handle whose restart requests are accepted and dropped. Tests only —
+    /// in the daemon the receiver is owned by the relay supervisor.
+    ///
+    /// The sender is handed a task that keeps the channel open (so a write
+    /// route still reports `willRestart: true`) instead of a dropped receiver
+    /// that would turn every restart request into a spurious failure.
+    #[cfg(test)]
+    pub(crate) fn detached(bind_host: &str, port: u16) -> Self {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        tokio::spawn(async move { while rx.recv().await.is_some() {} });
+        Self {
+            bind_host: bind_host.to_string(),
+            port,
+            restart: tx,
+        }
+    }
+}
+
 /// HTTP router state shared by the node's reverse-proxy and fs_browse
 /// routers (merged onto one listener, ADR-055 §6.4).
 ///
@@ -280,6 +330,12 @@ pub struct NodeHttpState {
     /// Node config — the rename route persists `identity.json` under
     /// `config.home` and rebuilds the `NodeInfo` snapshot with it.
     pub config: crate::config::NodeConfig,
+    /// LSP server registry — the single writer of
+    /// `{home}/lsp_servers.json` (ADR-091 D11).
+    pub lsp: crate::lsp_registry::SharedLspRegistry,
+    /// The relay this node hosts: address for probe/relay calls + the restart
+    /// channel (ADR-091 §5.5/§5.6).
+    pub lsp_relay: LspRelayControl,
 }
 
 /// Load a persisted snapshot, mapped to the crate Result for CLI use.

@@ -112,6 +112,40 @@ pub fn attach_existing_lsp_relay(
     }
 }
 
+/// The two directories the relay is told about, explicitly (ADR-091 D16).
+///
+/// They used to collapse into one (`ACOWORK_LSP_CONFIG_DIR` = the Desktop's
+/// resource dir, which held both the preset and `lsp_install/`). Since the
+/// Node owns the runtime registry, that variable now names `{node_home}` —
+/// where install scripts never live — so the preset/scripts need their own.
+/// The relay is never left to inherit these from the Node's environment: a
+/// stale injected value would silently point it at the wrong file.
+#[derive(Debug, Clone)]
+pub struct LspRelayDirs {
+    /// Runtime registry directory (= `{node_home}`) → `ACOWORK_LSP_CONFIG_DIR`.
+    pub config_dir: std::path::PathBuf,
+    /// Preset + `lsp_install/` directory → `ACOWORK_LSP_ASSET_DIR`.
+    /// `None` leaves the variable as the relay's own fallback chain decides
+    /// (dev builds, a relay started by hand).
+    pub asset_dir: Option<std::path::PathBuf>,
+}
+
+/// The env pairs for a relay child (split out so it is assertable without
+/// spawning the real binary).
+pub fn relay_env(dirs: &LspRelayDirs) -> Vec<(String, String)> {
+    let mut pairs = vec![(
+        "ACOWORK_LSP_CONFIG_DIR".to_string(),
+        dirs.config_dir.display().to_string(),
+    )];
+    if let Some(asset_dir) = &dirs.asset_dir {
+        pairs.push((
+            "ACOWORK_LSP_ASSET_DIR".to_string(),
+            asset_dir.display().to_string(),
+        ));
+    }
+    pairs
+}
+
 /// Spawn the acowork-lsp-relay process.
 ///
 /// The LSP Relay runs as a sibling process to the Node, listening on
@@ -131,11 +165,13 @@ pub fn attach_existing_lsp_relay(
 /// for reaping the child process (e.g. spawning a task that awaits
 /// `child.wait()` and clears state on exit).
 ///
-/// Note: The LSP Relay discovers its config directory via the
-/// `ACOWORK_LSP_CONFIG_DIR` environment variable (inherited from the
-/// Node process) or the sibling-directory fallback chain in
-/// `acowork-lsp-relay/src/config.rs`. No explicit `--lsp-config-dir`
-/// argument is passed.
+/// Note: the relay's two directories are passed explicitly through
+/// [`relay_env`] — `ACOWORK_LSP_CONFIG_DIR` (the runtime registry, i.e.
+/// `{node_home}`) and `ACOWORK_LSP_ASSET_DIR` (preset + install scripts).
+/// Nothing is left to environment inheritance (ADR-091 D16). No
+/// `--lsp-config-dir` argument is passed; the CLI flag and the variable mean
+/// the same thing to the relay and the variable is what the Desktop chain
+/// already carries.
 ///
 /// `bind_host` is the address the relay listens on — see
 /// [`relay_bind_host`] (ADR-089 D1: loopback by default; the Desktop
@@ -147,6 +183,7 @@ pub async fn spawn_lsp_relay(
     port: u16,
     node_health_url: &str,
     bind_host: &str,
+    dirs: &LspRelayDirs,
 ) -> Result<(LspRelayProcessState, tokio::process::Child)> {
     // Locate the acowork-lsp-relay binary (sibling of current executable)
     let relay_bin = std::env::current_exe()
@@ -194,6 +231,15 @@ pub async fn spawn_lsp_relay(
     cmd.args(relay_argv(bind_host, port, node_health_url))
         .stdout(Stdio::null())
         .stderr(Stdio::from(log_file));
+
+    // ADR-091 D16: the registry directory and the preset directory, injected
+    // per child rather than inherited, so a Gateway/Desktop-injected
+    // `ACOWORK_LSP_CONFIG_DIR` cannot point the relay at a shipped preset
+    // instead of the Node's runtime file.
+    for (key, value) in relay_env(dirs) {
+        tracing::debug!(env = %key, value = %value, "Injecting into LSP Relay process");
+        cmd.env(key, value);
+    }
 
     // On Unix, create a new process group
     #[cfg(unix)]
@@ -326,6 +372,35 @@ mod tests {
         let argv = relay_argv("127.0.0.1", 19878, "http://127.0.0.1:19900/health");
         assert_eq!(argv_value(&argv, "--host"), "127.0.0.1");
         assert_eq!(argv_value(&argv, "--port"), "19878");
+    }
+
+    /// D16: the runtime directory is always passed; the asset directory only
+    /// when the Node was given one. Two variables, two responsibilities.
+    #[test]
+    fn relay_env_splits_config_dir_from_asset_dir() {
+        let dirs = LspRelayDirs {
+            config_dir: std::path::PathBuf::from("/node-home"),
+            asset_dir: Some(std::path::PathBuf::from("/suite/assets")),
+        };
+        let pairs = relay_env(&dirs);
+        assert_eq!(
+            pairs.iter().find(|(k, _)| k == "ACOWORK_LSP_CONFIG_DIR").map(|(_, v)| v.as_str()),
+            Some("/node-home")
+        );
+        assert_eq!(
+            pairs
+                .iter()
+                .find(|(k, _)| k == "ACOWORK_LSP_ASSET_DIR")
+                .map(|(_, v)| v.as_str()),
+            Some("/suite/assets")
+        );
+
+        let no_asset = relay_env(&LspRelayDirs {
+            config_dir: std::path::PathBuf::from("/node-home"),
+            asset_dir: None,
+        });
+        assert_eq!(no_asset.len(), 1, "asset dir must not be sent empty");
+        assert_eq!(no_asset[0].0, "ACOWORK_LSP_CONFIG_DIR");
     }
 
     #[test]

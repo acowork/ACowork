@@ -36,9 +36,10 @@ function deferred(): Deferred {
 
 let installDeferred: Deferred;
 
-/** `/api/lsp/servers` serves `markdown` with an install script, and the
- *  PATH probe reports it missing — the state the user sees before and
- *  during a fresh install. */
+/** The Node registry (`GET .../lsp-admin/servers`) serves `markdown` with an
+ *  install script and no resolved install state, and the relay's PATH probe
+ *  reports it missing — the state the user sees before and during a fresh
+ *  install. */
 function stubFetch() {
   vi.stubGlobal(
     "fetch",
@@ -55,7 +56,16 @@ function stubFetch() {
             }),
         });
       }
-      if (url.includes("/api/lsp/servers")) {
+      // Ordered before the plain registry match: the install URL is a
+      // sub-path of it.
+      if (url.includes(`/lsp-admin/servers/${TARGET}/install`)) {
+        return installDeferred.promise.then((body) => ({
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve(body),
+        }));
+      }
+      if (url.includes("/lsp-admin/servers")) {
         return Promise.resolve({
           ok: true,
           status: 200,
@@ -64,13 +74,17 @@ function stubFetch() {
               version: 1,
               servers: {
                 [TARGET]: {
+                  source: "preset",
                   candidates: ["marksman"],
                   args: [],
                   install_script: TARGET,
                   install_hint: "brew install marksman",
                   description: "Markdown",
+                  install_state: "unknown",
                 },
               },
+              conflicts: [],
+              installing: [],
             }),
         });
       }
@@ -81,19 +95,14 @@ function stubFetch() {
           json: () => Promise.resolve([{ language: TARGET, installed: false }]),
         });
       }
-      if (url.includes(`/api/lsp/install/${TARGET}`)) {
-        return installDeferred.promise.then((body) => ({
-          ok: true,
-          status: 200,
-          json: () => Promise.resolve(body),
-        }));
-      }
       if (url.includes("/api/nodes")) {
         return Promise.resolve({
           ok: true,
           status: 200,
           json: () =>
-            Promise.resolve([{ node_id: NODE_A, node_name: "desktop-a", lsp_endpoint: "http://x:19878" }]),
+            Promise.resolve([
+              { node_id: NODE_A, node_name: "desktop-a", online: true, http_endpoint: "http://x:19900" },
+            ]),
         });
       }
       return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) });
@@ -159,9 +168,11 @@ describe("LspTab install progress survives a view switch", () => {
 
     await act(async () => {
       installDeferred.resolve({
-        language: TARGET,
+        name: TARGET,
         success: true,
-        exit_code: 0,
+        installState: "installed",
+        willRestart: false,
+        exitCode: 0,
         stdout: "OK: marksman installed",
         stderr: "",
       });

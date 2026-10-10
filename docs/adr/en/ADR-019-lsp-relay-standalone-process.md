@@ -437,6 +437,9 @@ core/acowork-lsp-relay/
     ├── relay.rs             # the WebSocket ↔ stdin/stdout relay (moved in from the Gateway)
     ├── protocol.rs          # LSP protocol helpers (initialize caching, JSON-RPC id substitution)
     ├── install.rs           # install script management (moved in; uses acowork_core::process::run_command_with_idle_timeout)
+    │                        # [ADR-091 D15, removed 2026-10-10] the installer moved down to the Node
+    │                        # (core/acowork-node/src/lsp_install.rs); the relay keeps a read-only probe surface —
+    │                        # the registry is Node state
     ├── codebase.rs          # the JSON-RPC API for the Agent Runtime codebase tool (new)
     ├── server.rs            # the Axum HTTP + WebSocket server (uses acowork_core::event_bus::EventBus<LspRelayState>)
     └── health.rs            # /health (returns acowork_core::health::HealthResponse) + SSE /events
@@ -476,12 +479,15 @@ struct Cli {
 }
 ```
 
+> **ADR-091 D16 revision (2026-10-10)**: the meaning of `--lsp-config-dir` / `ACOWORK_LSP_CONFIG_DIR` is narrowed from "the Desktop resource dir" to the **runtime registry directory** (= `{node_home}`, where the live `lsp_servers.json` lives), injected explicitly via `.env` by the Node supervisor when it spawns the relay (no longer inherited from the parent process). Presets and install scripts now come from a second env, **`ACOWORK_LSP_ASSET_DIR`** (= the Desktop resource dir, holding the preset `lsp_servers.json` and `lsp_install/`). Why the two envs are split, and the candidate-chain changes: [ADR-091 §5.11](../zh/ADR-091-lsp-server-registry-node.md). The relay writes no runtime files; `dev/ci.sh`'s `run_lsp_registry_redline` enforces it.
+
 #### 2. The Gateway side
 
 **Deleted**: `core/acowork-gateway/src/lsp/mod.rs` (1752 lines);
 `core/acowork-gateway/src/lsp/pool.rs` (352 lines); the `AppState.lsp_pool` field; the 5 LSP HTTP
 routes (`/lsp/{language}`, `/api/lsp/servers`, `/api/lsp/status`, `/api/lsp/install/{language}`
-GET/POST); the `LspPool::start_reaper` call in `server.rs`; the `lsp_config_dir` field in
+GET/POST — **[ADR-091 D15]** the two install routes have since been deleted from the relay as well,
+so the relay serves no write path at all); the `LspPool::start_reaper` call in `server.rs`; the `lsp_config_dir` field in
 `config.rs`; and the `--lsp-config-dir` argument in `cli.rs`.
 
 **Added** — `core/acowork-gateway/src/lifecycle/lsp_relay.rs` (modelled on `embed.rs`):

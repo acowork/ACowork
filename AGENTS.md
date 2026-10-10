@@ -6,11 +6,11 @@ ACowork is a decentralized, high-security, scalable AI Agent runtime platform. E
 
 ## Build & Test
 
-### Core (Rust workspace, 16 crates)
+### Core (Rust workspace, 17 crates)
 
 ```bash
 cd core
-cargo build --release          # all 16 crates
+cargo build --release          # all 17 crates
 cargo clippy --all-targets -- -D warnings
 cargo test                     # unit + integration tests
 # ./dev/ci.sh all              # check + clippy + test + integration
@@ -47,12 +47,12 @@ core/                  # Rust workspace (17 crates; source of truth: core/Cargo.
   acowork-core/        # Shared types, errors, config, MQTT proto
   acowork-embed/       # ONNX-Runtime embedding model runner
   acowork-gateway/     # HTTP API, embedded MQTT broker, reverse proxy, lifecycle, package mgr
-  acowork-lsp-relay/   # LSP protocol relay (Desktop <-> external language servers)
+  acowork-lsp-relay/   # LSP protocol relay (Node-spawned loopback sidecar; stateless since ADR-091 — it only reads the registry and probes)
   acowork-mcp/         # MCP (Model Context Protocol) wrapper
   acowork-memory/      # Memory manager (trait, middleware)
   acowork-mqtt-session/# MQTT session / event multiplexing (Gateway <-> Runtime)
   acowork-pm/          # Project & task management service (REST API + MCP tools)
-  acowork-node/        # Node Agent (ADR-055) — per-machine daemon hosting Runtime processes
+  acowork-node/        # Node Agent (ADR-055) — per-machine daemon hosting Runtime processes; owns the LSP server registry (ADR-091)
   acowork-doc/         # Online document library service (REST API + MCP tools)
   acowork-user/        # User domain service (ADR-084) — accounts, credentials, roles, profiles/avatars, user chat
   acowork-relay/       # Cloud thin relay: SNI-routed byte pipe + yamux tunnel (design 24; BYO self-hosted tier, protocol frozen per ADR-088). Not bundled into Desktop builds.
@@ -64,15 +64,18 @@ core/                  # Rust workspace (17 crates; source of truth: core/Cargo.
 
 apps/
   acowork-desktop/     # Tauri v2 desktop app (frontend + thin Rust backend, system tray)
-  cli/                 # Gateway CLI (planned)
+  acowork-mobile/      # Tauri v2 mobile app (ADR-086) — IM-style chat + multi-session
+  cli/                 # Gateway CLI (planned, directory does not exist yet)
 
 docs/                  # Public architecture docs
-  design/{zh,en}/      # 21 zh / 17 en design docs
+  design/{zh,en}/      # 23 zh / 17 en design docs
   module-design/{zh,en}/ # 8 zh / 7 en Rust crate specs
-  adr/{zh,en}/         # 80 ADRs (en: 3, zh: 77)
+  adr/{zh,en}/         # 84 ADRs (zh: 84, en: 84 — en is the maintained translation set)
   prd/{zh,en}/         # Platform + Desktop UI/UX PRD
   protocols/{zh,en}/   # HTTP + MQTT + RAG protocol reference
   mcp-server-research/{zh,en}/
+  runbooks/            # operator runbooks (single-machine remote topology, accounts, relay deploy)
+  plan/ review/ prompt-audit/ prototypes/  # working documents (zh)
 
 examples/              # Example .agent packages
 dev/                   # Build / package / CI scripts
@@ -88,6 +91,7 @@ Desktop App (Tauri v2) — separate process
 Gateway (keep-alive process, Rust)
   HTTP API :19876 (Axum, localhost) · embedded MQTT broker :19875 (rumqttd)
   Reverse proxy -> Runtime localhost HTTP · package mgr · lifecycle mgr
+  LSP reverse proxies: /lsp (relay passthrough) + /lsp-admin (Node registry, ADR-091)
   Intent router · global resources · budget tracker · rate limiter
         |
         | MQTT pub/sub :19875
@@ -95,7 +99,7 @@ Gateway (keep-alive process, Rust)
 Node Agent (acowork-node, ADR-055) — per-machine daemon
   MQTT control plane (acowork/nodes/#) · process table (spawn/kill/reap Runtime)
   Local package mgr · identity/enrollment · reverse proxy :19900
-  LSP sidecar supervisor · node-local fs browse
+  LSP sidecar supervisor · LSP server registry + install executor (ADR-091) · node-local fs browse
         |
         | MQTT pub/sub :19875
         v
@@ -107,6 +111,7 @@ Agent Runtime (universal binary, Rust)
 ## Conventions
 
 - Design docs zh + en; Rust code comments (`//`, `//!`, `///`) MUST be English
+- ADRs: the Chinese document is the source of truth, and every Chinese ADR has an English counterpart that must be updated in the same commit (rule and conventions: `docs/adr/en/README.md`)
 - Workspace members source of truth: `core/Cargo.toml [workspace] members`
 - Desktop App = presentation/interaction only — no business logic, no state persistence
 - **Gateway boundary = communication + resource management + reverse proxy.** Agent-private data (skills, prompts, conversations, memory, per-agent embedding, `{install_path}/assets`) is read and written **only through Runtime HTTP** (`core/acowork-gateway/src/http/proxy.rs`), never by direct filesystem access. Since ADR-055 `install_path` is a node-local path, so a Gateway-side `fs` read works in a single-machine setup and returns 5xx the moment Gateway and Node are on different hosts. Enforced by `run_gateway_fs_redline` in `dev/ci.sh`; rationale and the frozen ceilings in [ADR-009 §5](docs/adr/zh/ADR-009-gateway-workspace-isolation.md).

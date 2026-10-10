@@ -251,7 +251,12 @@ fn relay_ws_url(base: &str, tail: &str, query: Option<&str>) -> String {
 
 /// Long-lived forward client (install runs are minutes; connect-only
 /// timeout, the relay's own idle timeout bounds the request).
-fn relay_proxy_client() -> &'static reqwest::Client {
+///
+/// `pub(crate)` because the ADR-091 registry proxy forwards the same
+/// kind of call (`POST /lsp/servers/{name}/install` runs a script on the
+/// node) and must not grow a second total-timeout client that would cut
+/// a long install off mid-script.
+pub(crate) fn relay_proxy_client() -> &'static reqwest::Client {
     static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
     CLIENT.get_or_init(|| {
         reqwest::Client::builder()

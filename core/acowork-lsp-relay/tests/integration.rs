@@ -131,33 +131,6 @@ async fn status_endpoint_returns_list() {
 }
 
 #[tokio::test]
-async fn install_get_known_language_returns_script() {
-    let server = TestServer::start().await;
-
-    let resp = reqwest::get(server.url("/api/lsp/install/rust")).await.unwrap();
-    assert_eq!(resp.status(), 200);
-
-    let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["language"], "rust");
-    assert!(!body["script"].as_str().unwrap().is_empty());
-
-    let _ = server.shutdown_tx.send(());
-}
-
-#[tokio::test]
-async fn install_get_unknown_language_returns_404() {
-    let server = TestServer::start().await;
-
-    let resp = reqwest::get(server.url("/api/lsp/install/brainfuck")).await.unwrap();
-    assert_eq!(resp.status(), 404);
-
-    let body: serde_json::Value = resp.json().await.unwrap();
-    assert!(body["error"].as_str().unwrap().contains("brainfuck"));
-
-    let _ = server.shutdown_tx.send(());
-}
-
-#[tokio::test]
 async fn events_endpoint_returns_sse_stream() {
     let server = TestServer::start().await;
 
@@ -212,107 +185,32 @@ async fn lsp_websocket_unknown_language_returns_400() {
     let _ = server.shutdown_tx.send(());
 }
 
-// ── New E2E: POST /api/lsp/install — execute real script ───────────────
+// ── New E2E: install surface is gone (ADR-091 D15) ─────────────────────
 
+/// Install moved to the Node registry API (`POST /lsp/servers/{name}/install`).
+/// A stale client must get a clean 404 from the relay rather than a script
+/// body or a run — this is the guard that keeps the relay from growing a
+/// second write path back.
 #[tokio::test]
-async fn post_install_runs_script_and_returns_output() {
-    // Test both success and failure paths in a single test to avoid
-    // env var race conditions between parallel tests.
+async fn install_routes_are_not_served_by_the_relay() {
+    let server = TestServer::start().await;
+    let client = reqwest::Client::new();
 
-    // --- Success path ---
-    {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let install_dir = dir.path().join("lsp_install");
-        std::fs::create_dir_all(&install_dir).expect("mkdir lsp_install");
+    let get = client
+        .get(server.url("/api/lsp/install/rust"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get.status(), 404, "GET install route must not exist");
 
-        // `lsp_install_run` resolves the script filename with a
-        // platform-specific extension (.ps1 on Windows, .sh elsewhere).
-        // Write the mock with the matching extension so the lookup
-        // resolves to the fixture — otherwise it falls through to the
-        // repository's real scripts under assets/lsp_install/.
-        let (script_name, mock_script) = if cfg!(windows) {
-            (
-                "rust.ps1",
-                "[Console]::Out.WriteLine('mock install success')\r\nexit 0\r\n",
-            )
-        } else {
-            ("rust.sh", "#!/bin/bash\necho 'mock install success'\nexit 0\n")
-        };
-        std::fs::write(install_dir.join(script_name), mock_script).expect("write mock script");
+    let post = client
+        .post(server.url("/api/lsp/install/rust"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(post.status(), 404, "POST install route must not exist");
 
-        // SAFETY: No other test in this file uses ACOWORK_LSP_CONFIG_DIR
-        // at the same time because both success and failure paths are
-        // tested sequentially within this single test function.
-        unsafe {
-            std::env::set_var("ACOWORK_LSP_CONFIG_DIR", dir.path());
-        }
-
-        let server = TestServer::start().await;
-        let client = reqwest::Client::new();
-        let resp = client
-            .post(server.url("/api/lsp/install/rust"))
-            .send()
-            .await
-            .unwrap();
-
-        unsafe {
-            std::env::remove_var("ACOWORK_LSP_CONFIG_DIR");
-        }
-
-        assert_eq!(resp.status(), 200);
-        let body: serde_json::Value = resp.json().await.unwrap();
-        assert_eq!(body["language"], "rust");
-        assert_eq!(body["success"], true);
-        assert_eq!(body["exit_code"], 0);
-        assert!(
-            body["stdout"]
-                .as_str()
-                .unwrap()
-                .contains("mock install success"),
-            "stdout should contain mock output: {}",
-            body["stdout"]
-        );
-
-        let _ = server.shutdown_tx.send(());
-    }
-
-    // --- Failure path ---
-    {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let install_dir = dir.path().join("lsp_install");
-        std::fs::create_dir_all(&install_dir).expect("mkdir");
-
-        let (script_name, mock_script) = if cfg!(windows) {
-            ("rust.ps1", "[Console]::Out.WriteLine('install failed')\r\nexit 1\r\n")
-        } else {
-            ("rust.sh", "#!/bin/bash\necho 'install failed'\nexit 1\n")
-        };
-        std::fs::write(install_dir.join(script_name), mock_script).expect("write script");
-
-        unsafe {
-            std::env::set_var("ACOWORK_LSP_CONFIG_DIR", dir.path());
-        }
-
-        let server = TestServer::start().await;
-        let client = reqwest::Client::new();
-        let resp = client
-            .post(server.url("/api/lsp/install/rust"))
-            .send()
-            .await
-            .unwrap();
-
-        unsafe {
-            std::env::remove_var("ACOWORK_LSP_CONFIG_DIR");
-        }
-
-        assert_eq!(resp.status(), 500);
-        let body: serde_json::Value = resp.json().await.unwrap();
-        assert_eq!(body["success"], false);
-        assert_eq!(body["exit_code"], 1);
-        assert!(body["stdout"].as_str().unwrap().contains("install failed"));
-
-        let _ = server.shutdown_tx.send(());
-    }
+    let _ = server.shutdown_tx.send(());
 }
 
 // ── New E2E: SSE /events — receive state event ─────────────────────────

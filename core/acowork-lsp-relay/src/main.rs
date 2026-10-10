@@ -26,7 +26,10 @@ struct Cli {
     #[arg(long, default_value = "0")]
     port: u16,
 
-    /// LSP config directory (contains lsp_servers.json and lsp_install/)
+    /// Directory holding the runtime registry `lsp_servers.json` — the Node's
+    /// home (ADR-091 D16). Install scripts are not read here any more; the
+    /// shipped preset suite and its `lsp_install/` directory come from
+    /// `ACOWORK_LSP_ASSET_DIR`.
     #[arg(long, env = "ACOWORK_LSP_CONFIG_DIR")]
     lsp_config_dir: Option<String>,
 

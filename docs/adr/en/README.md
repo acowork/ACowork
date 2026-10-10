@@ -4,7 +4,7 @@
 > these files are translations maintained alongside it. When the two disagree, the Chinese
 > document governs.
 
-**Coverage**: 80 / 80 documents translated.
+**Coverage**: 84 / 84 documents translated.
 
 Numbering notes: `037` is unused; `061` and `062` each have two files (a decision and its
 companion report), so the count exceeds the number of unique ADR numbers.
@@ -108,7 +108,8 @@ ADRs are not a sequence to be read front to back. Suggested entry points:
 | 80 | [ADR-087](./ADR-087-node-agent-owner-permissions.md) | The Node and Agent Owner Permission Model — Plugging the Hole Where "the Whole Machine Is Writable by Every User by Def… | Draft (v2 revision; Q1/Q2/Q4 and the "single owner + multiple guests"… | [zh](../zh/ADR-087-node-agent-owner-permissions.md) |
 | 81 | [ADR-088](./ADR-088-cloud-hub-application-layer-remote-access.md) | Adding the Cloud Hub Application-Layer Remote-Access Mode, Coexisting Permanently with the Thin Relay | Decided (not yet implemented; Phase 0 not started) | [zh](../zh/ADR-088-cloud-hub-application-layer-remote-access.md) |
 | 82 | [ADR-089](./ADR-089-lsp-relay-reachability-vs-exposure.md) | LSP Relay Reachability vs. Exposure — Desktop Accesses the Relay Through a Gateway Reverse Proxy | Proposed (pending architecture review) | [zh](../zh/ADR-089-lsp-relay-reachability-vs-exposure.md) |
-| 83 | [ADR-090](./ADR-090-mcp-lsp-install-ownership-node.md) | MCP/LSP Server Install Ownership Moves to the Node — Read-only Presets, Runtime File as the Single Source of Truth | Proposed (pending architecture review) | [zh](../zh/ADR-090-mcp-lsp-install-ownership-node.md) |
+| 83 | [ADR-090](./ADR-090-mcp-lsp-install-ownership-node.md) | MCP Install Moves to the Agent's First Enable — Gateway Keeps the Global Registry and Key Vault | Accepted (implemented 2026-10-10; the LSP half was split out into ADR-091) | [zh](../zh/ADR-090-mcp-lsp-install-ownership-node.md) |
+| 84 | [ADR-091](./ADR-091-lsp-server-registry-node.md) | LSP Server Registry Moves Down to the Node — preset ∪ custom Merge, Persistent Install State | Accepted (implemented 2026-10-10, P0–P7) | [zh](../zh/ADR-091-lsp-server-registry-node.md) |
 
 ---
 

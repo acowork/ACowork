@@ -23,6 +23,9 @@ tokio = { workspace = true }
 clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# ADR-091: the LSP server registry is an ordered map (preset order, then custom
+# creation order) — `HashMap` would reshuffle the harness list every restart.
+indexmap = { workspace = true }
 # ADR-087: hidden password prompt for the headless `acowork-node start`
 # credential exchange (same crate the Gateway's admin-setup uses).
 rpassword = "7"

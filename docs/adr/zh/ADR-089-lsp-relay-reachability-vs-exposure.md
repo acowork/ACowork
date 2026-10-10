@@ -33,6 +33,8 @@
 | D5 | bind 与 advertise 同源 | Node 反代的 bind 地址改为跟随 §6.3.3 `live_advertise_host` 快照（IP 漂移时重绑），删除 `start` 缺省路径上的一次性 LAN 探测 |
 | D6 | codebase 工具接入 relay | **移出本 ADR 范围**（见 §2.4），另案处理 |
 
+> **ADR-091 追加（2026-10-10）**：本 ADR 的 `/lsp/{*tail}` 透传路由保持不动（它透传的是 **relay** 的只读端点）。ADR-091 另加一条并列的反代路由 `/api/nodes/{id}/lsp-admin/{*tail}` → Node 自己的 `/lsp/...` registry API：读类 `can_view`、写类 `can_manage`，且**故意不要求 `lsp_endpoint` 就绪**（registry 是 Node 的状态，relay 没起来照样要能装 / 能配）。两条路径的门控差异见 [ADR-091 §5.5](./ADR-091-lsp-server-registry-node.md)。
+
 ---
 
 ## 2. 背景与问题

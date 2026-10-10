@@ -7,10 +7,12 @@
 //!    settings/harness surface lives inside a card, so it read as an
 //!    orphaned form. It now rides in the card header's trailing slot next
 //!    to Refresh.
-//! 2. With no reachable relay the component used to early-return before
+//! 2. With no addressable node the component used to early-return before
 //!    rendering the card at all, which made the picker unreachable and
 //!    stranded the panel with no way to try another node. The card must
-//!    always render, with the reason shown in its body.
+//!    always render, with the reason shown in its body. Since ADR-091 the
+//!    candidate set is every ONLINE node — the registry is served by the
+//!    Node itself and stays readable while its relay is down.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor, within } from "@testing-library/react";
@@ -26,7 +28,8 @@ const NODE_B = "bbbbbbbb-1111-2222-3333-444444444444";
 interface NodeFixture {
   node_id: string;
   node_name: string;
-  lsp_endpoint?: string;
+  online: boolean;
+  http_endpoint: string;
 }
 
 /** Nodes returned by `GET /api/nodes`. */
@@ -59,20 +62,25 @@ function stubFetch() {
             }),
         });
       }
-      if (url.includes("/api/lsp/servers")) {
+      if (url.includes("/lsp-admin/servers")) {
         return Promise.resolve({
           ok: true,
           status: 200,
           json: () =>
             Promise.resolve({
+              version: 1,
               servers: {
                 rust: {
+                  source: "preset",
                   candidates: ["rust-analyzer"],
                   args: [],
                   install_hint: "rustup component add rust-analyzer",
                   description: "Rust",
+                  install_state: "detected",
                 },
               },
+              conflicts: [],
+              installing: [],
             }),
         });
       }
@@ -105,8 +113,8 @@ function picker(): HTMLSelectElement {
 describe("LspTab node picker placement (ADR-055 6.7)", () => {
   beforeEach(() => {
     nodes = [
-      { node_id: NODE_A, node_name: "desktop-a", lsp_endpoint: "http://192.168.5.82:19878" },
-      { node_id: NODE_B, node_name: "desktop-b", lsp_endpoint: "http://192.168.17.113:19878" },
+      { node_id: NODE_A, node_name: "desktop-a", online: true, http_endpoint: "http://192.168.5.82:19900" },
+      { node_id: NODE_B, node_name: "desktop-b", online: true, http_endpoint: "http://192.168.17.113:19900" },
     ];
     agentNodeId = NODE_A;
     agentId = `com.example.agent-${++agentSeq}`;
@@ -128,13 +136,13 @@ describe("LspTab node picker placement (ADR-055 6.7)", () => {
     expect(within(header).getByLabelText(i18n.t("harnessLsp.node"))).toBe(picker());
   });
 
-  it("still renders the card when no relay is reachable, so the picker stays usable", async () => {
+  it("still renders the card when no node is online, so the picker stays reachable", async () => {
     nodes = [];
     agentNodeId = null;
     render(<LspTab />);
 
     await waitFor(() =>
-      expect(screen.getByText(i18n.t("harnessLsp.noRelayNodes"))).toBeTruthy(),
+      expect(screen.getByText(i18n.t("harnessLsp.noNodes"))).toBeTruthy(),
     );
     // The fold must still exist: without it the user has no way to reach
     // the picker at all.
@@ -145,7 +153,7 @@ describe("LspTab node picker placement (ADR-055 6.7)", () => {
     // ADR-087 D5: a non-manager gets an endpoint but no node entry, so the
     // picker would otherwise render with an empty value.
     nodes = [
-      { node_id: NODE_B, node_name: "desktop-b", lsp_endpoint: "http://192.168.17.113:19878" },
+      { node_id: NODE_B, node_name: "desktop-b", online: true, http_endpoint: "http://192.168.17.113:19900" },
     ];
     agentNodeId = NODE_A;
     render(<LspTab />);

@@ -30,6 +30,11 @@
 //! ├── sidecar/      # LSP relay supervisor (Phase 4 — migrated from
 //! │                 # gateway lifecycle/lsp_relay_supervisor.rs)
 //! ├── fs_browse.rs  # node-local filesystem browsing (Phase 3, L7-1)
+//! ├── lsp_registry.rs # LSP server registry — the single writer of
+//! │                 # `{node_home}/lsp_servers.json` (ADR-091)
+//! ├── lsp_api.rs    # `/lsp/...` registry HTTP API (ADR-091 §5.5)
+//! ├── lsp_install.rs # install-script discovery + execution (ADR-091 D15)
+//! ├── lsp_converge.rs # relay-probe → persisted install state (ADR-091 §5.8)
 //! ├── node_api.rs   # node-local identity HTTP (rename, ADR-075 D4)
 //! ├── state.rs      # NodeState — the GatewayState replacement
 //! └── cli.rs        # §6.13.2 command surface (thin orchestration shell)
@@ -42,6 +47,10 @@ pub mod control;
 pub mod error;
 pub mod fs_browse;
 pub mod identity;
+pub mod lsp_api;
+pub mod lsp_converge;
+pub mod lsp_install;
+pub mod lsp_registry;
 pub mod node_api;
 pub mod package;
 pub mod process;

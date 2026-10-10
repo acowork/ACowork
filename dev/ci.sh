@@ -376,8 +376,10 @@ run_permission_route_redline() {
     # (3) Node side: /api/nodes/{id}/... head segments must be known too
     # (owner / guests / visibility are the attribution trio; `claim` is the
     # ADR-087 D7 ownerless-claim route, handler-enforced via `Tier::Claim`;
-    # anything else is NodeManage by the route_requirement default).
-    local known_node_segments="claim owner guests visibility permissions"
+    # `lsp` is the ADR-089 relay passthrough and `lsp-admin` the ADR-091
+    # registry proxy — both gated in http/lsp_admin_proxy.rs; anything else
+    # is NodeManage by the route_requirement default).
+    local known_node_segments="claim owner guests visibility permissions lsp lsp-admin"
     local nsegs nseg
     nsegs=$(grep -rhoE '\.route\("/api/nodes/\{id\}/[^"{]*' --include='*.rs' "$root"         | sed -E 's|.*\{id\}/||; s|/.*$||'         | grep -v '^$' | sort -u)
     for nseg in $nsegs; do
@@ -392,6 +394,73 @@ run_permission_route_redline() {
     done
 
     echo "Permission-route red line: OK"
+}
+
+# ADR-091 D11/D15 red line: the LSP server registry is the Node's state.
+# The relay is a stateless protocol bridge — it reads the registry the Node
+# wrote, probes servers and relays the WebSocket. Invariants:
+#   (1) no install-state vocabulary anywhere in the relay crate: that schema
+#       is owned by core::lsp and written only by the Node (a relay-side copy
+#       would race the Node's atomic rewrite, and since the relay reloads the
+#       registry only on restart the drift survives until the next restart);
+#   (2) no `/api/lsp/install` route in the relay source: the install executor
+#       moved to the Node with D15. Tests may still hit the path to assert the
+#       404, so this check scans src only;
+#   (3) filesystem writes only inside test fixtures. Ceiling, not allowlist:
+#       these are the surviving `#[cfg(test)]` call sites. Counts may only go
+#       DOWN — lower a number in the same commit that removes a call site.
+LSP_RELAY_WRITE_CEILING="
+config.rs:3
+project_root.rs:7
+"
+run_lsp_registry_redline() {
+    echo "Checking ADR-091 LSP relay statelessness red line..."
+    local crate="$SCRIPT_DIR/../core/acowork-lsp-relay"
+    local root="$crate/src"
+    local failed=0
+
+    local vocab
+    vocab=$(grep -rnE '(install_state|LspInstallRecord|LspRegistryFile|LspSource)' --include='*.rs' "$crate"         | grep -vE ':[0-9]+:[[:space:]]*(//|///)'         || true)
+    if [ -n "$vocab" ]; then
+        echo "ERROR: LSP install-state vocabulary in the relay crate (ADR-091 D11):"
+        echo "$vocab"
+        failed=1
+    fi
+
+    local routes
+    routes=$(grep -rnE '"/api/lsp/install' --include='*.rs' "$root" || true)
+    if [ -n "$routes" ]; then
+        echo "ERROR: install route registered in the relay (ADR-091 D15):"
+        echo "$routes"
+        echo "Installs run on the Node: POST /lsp/servers/{name}/install."
+        failed=1
+    fi
+
+    local files f rel count ceiling
+    files=$(grep -rlE '(std::fs::write|fs::write\(|File::create|OpenOptions::new)' --include='*.rs' "$root" || true)
+    while IFS= read -r f; do
+        [ -z "$f" ] && continue
+        rel="${f#"$root"/}"
+        count=$(grep -cE '(std::fs::write|fs::write\(|File::create|OpenOptions::new)' "$f" || true)
+        ceiling=$(printf '%s\n' "$LSP_RELAY_WRITE_CEILING" | grep -E "^$rel:" | cut -d: -f2 || true)
+        if [ -z "$ceiling" ]; then
+            echo "ERROR: ${rel}: ${count} filesystem write(s) — not on the ADR-091 relay ceiling list."
+            failed=1
+        elif [ "$count" -gt "$ceiling" ]; then
+            echo "ERROR: ${rel}: ${count} filesystem write(s), ceiling is ${ceiling}."
+            failed=1
+        fi
+    done <<< "$files"
+
+    if [ "$failed" -ne 0 ]; then
+        echo ""
+        echo "The registry and its install executor are Node state:"
+        echo "  core/acowork-node/src/lsp_registry.rs  (single writer, atomic rewrite)"
+        echo "  core/acowork-node/src/lsp_install.rs   (script runner)"
+        echo "The relay only reads the registry the Node wrote."
+        exit 1
+    fi
+    echo "LSP relay statelessness red line: OK"
 }
 
 # Embedding ONNX Runtime compatibility red line.
@@ -508,6 +577,7 @@ case "$MODE" in
         run_user_auth_mode_redline
         run_user_chat_path_redline
         run_permission_route_redline
+        run_lsp_registry_redline
         run_ort_api_redline
         run_check
         ;;
@@ -532,6 +602,8 @@ case "$MODE" in
         run_gateway_auth_scope_redline
         run_user_auth_mode_redline
         run_user_chat_path_redline
+        run_permission_route_redline
+        run_lsp_registry_redline
         run_ort_api_redline
         run_check
         run_clippy

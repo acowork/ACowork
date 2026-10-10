@@ -327,6 +327,10 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 enrolled_at: None,
             })),
+            // Not under test here: an empty registry and a relay handle that
+            // does not point at a live relay.
+            lsp: crate::lsp_registry::for_tests(std::path::Path::new("."), None),
+            lsp_relay: crate::state::LspRelayControl::detached("127.0.0.1", port),
         }
     }
 

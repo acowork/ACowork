@@ -15,50 +15,12 @@ use tokio::sync::{Notify, RwLock};
 
 // ── LSP server configuration (from JSON file) ──────────────────────────
 
-/// Per-language LSP server specification from `lsp_servers.json`.
-///
-/// `candidate_args` is intentionally kept as `HashMap`: only the entry-point
-/// `servers` / `status` maps are user-visible ordering, and there is no
-/// stable contract on per-candidate arg overrides.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LspServerEntry {
-    /// Candidate command names (tried in order).
-    pub candidates: Vec<String>,
-    /// Extra arguments for stdio-mode LSP communication.
-    pub args: Vec<String>,
-    /// Per-candidate arg overrides.
-    #[serde(default, skip_serializing_if = "empty_candidate_args")]
-    pub candidate_args: std::collections::HashMap<String, Vec<String>>,
-    /// One-line install hint shown to the user.
-    pub install_hint: String,
-    /// Name of the install script file (e.g. "rust" → assets/lsp_install/rust.sh).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub install_script: Option<String>,
-    /// Human-readable description.
-    pub description: String,
-    /// Language-specific root marker files (e.g. tsconfig.json, Cargo.toml).
-    /// Used by project root discovery to find the nearest project root.
-    /// Languages with no markers (rootless) have an empty list.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub root_markers: Vec<String>,
-}
-
-fn empty_candidate_args(map: &std::collections::HashMap<String, Vec<String>>) -> bool {
-    map.is_empty()
-}
-
-/// Top-level structure for `lsp_servers.json`.
-///
-/// `servers` is an `IndexMap` (not `HashMap`) so iteration order matches
-/// the order keys appear in the JSON file. `HashMap` would randomize the
-/// order per-process (SipHash with a random seed), which made the harness
-/// LSP list appear in a different order on every gateway restart — see
-/// the comment on `LspServersWithStatus::status` for the same rationale.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LspServersConfig {
-    pub version: u32,
-    pub servers: IndexMap<String, LspServerEntry>,
-}
+// ADR-091 P0: the entry schema moved to `acowork-core::lsp` so the Node can
+// write the runtime registry file without depending on this crate. The relay
+// keeps reading it as a preset-shaped `LspServersConfig` — the `source` and
+// install-state keys a Node-written file carries are ignored by serde, which
+// is what makes "the Node owns the file, the relay only reads it" work.
+pub use acowork_core::lsp::{LspServerEntry, LspServersConfig};
 
 /// Per-language LSP server installation status.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -195,9 +157,21 @@ fn load_lsp_servers_from_file(config_dir: Option<&std::path::Path>) -> Option<Ls
 fn build_config_candidates(config_dir: Option<&std::path::Path>) -> Vec<std::path::PathBuf> {
     let mut candidates = Vec::new();
 
-    // 0. Explicit config dir (CLI arg or env var, resolved by caller)
+    // 0. Explicit config dir (CLI arg or env var, resolved by caller).
+    // ADR-091: in a Node-managed setup this is `{node_home}` and holds the
+    // runtime registry file — the only file that contains custom servers.
     if let Some(config_dir) = config_dir {
         let path = config_dir.join("lsp_servers.json");
+        if path.exists() {
+            candidates.push(path);
+        }
+    }
+
+    // 0b. Preset asset dir (`ACOWORK_LSP_ASSET_DIR`, ADR-091 D16) — reached
+    // when the runtime file has not been written yet (relay started on its
+    // own, or a first run). Ships with the suite, read-only.
+    if let Some(asset_dir) = acowork_core::lsp::lsp_asset_dir_from_env() {
+        let path = asset_dir.join("lsp_servers.json");
         if path.exists() {
             candidates.push(path);
         }
@@ -834,8 +808,9 @@ fn profile_path_cache() -> &'static Mutex<Vec<PathBuf>> {
 
 /// Parse shell profile files and cache any `export PATH=...` directories.
 ///
-/// Called after a successful install so that the status check can find
-/// the newly-installed binary without a process restart.
+/// Called before every forced status probe (ADR-091 §5.10) so a binary the
+/// Node just installed is found without restarting the relay — a restart
+/// would drop the editors' LSP Websockets.
 pub fn refresh_path_from_profiles() {
     let home = dirs_home();
     let mut new_dirs = Vec::new();
@@ -868,6 +843,11 @@ pub fn refresh_path_from_profiles() {
         }
     }
 
+    // Windows has no shell profile to scan; its install scripts persist the
+    // user PATH in the registry instead.
+    #[cfg(windows)]
+    new_dirs.extend(user_path_from_registry());
+
     if !new_dirs.is_empty()
         && let Ok(mut cache) = profile_path_cache().lock()
     {
@@ -877,6 +857,103 @@ pub fn refresh_path_from_profiles() {
             }
         }
     }
+}
+
+/// Read the persistent USER `PATH` out of the registry (Windows).
+///
+/// The Windows install scripts persist their bin directory with
+/// `[Environment]::SetEnvironmentVariable("PATH", …, "User")`, which writes
+/// `HKCU\Environment` and is picked up only by *newly started* processes — a
+/// running relay never sees it through `std::env::var("PATH")`. Without this
+/// read, every install on Windows would need a relay restart to become
+/// visible (ADR-091 §5.10).
+///
+/// Shelling out to `reg.exe` is the same cost class as the profile file reads
+/// above: milliseconds, against a forced full probe that takes seconds.
+#[cfg(windows)]
+fn user_path_from_registry() -> Vec<PathBuf> {
+    let output = match std::process::Command::new("reg")
+        .args(["query", "HKCU\\Environment", "/v", "Path"])
+        .output()
+    {
+        // A user with no `Path` value is not an error condition — there is
+        // simply nothing extra to add.
+        Ok(output) if output.status.success() => output,
+        Ok(_) => return Vec::new(),
+        Err(e) => {
+            tracing::debug!("[LSP] Failed to run `reg query` for the user PATH: {e}");
+            return Vec::new();
+        }
+    };
+
+    parse_reg_path_output(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// Parse the text body of a `reg query HKCU\Environment /v Path` answer.
+///
+/// Split out from [`user_path_from_registry`] so the shape of that output is
+/// assertable without touching the real registry.
+#[cfg(windows)]
+fn parse_reg_path_output(text: &str) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    for line in text.lines() {
+        // Expected shape: `    Path    REG_EXPAND_SZ    C:\Users\me\bin;%X%\bin`
+        if !line
+            .split_whitespace()
+            .next()
+            .is_some_and(|name| name.eq_ignore_ascii_case("Path"))
+        {
+            continue;
+        }
+        let Some(type_at) = line.find("REG_") else { continue };
+        let after_type = &line[type_at..];
+        let Some(offset) = after_type
+            .find(|c: char| !c.is_alphanumeric() && c != '_')
+            .filter(|offset| *offset > 0)
+        else {
+            continue;
+        };
+        let value = after_type[offset..].trim();
+        for segment in expand_env_vars(value).split(';') {
+            let segment = segment.trim();
+            if segment.is_empty() {
+                continue;
+            }
+            let path = PathBuf::from(segment);
+            if path.is_dir() && !dirs.contains(&path) {
+                tracing::info!("[LSP] Discovered PATH dir from HKCU\\Environment: {}", path.display());
+                dirs.push(path);
+            }
+        }
+    }
+    dirs
+}
+
+/// Expand `%VAR%` references in a registry `REG_EXPAND_SZ` value.
+///
+/// Unknown variables expand to an empty string, which the caller then drops
+/// (the resulting path does not exist).
+#[cfg(windows)]
+fn expand_env_vars(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(start) = rest.find('%') {
+        out.push_str(&rest[..start]);
+        match rest[start + 1..].find('%') {
+            Some(end) => {
+                let name = &rest[start + 1..start + 1 + end];
+                out.push_str(&std::env::var(name).unwrap_or_default());
+                rest = &rest[start + 2 + end..];
+            }
+            // Trailing lone '%': keep it verbatim and stop scanning.
+            None => {
+                out.push_str(&rest[start..]);
+                rest = "";
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Extract a directory path from a shell `export PATH=...` line.
@@ -1378,6 +1455,38 @@ async fn seed_cache_for_test(canonical: &str, entry: LspServerStatusEntry) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The registry-PATH reader must survive the shapes `reg.exe` emits, and
+    /// must drop directories that do not exist (a `%VAR%` that did not expand,
+    /// a path the user deleted since).
+    #[cfg(windows)]
+    #[test]
+    fn parses_user_path_from_reg_output() {
+        let existing = std::env::temp_dir();
+        let fixture = format!(
+            "\nHKEY_CURRENT_USER\\Environment\n    Path    REG_EXPAND_SZ    {};%USERPROFILE%\\acowork-no-such-dir\\bin\n\n",
+            existing.display()
+        );
+        assert_eq!(parse_reg_path_output(&fixture), vec![existing]);
+        // Section header, and a value that is not `Path`.
+        assert!(parse_reg_path_output("HKEY_CURRENT_USER\\Environment").is_empty());
+        assert!(parse_reg_path_output("    Temp    REG_SZ    C:\\Temp").is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn expands_registry_variables() {
+        let system_root = std::env::var("SystemRoot").expect("SystemRoot is set on every Windows box");
+        assert_eq!(
+            expand_env_vars("%SystemRoot%\\System32"),
+            format!("{system_root}\\System32")
+        );
+        // An unknown variable expands to nothing — the caller then drops the
+        // path because it does not exist.
+        assert_eq!(expand_env_vars("%ACOWORK_NO_SUCH_VAR%\\bin"), "\\bin");
+        // A lone trailing '%' is data, not a variable start.
+        assert_eq!(expand_env_vars("C:\\100%\\bin"), "C:\\100%\\bin");
+    }
 
     #[test]
     fn test_canonical_language_aliases() {

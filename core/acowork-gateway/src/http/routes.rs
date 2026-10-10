@@ -300,6 +300,9 @@ pub fn build_router(state: AppState) -> Router {
         .merge(crate::http::nodes_api::nodes_routes())
         // ADR-089 D2: LSP relay reverse proxy (HTTP + WebSocket).
         .merge(crate::http::lsp_proxy::lsp_proxy_routes())
+        // ADR-091 §5.7: LSP *registry* admin proxy (`can_manage` on writes,
+        // and deliberately not gated on the relay being up).
+        .merge(crate::http::lsp_admin_proxy::lsp_admin_routes())
         // Plan §3.3 P2-2: Gateway-perspective service diagnostics
         // (`GET /api/services/diagnose`) — one-fetch aggregate of
         // gateway / mqtt / embed / pm / doc / nodes for the Desktop

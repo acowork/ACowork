@@ -658,6 +658,10 @@ avatar = \"assets/avatar.png\"
             node: Arc::new(RwLock::new(node)),
             config: NodeConfig::default(),
             identity: Arc::new(RwLock::new(node_identity(Some(TEST_TOKEN)))),
+            // Not under test here: an empty registry and a relay handle on an
+            // unused port.
+            lsp: crate::lsp_registry::for_tests(dir, None),
+            lsp_relay: crate::state::LspRelayControl::detached("127.0.0.1", 1),
         }
     }
 

@@ -401,6 +401,8 @@ core/acowork-lsp-relay/
     ├── relay.rs             # WebSocket ↔ stdin/stdout relay（从 Gateway 移入）
     ├── protocol.rs          # LSP 协议辅助（initialize 缓存、JSON-RPC id 替换）
     ├── install.rs           # 安装脚本管理（从 Gateway 移入，使用 acowork_core::process::run_command_with_idle_timeout）
+    │                        # 【ADR-091 D15，2026-10-10 已删除】安装执行器下迁到 Node（core/acowork-node/src/lsp_install.rs），
+    │                        # relay 只保留只读 probe 面——registry 是 Node 的状态
     ├── codebase.rs          # JSON-RPC API for Agent Runtime codebase tool（新增）
     ├── server.rs            # Axum HTTP + WebSocket server（使用 acowork_core::event_bus::EventBus<LspRelayState>）
     └── health.rs            # /health（返回 acowork_core::health::HealthResponse）+ SSE /events
@@ -442,13 +444,15 @@ struct Cli {
 }
 ```
 
+> **ADR-091 D16 修订（2026-10-10）**：`--lsp-config-dir` / `ACOWORK_LSP_CONFIG_DIR` 的语义从「Desktop resource dir」收紧为 **runtime registry 目录**（= `{node_home}`，运行时 `lsp_servers.json` 所在），由 Node supervisor 在 spawn 时显式 `.env` 注入（不再依赖父进程继承）；preset 与安装脚本另走一个新 env **`ACOWORK_LSP_ASSET_DIR`**（= Desktop resource dir，含 preset `lsp_servers.json` 与 `lsp_install/`）。两个 env 分开的原因与候选链改动见 [ADR-091 §5.11](./ADR-091-lsp-server-registry-node.md)；relay 内不写任何 runtime 文件，由 `dev/ci.sh` 的 `run_lsp_registry_redline` 卡住。
+
 #### 2. Gateway 侧改动
 
 **删除**：
 - `core/acowork-gateway/src/lsp/mod.rs`（1752 行）
 - `core/acowork-gateway/src/lsp/pool.rs`（352 行）
 - `AppState.lsp_pool` 字段
-- 5 条 LSP HTTP 路由（`/lsp/{language}`、`/api/lsp/servers`、`/api/lsp/status`、`/api/lsp/install/{language}` GET/POST）
+- 5 条 LSP HTTP 路由（`/lsp/{language}`、`/api/lsp/servers`、`/api/lsp/status`、`/api/lsp/install/{language}` GET/POST；【ADR-091 D15】其中 install 两条已从 relay 进一步删除，relay 不再提供任何写路径）
 - `server.rs` 中的 `LspPool::start_reaper` 调用
 - `config.rs` 中的 `lsp_config_dir` 字段
 - `cli.rs` 中的 `--lsp-config-dir` 参数

@@ -2142,7 +2142,7 @@ export interface AgentLspEndpointResponse {
   reason?: string;
 }
 
-/** LSP server entry — matches acowork_lsp_relay::config::LspServerEntry */
+/** LSP server entry — matches acowork_core::lsp::LspServerEntry */
 export interface LspServerEntry {
   /** Candidate command names (tried in order) */
   candidates: string[];
@@ -2156,6 +2156,85 @@ export interface LspServerEntry {
   install_script?: string;
   /** Human-readable description */
   description: string;
+  /** Project-root marker files (e.g. "Cargo.toml"); empty = rootless */
+  root_markers?: string[];
+}
+
+/**
+ * Where a runtime registry entry came from (ADR-091 D5).
+ *
+ * `preset` entries get their metadata refreshed from the shipped suite on
+ * every Node start, so only `candidate_args` survives an edit; `custom`
+ * entries are fully user-owned.
+ */
+export type LspSource = "preset" | "custom";
+
+/**
+ * Persisted installation state (ADR-091 D9/D10, §5.8).
+ *
+ * There is deliberately no `installing` value — an in-flight install is
+ * process state and would survive a crash as a lie. In-flight keys arrive
+ * separately as `installing` on {@link LspRegistryView}.
+ */
+export type LspInstallState = "unknown" | "detected" | "installed" | "failed";
+
+/** State block of a runtime entry (flattened into {@link LspRuntimeEntry}). */
+export interface LspInstallRecord {
+  install_state: LspInstallState;
+  /** Candidate that resolved last time; only set when a binary was found */
+  installed_command?: string;
+  /** Tail of the last install run's stdout (truncated by the Node) */
+  install_stdout?: string;
+  install_stderr?: string;
+  /** Wall-clock ms at the end of the last install run */
+  last_install_ms?: number;
+  /** Wall-clock ms of the last probe convergence — "checked N ago" */
+  last_check_ms?: number;
+}
+
+/**
+ * One entry of the Node's runtime registry
+ * (`GET /api/nodes/{id}/lsp-admin/servers`, ADR-091 §5.5).
+ *
+ * The registry keeps the snake_case field names of `lsp_servers.json` (it is
+ * the same object the relay reads from disk), while the surrounding envelope
+ * is camelCase like the rest of the Node HTTP surface — hence the mix here.
+ */
+export interface LspRuntimeEntry extends LspServerEntry, LspInstallRecord {
+  source: LspSource;
+}
+
+/** Envelope of `GET /lsp-admin/servers` (camelCase — it is an envelope). */
+export interface LspRegistryView {
+  version: number;
+  /** Keyed by server name (canonical language for presets) */
+  servers: Record<string, LspRuntimeEntry>;
+  /** Keys where a custom entry collided with a preset (§5.3) */
+  conflicts: string[];
+  /** Keys whose install script is running right now (D10, memory only) */
+  installing: string[];
+}
+
+/** Response of a registry write that may need a relay restart (§5.6). */
+export interface LspMutationResponse {
+  ok: boolean;
+  /**
+   * Whether the Node is going to restart the LSP relay to pick the change
+   * up — which drops the editor's live LSP WebSocket. `false` means no
+   * supervisor was listening, so the change lands on the relay's next start.
+   */
+  willRestart: boolean;
+  server?: LspRuntimeEntry;
+}
+
+/** `GET .../install/status` — the in-flight view of one server. */
+export interface LspInstallStatusResponse {
+  name: string;
+  installing: boolean;
+  install_state: LspInstallState;
+  installed_command?: string;
+  last_install_ms?: number;
+  last_check_ms?: number;
 }
 
 /** LSP servers config — matches acowork_lsp_relay::config::LspServersConfig */
@@ -2167,7 +2246,7 @@ export interface LspServersConfig {
 }
 
 /**
- * Combined response from `GET /api/lsp/servers-with-status`.
+ * Response from `GET /api/lsp/servers-with-status`.
  *
  * Returns the configured LSP server list together with per-language
  * install status in a single round-trip. Used on initial load and on
@@ -2186,21 +2265,39 @@ export interface LspServersWithStatus {
   status: Record<string, LspServerStatusEntry>;
 }
 
-/** LSP install script response from GET /api/lsp/install/{language} */
+/**
+ * Install script text, from `GET /api/nodes/{id}/lsp-admin/servers/{name}/script`
+ * (ADR-091 D14: the UI shows the script before offering to run it).
+ */
 export interface LspInstallScriptResponse {
-  language: string;
+  name: string;
   filename: string;
-  script: string;
+  /** Absolute path on the NODE — informational, the file is not local */
+  path: string;
+  /** Script extension (`sh` / `ps1`), i.e. which node OS ran it */
   platform: string;
+  script: string;
 }
 
-/** LSP install run response from POST /api/lsp/install/{language} */
+/**
+ * Install run response from
+ * `POST /api/nodes/{id}/lsp-admin/servers/{name}/install`.
+ *
+ * camelCase: this is the Node's API envelope, not the registry file. ADR-091
+ * §5.10 — an install never restarts the relay (`willRestart` is always false
+ * today); the newly installed binary becomes visible through the forced
+ * probe the Node fires afterwards.
+ */
 export interface LspInstallRunResponse {
-  language: string;
+  name: string;
   success: boolean;
-  exit_code: number | null;
+  installState: LspInstallState;
+  willRestart: boolean;
+  exitCode?: number | null;
   stdout: string;
   stderr: string;
+  /** Why it failed when there was no stderr to show (timeout, no script) */
+  failure?: string;
 }
 
 /**

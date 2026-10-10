@@ -35,6 +35,8 @@ the `acowork/nodes/{id}/lsps` retained topic becomes a health signal only — **
 | D5 | bind and advertise share one source | The Node reverse proxy binds from the §6.3.3 `live_advertise_host` snapshot (rebind on IP drift), making it identically the advertised value; the one-shot LAN probe on the `start` default path is deleted |
 | D6 | Runtime codebase tool wiring | **Out of scope for this ADR** (see §2.4), handled separately |
 
+> **Added by ADR-091 (2026-10-10)**: the `/lsp/{*tail}` passthrough route of this ADR stays as it is — it forwards the **relay's** read-only endpoints. ADR-091 adds a sibling reverse-proxy route, `/api/nodes/{id}/lsp-admin/{*tail}` → the Node's own `/lsp/...` registry API: reads require `can_view`, writes require `can_manage`, and it deliberately **does not require `lsp_endpoint` to be ready** (the registry is Node state, so installing and configuring must work even while the relay is down). The gating difference between the two routes: [ADR-091 §5.5](../zh/ADR-091-lsp-server-registry-node.md).
+
 ---
 
 ## 2. Background and Problem

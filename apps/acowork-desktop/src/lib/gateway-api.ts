@@ -24,8 +24,12 @@ import type {
   UpdateCloudEmbeddingProviderRequest,
   CloudEmbeddingProviderResponse,
   AgentLspEndpointResponse,
-  LspInstallScriptResponse,
   LspInstallRunResponse,
+  LspInstallScriptResponse,
+  LspInstallStatusResponse,
+  LspMutationResponse,
+  LspRegistryView,
+  LspServerEntry,
   LspServerStatusEntry,
   LspServersConfig,
   LspServersWithStatus,
@@ -596,17 +600,14 @@ export async function getLspRelayUrl(
 // `getLspRelayUrl()`.
 
 /**
- * Fetch the configured LSP server list without probing `PATH`.
+ * Fetch the configured LSP server list from the RELAY without probing
+ * `PATH`.
  *
- * The relay handler reads from a process-lifetime `OnceLock`, so this
- * endpoint is intentionally fast (no fork-exec, no PATH lookup). The
- * harness UI uses it on initial load to render the language list
- * **immediately**, then kicks off a separate `fetchLspStatus` /
- * `fetchLspServersWithStatus` call to resolve per-language install
- * badges incrementally.
- *
- * The returned `LspServersConfig` is the same shape as the `servers`
- * field of `LspServersWithStatus`.
+ * Kept for the read-only tooling surface (the relay's own view of the
+ * registry file it loaded at start). The harness LSP panel reads the
+ * **Node registry** instead via {@link fetchLspRegistry} — that is the
+ * merged truth including entries the relay has not loaded yet, and it works
+ * while the relay is down (ADR-091 §5.5).
  */
 export async function fetchLspServers(
   relayUrl: string,
@@ -723,34 +724,177 @@ export async function fetchLspStatusForLanguage(
   return resp.json();
 }
 
-/** Fetch install script content for a language from the LSP Relay */
-export async function fetchLspInstallScript(
-  language: string,
-  relayUrl: string,
-): Promise<LspInstallScriptResponse> {
-  const resp = await fetch(`${relayUrl}/api/lsp/install/${encodeURIComponent(language)}`);
-  if (!resp.ok) throw new Error(`Failed to fetch install script: ${resp.status}`);
+// ── LSP registry admin API (ADR-091 §5.5 / §5.7) ────────────────────────
+//
+// The Node owns the LSP server registry; the Gateway reverse-proxies it at
+// `/api/nodes/{id}/lsp-admin/{*tail}` and is where `can_view` / `can_manage`
+// are decided. Two things follow from that shape and are easy to get wrong:
+//
+// * the base URL is derived from the relay proxy URL, not from a second
+//   endpoint lookup — the registry must stay reachable when the relay is NOT
+//   ready (§5.5: a broken language server is exactly why the user is here),
+//   so nothing here may go through `lsp_endpoint` readiness;
+// * keys are server NAMES, and for presets the name is the canonical
+//   language — so `js` must be canonicalised by the caller the same way the
+//   relay does it, or the write lands on a new custom key.
+
+/**
+ * The registry-admin base URL for a node, from its relay proxy base URL
+ * (`{gateway}/api/nodes/{id}/lsp` → `{gateway}/api/nodes/{id}/lsp-admin`).
+ *
+ * Returns `null` for a URL that is not a Gateway node proxy (a raw
+ * loopback relay address, for instance): the admin surface only exists
+ * behind the Gateway, because that is where the caller's identity — and
+ * therefore the permission check — lives.
+ */
+export function lspAdminUrlFromRelayUrl(relayUrl: string): string | null {
+  const m = /^(.*)\/api\/nodes\/([^/]+)\/lsp\/?$/.exec(relayUrl);
+  if (!m) return null;
+  return `${m[1]}/api/nodes/${m[2]}/lsp-admin`;
+}
+
+/** Shared error rendering for the registry surface (`{error, code}` bodies). */
+async function lspAdminError(resp: Response, action: string): Promise<Error> {
+  let detail = "";
+  try {
+    const data = (await resp.json()) as { error?: string; stderr?: string; stdout?: string };
+    detail = data.error || data.stderr || data.stdout || "";
+  } catch {
+    // Non-JSON answer (a Gateway 502 page, a tunnel reset) — status only.
+  }
+  return new Error(detail ? `${action}: ${resp.status} — ${detail}` : `${action}: ${resp.status}`);
+}
+
+/**
+ * `GET .../lsp-admin/servers` — the merged runtime registry.
+ *
+ * This is the list the panel renders: presets ∪ customs, plus the persisted
+ * install state and the two things a file cannot say (`conflicts`,
+ * `installing`). It is a fast memory read on the Node and never blocks on a
+ * PATH probe, so badges may be stale — the live probe is the separate
+ * {@link fetchLspStatus} call.
+ */
+export async function fetchLspRegistry(
+  adminUrl: string,
+): Promise<LspRegistryView> {
+  const resp = await fetch(`${adminUrl}/servers`);
+  if (!resp.ok) throw await lspAdminError(resp, "Failed to fetch LSP registry");
   return resp.json();
 }
 
-/** Run the install script for a language on the LSP Relay */
+/**
+ * `GET .../lsp-admin/presets` — the read-only shipped registry.
+ *
+ * The "add custom server" form reads candidate definitions from here so a
+ * typo in a new key is visible against what the suite already ships (D1).
+ */
+export async function fetchLspPresets(
+  adminUrl: string,
+): Promise<LspServersConfig> {
+  const resp = await fetch(`${adminUrl}/presets`);
+  if (!resp.ok) throw await lspAdminError(resp, "Failed to fetch LSP presets");
+  return resp.json();
+}
+
+/** `GET .../servers/{name}/script` — the install script text (D14 UI gate). */
+export async function fetchLspInstallScript(
+  adminUrl: string,
+  name: string,
+): Promise<LspInstallScriptResponse> {
+  const resp = await fetch(`${adminUrl}/servers/${encodeURIComponent(name)}/script`);
+  if (!resp.ok) throw await lspAdminError(resp, "Failed to fetch install script");
+  return resp.json();
+}
+
+/**
+ * `POST .../servers/{name}/install` — run the install script on the Node.
+ *
+ * Deliberately uncapped in time: this is apt / rustup / npm downloading in
+ * the foreground, and the Gateway's forward client for this path has a
+ * connect timeout only (ADR-089 `relay_proxy_client`). The Node never
+ * restarts the relay for an install (§5.10) — it fires a forced probe
+ * instead, so the response's `willRestart` is false.
+ */
 export async function runLspInstall(
-  language: string,
-  relayUrl: string,
+  adminUrl: string,
+  name: string,
 ): Promise<LspInstallRunResponse> {
-  const resp = await fetch(`${relayUrl}/api/lsp/install/${encodeURIComponent(language)}`, {
+  const resp = await fetch(`${adminUrl}/servers/${encodeURIComponent(name)}/install`, {
     method: "POST",
   });
-  const data = await resp.json();
-  if (!resp.ok) {
-    // The relay's 500/504 answers carry no `error` field — only the script's
-    // stdout/stderr. Without these fallbacks the UI showed a bare
-    // "Install failed: 500" and the actual reason (missing JDK, no package
-    // manager, …) was dropped on the floor.
-    const detail = data as { error?: string; stderr?: string; stdout?: string };
-    throw new Error(detail.error || detail.stderr || detail.stdout || `Install failed: ${resp.status}`);
-  }
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) throw await lspAdminError(resp, "Install failed");
   return data as LspInstallRunResponse;
+}
+
+/** `GET .../servers/{name}/install/status` — the in-flight view of one key. */
+export async function fetchLspInstallStatus(
+  adminUrl: string,
+  name: string,
+): Promise<LspInstallStatusResponse> {
+  const resp = await fetch(`${adminUrl}/servers/${encodeURIComponent(name)}/install/status`);
+  if (!resp.ok) throw await lspAdminError(resp, "Failed to fetch install status");
+  return resp.json();
+}
+
+/**
+ * `POST .../servers` — add a custom server.
+ *
+ * Body is flat: `name` plus the metadata block (the Node `#[serde(flatten)]`
+ * s them together). Answers `409 already_exists` for a preset key — presets
+ * are not editable, only overridable through `candidate_args`.
+ */
+export async function addLspServer(
+  adminUrl: string,
+  name: string,
+  metadata: LspServerEntry,
+): Promise<LspMutationResponse> {
+  const resp = await fetch(`${adminUrl}/servers`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name, ...metadata }),
+  });
+  if (!resp.ok) throw await lspAdminError(resp, "Failed to add LSP server");
+  return resp.json();
+}
+
+/**
+ * `PUT .../servers/{name}` — update the instance block.
+ *
+ * For a preset entry the Node keeps only `candidate_args` (the rest is
+ * refreshed from the shipped preset on the next merge, D6), so the form must
+ * not pretend the other fields were saved.
+ */
+export async function updateLspServer(
+  adminUrl: string,
+  name: string,
+  metadata: LspServerEntry,
+): Promise<LspMutationResponse> {
+  const resp = await fetch(`${adminUrl}/servers/${encodeURIComponent(name)}`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(metadata),
+  });
+  if (!resp.ok) throw await lspAdminError(resp, "Failed to update LSP server");
+  return resp.json();
+}
+
+/**
+ * `DELETE .../servers/{name}` — drop the registry entry.
+ *
+ * Custom only (presets come back from the suite, so the Node refuses with
+ * `409 preset_not_removable`). The language-server binary stays on disk —
+ * removing the record is not an uninstall of a tool other software may share.
+ */
+export async function deleteLspServer(
+  adminUrl: string,
+  name: string,
+): Promise<LspMutationResponse> {
+  const resp = await fetch(`${adminUrl}/servers/${encodeURIComponent(name)}`, {
+    method: "DELETE",
+  });
+  if (!resp.ok) throw await lspAdminError(resp, "Failed to delete LSP server");
+  return resp.json();
 }
 
 

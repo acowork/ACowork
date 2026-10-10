@@ -6,6 +6,8 @@
  * - `PUT  /api/users/{user_id}` answers with `UserResponse { user, version }`
  * - `POST /api/users/{user_id}/activate` answers with `ActivateResponse`
  * - `GET  /api/nodes` answers snake_case `NodeResponse` (legacy camelCase normalized)
+ * - LSP registry writes address the Node through the Gateway `lsp-admin`
+ *   proxy, and a failed install reports its reason in `stderr` (ADR-091)
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
@@ -16,6 +18,7 @@ import {
     fetchActiveUser,
     verifyAgentHealth,
     fetchNodes,
+    lspAdminUrlFromRelayUrl,
     runLspInstall,
 } from "./gateway-api";
 import type { BackendUserProfile } from "./types";
@@ -331,33 +334,52 @@ describe("fetchNodes field normalization", () => {
 });
 
 describe("runLspInstall failure reporting", () => {
-    it("surfaces the script stderr on the relay's 500 (no `error` field)", async () => {
-        // The relay's non-zero-exit answer carries no `error` key, so reading
+    it("surfaces the script stderr on the Node's 500 (no `error` key)", async () => {
+        // The Node's non-zero-exit answer carries no `error` key, so reading
         // only `data.error` degraded to "Install failed: 500" and hid the real
         // reason (missing JDK / no package manager).
         mockFetchOnce(
             {
-                language: "java",
+                name: "java",
                 success: false,
-                exit_code: 1,
+                installState: "failed",
+                willRestart: false,
+                exitCode: 1,
                 stdout: "",
                 stderr: "ERROR: jdtls requires Java 21+, but found Java 11.",
             },
             500,
         );
 
-        await expect(runLspInstall("java", "http://relay")).rejects.toThrow(
-            "ERROR: jdtls requires Java 21+, but found Java 11.",
-        );
-        expect(calls[0].url).toBe("http://relay/api/lsp/install/java");
+        await expect(
+            runLspInstall("http://gw/api/nodes/n-1/lsp-admin", "java"),
+        ).rejects.toThrow("ERROR: jdtls requires Java 21+, but found Java 11.");
+        expect(calls[0].url).toBe("http://gw/api/nodes/n-1/lsp-admin/servers/java/install");
         expect(calls[0].init?.method).toBe("POST");
     });
 
     it("still prefers an explicit `error` field when present (404 path)", async () => {
-        mockFetchOnce({ error: "Install script file 'java.sh' not found", code: 404 }, 404);
+        mockFetchOnce({ error: "Install script file 'java.ps1' not found", code: 404 }, 404);
 
-        await expect(runLspInstall("java", "http://relay")).rejects.toThrow(
-            "Install script file 'java.sh' not found",
-        );
+        await expect(
+            runLspInstall("http://gw/api/nodes/n-1/lsp-admin", "java"),
+        ).rejects.toThrow("Install script file 'java.ps1' not found");
+    });
+});
+
+describe("lspAdminUrlFromRelayUrl", () => {
+    it("derives the registry base from the relay proxy URL", () => {
+        // The panel only ever knows the relay address; a second endpoint
+        // lookup would fail exactly when the relay is down — which is when
+        // the registry is most needed (ADR-091 §5.5).
+        expect(
+            lspAdminUrlFromRelayUrl("http://localhost:19876/api/nodes/n-1/lsp"),
+        ).toBe("http://localhost:19876/api/nodes/n-1/lsp-admin");
+    });
+
+    it("refuses a raw loopback relay address", () => {
+        // Not a Gateway proxy path, so there is no caller identity attached
+        // to the request and no permission gate in front of it.
+        expect(lspAdminUrlFromRelayUrl("http://127.0.0.1:19878")).toBeNull();
     });
 });

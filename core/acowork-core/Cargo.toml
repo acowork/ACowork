@@ -10,6 +10,9 @@ description = "Shared types, protocols, and traits for ACowork.AI"
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+# ADR-091: the LSP registry keeps insertion order (`lsp` module) — the harness
+# list shuffled on every restart while it was a `HashMap`.
+indexmap.workspace = true
 bincode.workspace = true
 async-trait.workspace = true
 thiserror.workspace = true

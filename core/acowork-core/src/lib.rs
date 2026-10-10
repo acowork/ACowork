@@ -45,6 +45,7 @@ pub mod health;
 pub mod install;
 pub mod intent;
 pub mod logging;
+pub mod lsp;
 pub mod manifest;
 pub mod memory;
 pub mod node;
@@ -66,6 +67,10 @@ pub mod workspace;
 // Re-exports for convenience
 pub use agent_instance_id::{AgentInstanceId, InstanceIdError};
 pub use agent_overrides::{AgentOverrides, overrides_path};
+pub use lsp::{
+    LSP_INSTALL_OUTPUT_LIMIT, LSP_REGISTRY_VERSION, LspInstallRecord, LspInstallState,
+    LspRegistryFile, LspRuntimeEntry, LspServerEntry, LspServersConfig, LspSource,
+};
 pub use manifest::{
     AgentManifest, CapabilityDef, LlmBudget, LlmConfig, ManifestConsolidationQuality,
     ManifestDedupQuality, ManifestMemoryQuality, ProviderConfig, RagToolConfig, RoutingConfig,

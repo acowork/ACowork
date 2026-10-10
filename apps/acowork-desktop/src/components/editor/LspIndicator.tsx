@@ -2,7 +2,7 @@ import { useState, useRef, useEffect } from "react";
 import { Circle, CircleDot, Copy, Check, Play, Loader2, AlertTriangle } from "lucide-react";
 import { Tooltip } from "../common/Tooltip";
 import { cn } from "../../lib/utils";
-import { getLspRelayUrl, runLspInstall } from "../../lib/gateway-api";
+import { getLspRelayUrl, lspAdminUrlFromRelayUrl, runLspInstall } from "../../lib/gateway-api";
 import { useTranslation } from "../../i18n/useTranslation";
 import { type LspStatus } from "../../lib/lspUtils";
 
@@ -117,26 +117,35 @@ export function LspIndicator({
         setInstalling(true);
         setInstallResult(null);
         try {
-            // ADR-055 §6.7 (Phase 4): the relay is a node-local sidecar, so
-            // installs go through the relay hosting the active file's agent
-            // (the Gateway no longer hosts `/api/lsp/install`).
+            // ADR-091 D15: the Node is the only installer. The relay's own
+            // `/api/lsp/install` is gone, so this goes to the registry-admin
+            // proxy next to the relay passthrough — same node, different
+            // surface (`can_manage` is checked there, not here).
             const relayUrl = await getLspRelayUrl(agentId);
-            if (!relayUrl) {
+            const adminUrl = relayUrl ? lspAdminUrlFromRelayUrl(relayUrl) : null;
+            if (!adminUrl) {
                 setInstallResult({
                     success: false,
                     text: "LSP Relay not available",
                 });
                 return;
             }
-            const data = await runLspInstall(language, relayUrl);
+            const data = await runLspInstall(adminUrl, language);
             if (data.success) {
                 setInstallResult({
                     success: true,
-                    text: data.stdout || "Installation completed. Restart Gateway to apply.",
+                    // No relay restart for an install (§5.10): the Node fires
+                    // a forced probe that re-reads PATH, so an editor session
+                    // that already gave up on this language needs a reconnect.
+                    text: data.stdout || "Installation completed. Reopen the file to start the server.",
                 });
             } else {
                 // Show stderr first, then stdout, then fallback
-                const detail = data.stderr || data.stdout || `Install failed (exit code: ${data.exit_code})`;
+                const detail =
+                    data.stderr ||
+                    data.failure ||
+                    data.stdout ||
+                    `Install failed (exit code: ${data.exitCode ?? "n/a"})`;
                 setInstallResult({
                     success: false,
                     text: detail,

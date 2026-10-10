@@ -10,9 +10,11 @@
 //!   together with per-language install status (single round-trip)
 //! - `GET /api/lsp/status` — re-probe per-language install status
 //!   (used by per-row Check button; avoids re-fetching the full config)
-//! - `GET /api/lsp/install/{language}` — get install script
-//! - `POST /api/lsp/install/{language}` — run install script
+//! - `GET /api/lsp/status/{language}` — re-probe one language
 //! - `POST /api/project-root/discover` — discover language-specific project root
+//!
+//! Install scripts are NOT served here: the Node owns the registry and runs
+//! the install (ADR-091 D15), so the relay exposes read-only probe surface only.
 
 use std::sync::Arc;
 
@@ -32,7 +34,7 @@ use acowork_core::health::HealthResponse;
 
 use crate::config::{
     LspServerStatusEntry, LspServersConfig, LspServersWithStatus, canonical_language,
-    lsp_servers_config, probe_all, probe_one, resolve_lsp_command,
+    lsp_servers_config, probe_all, probe_one, refresh_path_from_profiles, resolve_lsp_command,
 };
 use crate::pool::LspPool;
 use crate::relay::lsp_relay;
@@ -198,9 +200,17 @@ async fn lsp_servers_with_status(
 /// per-row "Check" button can re-probe a single language without
 /// re-fetching the full server list. Pass `?force=true` to bypass the
 /// cache.
+///
+/// A forced probe is also the "something may have just been installed" signal:
+/// the Node runs one after every install (ADR-091 §5.10), so the PATH sources
+/// are refreshed first — a newly installed binary becomes visible without a
+/// relay restart, which would drop the editors' LSP Websockets.
 async fn lsp_status_list(
     Query(query): Query<StatusQuery>,
 ) -> Json<Vec<crate::config::LspServerStatusEntry>> {
+    if query.force {
+        refresh_path_from_profiles();
+    }
     Json(probe_all(query.force).await)
 }
 
@@ -223,6 +233,10 @@ async fn lsp_status_for_language(
 ) -> impl IntoResponse {
     let lang_lower = language.to_lowercase();
     let canonical = canonical_language(&lang_lower).to_string();
+    if query.force {
+        // Same contract as `/api/lsp/status` above.
+        refresh_path_from_profiles();
+    }
     let cfg = lsp_servers_config();
     if !cfg.servers.contains_key(&canonical) {
         return (
@@ -318,14 +332,6 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/lsp/servers-with-status", get(lsp_servers_with_status))
         .route("/api/lsp/status", get(lsp_status_list))
         .route("/api/lsp/status/{language}", get(lsp_status_for_language))
-        .route(
-            "/api/lsp/install/{language}",
-            get(crate::install::lsp_install_script),
-        )
-        .route(
-            "/api/lsp/install/{language}",
-            axum::routing::post(crate::install::lsp_install_run),
-        )
         .route("/api/codebase/rpc", axum::routing::post(crate::codebase::codebase_rpc))
         .route("/api/project-root/discover", axum::routing::post(project_root_discover))
         // Local-only CORS allowlist. Same origins as Gateway — covers Vite dev

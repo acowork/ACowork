@@ -44,6 +44,15 @@ use crate::http::acl::{self, Op};
 use crate::http::auth_middleware::AuthContext;
 use crate::http::routes::AppState;
 
+/// Does this node-scoped remainder address one of the LSP proxies?
+///
+/// `lsp/{*tail}` (relay passthrough) and `lsp-admin/{*tail}` (registry
+/// writes) both carry their own gate; matched on the *first* segment so
+/// a node id containing a hyphen can never be confused with them.
+fn is_lsp_proxy_rest(rest: &str) -> bool {
+    matches!(rest.split('/').next(), Some("lsp") | Some("lsp-admin"))
+}
+
 /// Query/segment extraction outcome for the resource a request targets.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Target<'a> {
@@ -97,6 +106,17 @@ pub fn extract_target<'a>(method: &Method, path: &'a str) -> Target<'a> {
                     // may see the list; attribution writes are gated
                     // separately at owner ∨ admin inside the handler).
                     ("GET", "permissions") => Target::Node(id),
+                    // ADR-089 D4 / ADR-091 §5.7: the LSP relay passthrough
+                    // and the LSP registry admin proxy each evaluate the
+                    // ADR-087 predicates *inline* (read → `can_view`, write
+                    // → `can_manage`) because they must also decide the
+                    // 404-vs-403 shape and the relay-readiness gate. A second
+                    // generic gate here would disagree with the handler — for
+                    // a guest on a private node this one would allow the read
+                    // the handler deliberately tiers, and a manage-only arm
+                    // would 403 a `public` node's reader. Handled = the
+                    // proxy is the single enforcement point.
+                    (_, rest) if is_lsp_proxy_rest(rest) => Target::None,
                     _ => Target::None,
                 }
             }
@@ -771,6 +791,27 @@ mod tests {
             extract_target(&Method::PATCH, "/api/nodes/n-1/guests"),
             Target::Node("n-1")
         );
+        // The LSP proxies gate themselves — the middleware must stay out of
+        // the way, on reads *and* writes (ADR-089 D4, ADR-091 §5.7).
+        assert_eq!(
+            extract_target(&Method::GET, "/api/nodes/n-1/lsp/api/lsp/status"),
+            Target::None
+        );
+        assert_eq!(
+            extract_target(&Method::GET, "/api/nodes/n-1/lsp-admin/servers"),
+            Target::None
+        );
+        assert_eq!(
+            extract_target(&Method::DELETE, "/api/nodes/n-1/lsp-admin/servers/rust"),
+            Target::None
+        );
+        // A node route whose first segment merely starts with those letters
+        // stays on the normal (currently ungated) node path.
+        assert!(!is_lsp_proxy_rest("lsps-state"));
+        assert!(!is_lsp_proxy_rest(""));
+        assert!(is_lsp_proxy_rest("lsp"));
+        assert!(is_lsp_proxy_rest("lsp/api/lsp/status"));
+        assert!(is_lsp_proxy_rest("lsp-admin/servers"));
         // fs browse carries the node id in the query, not the path.
         assert_eq!(
             extract_target(&Method::GET, "/api/fs/browse"),

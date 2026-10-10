@@ -11,6 +11,15 @@
 //! - every ready/unavailable transition now PUBLISHES the retained
 //!   `acowork/nodes/{node_id}/lsps` (AvailableLsps) + sidecar status
 //!   topic — the Gateway version left this as `TODO(sidecar-mqtt)`.
+//! - ADR-091 §5.6: a configuration change (custom server added / edited /
+//!   removed) is propagated by an explicit restart request on an mpsc
+//!   channel. The relay has no hot reload (`OnceLock`, one load per
+//!   process), so the only way a registry write reaches it is a process
+//!   restart — debounced, because one UI submit can be several writes, and
+//!   reported to the caller as `willRestart` because it drops the editors'
+//!   LSP Websockets.
+//! - ADR-091 §5.8: the ready transition kicks off an install-state
+//!   convergence (the relay probes, the Node writes the runtime file).
 //!
 //! See ADR-019 for the supervisor design rationale.
 
@@ -25,11 +34,21 @@ use acowork_core::supervisor::{
     parse_sse_frame,
 };
 
-use crate::state::SharedNodeState;
+use crate::lsp_registry::SharedLspRegistry;
+use crate::state::{LspRelayRestartRequest, SharedNodeState};
+use tokio::sync::mpsc;
 
 use super::lsp_relay::{
     check_lsp_relay_health, kill_lsp_relay, spawn_lsp_relay,
 };
+
+/// §5.6-1: restart requests arriving within this window collapse into a
+/// single relay restart (one form submit is add + set-args + install).
+const RESTART_DEBOUNCE: Duration = Duration::from_millis(1_000);
+
+/// Upper bound on the collapse window — a UI that keeps writing must not be
+/// able to postpone the restart indefinitely.
+const RESTART_DEBOUNCE_MAX: Duration = Duration::from_millis(3_000);
 
 /// Shared HTTP client for LSP Relay supervisor REST calls
 /// (short-lived `/health`, `/events` probe, …). Reusing a single
@@ -92,6 +111,13 @@ pub struct LspRelaySupervisorConfig {
     /// [`super::lsp_relay::relay_bind_host`] at construction so spawn
     /// and probe can never diverge (the §2.2 disappearing-node bug).
     pub bind_host: String,
+    /// ADR-091 D16: the two directories the relay child is told about —
+    /// `{node_home}` for the runtime registry, the resource dir for the
+    /// preset + install scripts. Injected explicitly on the spawn command
+    /// instead of relying on inherited env.
+    pub dirs: super::lsp_relay::LspRelayDirs,
+    /// The registry to converge after every ready transition (§5.8 a).
+    pub lsp_registry: SharedLspRegistry,
 }
 
 /// Publish the retained node-local LSP state through the process-wide
@@ -114,7 +140,15 @@ async fn publish_lsps_state(cfg: &LspRelaySupervisorConfig, ready: bool) {
 /// (migrated from the Gateway's startup block), reap the child, and
 /// supervise via SSE. Runs until the relay is intentionally removed or
 /// the node process exits.
-pub fn start_lsp_relay_supervisor(cfg: LspRelaySupervisorConfig, state: SharedNodeState) {
+///
+/// `restart_rx` is the config-restart channel (ADR-091 §5.6): the write
+/// routes hand the supervisor a request instead of touching the process
+/// table themselves.
+pub fn start_lsp_relay_supervisor(
+    cfg: LspRelaySupervisorConfig,
+    state: SharedNodeState,
+    restart_rx: mpsc::UnboundedReceiver<LspRelayRestartRequest>,
+) {
     let port = cfg.port;
     tokio::spawn(async move {
         // ── Initial attach-or-spawn (ADR-055 §6.7, §6.11 local node) ──
@@ -130,7 +164,7 @@ pub fn start_lsp_relay_supervisor(cfg: LspRelaySupervisorConfig, state: SharedNo
                 state.write().await.lsp_relay_process = Some(relay_state);
                 publish_lsps_state(&cfg, relay_ready).await;
             } else {
-                match spawn_lsp_relay(&cfg.data_dir, port, &cfg.health_url, &cfg.bind_host)
+                match spawn_lsp_relay(&cfg.data_dir, port, &cfg.health_url, &cfg.bind_host, &cfg.dirs)
                     .await
                 {
                     Ok((relay_state, child)) => {
@@ -175,18 +209,20 @@ pub fn start_lsp_relay_supervisor(cfg: LspRelaySupervisorConfig, state: SharedNo
                 }
             }
         }
-        run_supervisor(cfg, state, port).await;
+        run_supervisor(cfg, state, port, restart_rx).await;
     });
 }
 
 /// Long-running supervisor. Monitors the LSP Relay child via SSE; on
 /// heartbeat timeout or connection failure, restarts the relay with
 /// exponential backoff. Gives up after MAX_RESTART_ATTEMPTS recent
-/// failures.
+/// failures. A config restart (`MonitorExit::ConfigRestart`) is asked for
+/// by the operator, so it bypasses both the backoff and the crash budget.
 async fn run_supervisor(
     cfg: LspRelaySupervisorConfig,
     state: SharedNodeState,
     port: u16,
+    mut restart_rx: mpsc::UnboundedReceiver<LspRelayRestartRequest>,
 ) {
     let mut history = RestartHistory::new();
     let mut in_startup_grace = true;
@@ -219,12 +255,18 @@ async fn run_supervisor(
     }
 
     loop {
-        let exit_reason = match run_monitor_session(&cfg, &state, port, &mut in_startup_grace).await {
+        let exit_reason = match run_monitor_session(&cfg, &state, port, &mut in_startup_grace, &mut restart_rx).await {
             MonitorExit::Clean => {
                 tracing::info!("LSP Relay monitor session ended cleanly");
                 return;
             }
-            exit @ MonitorExit::HeartbeatTimeout { .. } | exit @ MonitorExit::ConnectionLost => exit,
+            MonitorExit::ConfigRestart => {
+                let merged = drain_restart_requests(&mut restart_rx).await;
+                tracing::info!(merged, "Restarting LSP Relay to pick up a registry change");
+                restart_for_config(&cfg, &state, port).await;
+                continue;
+            }
+            exit @ (MonitorExit::HeartbeatTimeout { .. } | MonitorExit::ConnectionLost) => exit,
         };
 
         if in_startup_grace {
@@ -258,7 +300,8 @@ async fn run_supervisor(
                     continue;
                 }
             }
-            MonitorExit::Clean => unreachable!(),
+            // Handled above; the crash path below only sees the other two.
+            MonitorExit::ConfigRestart | MonitorExit::Clean => unreachable!(),
         }
 
         if lsp_relay_alive(&state, &cfg.bind_host, port).await {
@@ -295,7 +338,7 @@ async fn run_supervisor(
         tracing::info!(attempt = attempts, ?backoff, "Restarting LSP Relay process");
         sleep(backoff).await;
 
-        match spawn_lsp_relay(&cfg.data_dir, port, &cfg.health_url, &cfg.bind_host).await {
+        match spawn_lsp_relay(&cfg.data_dir, port, &cfg.health_url, &cfg.bind_host, &cfg.dirs).await {
             Ok((new_state, child)) => {
                 tracing::info!(pid = new_state.pid, port = new_state.port, attempt = attempts, "LSP Relay restarted");
                 {
@@ -365,6 +408,104 @@ enum MonitorExit {
     Clean,
     HeartbeatTimeout { elapsed_secs: u64 },
     ConnectionLost,
+    /// A write route asked the relay to reload the registry (§5.6).
+    ConfigRestart,
+}
+
+/// Collapse a burst of restart requests into one (§5.6-1).
+///
+/// Returns how many requests the single restart will cover. The window is
+/// extended by each arriving request but capped at
+/// [`RESTART_DEBOUNCE_MAX`], so a UI that keeps writing cannot postpone the
+/// restart forever.
+async fn drain_restart_requests(rx: &mut mpsc::UnboundedReceiver<LspRelayRestartRequest>) -> usize {
+    let mut merged = 0usize;
+    while rx.try_recv().is_ok() {
+        merged += 1;
+    }
+    let deadline = Instant::now() + RESTART_DEBOUNCE_MAX;
+    while Instant::now() < deadline {
+        match tokio::time::timeout(RESTART_DEBOUNCE, rx.recv()).await {
+            Ok(Some(_)) => merged += 1,
+            // Timeout, or the sender was dropped (no more requests possible).
+            _ => break,
+        }
+    }
+    merged
+}
+
+/// Restart the relay so it re-reads `{node_home}/lsp_servers.json` (§5.6
+/// step 2).
+///
+/// Deliberately bypasses the crash backoff and the [`RestartHistory`]
+/// budget: this restart was requested by the operator, not caused by a
+/// failure, so counting it towards "give up after N crashes" would let a
+/// user editing several servers permanently disable their LSP tooling.
+async fn restart_for_config(cfg: &LspRelaySupervisorConfig, state: &SharedNodeState, port: u16) {
+    let pid = state.read().await.lsp_relay_process.as_ref().map(|e| e.pid);
+    if let Some(pid) = pid.filter(|pid| *pid != 0) {
+        let _ = kill_lsp_relay(pid).await;
+    }
+    {
+        let mut s = state.write().await;
+        s.lsp_relay_process = None;
+    }
+    publish_lsps_state(cfg, false).await;
+
+    match spawn_lsp_relay(&cfg.data_dir, port, &cfg.health_url, &cfg.bind_host, &cfg.dirs).await {
+        Ok((new_state, child)) => {
+            tracing::info!(
+                pid = new_state.pid,
+                port = new_state.port,
+                "LSP Relay restarted after a registry change"
+            );
+            {
+                let mut s = state.write().await;
+                s.lsp_relay_process = Some(new_state.clone());
+            }
+            let child_pid = new_state.pid;
+            let state_for_reaper = state.clone();
+            tokio::spawn(async move {
+                let mut child = child;
+                let _ = child.wait().await;
+                tracing::warn!(pid = child_pid, "LSP Relay (config restart) exited");
+                let mut s = state_for_reaper.write().await;
+                let still_ours = s
+                    .lsp_relay_process
+                    .as_ref()
+                    .map(|eps| eps.pid == child_pid)
+                    .unwrap_or(false);
+                if still_ours {
+                    s.lsp_relay_process = None;
+                }
+            });
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to restart LSP Relay after a registry change");
+            return;
+        }
+    }
+
+    // Same grace window as the crash path, so the next monitor session does
+    // not treat a booting relay as a heartbeat timeout.
+    let deadline = Instant::now() + supervisor_defaults::STARTUP_GRACE;
+    loop {
+        if try_connect_events(&cfg.bind_host, port).await {
+            tracing::info!("Restarted LSP Relay is serving /events");
+            break;
+        }
+        if state.read().await.lsp_relay_process.is_none() {
+            tracing::warn!("LSP Relay died during the post-restart grace window");
+            break;
+        }
+        if Instant::now() >= deadline {
+            tracing::warn!(
+                "LSP Relay did not serve /events within the post-restart grace window"
+            );
+            break;
+        }
+        sleep(supervisor_defaults::STARTUP_POLL).await;
+    }
 }
 
 /// Run one SSE session: connect to /events, parse events, update shared
@@ -374,6 +515,7 @@ async fn run_monitor_session(
     state: &SharedNodeState,
     port: u16,
     in_startup_grace: &mut bool,
+    restart_rx: &mut mpsc::UnboundedReceiver<LspRelayRestartRequest>,
 ) -> MonitorExit {
     let url = format!("http://{}:{port}/events", cfg.bind_host);
     tracing::info!(%url, "Connecting to LSP Relay SSE event stream");
@@ -420,6 +562,17 @@ async fn run_monitor_session(
             // ADR-055 §6.7: ready transition → publish AvailableLsps
             // with the advertise-host endpoint.
             publish_lsps_state(cfg, true).await;
+            // ADR-091 §5.8 trigger (a): the relay is answering, so pull its
+            // probe result into `install_state`. Not forced — a fresh relay
+            // has an empty status cache and will probe for real either way,
+            // while a relay that merely reconnected should serve from TTL.
+            crate::lsp_converge::spawn_converge(
+                cfg.lsp_registry.clone(),
+                cfg.bind_host.clone(),
+                cfg.port,
+                false,
+                "relay-ready",
+            );
         }
     }
 
@@ -433,6 +586,12 @@ async fn run_monitor_session(
 
     loop {
         tokio::select! {
+            // Refutable pattern: a dropped sender makes `recv()` return `None`
+            // once, which disables this branch — the SSE session keeps running
+            // rather than spinning on an exhausted channel.
+            Some(_request) = restart_rx.recv() => {
+                return MonitorExit::ConfigRestart;
+            }
             status = watchdog.tick() => {
                 match status {
                     HeartbeatStatus::Ok => {}
@@ -522,6 +681,11 @@ mod tests {
             node_id: "local".to_string(),
             advertise_host: "127.0.0.1".to_string(),
             bind_host: "127.0.0.1".to_string(),
+            dirs: super::super::lsp_relay::LspRelayDirs {
+                config_dir: std::path::PathBuf::from("/tmp/acowork-node"),
+                asset_dir: None,
+            },
+            lsp_registry: crate::lsp_registry::for_tests(std::path::Path::new("/tmp/acowork-node"), None),
         }
     }
 
@@ -542,9 +706,43 @@ mod tests {
             node_id: "gpu-1".to_string(),
             advertise_host: "192.168.1.10".to_string(),
             bind_host: "127.0.0.1".to_string(),
+            dirs: super::super::lsp_relay::LspRelayDirs {
+                config_dir: std::path::PathBuf::from("/tmp"),
+                asset_dir: Some(std::path::PathBuf::from("/tmp/assets")),
+            },
+            lsp_registry: crate::lsp_registry::for_tests(std::path::Path::new("/tmp"), None),
         };
         assert_eq!(cfg.port, 0);
         assert_eq!(cfg.advertise_host, "192.168.1.10");
+        // D16: the runtime dir and the preset asset dir are separate knobs.
+        assert_eq!(cfg.dirs.config_dir, std::path::PathBuf::from("/tmp"));
+        assert_eq!(cfg.dirs.asset_dir, Some(std::path::PathBuf::from("/tmp/assets")));
+    }
+
+    /// §5.6-1: a burst of write routes must cost one restart, not N.
+    #[tokio::test]
+    async fn restart_requests_collapse_into_one() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        for _ in 0..3 {
+            tx.send(LspRelayRestartRequest { reason: "form-submit" }).unwrap();
+        }
+        assert_eq!(drain_restart_requests(&mut rx).await, 3);
+        // Drained, so the next restart request starts a fresh window.
+        assert_eq!(drain_restart_requests(&mut rx).await, 0);
+    }
+
+    /// A request landing inside the window is merged rather than triggering a
+    /// second restart (the add → set-args → install sequence).
+    #[tokio::test]
+    async fn a_request_inside_the_window_is_merged() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        tx.send(LspRelayRestartRequest { reason: "added" }).unwrap();
+        let late_tx = tx.clone();
+        tokio::spawn(async move {
+            sleep(Duration::from_millis(200)).await;
+            let _ = late_tx.send(LspRelayRestartRequest { reason: "updated" });
+        });
+        assert_eq!(drain_restart_requests(&mut rx).await, 2);
     }
 
     #[test]

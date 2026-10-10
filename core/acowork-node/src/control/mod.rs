@@ -1203,6 +1203,33 @@ impl NodeControlPlane {
         // The rename route (ADR-075 D4) writes `identity.json` under
         // `config.home` and rebuilds the info snapshot with it.
         let proxy_config = config.clone();
+
+        // ── ADR-091: LSP registry + relay control ──
+        // Load + merge + persist BEFORE any route or relay child can read the
+        // registry, so the first boot is what creates
+        // `{node_home}/lsp_servers.json` (§5.6 steps 1-2).
+        let lsp_asset_dir = acowork_core::lsp::lsp_asset_dir_from_env();
+        let lsp_registry =
+            crate::lsp_registry::LspRegistry::load(&config.home, lsp_asset_dir.clone()).await;
+        // ADR-089 D1: spawn and probe share one bind host. ADR-091 D16: the
+        // runtime dir and the preset asset dir are two separate variables.
+        let lsp_bind_host = crate::sidecar::lsp_relay::relay_bind_host(
+            config.expose_lsp_relay,
+            &config.advertise_host,
+        );
+        let lsp_dirs = crate::sidecar::lsp_relay::LspRelayDirs {
+            config_dir: config.home.clone(),
+            asset_dir: lsp_asset_dir,
+        };
+        // Config-restart channel (§5.6): the write routes send requests, the
+        // supervisor owns the receiver and debounces them.
+        let (restart_tx, restart_rx) = tokio::sync::mpsc::unbounded_channel();
+        let lsp_relay = crate::state::LspRelayControl {
+            bind_host: lsp_bind_host.clone(),
+            port: config.lsp_relay_port,
+            restart: restart_tx,
+        };
+        let lsp_registry_for_supervisor = lsp_registry.clone();
         // Signals that the node HTTP server (hosting `/health`) is
         // bound — the LSP relay sidecar start waits for this so the
         // relay's parent-health watchdog has a live target from birth.
@@ -1219,11 +1246,15 @@ impl NodeControlPlane {
                 node: proxy_state.clone(),
                 identity: http_identity,
                 config: proxy_config,
+                lsp: lsp_registry,
+                lsp_relay,
             };
             let app = crate::proxy::router(node_http_state.clone())
                 .merge(crate::fs_browse::router(node_http_state.clone()))
                 .merge(crate::package_http::router(node_http_state.clone()))
-                .merge(crate::node_api::router(node_http_state));
+                .merge(crate::node_api::router(node_http_state.clone()))
+                // ADR-091 §5.5: the eight `/lsp/...` registry routes.
+                .merge(crate::lsp_api::router(node_http_state));
             let listener = match tokio::net::TcpListener::bind(&proxy_bind).await {
                 Ok(l) => l,
                 Err(e) => {
@@ -1259,12 +1290,16 @@ impl NodeControlPlane {
                 advertise_host: config.advertise_host.clone(),
                 // ADR-089 D1: bind + probe share one host (loopback
                 // unless the operator set --expose-lsp-relay).
-                bind_host: crate::sidecar::lsp_relay::relay_bind_host(
-                    config.expose_lsp_relay,
-                    &config.advertise_host,
-                ),
+                bind_host: lsp_bind_host,
+                // ADR-091 D16: injected on the relay command, not inherited.
+                dirs: lsp_dirs,
+                lsp_registry: lsp_registry_for_supervisor,
             };
-            crate::sidecar::lsp_relay_supervisor::start_lsp_relay_supervisor(sup_cfg, state.clone());
+            crate::sidecar::lsp_relay_supervisor::start_lsp_relay_supervisor(
+                sup_cfg,
+                state.clone(),
+                restart_rx,
+            );
         }
 
         // Process-level self-watchdog: probe our own `/health` from a
