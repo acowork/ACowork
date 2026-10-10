@@ -326,7 +326,7 @@ pub async fn auth_middleware(
   - `revoked_families.txt` 每条条目改为 `entry\t{unix秒}`，无时间戳的 legacy 行按文件 mtime 继承（**fail closed**，存量撤销不失效），旧文件无需迁移。
   - `{user_id}.*` 的语义从"永远"改为"**撤销 `iat <= cutoff` 的全部 family**"。新登录的 `iat` 必然晚于 cutoff，因此通配条目对"下一次登录"天然免疫——误判不再需要人工清理，登录本身就是恢复路径（回归测试 `a_misjudged_replay_recovers_on_the_next_login`）。
   - `r:` 条目带时间戳，`REFRESH_REUSE_GRACE_SECS = 10` 内的重复呈现只拒绝**这一次**请求，不连坐整条链；超窗才 `revoke_user`。宽限不能无限延长：合法轮换间隔约 13 分钟 ≫ 10 秒，攻击者重放旧 token 仍会落在窗外（`refresh_rotates_and_replay_inside_grace_spares_the_chain` / `refresh_replay_outside_grace_kills_the_whole_chain`）。
-  - `r:` 标记**必须前进**（last write wins）：每次轮换铸造的是同一 family 的后继 token，把标记冻在第一次轮换时间戳上，会让*下一次*轮换的并发重复对上一个陈旧时间戳求差、被判超窗而连坐——正是要防的假阳性。它不可能被拖成永久宽限（同上，13 分钟 ≫ 10 秒）。回归测试 `rotation_stamp_tracks_the_latest_spend`。
+  - `r:` 标记在正常流程中**每个 family 只写一次**：每次轮换铸造的是**全新** family（而非同一 family 的后继），重放在 `rotated_at` 处即被拦截，走不到第二次标记。`mark_rotated` 仍保留单调守卫（时间戳只前进不回退，last write wins），但这只是针对重试落盘 / 时钟抖动的防御——回退会缩短攻击者重放该 token 需要跨过的复用窗口。宽限窗口本身不依赖标记前进：两次相隔几毫秒的刷新共用同一个已写入的时间戳。回归测试 `rotation_stamp_tracks_the_latest_spend`。
   - `revoke_user` / `revoke_family` 签名新增 `now`；四处调用点（改密 / 禁用 / 重置 / 复用连坐）全部显式传 `now`。
 
 **`AuthContext` 注入后下游 handler 的写法**：

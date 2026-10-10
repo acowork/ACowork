@@ -76,6 +76,12 @@ let pair: Pair | null = null;
 let inflight: Promise<boolean> | null = null;
 let timer: ReturnType<typeof setTimeout> | null = null;
 let stalledRotations = 0;
+/**
+ * Bumped on every teardown. A rotation captures it before its round-trip and
+ * drops the result if the value changed while it was in flight, so a sign-out
+ * cannot be undone by a refresh that happens to succeed after it.
+ */
+let epoch = 0;
 
 const tokenListeners = new Set<(token: string | null) => void>();
 const endListeners = new Set<() => void>();
@@ -162,17 +168,27 @@ function rotate(): Promise<boolean> {
   if (!transport || !pair) return Promise.resolve(false);
 
   const refreshToken = pair.refreshToken;
+  const session = epoch;
   const attempt = (async () => {
     try {
       const next = await transport!.refresh(refreshToken);
+      // A sign-out during the round-trip bumped the epoch: this rotation
+      // belongs to a session that is already gone. Adopting would resurrect
+      // it and write the pair back to storage for the reloaded page to pick
+      // up — the user silently logged back in.
+      if (session !== epoch) return false;
       adopt(next);
       return true;
     } catch (err) {
+      if (session !== epoch) return false; // cleared mid-flight; verdict moot
       log.warn("[sessionTokens] rotation failed — ending the session:", err);
       end();
       return false;
     } finally {
-      inflight = null;
+      // Only release the shared slot when this attempt still owns it. A
+      // rotation that began before a `clear()` must not null the `inflight`
+      // of the next session that adopts afterwards.
+      if (session === epoch) inflight = null;
     }
   })();
   // Assigned before the first await of the *caller*, and the IIFE above
@@ -215,6 +231,7 @@ export function restore(): boolean {
  *  and notifies exactly once instead of twice. */
 export function clear(): void {
   if (!pair && inflight === null && timer === null) return;
+  epoch += 1;
   pair = null;
   inflight = null;
   disarm();

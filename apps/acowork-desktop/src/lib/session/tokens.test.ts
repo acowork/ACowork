@@ -276,6 +276,36 @@ describe("signOut", () => {
   });
 });
 
+describe("sign-out during an in-flight rotation", () => {
+  it("drops the late rotation instead of resurrecting the signed-out session", async () => {
+    // The race this guards: a proactive rotation is on the wire when the user
+    // signs out. If the refresh then succeeds, `adopt()` must NOT write the
+    // pair back — otherwise the reloaded page restores it and the user is
+    // silently logged in again.
+    adopt(pair(900));
+    const stale = current()!;
+
+    let resolveRefresh!: (v: { access_token: string; refresh_token: string }) => void;
+    refresh.mockImplementationOnce(
+      () =>
+        new Promise((r) => {
+          resolveRefresh = r;
+        }),
+    );
+
+    const rejected = reportRejected(stale); // starts a rotation, awaits transport
+    await Promise.resolve(); // let rotate suspend at `transport.refresh`
+    void signOut(); // clears the session and bumps the epoch
+    resolveRefresh(pair(900, "late")); // the abandoned rotation now succeeds
+
+    expect(await rejected).toBeNull();
+    expect(current()).toBeNull();
+    expect(localStorage.getItem("acowork.auth.tokens")).toBeNull();
+    // The late `adopt` was suppressed, so the fresh pair never reached storage.
+    expect(refresh).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("session-end signal", () => {
   it("fires once per death, not on an explicit clear", async () => {
     adopt(pair(900));

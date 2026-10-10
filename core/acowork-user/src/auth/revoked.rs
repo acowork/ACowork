@@ -141,12 +141,16 @@ impl RevokedFamilies {
 
     /// Record a family as spent by rotation (single-use refresh token).
     ///
-    /// Last write wins, unlike the revocation markers: each rotation of a
-    /// family issues a successor in that *same* family, so the marker has to
-    /// track the most recent spend. Freezing it at the first rotation would
-    /// judge every later duplicate against a 13-minute-old timestamp and
-    /// revoke a chain that is behaving perfectly normally — the exact false
-    /// positive this grace window exists to prevent.
+    /// In the normal flow this is written exactly once per family: every
+    /// rotation mints a *fresh* family, and a replay is caught at
+    /// [`Self::rotated_at`] in `AuthService::refresh` before it could mark the
+    /// same family twice. The monotonic guard below is purely defensive — a
+    /// retried persist or clock skew must never move an already-recorded spend
+    /// backwards, since regressing the stamp would shrink the reuse window an
+    /// attacker replaying this token has to clear. The grace window does not
+    /// depend on the stamp advancing: two refreshes a few ms apart share one
+    /// already-set stamp, so the second computes `now - rotated_at ≈ 0` and
+    /// stays inside it.
     pub fn mark_rotated(&mut self, family: &str, now: i64) -> Result<(), String> {
         let key = format!("{ROTATED}{family}");
         if self.entries.get(&key).is_some_and(|t| *t >= now) {
@@ -309,15 +313,12 @@ mod tests {
 
     #[test]
     fn rotation_stamp_tracks_the_latest_spend() {
-        // Each rotation issues a successor in the SAME family, so the marker
-        // must move forward. Freezing it at the first spend would judge every
-        // later duplicate against a stale stamp and revoke a chain that is
-        // behaving normally — the false positive the grace window exists to
-        // prevent.
-        //
-        // This cannot widen the window forever: the grace is 10s and a
-        // legitimate rotation is ~13 minutes apart, so an attacker replaying
-        // an old token still lands outside it and trips the revocation.
+        // Not the normal flow (a family is marked once — each rotation mints a
+        // fresh family, and a replay is caught at `rotated_at` before another
+        // mark). This pins the *defensive* monotonic guard: a second mark for
+        // the same family, from a retried persist or clock skew, must keep the
+        // newest stamp and never regress to an older one — regressing it would
+        // shorten the window a replaying attacker has to clear.
         let p = tmp_path("stamp-advances");
         let mut r = RevokedFamilies::load(&p);
         r.mark_rotated("u-1.abc", T0).unwrap();
