@@ -700,6 +700,12 @@ pub fn run() {
             // chat panel can upload files copied from the OS file manager
             // (WebView2 doesn't expose paths in ClipboardEvent).
             commands::clipboard::get_clipboard_file_paths,
+            // Persist a clipboard image Blob to a temp file so the
+            // path-based `upload_file` pipeline can pick it up. Bridges
+            // the gap where screenshot tools put CF_BITMAP on the
+            // clipboard (no CF_HDROP, no text/plain) — see
+            // `commands::clipboard::save_clipboard_blob` docs.
+            commands::clipboard::save_clipboard_blob,
             // Pre-flight file-size lookup so the chat panel can reject
             // oversized attachments (≥ 50 MiB runtime cap) BEFORE the
             // multipart roundtrip. See `commands::chat::get_file_size`.

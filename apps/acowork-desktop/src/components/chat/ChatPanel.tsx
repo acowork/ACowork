@@ -13,6 +13,7 @@ import { cn } from "../../lib/utils";
 import { CAPSULE_PANE_CN } from "../common/capsule";
 import { fetchProviderModels } from "../../lib/gateway-api";
 import { startAgentAndSyncUI } from "../../lib/agent-start";
+import { blobToBase64, extensionForMime } from "./clipboardImageExt";
 import { listRowHover, menuItemHover, menuItemSelected, toolbarIconButton } from "../../lib/ui-styles";
 import { AddProviderFlow } from "../harness/AddProviderFlow";
 import * as sessionControl from "../../lib/session-control";
@@ -1870,6 +1871,62 @@ export function ChatPanel() {
       return;
     }
 
+    // Raster image on the clipboard (screenshot tool Ctrl+C). Two
+    // surfaces to try:
+    //
+    //   1. `clipboardData.items` — synchronous, populated by Chromium
+    //      itself when the in-WebView "Copy image" path fires. Saves
+    //      an async roundtrip but is empty for OS screenshot tools
+    //      (which hand the OS a `CF_BITMAP`, not a DOM-serialised
+    //      image).
+    //
+    //   2. `navigator.clipboard.read()` — async, the only path that
+    //      surfaces the OS clipboard's `CF_BITMAP` / `CF_PNG` data
+    //      inside the WebView. The `paste` event is itself the
+    //      user-activation gate that lets `clipboard.read()` succeed
+    //      without a permission prompt.
+    //
+    // The `paste` event also fires before the user's first gesture
+    // expires the activation, so both calls are auth-free here.
+    //
+    // ponytail: WebView2 has surfaced `image/png` from `clipboard.read()`
+    // since Edge 98 (Feb 2022). Tauri v2 requires Edge ≥ 109 (Jan 2023),
+    // so every shipping build supports this. The async fallback path
+    // is unconditional — no version check — because the alternative
+    // (feature-detect) costs a roundtrip on every paste.
+    const imageFromDataTransfer = await extractInlineImage(cd);
+    const imageBlob = imageFromDataTransfer?.blob
+      ?? (await readClipboardImageBlob());
+    if (imageBlob) {
+      const extension = imageFromDataTransfer?.extension
+        ?? extensionForMime(imageBlob.type);
+      // Bridge to the existing path-based upload pipeline: hand the
+      // bytes to the Rust temp-file writer, then feed the returned
+      // path into the same `uploadFileAtPath` the paperclip uses.
+      // The pipeline handles size cap, image dimension probing, and
+      // the pending → done chip transition — see `uploadFileAtPath`.
+      //
+      // Transport is base64, NOT `Array.from(bytes)`: a JSON number
+      // array costs ~4 text bytes + one boxed JS value per image byte,
+      // so a 4K screenshot would stall the WebView main thread.
+      // `readAsDataURL` is native, handles any size, and avoids the
+      // `btoa(String.fromCharCode(...))` chunking trap entirely.
+      try {
+        const path = await invoke<string>("save_clipboard_blob", {
+          dataBase64: await blobToBase64(imageBlob),
+          extension,
+        });
+        void uploadFileAtPath(path);
+        return;
+      } catch (err) {
+        // Failure here is rare (disk full, perms on temp dir) — fall
+        // through to the silent no-op so the user can try a different
+        // paste method. Surface to the debug log so the issue isn't
+        // invisible.
+        log.error("[ChatPanel] save_clipboard_blob failed", err);
+      }
+    }
+
     // Last-resort: some WebViews populate `cd.files` even when
     // text/plain is empty and CF_HDROP is absent. Each File has only
     // `name` (no path), so we can't upload — but inserting the
@@ -1885,6 +1942,71 @@ export function ChatPanel() {
     // about "user sees *some* response" — the previous default-paste
     // fallback was the source of the double-paste bug).
   }, [insertTextAtCaret, uploadFileAtPath]);
+
+/**
+ * Try to pull a raster image out of the paste event without an
+ * async `clipboard.read()` roundtrip. Modern Chromium populates
+ * `clipboardData.items` with `kind=file, type=image/*` for the
+ * WebView's own copy-to-clipboard path; third-party screenshot
+ * tools (Windows Snipping Tool, Snipaste, ShareX) typically do
+ * NOT — they hand the OS a `CF_BITMAP` and the WebView sees no
+ * DOM-level image item, only the async `ClipboardItem` surface.
+ *
+ * Returns the blob + the file extension (without leading dot) the
+ * Rust writer should use, or `null` when no inline image is
+ * available and the caller should fall back to `clipboard.read()`.
+ */
+async function extractInlineImage(
+  cd: DataTransfer,
+): Promise<{ blob: Blob; extension: string } | null> {
+  for (let i = 0; i < cd.items.length; i++) {
+    const it = cd.items[i];
+    if (it.kind !== "file") continue;
+    const type = it.type;
+    if (!type.startsWith("image/")) continue;
+    const file = it.getAsFile();
+    if (!file) continue;
+    return { blob: file, extension: extensionForMime(type) };
+  }
+  return null;
+}
+
+/**
+ * Pull a raster image `Blob` from the OS clipboard via the async
+ * Clipboard API. Returns `null` if the clipboard holds no image or
+ * the API is denied (the latter is rare in Tauri WebView2 but we
+ * log it so the cause is visible during debugging).
+ *
+ * Preference order: `image/png` (lossless, native WebView2 surface
+ * for the Windows Snipping Tool since 22H2), then any other raster
+ * MIME the OS provides. We do NOT request `text/html` / `text/plain`
+ * here — the synchronous `text` branch above already handled that.
+ */
+async function readClipboardImageBlob(): Promise<Blob | null> {
+  if (typeof navigator === "undefined" || !navigator.clipboard?.read) {
+    return null;
+  }
+  try {
+    const items = await navigator.clipboard.read();
+    // Prefer PNG so the bytes are lossless and the existing image
+    // pipeline (which probes width/height via `new Image()`) gets a
+    // format the runtime accepts without conversion.
+    const pngItem = items.find((it) => it.types.includes("image/png"));
+    const anyImageItem = items.find((it) =>
+      it.types.some((t) => t.startsWith("image/")),
+    );
+    const picked = pngItem ?? anyImageItem;
+    if (!picked) return null;
+    const mime = picked.types.find((t) => t.startsWith("image/")) ?? "image/png";
+    return await picked.getType(mime);
+  } catch (err) {
+    log.debug(
+      "[ChatPanel] navigator.clipboard.read() failed (no image on clipboard, or permission denied)",
+      err,
+    );
+    return null;
+  }
+}
 
   /**
    * Right-click handler — always opens our custom context menu because
