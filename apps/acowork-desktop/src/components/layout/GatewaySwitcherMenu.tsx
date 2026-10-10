@@ -230,12 +230,29 @@ export function GatewaySwitcherMenu() {
             <ul className="mt-1 flex max-h-64 flex-col gap-0.5 overflow-auto">
               {rows.map((url) => {
                 const current = url === gatewayUrl;
+                // A row is switchable ONLY once its probe has positively
+                // answered `/health` — a whitelist, not a blacklist of
+                // the failures. Anything else (still in flight, rejected,
+                // never probed) is disabled, because clicking it can only
+                // do one thing: swap a working Gateway for a connection
+                // that then fails `checkHealth`, stranding the user.
+                //
+                // Gating on `fail` alone left the exact window an attacker
+                // — or a user — reaches for: open the menu, click before
+                // the first probe settles. A few hundred ms is all it takes,
+                // and "the row greyed out a moment ago" is the whole answer
+                // to why it now can't be clicked.
+                //
+                // No local-mode exemption is needed: that tab renders
+                // `rows = [gatewayUrl]`, i.e. the current address alone,
+                // which `current` already disables.
+                const reachable = verdicts[url] === "ok";
                 return (
                   <li key={url}>
                     <button
                       type="button"
                       onClick={() => switchTo(url)}
-                      disabled={current}
+                      disabled={current || !reachable}
                       title={url}
                       className={cn(
                         "flex w-full items-center justify-between gap-2 rounded px-2 py-1.5 text-left transition-colors",
@@ -246,6 +263,10 @@ export function GatewaySwitcherMenu() {
                         // utilities), and the active row would grey out
                         // under the cursor exactly when you click it.
                         current ? listRowSelected : listRowHover,
+                        // A disabled row must not light up under the
+                        // cursor while refusing the click (`listRowHover`
+                        // is a bare `hover:` utility with no disabled arm).
+                        !reachable && "cursor-not-allowed opacity-50",
                       )}
                     >
                       <span className="truncate font-mono text-xs">{url}</span>
@@ -266,10 +287,14 @@ export function GatewaySwitcherMenu() {
   );
 }
 
-/** Probe dot for one row. Green only for a host that actually answered
- *  `/health`; grey for pending (no verdict yet) and for a host the probe
- *  rejected. The current address shows its mode label instead of a dot
- *  — the dot's question is "which OTHERS are reachable". */
+/** Probe verdict for one row. Green dot for the ONE state that makes a row
+ *  clickable: a host that actually answered `/health`. Everything else is
+ *  spelled out in words — "testing…" while the probe is still in flight,
+ *  "Disconnected" once it is rejected — because both of those rows are
+ *  disabled, and a disabled row carrying a bare dot that could also mean
+ *  "green but I can't tell" leaves the user hunting for the difference.
+ *  The current address shows its mode label instead — the dot's question
+ *  is "which OTHERS are reachable". */
 function RowVerdict({
   verdict,
   current,
@@ -291,13 +316,25 @@ function RowVerdict({
       </span>
     );
   }
+  if (verdict === "fail") {
+    return (
+      <span className="shrink-0 text-11 text-text-tertiary">
+        {t("settings.disconnected")}
+      </span>
+    );
+  }
+  if (!verdict) {
+    // Not disabled for a reason the user can see — the row is greyed out
+    // because it is still being probed, and a bare dot next to it would
+    // look like the "offline" mark the row can't undo yet.
+    return (
+      <span className="shrink-0 text-11 text-text-tertiary">
+        {t("settings.testing")}
+      </span>
+    );
+  }
   return (
-    <span
-      className={cn(
-        "h-1.5 w-1.5 shrink-0 rounded-full",
-        verdict === "ok" ? "bg-emerald-500" : "bg-zinc-300 dark:bg-zinc-600",
-      )}
-    />
+    <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-500" />
   );
 }
 

@@ -69,15 +69,91 @@ describe("GatewaySwitcherMenu", () => {
     setSpy.mockRestore();
   });
 
-  it("clicking another address switches via applyGatewayUrl + checkHealth", () => {
+  it("clicking another address switches via applyGatewayUrl + checkHealth", async () => {
+    probeMock.mockImplementation(async (urls: string[], opts?: { onSettled?: (r: never) => void }) => {
+      urls.forEach((u) => opts?.onSettled?.({ url: u, ok: true, latencyMs: 3 } as never));
+      return [];
+    });
     const applySpy = vi.spyOn(useSettingsStore.getState(), "applyGatewayUrl");
     const checkSpy = vi.spyOn(useGatewayStore.getState(), "checkHealth").mockResolvedValue();
     open();
-    fireEvent.click(screen.getByRole("button", { name: /192\.168\.1\.20/ }));
+    const row = screen.getByRole("button", { name: /192\.168\.1\.20/ });
+    await waitFor(() => expect((row as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(row);
     expect(applySpy).toHaveBeenCalledWith("http://192.168.1.20:19876");
     expect(checkSpy).toHaveBeenCalled();
     applySpy.mockRestore();
     checkSpy.mockRestore();
+  });
+
+  it("disables only the probe-rejected address — a reachable one stays clickable", async () => {
+    // Three rows so "disabled because unreachable" is distinguishable from
+    // "disabled because it is the current address": `.10` is current,
+    // `.20` probes ok, `.30` probes dead.
+    useSettingsStore.setState({
+      gatewayUrlHistory: [
+        "http://192.168.1.10:19876",
+        "http://192.168.1.20:19876",
+        "http://192.168.1.30:19876",
+      ],
+    });
+    probeMock.mockImplementation(async (urls: string[], opts?: { onSettled?: (r: never) => void }) => {
+      urls.forEach((u) =>
+        opts?.onSettled?.({ url: u, ok: !u.includes(".30"), latencyMs: 3 } as never),
+      );
+      return [];
+    });
+    open();
+    await waitFor(() =>
+      expect(
+        (screen.getByRole("button", { name: /192\.168\.1\.30/ }) as HTMLButtonElement).disabled,
+      ).toBe(true),
+    );
+    expect(
+      (screen.getByRole("button", { name: /192\.168\.1\.20/ }) as HTMLButtonElement).disabled,
+    ).toBe(false);
+  });
+
+  it("a probe-rejected address cannot fire applyGatewayUrl", async () => {
+    probeMock.mockImplementation(async (urls: string[], opts?: { onSettled?: (r: never) => void }) => {
+      urls.forEach((u) => opts?.onSettled?.({ url: u, ok: false, latencyMs: 0 } as never));
+      return [];
+    });
+    const applySpy = vi.spyOn(useSettingsStore.getState(), "applyGatewayUrl");
+    open();
+    await waitFor(() =>
+      expect(
+        (screen.getByRole("button", { name: /192\.168\.1\.20/ }) as HTMLButtonElement).disabled,
+      ).toBe(true),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /192\.168\.1\.20/ }));
+    expect(applySpy).not.toHaveBeenCalled();
+    applySpy.mockRestore();
+  });
+
+  it("disables a still-probing address until its probe lands", () => {
+    // The window between opening the menu and the first verdict arriving
+    // is exactly the one an unreachable row is clicked through. Nothing
+    // may be clickable in it — not even a reachable host, because nothing
+    // has been proven yet.
+    probeMock.mockImplementation(async () => []);
+    open();
+    expect(
+      (screen.getByRole("button", { name: /192\.168\.1\.20/ }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+  });
+
+  it("enables a row the moment its probe answers ok", async () => {
+    probeMock.mockImplementation(async (urls: string[], opts?: { onSettled?: (r: never) => void }) => {
+      opts?.onSettled?.({ url: urls[1], ok: true, latencyMs: 3 } as never);
+      return [];
+    });
+    open();
+    await waitFor(() =>
+      expect(
+        (screen.getByRole("button", { name: /192\.168\.1\.20/ }) as HTMLButtonElement).disabled,
+      ).toBe(false),
+    );
   });
 
   it("probes the browsed list on open and does NOT touch gatewayStore.candidates", async () => {
