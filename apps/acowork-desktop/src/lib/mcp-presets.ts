@@ -223,5 +223,8 @@ export function presetToServerConfig(
     headers: {},
     tool_timeout_secs: undefined,
     install: preset.install,
+    // ADR-090 D4: the catalog is the filter truth for "needs a key" —
+    // mirror the preset's requiredEnv into required_secrets at add time.
+    required_secrets: preset.requiredEnv,
   };
 }

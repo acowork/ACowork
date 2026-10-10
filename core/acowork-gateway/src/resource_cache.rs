@@ -719,6 +719,7 @@ mod tests {
     fn test_build_mcp_list_from_catalog() {
         let defs = vec![acowork_core::protocol::McpServerConfigDef {
             name: "test-server".to_string(),
+            display_name: None,
             transport: acowork_core::protocol::McpTransportDef::Stdio,
             command: "node".to_string(),
             args: vec!["server.js".to_string()],
@@ -733,6 +734,7 @@ mod tests {
     fn test_extract_api_key_from_mcp() {
         let config = acowork_core::protocol::McpServerConfigDef {
             name: "test".to_string(),
+            display_name: None,
             env: HashMap::from([
                 ("API_KEY".to_string(), "secret-123".to_string()),
                 ("OTHER_VAR".to_string(), "visible".to_string()),
@@ -747,6 +749,7 @@ mod tests {
     fn test_extract_api_key_from_headers() {
         let config = acowork_core::protocol::McpServerConfigDef {
             name: "test".to_string(),
+            display_name: None,
             headers: HashMap::from([("Authorization".to_string(), "Bearer token-456".to_string())]),
             ..Default::default()
         };

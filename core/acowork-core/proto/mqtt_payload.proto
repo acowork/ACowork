@@ -385,6 +385,12 @@ message McpRef {
   uint64 tool_timeout_secs = 9;  // 0 = no override
   /// Decrypted MCP bearer token (empty = no auth required).
   string auth_token = 10;
+  /// ADR-090: JSON-serialized `McpInstallSpec` (acowork-core protocol) for
+  /// preset-added stdio servers. The Runtime executes the install on first
+  /// enable (health_check-first → run_install → re-check), because the binary
+  /// must land on the machine where the Runtime spawns it. Empty string =
+  /// no install spec (custom server, or npm/uvx lazy-spawn needing none).
+  string install_spec_json = 11;
 }
 
 /// MCP transport type (mirrors McpTransportDef).

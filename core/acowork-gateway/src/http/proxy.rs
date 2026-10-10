@@ -446,6 +446,14 @@ pub fn proxy_routes() -> Router<AppState> {
             "/api/agents/{id}/mcp-servers",
             get(proxy_get_mcp_servers).put(proxy_put_mcp_servers),
         )
+        // ADR-090: first-enable ensure status (probing / installing /
+        // usable / failed+reason). Pure reverse-proxy to the Runtime's
+        // `GET /agents/{id}/mcp-ensure/{name}` — the install runs in the
+        // Agent process, so only the Runtime knows its progress.
+        .route(
+            "/api/agents/{id}/mcp-ensure/{name}",
+            get(proxy_get_mcp_ensure),
+        )
         // ADR-069: per-MCP-server tool-level opt-in. `GET/PUT
         // /api/agents/{id}/mcp-tools` is a pure reverse-proxy to the
         // Runtime's `GET/PUT /agents/{id}/mcp-tools` (added in
@@ -2211,6 +2219,16 @@ async fn proxy_get_mcp_servers(
     headers: HeaderMap,
 ) -> Response {
     let path = format!("/agents/{}/mcp-servers", id);
+    proxy_to_runtime(&state, &id, &path, "", &headers).await
+}
+
+/// Reverse-proxy `GET /api/agents/{id}/mcp-ensure/{name}` (ADR-090).
+async fn proxy_get_mcp_ensure(
+    State(state): State<AppState>,
+    Path((id, name)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let path = format!("/agents/{}/mcp-ensure/{}", id, name);
     proxy_to_runtime(&state, &id, &path, "", &headers).await
 }
 

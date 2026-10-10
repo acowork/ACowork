@@ -859,6 +859,10 @@ impl RuntimeHttpServer {
                 "/agents/{id}/mcp-servers",
                 get(get_agent_mcp_servers).put(put_agent_mcp_servers),
             )
+            // ADR-090: first-enable ensure status (probing / installing /
+            // usable / failed + reason). The Desktop Tools panel polls this
+            // after opening a preset server's toggle.
+            .route("/agents/{id}/mcp-ensure/{name}", get(get_agent_mcp_ensure))
             // ADR-069: per-tool MCP opt-in. GET returns the **full**
             // per-server tool list (name + enabled + description) that
             // the Desktop Tools panel renders directly — the frontend
@@ -3451,6 +3455,27 @@ async fn put_agent_mcp_servers(
     let body = crate::usecases::PutMcpServersBody {
         servers: req.servers,
     };
+    // ADR-090: compute the enable/disable diff BEFORE the service
+    // overwrites `active_names`. Newly-enabled preset servers get an
+    // ensure task (health_check-first → install → re-check, on THIS
+    // machine); newly-disabled ones drop their stale registry entry so
+    // a later re-open starts a clean run (D6: retry = reopen).
+    let prev_active: Vec<String> = crate::agent_config::load_agent_mcp_config(
+        std::path::Path::new(&state.work_dir),
+    )
+    .ok()
+    .flatten()
+    .map(|c| c.active_server_names())
+    .unwrap_or_default();
+    let newly_enabled: Vec<String> = body
+        .servers
+        .iter()
+        .filter(|n| !prev_active.contains(n))
+        .cloned()
+        .collect();
+    for gone in prev_active.iter().filter(|n| !body.servers.iter().any(|s| s == *n)) {
+        crate::mcp_ensure::clear_status(gone);
+    }
     match svc.put_mcp_servers(&id, body).await {
         Ok(resp) => {
             // ADR-069 follow-up: persistence alone is not enough — the
@@ -3469,9 +3494,20 @@ async fn put_agent_mcp_servers(
                 );
                 notifier.notify();
             }
+            // ADR-090 D5: first-enable ensure runs in the Agent process —
+            // the machine the Runtime actually spawns on. Fire-and-forget;
+            // progress is polled via GET /agents/{id}/mcp-ensure/{name}.
+            if !newly_enabled.is_empty() {
+                crate::mcp_ensure::ensure_newly_enabled(
+                    std::path::Path::new(&state.work_dir),
+                    &newly_enabled,
+                    state.mcp_notifier.clone(),
+                );
+            }
             Ok(Json(serde_json::json!({
                 "agent_id": resp.agent_id,
                 "active_servers": resp.active_servers,
+                "ensuring": newly_enabled,
             })))
         }
         Err(crate::usecases::AgentToolsError::UnknownServers(unknown)) => Err((
@@ -3490,8 +3526,33 @@ async fn put_agent_mcp_servers(
     }
 }
 
-// ── Per-agent MCP tools endpoints (ADR-069) ──────────────────────────
-//
+/// `GET /agents/{id}/mcp-ensure/{name}` — ADR-090 first-enable ensure
+/// status for one catalog server. `{"state":"probing"|"installing"|
+/// "usable"|"failed", "error": "..."}` — 404 when the server has never
+/// been ensured in this process (custom/local servers and non-stdio
+/// entries never spawn an ensure task, so polling them is a client bug).
+async fn get_agent_mcp_ensure(
+    State(state): State<HttpState>,
+    Path((id, name)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if !state.instance_matches(&id) {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "instance_id mismatch"})),
+        ));
+    }
+    match crate::mcp_ensure::ensure_status(&name) {
+        Some(status) => Ok(Json(
+            serde_json::to_value(status).unwrap_or_else(|_| serde_json::json!({"state": "failed"})),
+        )),
+        None => Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": format!("no ensure task for '{name}'")})),
+        )),
+    }
+}
+
+// ── Per-agent MCP tools endpoints (ADR-069) ──────────────────────────//
 // These two routes expose the full per-tool opt-in list. The desktop
 // Tools panel renders this list directly (default-collapsed MCP server
 // cards, one switch per tool). The backend is the single source of
@@ -5675,6 +5736,7 @@ mod tests {
             &temp_dir,
             &[acowork_core::protocol::McpServerConfigDef {
                 name: "context7".into(),
+                display_name: None,
                 ..Default::default()
             }],
         )
@@ -6013,12 +6075,14 @@ mod tests {
         fn context7() -> acowork_core::protocol::McpServerConfigDef {
             acowork_core::protocol::McpServerConfigDef {
                 name: "context7".to_string(),
+                display_name: None,
                 ..acowork_core::protocol::McpServerConfigDef::default()
             }
         }
         fn search() -> acowork_core::protocol::McpServerConfigDef {
             acowork_core::protocol::McpServerConfigDef {
                 name: "search".to_string(),
+                display_name: None,
                 ..acowork_core::protocol::McpServerConfigDef::default()
             }
         }

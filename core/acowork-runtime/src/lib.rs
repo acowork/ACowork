@@ -14,6 +14,7 @@ pub mod embedding;
 pub mod episode_distill;
 pub mod error;
 pub mod http;
+pub mod mcp_ensure;
 pub mod mcp_notify;
 pub mod memory;
 pub mod mqtt;

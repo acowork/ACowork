@@ -3,6 +3,12 @@
 //! Manages two concerns:
 //! 1. Global MCP catalog — server definitions + credentials (analogous to Vault for providers)
 //! 2. Per-agent MCP activation — which servers are active for each agent
+//!
+//! ADR-090: install execution moved to the Agent (Runtime) process. Opening
+//! a preset server's toggle triggers ensure (health_check → install →
+//! re-check) on the Agent's machine; the Desktop polls
+//! `GET /api/agents/{id}/mcp-ensure/{name}` for progress. The former
+//! Gateway-side install pipeline (installMcp / install stages) is removed.
 
 import { create } from "zustand";
 import { getGatewayUrl } from "../lib/config";
@@ -12,40 +18,16 @@ import { emitAgentConfigRefresh } from "../lib/refresh";
 import type {
   McpCatalogEntryResponse,
   McpServerConfigDef,
-  McpProbeResponse,
-  McpHealthStatus,
-  McpInstallSpec,
   OperationAck,
 } from "../lib/types";
 
-/** ADR-072: install run response — mirrors McpInstallRunResponse in the Gateway */
-export interface McpInstallRunResponse {
-  name: string;
-  success: boolean;
-  exit_code?: number | null;
-  stdout: string;
-  stderr: string;
-  install_duration_ms: number;
-  tool_count?: number | null;
-  health_error?: string | null;
-  spawn?: McpServerConfigDef | null;
-}
-
-/**
- * Coarse stage of a running install — mirrors `InstallStage` in the
- * Gateway (`GET /api/mcp-catalog/install/{name}/status`). The pipeline is
- * runtime probe → install command → MCP handshake, so the stage is what
- * turns "a spinner" into "it is pulling dependencies right now".
- */
-export type McpInstallStage = "checking_runtime" | "installing" | "verifying";
-
-/** Last terminal outcome of an install attempt, per server name. */
-export interface McpInstallOutcome {
-  success: boolean;
-  /** Human-readable failure reason (stderr or health-check error). */
+/** ADR-090: one ensure status snapshot for a catalog server, mirrored
+ * from the Runtime's `GET /agents/{id}/mcp-ensure/{name}`.
+ * state: "probing" | "installing" | "usable" | "failed". */
+export interface McpEnsureStatus {
+  state: "probing" | "installing" | "usable" | "failed";
+  /** Detailed failure reason (only when state === "failed"). */
   error?: string;
-  /** Raw installer stdout, shown behind a "show output" toggle. */
-  stdout?: string;
 }
 
 /**
@@ -80,50 +62,38 @@ interface McpCatalogActions {
   removeServer: (name: string) => Promise<void>;
   /** Replace the entire catalog */
   replaceCatalog: (servers: McpServerConfigDef[]) => Promise<void>;
-  /**
-   * ADR-072: install a preset MCP server via the Gateway install pipeline
-   * (runtime check → install → health check → write catalog). Resolves with
-   * the run response; caller surfaces stdout/stderr in the row.
-   */
-  installMcp: (
-    name: string,
-    install: McpInstallSpec,
-    env?: Record<string, string>,
-  ) => Promise<McpInstallRunResponse>;
 }
 
-/**
- * ADR-072 install progress, keyed by server name.
- *
- * The install is a single long HTTP request (a first `npx`/`uvx` resolve
- * can run for minutes), so the row has to render its own state instead of
- * blocking on a modal — a modal can be dismissed, and dismissing it used to
- * leave the list looking untouched while the install kept running.
- */
-interface McpInstallProgressState {
-  /** Server names with an install in flight (row renders the busy state). */
-  installing: string[];
-  /** Last stage reported by the Gateway per running server. */
-  installStages: Record<string, McpInstallStage | undefined>;
-  /** Wall-clock ms since the install started, per running server. */
-  installElapsed: Record<string, number>;
-  /** Terminal outcome of the most recent attempt per server. */
-  installOutcomes: Record<string, McpInstallOutcome | undefined>;
+interface McpEnsureState {
+  /** Last ensure status per agent+server (`${agentId}/${name}` -> status). */
+  ensureStatus: Record<string, McpEnsureStatus | undefined>;
 }
 
-interface McpInstallProgressActions {
-  /** Record an install as started (called before the request fires). */
-  beginInstall: (name: string) => void;
-  /** Record a terminal install outcome and clear the busy state. */
-  endInstall: (name: string, outcome: McpInstallOutcome) => void;
-  /** Drop a terminal outcome once the user has read it. */
-  clearInstallOutcome: (name: string) => void;
+/** ensureStatus map key. Exported so the Tools panel reads the right slot. */
+export const mcpEnsureKey = (agentId: string, name: string) => `${agentId}/${name}`;
+
+/** In-flight ensure watchers, keyed like ensureStatus. Module-level (not
+ *  in the store) — timers must not trigger Zustand subscriptions. */
+const ensureWatchers: Map<string, ReturnType<typeof setInterval>> = new Map();
+
+interface McpEnsureActions {
   /**
-   * Poll one running install's stage + elapsed time. Best-effort: a Gateway
-   * without the status endpoint (404) leaves the row on a plain elapsed
-   * counter rather than erroring — the install itself still works.
+   * Poll the Runtime's ensure status for one server once. Returns the
+   * status; `undefined` when no ensure task exists (custom / non-stdio
+   * servers never spawn one) or the agent is unreachable.
    */
-  pollInstallStatus: (name: string) => Promise<void>;
+  pollEnsureStatus: (agentId: string, name: string) => Promise<McpEnsureStatus | undefined>;
+  /** Drop a stale ensure status (toggle closed = retry later, D6). */
+  clearEnsureStatus: (name: string) => void;
+  /**
+   * Poll one server's ensure status to a terminal state (usable/failed),
+   * updating `ensureStatus` along the way. On failure the Runtime has
+   * already removed the server from `active_names` — reload the agent's
+   * active list so the toggle springs back, and emit a config refresh so
+   * the Tools panel re-fetches tool state. Fire-and-forget; concurrent
+   * watchers for the same key are deduplicated.
+   */
+  watchEnsure: (agentId: string, name: string) => Promise<void>;
 }
 
 // ── Per-agent activation types ───────────────────────────────────────
@@ -145,22 +115,6 @@ interface McpActivationState {
    * a stuck UI.
    */
   perServerLoading: Record<string, Record<string, boolean>>;
-}
-
-interface McpHealthState {
-  /** Health status per server name (serverName -> status) */
-  healthStatus: Record<string, McpHealthStatus>;
-  /** Last probe error per server name (serverName -> error message) */
-  healthErrors: Record<string, string | null>;
-  /** Tool count per server name (serverName -> count) */
-  healthToolCounts: Record<string, number>;
-}
-
-interface McpHealthActions {
-  /** Probe a server config (before adding) — does NOT save to catalog */
-  probeServer: (config: McpServerConfigDef) => Promise<McpProbeResponse>;
-  /** Probe an existing catalog entry by name */
-  probeByName: (name: string) => Promise<McpProbeResponse>;
 }
 
 interface McpActivationActions {
@@ -185,10 +139,8 @@ export type McpStore = McpCatalogState &
   McpCatalogActions &
   McpActivationState &
   McpActivationActions &
-  McpHealthState &
-  McpHealthActions &
-  McpInstallProgressState &
-  McpInstallProgressActions;
+  McpEnsureState &
+  McpEnsureActions;
 
 export const useMcpStore = create<McpStore>((set, get) => ({
   // ── Catalog state ──
@@ -201,64 +153,79 @@ export const useMcpStore = create<McpStore>((set, get) => ({
   activationLoading: {},
   perServerLoading: {},
 
-  // ── Health state ──
-  healthStatus: {},
-  healthErrors: {},
-  healthToolCounts: {},
+  // ── Ensure state (ADR-090) ──
+  ensureStatus: {},
 
-  // ── Install progress state ──
-  installing: [],
-  installStages: {},
-  installElapsed: {},
-  installOutcomes: {},
+  // ── Ensure actions (ADR-090) ──
 
-  // ── Install progress actions ──
-
-  beginInstall: (name) =>
-    set((s) => ({
-      installing: s.installing.includes(name) ? s.installing : [...s.installing, name],
-      installStages: { ...s.installStages, [name]: undefined },
-      installElapsed: { ...s.installElapsed, [name]: 0 },
-      installOutcomes: { ...s.installOutcomes, [name]: undefined },
-    })),
-
-  endInstall: (name, outcome) =>
-    set((s) => {
-      const stages = { ...s.installStages };
-      const elapsed = { ...s.installElapsed };
-      delete stages[name];
-      delete elapsed[name];
-      return {
-        installing: s.installing.filter((n) => n !== name),
-        installStages: stages,
-        installElapsed: elapsed,
-        installOutcomes: { ...s.installOutcomes, [name]: outcome },
-      };
-    }),
-
-  clearInstallOutcome: (name) =>
-    set((s) => ({ installOutcomes: { ...s.installOutcomes, [name]: undefined } })),
-
-  pollInstallStatus: async (name) => {
+  pollEnsureStatus: async (agentId, name) => {
     try {
       const resp = await fetch(
-        `${getGatewayUrl()}/api/mcp-catalog/install/${encodeURIComponent(name)}/status`,
+        `${getGatewayUrl()}/api/agents/${encodeURIComponent(agentId)}/mcp-ensure/${encodeURIComponent(name)}`,
       );
-      // 404 = Gateway predates the status endpoint. The install is still
-      // running; the row just keeps a plain elapsed counter.
-      if (!resp.ok) return;
-      const data = (await resp.json()) as {
-        running: boolean;
-        stage?: McpInstallStage;
-        elapsed_ms?: number;
-      };
+      // 404 = no ensure task for this server (custom/non-stdio entry).
+      if (!resp.ok) return undefined;
+      const data = (await resp.json()) as McpEnsureStatus;
       set((s) => ({
-        installStages: { ...s.installStages, [name]: data.stage },
-        installElapsed: { ...s.installElapsed, [name]: data.elapsed_ms ?? 0 },
+        ensureStatus: { ...s.ensureStatus, [mcpEnsureKey(agentId, name)]: data },
       }));
+      return data;
     } catch {
-      // Network hiccup on a 2s poll — the next tick recovers.
+      // Network hiccup on a poll — the next tick recovers.
+      return undefined;
     }
+  },
+
+  clearEnsureStatus: (name) =>
+    set((s) => {
+      // Drop every agent's slot for this server name (cheap — the map is
+      // tiny) and cancel any running watcher (toggle closed = retry later).
+      const next: Record<string, McpEnsureStatus | undefined> = {};
+      for (const [k, v] of Object.entries(s.ensureStatus)) {
+        if (!k.endsWith(`/${name}`)) next[k] = v;
+      }
+      for (const key of [...ensureWatchers.keys()]) {
+        if (key.endsWith(`/${name}`)) {
+          clearInterval(ensureWatchers.get(key)!);
+          ensureWatchers.delete(key);
+        }
+      }
+      return { ensureStatus: next };
+    }),
+
+  watchEnsure: async (agentId, name) => {
+    const key = mcpEnsureKey(agentId, name);
+    if (ensureWatchers.has(key)) return; // one watcher per server
+    const stop = () => {
+      const t = ensureWatchers.get(key);
+      if (t) clearInterval(t);
+      ensureWatchers.delete(key);
+    };
+    // First poll immediately so a fast local health check resolves the
+    // toggle in one frame; then every 2s (cargo install is minutes).
+    const first = await get().pollEnsureStatus(agentId, name);
+    if (!first || first.state === "usable" || first.state === "failed") return;
+    ensureWatchers.set(
+      key,
+      setInterval(async () => {
+        const st = await get().pollEnsureStatus(agentId, name);
+        if (st === undefined) {
+          // Task vanished (Runtime restarted) — stop watching; the next
+          // toggle re-triggers ensure.
+          stop();
+          return;
+        }
+        if (st.state === "usable" || st.state === "failed") {
+          stop();
+          if (st.state === "failed") {
+            // Runtime auto-removed the server from active_names (D6
+            // spring-back) — resync local state so the Switch snaps off.
+            await get().loadActiveServers(agentId);
+          }
+          emitAgentConfigRefresh();
+        }
+      }, 2000),
+    );
   },
 
   // ── Catalog actions ──
@@ -366,54 +333,6 @@ export const useMcpStore = create<McpStore>((set, get) => ({
     }
   },
 
-  // ── Install actions (ADR-072) ──
-
-  installMcp: async (name: string, install: McpInstallSpec, env = {}) => {
-    set({ error: null });
-    get().beginInstall(name);
-    const finish = (outcome: McpInstallOutcome) => get().endInstall(name, outcome);
-    try {
-      const resp = await fetch(`${getGatewayUrl()}/api/mcp-catalog/install`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, install, env }),
-      });
-      if (!resp.ok) {
-        // Two 409s land here: a missing runtime ("Missing runtime 'uvx' …")
-        // and the duplicate-install guard. Both carry structured guidance —
-        // surface it verbatim on the row.
-        const err = await resp.json().catch(() => ({ error: `HTTP ${resp.status}` }));
-        throw new Error(err.error || `HTTP ${resp.status}`);
-      }
-      const data = (await resp.json()) as McpInstallRunResponse;
-      if (data.success) {
-        // Catalog + per-agent wiring refreshed server-side; reload here so
-        // the "Install" button hides (entry now has install.state=installed).
-        await get().loadCatalog();
-        emitAgentConfigRefresh();
-      }
-      finish({
-        success: data.success,
-        error: data.success
-          ? undefined
-          : data.health_error || data.stderr || "install failed",
-        stdout: data.stdout,
-      });
-      return data;
-    } catch (e: unknown) {
-      const message = e instanceof Error ? e.message : String(e);
-      set({ error: message });
-      finish({ success: false, error: message });
-      return {
-        name,
-        success: false,
-        stdout: "",
-        stderr: message,
-        install_duration_ms: 0,
-      };
-    }
-  },
-
   // ── Activation actions ──
 
   loadActiveServers: async (agentId: string) => {
@@ -489,6 +408,27 @@ export const useMcpStore = create<McpStore>((set, get) => ({
         activeServers: { ...s.activeServers, [agentId]: serverNames },
         activationLoading: { ...s.activationLoading, [agentId]: false },
       }));
+      // ADR-090: the Runtime reports which newly-enabled servers it began
+      // ensuring on this machine. Watch each to its terminal state; servers
+      // that toggle OFF get their stale status dropped (retry = reopen).
+      try {
+        const ack = (await resp.json()) as { ensuring?: string[] };
+        const ensuring = ack.ensuring ?? [];
+        // Servers the user just switched OFF: drop their stale status so a
+        // later re-open starts clean (D6). Servers ON but not being ensured
+        // (custom / already-usable) have nothing to show either.
+        for (const name of previous) {
+          if (!serverNames.includes(name)) get().clearEnsureStatus(name);
+        }
+        for (const name of serverNames) {
+          if (!ensuring.includes(name)) get().clearEnsureStatus(name);
+        }
+        for (const name of ensuring) {
+          void get().watchEnsure(agentId, name);
+        }
+      } catch {
+        // Non-JSON ack — nothing to watch; the toggle itself succeeded.
+      }
     } catch (e: unknown) {
       // Aborted by a newer call → don't touch the optimistic state; the
       // newer call already wrote its own serverNames.
@@ -572,69 +512,4 @@ export const useMcpStore = create<McpStore>((set, get) => ({
     });
   },
 
-  // ── Health actions ──
-
-  probeServer: async (config: McpServerConfigDef) => {
-    const name = config.name;
-    set((s) => ({
-      healthStatus: { ...s.healthStatus, [name]: "probing" },
-      healthErrors: { ...s.healthErrors, [name]: null },
-    }));
-    try {
-      const resp = await fetch(`${getGatewayUrl()}/api/mcp-catalog/probe`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(config),
-      });
-      if (!resp.ok) {
-        const err = await resp.json().catch(() => ({ error: `HTTP ${resp.status}` }));
-        throw new Error(err.error || `HTTP ${resp.status}`);
-      }
-      const data = (await resp.json()) as McpProbeResponse;
-      set((s) => ({
-        healthStatus: { ...s.healthStatus, [name]: data.success ? "healthy" : "unhealthy" },
-        healthErrors: { ...s.healthErrors, [name]: data.error ?? null },
-        healthToolCounts: { ...s.healthToolCounts, [name]: data.tool_count },
-      }));
-      return data;
-    } catch (e: unknown) {
-      const message = e instanceof Error ? e.message : String(e);
-      set((s) => ({
-        healthStatus: { ...s.healthStatus, [name]: "unhealthy" },
-        healthErrors: { ...s.healthErrors, [name]: message },
-      }));
-      return { success: false, tool_count: 0, tools: [], error: message, duration_ms: 0 };
-    }
-  },
-
-  probeByName: async (name: string) => {
-    set((s) => ({
-      healthStatus: { ...s.healthStatus, [name]: "probing" },
-      healthErrors: { ...s.healthErrors, [name]: null },
-    }));
-    try {
-      const resp = await fetch(
-        `${getGatewayUrl()}/api/mcp-catalog/${encodeURIComponent(name)}/probe`,
-        { method: "POST" },
-      );
-      if (!resp.ok) {
-        const err = await resp.json().catch(() => ({ error: `HTTP ${resp.status}` }));
-        throw new Error(err.error || `HTTP ${resp.status}`);
-      }
-      const data = (await resp.json()) as McpProbeResponse;
-      set((s) => ({
-        healthStatus: { ...s.healthStatus, [name]: data.success ? "healthy" : "unhealthy" },
-        healthErrors: { ...s.healthErrors, [name]: data.error ?? null },
-        healthToolCounts: { ...s.healthToolCounts, [name]: data.tool_count },
-      }));
-      return data;
-    } catch (e: unknown) {
-      const message = e instanceof Error ? e.message : String(e);
-      set((s) => ({
-        healthStatus: { ...s.healthStatus, [name]: "unhealthy" },
-        healthErrors: { ...s.healthErrors, [name]: message },
-      }));
-      return { success: false, tool_count: 0, tools: [], error: message, duration_ms: 0 };
-    }
-  },
 }));

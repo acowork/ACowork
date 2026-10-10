@@ -1328,6 +1328,7 @@ mod tests {
         let cfg = AgentMcpConfig {
             catalog: vec![McpServerConfigDef {
                 name: "catalog-a".into(),
+                display_name: None,
                 transport: McpTransportDef::Stdio,
                 url: None,
                 command: "cmd-a".into(),
@@ -1336,9 +1337,11 @@ mod tests {
                 headers: std::collections::HashMap::new(),
                 tool_timeout_secs: None,
                 install: None,
+                required_secrets: vec![],
             }],
             local: vec![McpServerConfigDef {
                 name: "local-b".into(),
+                display_name: None,
                 transport: McpTransportDef::Stdio,
                 url: None,
                 command: "cmd-b".into(),
@@ -1347,6 +1350,7 @@ mod tests {
                 headers: std::collections::HashMap::new(),
                 tool_timeout_secs: None,
                 install: None,
+                required_secrets: vec![],
             }],
 
             active_names: None,
@@ -1364,6 +1368,7 @@ mod tests {
         let cfg = AgentMcpConfig {
             catalog: vec![McpServerConfigDef {
                 name: "dup-name".into(),
+                display_name: None,
                 transport: McpTransportDef::Stdio,
                 url: None,
                 command: "catalog-cmd".into(),
@@ -1372,9 +1377,11 @@ mod tests {
                 headers: std::collections::HashMap::new(),
                 tool_timeout_secs: None,
                 install: None,
+                required_secrets: vec![],
             }],
             local: vec![McpServerConfigDef {
                 name: "dup-name".into(),
+                display_name: None,
                 transport: McpTransportDef::Http,
                 url: Some("http://local:8080".into()),
                 command: "local-cmd".into(),
@@ -1383,6 +1390,7 @@ mod tests {
                 headers: std::collections::HashMap::new(),
                 tool_timeout_secs: None,
                 install: None,
+                required_secrets: vec![],
             }],
 
             active_names: None,
@@ -1399,6 +1407,7 @@ mod tests {
         let cfg = AgentMcpConfig {
             catalog: vec![McpServerConfigDef {
                 name: "cat".into(),
+                display_name: None,
                 transport: McpTransportDef::Stdio,
                 url: None,
                 command: "x".into(),
@@ -1407,9 +1416,11 @@ mod tests {
                 headers: std::collections::HashMap::new(),
                 tool_timeout_secs: None,
                 install: None,
+                required_secrets: vec![],
             }],
             local: vec![McpServerConfigDef {
                 name: "loc".into(),
+                display_name: None,
                 transport: McpTransportDef::Stdio,
                 url: None,
                 command: "y".into(),
@@ -1418,6 +1429,7 @@ mod tests {
                 headers: std::collections::HashMap::new(),
                 tool_timeout_secs: None,
                 install: None,
+                required_secrets: vec![],
             }],
 
             active_names: None,
@@ -1433,6 +1445,7 @@ mod tests {
         let cfg = AgentMcpConfig {
             catalog: vec![McpServerConfigDef {
                 name: "cat".into(),
+                display_name: None,
                 transport: McpTransportDef::Stdio,
                 url: None,
                 command: "x".into(),
@@ -1441,9 +1454,11 @@ mod tests {
                 headers: std::collections::HashMap::new(),
                 tool_timeout_secs: None,
                 install: None,
+                required_secrets: vec![],
             }],
             local: vec![McpServerConfigDef {
                 name: "loc".into(),
+                display_name: None,
                 transport: McpTransportDef::Stdio,
                 url: None,
                 command: "y".into(),
@@ -1452,6 +1467,7 @@ mod tests {
                 headers: std::collections::HashMap::new(),
                 tool_timeout_secs: None,
                 install: None,
+                required_secrets: vec![],
             }],
 
             active_names: None,
@@ -1478,6 +1494,7 @@ mod tests {
         let cfg = AgentMcpConfig {
             catalog: vec![McpServerConfigDef {
                 name: "mcp1".into(),
+                display_name: None,
                 transport: McpTransportDef::Stdio,
                 url: None,
                 command: "/usr/bin/server".into(),
@@ -1490,9 +1507,11 @@ mod tests {
                 headers: std::collections::HashMap::new(),
                 tool_timeout_secs: Some(30),
                 install: None,
+                required_secrets: vec![],
             }],
             local: vec![McpServerConfigDef {
                 name: "local1".into(),
+                display_name: None,
                 transport: McpTransportDef::Sse,
                 url: Some("http://example.com/sse".into()),
                 command: "".into(),
@@ -1505,6 +1524,7 @@ mod tests {
                 },
                 tool_timeout_secs: None,
                 install: None,
+                required_secrets: vec![],
             }],
 
             active_names: None,
@@ -1559,6 +1579,7 @@ mod tests {
         let initial = AgentMcpConfig {
             catalog: vec![McpServerConfigDef {
                 name: "orig-cat".into(),
+                display_name: None,
                 transport: McpTransportDef::Stdio,
                 url: None,
                 command: "cat-cmd".into(),
@@ -1567,9 +1588,11 @@ mod tests {
                 headers: std::collections::HashMap::new(),
                 tool_timeout_secs: None,
                 install: None,
+                required_secrets: vec![],
             }],
             local: vec![McpServerConfigDef {
                 name: "orig-loc".into(),
+                display_name: None,
                 transport: McpTransportDef::Stdio,
                 url: None,
                 command: "loc-cmd".into(),
@@ -1578,6 +1601,7 @@ mod tests {
                 headers: std::collections::HashMap::new(),
                 tool_timeout_secs: None,
                 install: None,
+                required_secrets: vec![],
             }],
 
             active_names: None,
@@ -1586,6 +1610,7 @@ mod tests {
 
         let new_catalog = vec![McpServerConfigDef {
             name: "new-cat".into(),
+            display_name: None,
             transport: McpTransportDef::Stdio,
             url: None,
             command: "new-cmd".into(),
@@ -1594,6 +1619,7 @@ mod tests {
             headers: std::collections::HashMap::new(),
             tool_timeout_secs: None,
             install: None,
+            required_secrets: vec![],
         }];
         save_agent_mcp_config_catalog(dir.path(), &new_catalog).unwrap();
 
@@ -1624,6 +1650,7 @@ mod tests {
         let initial = AgentMcpConfig {
             catalog: vec![McpServerConfigDef {
                 name: "context7".into(),
+                display_name: None,
                 transport: McpTransportDef::Stdio,
                 url: None,
                 command: "npx".into(),
@@ -1632,6 +1659,7 @@ mod tests {
                 headers: std::collections::HashMap::new(),
                 tool_timeout_secs: None,
                 install: None,
+                required_secrets: vec![],
             }],
             local: vec![],
             active_names: Some(vec!["context7".into()]),
@@ -1642,6 +1670,7 @@ mod tests {
         let new_catalog = vec![
             McpServerConfigDef {
                 name: "context7".into(),
+                display_name: None,
                 transport: McpTransportDef::Stdio,
                 url: None,
                 command: "npx".into(),
@@ -1650,9 +1679,11 @@ mod tests {
                 headers: std::collections::HashMap::new(),
                 tool_timeout_secs: None,
                 install: None,
+                required_secrets: vec![],
             },
             McpServerConfigDef {
                 name: "new-mcp".into(),
+                display_name: None,
                 transport: McpTransportDef::Http,
                 url: Some("http://example.com".into()),
                 command: String::new(),
@@ -1661,6 +1692,7 @@ mod tests {
                 headers: std::collections::HashMap::new(),
                 tool_timeout_secs: None,
                 install: None,
+                required_secrets: vec![],
             },
         ];
         save_agent_mcp_config_catalog(dir.path(), &new_catalog).unwrap();
@@ -1786,6 +1818,7 @@ mod tests {
     fn mcp_def(name: &str) -> McpServerConfigDef {
         McpServerConfigDef {
             name: name.to_string(),
+            display_name: None,
             transport: McpTransportDef::Stdio,
             url: None,
             command: "npx".to_string(),
@@ -1794,6 +1827,7 @@ mod tests {
             headers: std::collections::HashMap::new(),
             tool_timeout_secs: None,
             install: None,
+            required_secrets: vec![],
         }
     }
 

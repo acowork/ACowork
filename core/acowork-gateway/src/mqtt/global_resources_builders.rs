@@ -78,6 +78,8 @@ fn gateway_hosted_mcp_ref(name: &str, url: String) -> McpRef {
         headers,
         tool_timeout_secs: 60,
         auth_token: String::new(),
+        // pm/doc are Gateway-hosted HTTP servers — nothing to install (ADR-090).
+        install_spec_json: String::new(),
     }
 }
 
@@ -250,6 +252,19 @@ pub(crate) fn build_available_providers(gw: &GatewayState) -> AvailableProviders
     }
 }
 
+/// ADR-090 D3: is secret `name` configured (non-blank) on this catalog
+/// entry? Looked up across `env ∪ headers` — stdio keys live in env, custom
+/// HTTP keys in headers (same convention as
+/// [`crate::resource_cache::extract_api_key_from_mcp_config`]).
+fn secret_configured(entry: &acowork_core::protocol::McpServerConfigDef, name: &str) -> bool {
+    entry
+        .env
+        .get(name)
+        .or_else(|| entry.headers.get(name))
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false)
+}
+
 /// Build `AvailableMcps` from the GatewayState resource cache.
 ///
 /// The `auth_token` is extracted from env vars and headers via
@@ -271,14 +286,33 @@ pub(crate) fn build_available_mcps(gw: &GatewayState) -> AvailableMcps {
     let servers: Vec<McpRef> = cache
         .servers
         .iter()
-        .map(|s| {
-            // Look up the catalog entry to extract env/headers for the token.
-            let auth_token = catalog
-                .iter()
-                .find(|c| c.name == s.id)
+        .filter_map(|s| {
+            // Look up the catalog entry: source of truth for token,
+            // required_secrets and the install spec (ADR-090 D3/D4/D5).
+            let entry = catalog.iter().find(|c| c.name == s.id);
+            let auth_token = entry
                 .and_then(crate::resource_cache::extract_api_key_from_mcp_config)
                 .unwrap_or_default();
-            McpRef {
+            // ADR-090 D3 push filter: skip an entry whose required_secrets is
+            // non-empty while any required name is missing/empty across
+            // `env ∪ headers`. Everything else (no-secret servers + fully
+            // keyed ones) is pushed regardless of install state — the Agent
+            // installs on first enable (D5).
+            if let Some(e) = entry
+                && !e.required_secrets.is_empty()
+                && e.required_secrets.iter().any(|k| !secret_configured(e, k))
+            {
+                tracing::debug!(
+                    server = %s.id,
+                    "MCP catalog entry not pushed: required secret missing (ADR-090 D3)"
+                );
+                return None;
+            }
+            let install_spec_json = entry
+                .and_then(|e| e.install.as_ref())
+                .and_then(|i| serde_json::to_string(i).ok())
+                .unwrap_or_default();
+            Some(McpRef {
                 id: s.id.clone(),
                 name: s.name.clone(),
                 transport: map_mcp_transport(&s.transport).into(),
@@ -289,7 +323,8 @@ pub(crate) fn build_available_mcps(gw: &GatewayState) -> AvailableMcps {
                 headers: s.headers.clone(),
                 tool_timeout_secs: s.tool_timeout_secs.unwrap_or(0),
                 auth_token,
-            }
+                install_spec_json,
+            })
         })
         .collect();
 
@@ -433,6 +468,36 @@ pub(crate) fn map_mcp_transport(t: &McpTransportDef) -> acowork_core::mqtt_proto
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ADR-090 D3: secret lookup spans `env ∪ headers` (stdio keys live in
+    /// env, custom HTTP keys in headers); blank/whitespace values do not
+    /// count as configured.
+    #[test]
+    fn test_secret_configured_env_headers_and_blank() {
+        use acowork_core::protocol::McpServerConfigDef;
+        let mut entry = McpServerConfigDef {
+            name: "brave".into(),
+            display_name: None,
+            env: std::collections::HashMap::from([
+                ("BRAVE_API_KEY".to_string(), "k1".to_string()),
+                ("BLANK".to_string(), "   ".to_string()),
+            ]),
+            headers: std::collections::HashMap::from([(
+                "X-API-KEY".to_string(),
+                "h1".to_string(),
+            )]),
+            ..Default::default()
+        };
+        assert!(secret_configured(&entry, "BRAVE_API_KEY"), "env hit");
+        assert!(secret_configured(&entry, "X-API-KEY"), "headers hit");
+        assert!(!secret_configured(&entry, "BLANK"), "whitespace = not set");
+        assert!(!secret_configured(&entry, "MISSING"));
+        // env wins when both carry the name (same convention as
+        // extract_api_key_from_mcp_config — presence in either suffices).
+        entry.headers
+            .insert("BRAVE_API_KEY".to_string(), "h2".to_string());
+        assert!(secret_configured(&entry, "BRAVE_API_KEY"));
+    }
 
     /// Only local providers may be published without a key; a keyless
     /// non-local provider must not reach the runtimes.

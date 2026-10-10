@@ -2015,6 +2015,10 @@ export interface McpInstallSpec {
 /** MCP server config — matches McpServerConfigDef in acowork_core::protocol */
 export interface McpServerConfigDef {
   name: string;
+  /** Human-readable alias for the UI. Purely cosmetic — agents reference a
+   *  server by its immutable `name`. Lets a machine name like
+   *  `market-cmgjmcp00075722` show as "CMJ Market" without a re-key. */
+  display_name?: string;
   transport: McpTransportDef;
   url?: string;
   command: string;
@@ -2024,6 +2028,9 @@ export interface McpServerConfigDef {
   tool_timeout_secs?: number;
   /** ADR-072: optional install context (preset-added servers only) */
   install?: McpInstallSpec;
+  /** ADR-090 D4: secret names this server requires (from preset.requiredEnv).
+   *  Gateway filters the push when any of these is unset in env ∪ headers. */
+  required_secrets?: string[];
 }
 
 /** MCP catalog entry response (env values with sensitive fields masked) */
@@ -2053,18 +2060,6 @@ export interface McpServerView {
   /** Whether this server is currently in this agent's active_names */
   active: boolean;
 }
-
-/** MCP probe response — result of a health check against an MCP server */
-export interface McpProbeResponse {
-  success: boolean;
-  tool_count: number;
-  tools: string[];
-  error: string | null;
-  duration_ms: number;
-}
-
-/** MCP server health status (frontend-only, derived from probe results) */
-export type McpHealthStatus = "unknown" | "probing" | "healthy" | "unhealthy";
 
 /**
  * Single MCP tool row inside a server's flat list (ADR-069).

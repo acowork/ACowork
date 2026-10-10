@@ -185,6 +185,7 @@ pub fn build_spawn_env(extra: &HashMap<String, String>) -> HashMap<String, Strin
 pub fn derive_spawn_config(name: &str, pkg: &McpPackageSpec) -> McpServerConfigDef {
     let mut cfg = McpServerConfigDef {
         name: name.to_string(),
+        display_name: None,
         transport: McpTransportDef::Stdio,
         ..Default::default()
     };

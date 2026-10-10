@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import type { VaultKeyEntry, ModelInfo, ModelCapabilitiesInfo, ProviderListEntry, McpServerConfigDef, McpTransportDef, McpPresetDef } from "../../lib/types";
+import type { VaultKeyEntry, ModelInfo, ModelCapabilitiesInfo, ProviderListEntry, McpServerConfigDef, McpCatalogEntryResponse, McpTransportDef, McpPresetDef } from "../../lib/types";
 import { cn } from "../../lib/utils";
 import { inputBase } from "../../lib/ui-styles";
 import { StyledInput } from "../common/StyledInput";
@@ -9,9 +9,10 @@ import { ProviderLogo } from "../common/ProviderLogo";
 import { isLocalProvider } from "../../lib/providers";
 import { fetchProviderModels } from "../../lib/gateway-api";
 import { getGatewayUrl } from "../../lib/config";
-import { Monitor, MousePointer, Package, Search, Globe, BookOpen, FileText, PenTool, Star, Plus, CheckCircle2, Download, XCircle, Loader2, Minus, Pencil, Cpu, Plug, Database, Braces, Puzzle } from "lucide-react";
+import { Monitor, MousePointer, Package, Search, Globe, BookOpen, FileText, PenTool, Star, Plus, Minus, Check, Pencil, Cpu, Plug, Database, Braces, Puzzle } from "lucide-react";
 import { useMcpStore } from "../../stores/mcpStore";
 import { MCP_PRESETS, presetToServerConfig } from "../../lib/mcp-presets";
+import { normalizeMcpConfigInput } from "../../lib/mcpConfigNormalizer";
 import { EmbeddingModelTab } from "./EmbeddingModelTab";
 import { LspTab } from "./LspTab";
 import { ModelMultiSelect, defaultMakeCaps } from "./ModelMultiSelect";
@@ -681,39 +682,57 @@ const MCP_ICON_MAP: Record<string, React.ComponentType<{ className?: string }>> 
 };
 const MCP_FALLBACK_ICON = Package;
 
+// Parse the free-text `KEY=VALUE, ...` (env, sep "=") and `Name: value, ...`
+// (headers, sep ":") fields into a map. Splits on the FIRST separator only so
+// a value may itself contain the separator (Windows paths, `Bearer` tokens,
+// URLs); empty input yields `{}` so the wire field stays an empty object.
+function parsePairs(text: string, sep: string): Record<string, string> {
+  const trimmed = text.trim();
+  if (!trimmed) return {};
+  const out: Record<string, string> = {};
+  for (const pair of trimmed.split(",")) {
+    const idx = pair.indexOf(sep);
+    if (idx === -1) continue;
+    const k = pair.slice(0, idx).trim();
+    const v = pair.slice(idx + sep.length).trim();
+    if (k) out[k] = v;
+  }
+  return out;
+}
+
+// Inverse of parsePairs — re-serialize a map back into the text field shape
+// (`sep` is inserted verbatim, so pass ": " for headers for readability).
+function pairsToText(obj: Record<string, string>, sep: string): string {
+  return Object.entries(obj).map(([k, v]) => `${k}${sep}${v}`).join(", ");
+}
+
 export function McpTab() {
   const { t } = useTranslation();
-  const { catalog, loading, error, loadCatalog, addServer, removeServer, probeServer, probeByName,
-    installMcp, installing, installStages, installElapsed, installOutcomes,
-    clearInstallOutcome, pollInstallStatus,
-    healthStatus, healthErrors, healthToolCounts } = useMcpStore();
+  const { catalog, loading, error, loadCatalog, addServer, updateServer, removeServer } = useMcpStore();
   const [showAddForm, setShowAddForm] = useState(false);
+  // When set, the shared form dialog is in edit mode for this catalog
+  // entry (name is identity — agents reference servers by name, so the
+  // name field is locked and the PUT is keyed by this original name).
+  const [editingName, setEditingName] = useState<string | null>(null);
   // Tools-tab style level-1 collapsible groups (default open)
-  const [catalogOpen, setCatalogOpen] = useState(true);
-  const [recommendedOpen, setRecommendedOpen] = useState(true);
+  const [listOpen, setListOpen] = useState(true);
 
-  // Probe-before-add state
-  const [pendingConfig, setPendingConfig] = useState<McpServerConfigDef | null>(null);
-  const [probeResult, setProbeResult] = useState<{ success: boolean; tool_count: number; tools: string[]; error: string | null; duration_ms: number } | null>(null);
-
-  /** Preset ids whose installer stdout is expanded on the row. */
-  const [showInstallOutput, setShowInstallOutput] = useState<Set<string>>(new Set());
-
-  const presetIconMap = useMemo(() => {
-    const map: Record<string, string> = {};
-    for (const p of MCP_PRESETS) {
-      map[p.id] = p.icon ?? "";
-    }
-    return map;
-  }, []);
-
-  // New server form state
+  // New/edit server form state
   const [newName, setNewName] = useState("");
+  const [newDisplayName, setNewDisplayName] = useState("");
   const [newTransport, setNewTransport] = useState<McpTransportDef>("stdio");
   const [newCommand, setNewCommand] = useState("");
   const [newArgs, setNewArgs] = useState("");
   const [newUrl, setNewUrl] = useState("");
   const [newEnv, setNewEnv] = useState("");
+  const [newHeaders, setNewHeaders] = useState("");
+
+  // Paste-to-normalize state: a vendor `mcpServers` JSON block or a CLI
+  // `mcp add` line, parsed into the form fields below (never submitted
+  // directly — the user always reviews the autofilled fields first).
+  const [showPaste, setShowPaste] = useState(false);
+  const [pasteText, setPasteText] = useState("");
+  const [parseMsg, setParseMsg] = useState<{ kind: "error" | "warn" | "ok"; text: string }[]>([]);
 
   // Preset env var form (for servers requiring API keys)
   const [presetEnvForm, setPresetEnvForm] = useState<Record<string, string>>({});
@@ -724,31 +743,25 @@ export function McpTab() {
   }, [loadCatalog]);
 
   const catalogNames = useMemo(() => new Set(catalog.map((s) => s.name)), [catalog]);
+  // ADR-090: the settings page is ONE list with two row kinds.
+  //  - Preset rows are permanent built-ins: "Add" until they are registered
+  //    in the Gateway catalog, then a neutral "Added" label. They are never
+  //    removable — the registry copy of a built-in template is not the
+  //    user's to delete.
+  //  - Custom rows are catalog entries that match no preset; these carry
+  //    Remove. Runtime verification (Test) lives on the Node machine — the
+  //    Tools panel's enable switch drives ensure — so no row here probes.
+  const presetIds = useMemo(() => new Set(MCP_PRESETS.map((p) => p.id)), []);
+  const customServers = useMemo(
+    () => catalog.filter((c) => !presetIds.has(c.name)),
+    [catalog, presetIds],
+  );
 
-  const installingSet = useMemo(() => new Set(installing), [installing]);
-
-  // Poll stage + elapsed for every in-flight install. The install is one
-  // long HTTP request, so without this the row can only say "installing…"
-  // for minutes with no idea whether it is pulling deps or handshaking.
-  useEffect(() => {
-    if (installing.length === 0) return;
-    const ids = [...installing];
-    const poll = () => ids.forEach((id) => pollInstallStatus(id));
-    poll();
-    const timer = setInterval(poll, 2000);
-    return () => clearInterval(timer);
-  }, [installing, pollInstallStatus]);
-
-  /**
-   * ADR-072: run the install pipeline for a preset (install-then-add).
-   * Progress + outcome live in the store so the row owns them — no dialog.
-   */
-  const runPresetInstall = async (preset: McpPresetDef, env: Record<string, string>) => {
-    if (!preset.install) return;
-    await installMcp(preset.id, preset.install, env);
-  };
-
-  const handleAddFromPreset = async (preset: McpPresetDef) => {
+  // ADR-090: "add" is a pure registry write. No probe-then-add — a Gateway-side
+  // probe would spawn the server on the Gateway machine, which says nothing
+  // about the Node where an Agent will actually run it. Usability is verified
+  // by the Agent when the user enables the server in the Tools panel.
+  const handleAddFromPreset = (preset: McpPresetDef) => {
     if (preset.requiredEnv.length > 0) {
       // Show env form for API keys
       setActivePreset(preset);
@@ -757,85 +770,104 @@ export function McpTab() {
       );
       return;
     }
-    // No API key needed — install presets go through the install pipeline
-    // (ADR-072), everything else keeps the probe-then-add flow.
-    if (preset.install) {
-      await runPresetInstall(preset, { ...preset.optionalEnv });
-      return;
-    }
-    const config = presetToServerConfig(preset);
-    setPendingConfig(config);
-    setProbeResult(null);
-    const result = await probeServer(config);
-    setProbeResult(result);
-    if (result.success) {
-      addServer(config);
-      setPendingConfig(null);
-    }
+    addServer(presetToServerConfig(preset));
   };
 
-  const handlePresetEnvSubmit = async () => {
+  const handlePresetEnvSubmit = () => {
     if (!activePreset) return;
     const env = { ...activePreset.optionalEnv, ...presetEnvForm };
-    const preset = activePreset;
+    const config = presetToServerConfig(activePreset, env);
     setActivePreset(null);
     setPresetEnvForm({});
-    if (preset.install) {
-      await runPresetInstall(preset, env);
+    addServer(config);
+  };
+
+  const handleAddManual = () => {
+    if (!newName.trim()) return;
+    const config: McpServerConfigDef = buildFormConfig(newName.trim());
+    closeForm();
+    if (editingName) {
+      updateServer(editingName, config);
+    } else {
+      addServer(config);
+    }
+  };
+
+  // Serialize the shared form state into a catalog config (args split on
+  // whitespace, env parsed from the `KEY=VALUE, ...` text field, headers from
+  // the `Name: value, ...` field — a header value may itself contain colons,
+  // so only the first separates name from value).
+  const buildFormConfig = (name: string): McpServerConfigDef => ({
+    name,
+    display_name: newDisplayName.trim() || undefined,
+    transport: newTransport,
+    command: newCommand.trim(),
+    args: newArgs.trim() ? newArgs.trim().split(/\s+/) : [],
+    url: newUrl.trim() || undefined,
+    env: parsePairs(newEnv, "="),
+    headers: parsePairs(newHeaders, ":"),
+  });
+
+  // Run the normalizer over the pasted vendor config / CLI line and autofill
+  // the form fields below with the result. The parsed config is NEVER
+  // submitted straight — the user reviews the fields, then hits Save (which
+  // re-serializes the form, so manual edits after a parse are honored).
+  const handleParse = () => {
+    const r = normalizeMcpConfigInput(pasteText, newName.trim());
+    if (r.errors.length > 0) {
+      setParseMsg(r.errors.map((e) => ({ kind: "error", text: e.message })));
       return;
     }
-    const config = presetToServerConfig(preset, env);
-    setPendingConfig(config);
-    setProbeResult(null);
-    const result = await probeServer(config);
-    setProbeResult(result);
-    if (result.success) {
-      addServer(config);
-      setPendingConfig(null);
+    const s = r.servers[0];
+    setNewTransport(s.transport);
+    setNewCommand(s.command ?? "");
+    setNewArgs((s.args ?? []).join(" "));
+    setNewUrl(s.url ?? "");
+    setNewEnv(pairsToText(s.env ?? {}, "="));
+    setNewHeaders(pairsToText(s.headers ?? {}, ": "));
+    // Name is the identity key: in add mode adopt the parsed name; in edit
+    // mode the field is locked, so leave it and just note a mismatch.
+    const msgs: { kind: "error" | "warn" | "ok"; text: string }[] = [];
+    if (!editingName) {
+      if (s.name) setNewName(s.name);
+    } else if (s.name && s.name !== editingName) {
+      msgs.push({ kind: "warn", text: `Parsed name "${s.name}" ignored — editing keeps the existing key.` });
     }
+    if (r.servers.length > 1) {
+      msgs.push({ kind: "warn", text: `Parsed ${r.servers.length} servers — filled the first (${s.name}); add the others one at a time.` });
+    }
+    for (const w of r.warnings) msgs.push({ kind: "warn", text: w });
+    if (msgs.length === 0 || msgs.every((m) => m.kind !== "error")) {
+      msgs.push({ kind: "ok", text: t("harnessMcp.parsedOk") });
+    }
+    setParseMsg(msgs);
   };
 
-  const handleAddManual = async () => {
-    if (!newName.trim()) return;
-    const config: McpServerConfigDef = {
-      name: newName.trim(),
-      transport: newTransport,
-      command: newCommand.trim(),
-      args: newArgs.trim() ? newArgs.trim().split(/\s+/) : [],
-      url: newUrl.trim() || undefined,
-      env: newEnv.trim()
-        ? Object.fromEntries(
-          newEnv.split(",").map((pair) => {
-            const [k, ...v] = pair.split("=");
-            return [k.trim(), v.join("=").trim()];
-          })
-        )
-        : {},
-    };
-    setPendingConfig(config);
-    setProbeResult(null);
+  // Open the shared dialog in edit mode, prefilled from the catalog row.
+  // Sensitive env values arrive masked (`••••`) from GET /mcp-catalog;
+  // sending them back verbatim makes the Gateway's update handler keep
+  // the stored secret, so untouched keys survive the round-trip.
+  const openEdit = (server: McpCatalogEntryResponse) => {
+    setEditingName(server.name);
+    setNewName(server.name);
+    setNewDisplayName(server.display_name ?? "");
+    setNewTransport(server.transport);
+    setNewCommand(server.command ?? "");
+    setNewArgs((server.args ?? []).join(" "));
+    setNewUrl(server.url ?? "");
+    setNewEnv(
+      Object.entries(server.env ?? {}).map(([k, v]) => `${k}=${v}`).join(", "),
+    );
+    setNewHeaders(pairsToText(server.headers ?? {}, ": "));
+    setShowAddForm(true);
+  };
+
+  const closeForm = () => {
     setShowAddForm(false);
-    const result = await probeServer(config);
-    setProbeResult(result);
-    if (result.success) {
-      addServer(config);
-      setPendingConfig(null);
-      setNewName(""); setNewCommand(""); setNewArgs(""); setNewUrl(""); setNewEnv("");
-    }
-  };
-
-  /** Add the pending config despite probe failure */
-  const handleAddAnyway = () => {
-    if (!pendingConfig) return;
-    addServer(pendingConfig);
-    setPendingConfig(null);
-    setProbeResult(null);
-  };
-
-  /** Dismiss probe result without adding */
-  const dismissProbe = () => {
-    setPendingConfig(null);
-    setProbeResult(null);
+    setEditingName(null);
+    setNewName(""); setNewCommand(""); setNewArgs(""); setNewUrl(""); setNewEnv(""); setNewHeaders("");
+    setNewDisplayName("");
+    setShowPaste(false); setPasteText(""); setParseMsg([]);
   };
 
   return (
@@ -845,10 +877,10 @@ export function McpTab() {
           live in the inset body (default open). */}
       <ListBox dividers={false}>
         <ExpandableRow
-          open={catalogOpen}
-          onToggle={() => setCatalogOpen((v) => !v)}
-          title={t("harnessMcp.mcpServerCatalog", { count: catalog.length })}
-          ariaLabel={t("harnessMcp.mcpServerCatalog", { count: catalog.length })}
+          open={listOpen}
+          onToggle={() => setListOpen((v) => !v)}
+          title={t("harnessMcp.mcpServers", { count: MCP_PRESETS.length + customServers.length })}
+          ariaLabel={t("harnessMcp.mcpServers", { count: MCP_PRESETS.length + customServers.length })}
           trailing={
             <span onClick={(e) => e.stopPropagation()}>
               <button
@@ -872,104 +904,13 @@ export function McpTab() {
             <p className="px-3 py-3 text-xs text-text-tertiary">{t("harnessMcp.loadingCatalog")}</p>
           )}
 
-          {!loading && catalog.length === 0 && (
-            <p className="px-3 py-3 text-xs text-text-tertiary">
-              {t("harnessMcp.noMcpServers")}
-            </p>
-          )}
-
-          {/* Server list */}
-          {catalog.length > 0 && (
-            <ListBox variant="plain">
-              {catalog.map((server) => {
-                const status = healthStatus[server.name];
-                const healthErr = healthErrors[server.name];
-                const toolCount = healthToolCounts[server.name];
-                return (
-                  <ListRow
-                    key={server.name}
-                    trailing={
-                      <div className="flex shrink-0 items-center gap-1.5">
-                        <button
-                          type="button"
-                          onClick={() => probeByName(server.name)}
-                          disabled={status === "probing"}
-                          className="inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-11 font-medium disabled:opacity-50"
-                        >
-                          {status === "probing" ? "..." : t("harnessMcp.testConn")}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => removeServer(server.name)}
-                          className="inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-11 font-medium"
-                        >
-                          {t("harnessMcp.remove")}
-                        </button>
-                      </div>
-                    }
-                  >
-                    <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
-                      {/* Health indicator dot */}
-                      {status === "probing" && (
-                        <span className="h-2 w-2 shrink-0 rounded-full bg-amber-400 animate-pulse" title={t("harnessMcp.testing")} />
-                      )}
-                      {status === "healthy" && (
-                        <span className="h-2 w-2 shrink-0 rounded-full bg-green-500" title={t("harnessMcp.connected", { count: toolCount })} />
-                      )}
-                      {status === "unhealthy" && (
-                        <span className="h-2 w-2 shrink-0 rounded-full bg-red-500" title={healthErr || t("harnessMcp.connFailed")} />
-                      )}
-                      <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-10 font-mono text-text-tertiary dark:bg-zinc-700">
-                        {server.transport}
-                      </span>
-                      {(() => {
-                        const iconName = presetIconMap[server.name];
-                        const Icon = (iconName && MCP_ICON_MAP[iconName]) || MCP_FALLBACK_ICON;
-                        return <Icon className="h-3.5 w-3.5 shrink-0 text-text-tertiary" />;
-                      })()}
-                      <span className="truncate text-xs font-medium text-text-secondary ">{server.name}</span>
-                      {server.has_secrets && (
-                        <span className="text-10 text-amber-500 shrink-0">{t("harnessMcp.hasApiKey")}</span>
-                      )}
-                      {status === "healthy" && toolCount > 0 && (
-                        <span className="text-10 text-green-500 shrink-0">{toolCount} tools</span>
-                      )}
-                    </div>
-                    {(server.command || server.url) && (
-                      <p className="mt-0.5 truncate text-10 text-text-tertiary break-all">
-                        {server.command || server.url}
-                      </p>
-                    )}
-                    {/* Show health error inline */}
-                    {status === "unhealthy" && healthErr && (
-                      <div className="mt-0.5">
-                        <ErrorBox message={healthErr} className="!p-2 !text-10" />
-                      </div>
-                    )}
-                  </ListRow>
-                );
-              })}
-            </ListBox>
-          )}
-        </ExpandableRow>
-      </ListBox>
-
-      {/* Recommended servers — Tools-tab level-1 collapsible card: presets
-          now render as unified ListRow rows (hairline separators + inset
-          hover) instead of the old 2-column mini-card grid. */}
-      <ListBox dividers={false}>
-        <ExpandableRow
-          open={recommendedOpen}
-          onToggle={() => setRecommendedOpen((v) => !v)}
-          title={t("harnessMcp.recommendedMcpServers", { count: MCP_PRESETS.length })}
-          ariaLabel={t("harnessMcp.recommendedMcpServers", { count: MCP_PRESETS.length })}
-          bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset"
-        >
+          {/* ADR-090: one list, two row kinds — preset rows (permanent
+              built-ins, Add / Added) then custom registry rows (Remove).
+              No Test anywhere: usability is probed on the Node machine by
+              the Agent at first enable, not by the Gateway. */}
           <ListBox variant="plain">
             {MCP_PRESETS.map((preset) => {
-              const isInstalled = catalogNames.has(preset.id);
-              const isInstalling = installingSet.has(preset.id);
-              const outcome = installOutcomes[preset.id];
+              const isAdded = catalogNames.has(preset.id);
               return (
                 <ListRow
                   key={preset.id}
@@ -984,18 +925,13 @@ export function McpTab() {
                     })()
                   }
                   trailing={
-                    isInstalled ? (
-                      <span className="inline-flex shrink-0 items-center gap-1 rounded bg-green-100 px-2 py-1 text-11 font-medium text-green-700 dark:bg-green-900/30 dark:text-green-400">
-                        <CheckCircle2 className="h-3 w-3" />
-                        {t("harnessMcp.installed")}
-                      </span>
-                    ) : isInstalling ? (
-                      /* Busy state lives on the row, not in a modal: the
-                         install request stays open for minutes and a dialog
-                         could be dismissed while it kept running. */
-                      <span className="inline-flex shrink-0 items-center gap-1 rounded bg-zinc-100 px-2 py-1 text-11 font-medium text-text-secondary dark:bg-zinc-700">
-                        <Loader2 className="h-3 w-3 animate-spin" />
-                        {t("harnessMcp.installing")}
+                    isAdded ? (
+                      <span
+                        className="inline-flex shrink-0 items-center gap-1 text-11 text-text-tertiary"
+                        data-testid={`mcp-preset-added-${preset.id}`}
+                      >
+                        <Check className="h-3.5 w-3.5" />
+                        {t("harnessMcp.added")}
                       </span>
                     ) : (
                       <button
@@ -1003,19 +939,8 @@ export function McpTab() {
                         onClick={() => handleAddFromPreset(preset)}
                         className="inline-flex shrink-0 items-center gap-1 rounded btn-solid px-2 py-1 text-11 font-medium"
                       >
-                        {preset.install ? (
-                          <>
-                            <Download className="h-3 w-3" />
-                            {outcome && !outcome.success
-                              ? t("harnessMcp.installRetry")
-                              : t("harnessMcp.install")}
-                          </>
-                        ) : (
-                          <>
-                            <Plus className="h-3 w-3" />
-                            {t("harnessMcp.add")}
-                          </>
-                        )}
+                        <Plus className="h-3 w-3" />
+                        {t("harnessMcp.add")}
                       </button>
                     )
                   }
@@ -1025,98 +950,148 @@ export function McpTab() {
                     <span className="shrink-0 rounded bg-zinc-100 px-1 py-0.5 text-10 text-text-tertiary dark:bg-zinc-700">
                       {preset.category}
                     </span>
-                    {/* Stage + elapsed while installing — the stage comes from
-                        the Gateway pipeline, the elapsed from the same poll. */}
-                    {isInstalling && (() => {
-                      const seconds = Math.round((installElapsed[preset.id] ?? 0) / 1000);
-                      const stage = installStages[preset.id];
-                      // One string, not three sibling nodes: keeps the row
-                      // text queryable and the label unbreakable.
-                      const label = stage
-                        ? `${t(`harnessMcp.installStage_${stage}`)} · ${t("harnessMcp.installElapsed", { seconds })}`
-                        : t("harnessMcp.installElapsed", { seconds });
-                      return (
-                        <span
-                          data-testid={`mcp-install-stage-${preset.id}`}
-                          className="inline-flex shrink-0 items-center gap-1 text-10 text-text-tertiary"
-                        >
-                          {label}
-                        </span>
-                      );
-                    })()}
                   </div>
                   <p className="mt-0.5 line-clamp-1 text-10 text-text-tertiary">{preset.description}</p>
-                  {preset.requiredEnv.length > 0 && !isInstalled && !isInstalling && (
+                  {preset.requiredEnv.length > 0 && (
                     <p className="mt-0.5 text-10 text-amber-500">
                       {t("harnessMcp.requires")}{preset.requiredEnv.join(", ")}
                     </p>
                   )}
-                  {/* Terminal install result, inline (mirrors LspTab). The
-                      button above already turned into "Retry". */}
-                  {outcome && !outcome.success && !isInstalling && (
-                    <div className="mt-1">
-                      <div className="flex items-center gap-2">
-                        <span className="inline-flex items-center gap-1 text-10 text-red-600 dark:text-red-400">
-                          <XCircle className="h-2.5 w-2.5" />
-                          {t("harnessMcp.installFailed")}
-                        </span>
-                        {outcome.stdout && (
-                          <button
-                            type="button"
-                            onClick={() =>
-                              setShowInstallOutput((prev) => {
-                                const next = new Set(prev);
-                                if (next.has(preset.id)) next.delete(preset.id);
-                                else next.add(preset.id);
-                                return next;
-                              })
-                            }
-                            className="text-10 text-text-tertiary hover:text-zinc-600 dark:hover:text-zinc-300"
-                          >
-                            {showInstallOutput.has(preset.id)
-                              ? t("common.hideDetails")
-                              : t("common.showDetails")}
-                          </button>
-                        )}
-                        <button
-                          type="button"
-                          onClick={() => clearInstallOutcome(preset.id)}
-                          className="text-10 text-text-tertiary hover:text-zinc-600 dark:hover:text-zinc-300"
-                        >
-                          {t("harnessMcp.installDismiss")}
-                        </button>
-                      </div>
-                      {outcome.error && (
-                        <p className="mt-0.5 break-all text-10 text-red-500">{outcome.error}</p>
-                      )}
-                      {outcome.stdout && showInstallOutput.has(preset.id) && (
-                        <pre className="mt-1 max-h-32 overflow-auto rounded bg-zinc-50 p-2 text-10 leading-relaxed dark:bg-zinc-900/50">
-                          <code>{outcome.stdout}</code>
-                        </pre>
-                      )}
-                    </div>
-                  )}
                 </ListRow>
               );
             })}
+            {customServers.map((server) => (
+              <ListRow
+                key={server.name}
+                testId={`mcp-custom-${server.name}`}
+                surface="inset"
+                leading={
+                  <Package className="h-4 w-4 shrink-0 text-text-tertiary " />
+                }
+                trailing={
+                  <span className="inline-flex shrink-0 items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={() => openEdit(server)}
+                      data-testid={`mcp-edit-${server.name}`}
+                      className="inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-11 font-medium"
+                    >
+                      <Pencil className="h-3 w-3" />
+                      {t("harnessMcp.edit")}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => removeServer(server.name)}
+                      className="inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-11 font-medium"
+                    >
+                      {t("harnessMcp.remove")}
+                    </button>
+                  </span>
+                }
+              >
+                <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
+                  <span className="truncate text-xs font-medium text-text-secondary ">{server.display_name?.trim() || server.name}</span>
+                  <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-10 font-mono text-text-tertiary dark:bg-zinc-700">
+                    {server.transport}
+                  </span>
+                  {server.has_secrets && (
+                    <span className="text-10 text-amber-500 shrink-0">{t("harnessMcp.hasApiKey")}</span>
+                  )}
+                </div>
+                {/* When a friendly alias is set, still surface the immutable
+                    identity key agents actually reference. */}
+                {server.display_name?.trim() && (
+                  <p className="mt-0.5 truncate text-10 text-text-tertiary font-mono break-all">{server.name}</p>
+                )}
+                {(server.command || server.url) && (
+                  <p className="mt-0.5 truncate text-10 text-text-tertiary break-all">
+                    {server.command || server.url}
+                  </p>
+                )}
+              </ListRow>
+            ))}
           </ListBox>
         </ExpandableRow>
       </ListBox>
 
-      {/* Add Server dialog */}
+      {/* Add / edit server dialog — one form, two modes (editingName set
+          means edit). Name is the agent-side reference key, so it is
+          locked in edit mode; everything else is freely editable. */}
       {showAddForm && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-modal-overlay">
           <div className="w-[440px] max-h-[85vh] overflow-y-auto rounded-md bg-modal-surface p-6 shadow-xl">
-            <h3 className="mb-3 text-sm font-semibold">{t("harnessMcp.addCustomMcpServer")}</h3>
+            <h3 className="mb-3 text-sm font-semibold">
+              {editingName ? t("harnessMcp.editCustomMcpServer") : t("harnessMcp.addCustomMcpServer")}
+            </h3>
             <div className="space-y-2">
+              {/* Paste-to-normalize: drop in a vendor `mcpServers` JSON block
+                  or a CLI `mcp add` line and it fills the fields below. It
+                  never submits — you always review the autofill first. */}
+              <button
+                type="button"
+                onClick={() => setShowPaste((v) => !v)}
+                className="text-xs font-medium text-[var(--color-accent)] hover:underline"
+              >
+                {showPaste ? t("harnessMcp.hidePaste") : t("harnessMcp.pastePlaceholder")}
+              </button>
+              {showPaste && (
+                <div className="space-y-2 rounded-md border border-border-divider bg-panel-inset p-2">
+                  <textarea
+                    value={pasteText}
+                    onChange={(e) => setPasteText(e.target.value)}
+                    rows={4}
+                    className={cn(inputBase, "font-mono text-10")}
+                    placeholder={'{ "mcpServers": { ... } }  \n  or  \n  npx -y @modelcontextprotocol/server-filesystem ...'}
+                  />
+                  <button
+                    type="button"
+                    onClick={handleParse}
+                    disabled={!pasteText.trim()}
+                    className="inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-11 font-medium disabled:opacity-50"
+                  >
+                    {t("harnessMcp.parse")}
+                  </button>
+                  {parseMsg.length > 0 && (
+                    <ul className="space-y-1">
+                      {parseMsg.map((m, i) => (
+                        <li
+                          key={i}
+                          className={cn(
+                            "text-10",
+                            m.kind === "error" && "text-red-500",
+                            m.kind === "warn" && "text-amber-500",
+                            m.kind === "ok" && "text-green-600",
+                          )}
+                        >
+                          {m.text}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
               <div>
                 <label className="mb-1 block text-xs text-text-tertiary">{t("harnessMcp.name")}</label>
                 <input
                   value={newName}
                   onChange={(e) => setNewName(e.target.value)}
-                  className={inputBase}
+                  className={cn(inputBase, editingName && "cursor-not-allowed opacity-60")}
                   placeholder="my-server"
+                  readOnly={!!editingName}
                 />
+                {editingName && (
+                  <p className="mt-1 text-10 text-text-tertiary">{t("harnessMcp.nameIdentityHint")}</p>
+                )}
+              </div>
+              <div>
+                <label className="mb-1 block text-xs text-text-tertiary">{t("harnessMcp.displayName")}</label>
+                <input
+                  value={newDisplayName}
+                  onChange={(e) => setNewDisplayName(e.target.value)}
+                  className={inputBase}
+                  placeholder={newName || t("harnessMcp.displayNamePlaceholder")}
+                />
+                <p className="mt-1 text-10 text-text-tertiary">{t("harnessMcp.displayNameHint")}</p>
               </div>
               <div>
                 <label className="mb-1 block text-xs text-text-tertiary">{t("harnessMcp.transport")}</label>
@@ -1152,15 +1127,32 @@ export function McpTab() {
                   </div>
                 </>
               ) : (
-                <div>
-                  <label className="mb-1 block text-xs text-text-tertiary">{t("harnessMcp.url")}</label>
-                  <input
-                    value={newUrl}
-                    onChange={(e) => setNewUrl(e.target.value)}
-                    className={inputBase}
-                    placeholder="http://localhost:3000"
-                  />
-                </div>
+                <>
+                  <div>
+                    <label className="mb-1 block text-xs text-text-tertiary">{t("harnessMcp.url")}</label>
+                    <input
+                      value={newUrl}
+                      onChange={(e) => setNewUrl(e.target.value)}
+                      className={inputBase}
+                      placeholder="http://localhost:3000"
+                    />
+                  </div>
+                  {/* http/sse auth travels in request headers (env is only
+                      injected into stdio subprocesses) — e.g. a Bearer token
+                      for a hosted dashscope MCP. */}
+                  <div>
+                    <label className="mb-1 block text-xs text-text-tertiary">{t("harnessMcp.headers")}</label>
+                    <input
+                      value={newHeaders}
+                      onChange={(e) => setNewHeaders(e.target.value)}
+                      className={inputBase}
+                      placeholder="Authorization: Bearer sk-xxx"
+                    />
+                    {editingName && (
+                      <p className="mt-1 text-10 text-text-tertiary">{t("harnessMcp.envMaskedHint")}</p>
+                    )}
+                  </div>
+                </>
               )}
               <div>
                 <label className="mb-1 block text-xs text-text-tertiary">{t("harnessMcp.environment")}</label>
@@ -1170,11 +1162,14 @@ export function McpTab() {
                   className={inputBase}
                   placeholder="API_KEY=sk-xxx, DEBUG=true"
                 />
+                {editingName && (
+                  <p className="mt-1 text-10 text-text-tertiary">{t("harnessMcp.envMaskedHint")}</p>
+                )}
               </div>
             </div>
             <div className="mt-4 flex justify-end gap-2">
               <button
-                onClick={() => { setShowAddForm(false); }}
+                onClick={closeForm}
                 className="inline-flex items-center gap-1 rounded-md border border-zinc-300 px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-zinc-50 dark:border-zinc-600  dark:hover:bg-zinc-700"
               >
                 {t("common.cancel")}
@@ -1184,7 +1179,7 @@ export function McpTab() {
                 disabled={!newName.trim()}
                 className="inline-flex items-center gap-1 rounded btn-accent px-3 py-1.5 text-xs font-medium disabled:opacity-50"
               >
-                {t("harnessMcp.addServer")}
+                {editingName ? t("harnessMcp.save") : t("harnessMcp.addServer")}
               </button>
             </div>
           </div>
@@ -1225,81 +1220,6 @@ export function McpTab() {
                 {t("common.cancel")}
               </button>
             </div>
-          </div>
-        </div>
-      )}
-
-      {/* Probe result dialog */}
-      {probeResult && pendingConfig && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-modal-overlay">
-          <div className="w-[400px] rounded-md bg-modal-surface p-6 shadow-xl">
-            {probeResult.success ? (
-              <>
-                <div className="flex items-center gap-2 mb-3">
-                  <span className="h-3 w-3 rounded-full bg-green-500" />
-                  <h3 className="text-sm font-semibold text-green-600 dark:text-green-400">
-                    {t("harnessMcp.connected", { count: probeResult.tool_count })}
-                  </h3>
-                </div>
-                {probeResult.tools.length > 0 && (
-                  <div className="mb-3 max-h-32 overflow-y-auto rounded bg-zinc-50 p-2 dark:bg-zinc-700/50">
-                    {probeResult.tools.map((tool) => (
-                      <span key={tool} className="mr-1 mb-1 inline-block rounded bg-zinc-100 px-1.5 py-0.5 text-10 font-mono text-text-secondary dark:bg-zinc-600 ">
-                        {tool}
-                      </span>
-                    ))}
-                  </div>
-                )}
-                <p className="text-10 text-text-tertiary mb-3">{probeResult.duration_ms}ms</p>
-                <button
-                  onClick={dismissProbe}
-                  className="inline-flex items-center gap-1 rounded btn-accent px-3 py-1.5 text-xs font-medium"
-                >
-                  OK
-                </button>
-              </>
-            ) : (
-              <>
-                <div className="flex items-center gap-2 mb-3">
-                  <span className="h-3 w-3 rounded-full bg-red-500" />
-                  <h3 className="text-sm font-semibold text-red-600 dark:text-red-400">
-                    {t("harnessMcp.connFailed")}
-                  </h3>
-                </div>
-                <div className="mb-3">
-                  <ErrorBox
-                    message={t("harnessMcp.connFailed")}
-                    details={probeResult.error ?? undefined}
-                  />
-                </div>
-                <p className="text-10 text-text-tertiary mb-3">{probeResult.duration_ms}ms</p>
-                <div className="flex gap-2">
-                  <button
-                    onClick={handleAddAnyway}
-                    className="inline-flex items-center gap-1 rounded-md border border-amber-400 px-3 py-1.5 text-xs font-medium text-amber-600 hover:bg-amber-50 dark:border-amber-600 dark:text-amber-400 dark:hover:bg-amber-900/20"
-                  >
-                    {t("harnessMcp.addAnyway")}
-                  </button>
-                  <button
-                    onClick={dismissProbe}
-                    className="inline-flex items-center gap-1 rounded-md border border-zinc-300 px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-zinc-50 dark:border-zinc-600  dark:hover:bg-zinc-700"
-                  >
-                    {t("common.cancel")}
-                  </button>
-                </div>
-              </>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* Probing spinner overlay (shown while probe is in progress) */}
-      {pendingConfig && !probeResult && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-modal-overlay">
-          <div className="w-[300px] rounded-md bg-modal-surface p-6 text-center shadow-xl">
-            <div className="mx-auto mb-3 h-8 w-8 animate-spin rounded-full border-2 border-zinc-300 border-t-[var(--color-accent)]" />
-            <p className="text-xs text-text-tertiary">{t("harnessMcp.testing")}</p>
-            <p className="mt-1 text-10 text-text-tertiary">{pendingConfig.name}</p>
           </div>
         </div>
       )}

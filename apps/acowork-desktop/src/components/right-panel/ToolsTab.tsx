@@ -1,7 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Loader2 } from "lucide-react";
 import { useAgentStore } from "../../stores/agentStore";
-import { useMcpStore } from "../../stores/mcpStore";
+import { useMcpStore, mcpEnsureKey, type McpEnsureStatus } from "../../stores/mcpStore";
 import { getGatewayUrl } from "../../lib/config";
 import { with503Retry } from "../../lib/httpRetry";
 import { log } from "../../lib/logger";
@@ -27,6 +27,11 @@ interface BuiltinToolEntry {
 
 interface McpServerCardProps {
   server: McpServerView;
+  /** Friendly alias joined from the Gateway catalog by `server.name` (see
+   *  the parent). The Runtime's McpServerView doesn't carry display_name
+   *  (it isn't part of the MQTT McpRef push), so the Desktop resolves it
+   *  client-side against the catalog it already loads. */
+  displayName?: string;
   isChecked: boolean;
   /** ADR-069: complete per-tool list advertised by `server`, each row
    *  carrying `name` + `enabled` + `description`. Sourced entirely
@@ -42,6 +47,10 @@ interface McpServerCardProps {
   onToggleServer: () => void;
   switchDisabled: boolean;
   toolSwitchDisabled: boolean;
+  /** ADR-090: first-enable ensure status on THIS machine (undefined =
+   *  nothing being ensured — custom/local servers, or already usable).
+   *  Drives the 探测中/安装中/失败 badge and the failure detail line. */
+  ensure?: McpEnsureStatus;
 }
 
 /**
@@ -62,6 +71,7 @@ interface McpServerCardProps {
  */
 function McpServerCard({
   server,
+  displayName,
   isChecked,
   tools,
   loading,
@@ -69,7 +79,9 @@ function McpServerCard({
   onToggleServer,
   switchDisabled,
   toolSwitchDisabled,
+  ensure,
 }: McpServerCardProps) {
+  const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   // ADR-068/069 UX: the chevron is only meaningful when there is
   // actually something to expand — the server is active AND its tool
@@ -89,7 +101,7 @@ function McpServerCard({
       open={showBody}
       onToggle={() => setOpen((v) => !v)}
       disabled={!hasExpandableBody}
-      title={`${server.name}${tools.length > 0 ? ` (${tools.length})` : ""}`}
+      title={`${displayName?.trim() || server.name}${tools.length > 0 ? ` (${tools.length})` : ""}`}
       meta={
         // Inline spinner on the right of the title — visible from the
         // moment the user flips the Switch until the post-reconcile
@@ -98,7 +110,24 @@ function McpServerCard({
         // stuck UI. The spinner replaces the transport badge while
         // loading to keep the meta slot single-width and avoid a
         // layout shift when it disappears.
-        loading ? (
+        ensure?.state === "probing" || ensure?.state === "installing" ? (
+          <span
+            className="inline-flex items-center gap-1 text-10 text-text-tertiary"
+            data-testid={`mcp-ensure-${server.name}`}
+          >
+            <Loader2 className="h-3 w-3 animate-spin" />
+            {ensure.state === "probing"
+              ? t("agentSetup.ensureProbing")
+              : t("agentSetup.ensureInstalling")}
+          </span>
+        ) : ensure?.state === "failed" ? (
+          <span
+            className="inline-flex items-center gap-1 text-10 text-red-500"
+            data-testid={`mcp-ensure-${server.name}`}
+          >
+            {t("agentSetup.ensureFailed")}
+          </span>
+        ) : loading ? (
           <Loader2
             className="h-3 w-3 animate-spin text-text-tertiary "
             aria-label={`Connecting ${server.name}`}
@@ -107,7 +136,11 @@ function McpServerCard({
           <Badge>{server.transport}</Badge>
         )
       }
-      description={server.command || server.url || ""}
+      description={
+        ensure?.state === "failed" && ensure.error
+          ? ensure.error
+          : server.command || server.url || ""
+      }
       trailing={
         // The Switch component owns its own click handler; we stop
         // propagation so clicking the activation toggle does not
@@ -181,9 +214,29 @@ export function ToolsTab() {
   // Re-evaluated on every store change so a flip in any server's flag
   // re-renders the matching card and shows/hides its spinner.
   const perServerLoading = useMcpStore((s) => selectedAgentId ? (s.perServerLoading[selectedAgentId] ?? EMPTY_OBJECT) : EMPTY_OBJECT);
+  // ADR-090: ensure-usable status per server (probing/installing/failed
+  // badges on the card; undefined once usable or for custom servers).
+  const ensureStatus = useMcpStore((s) => s.ensureStatus);
   const mcpError = useMcpStore((s) => s.error);
   const toggleServer = useMcpStore((s) => s.toggleServer);
   const clearServerLoading = useMcpStore((s) => s.clearServerLoading);
+
+  // Resolve each server's friendly alias from the Gateway catalog (the
+  // source of truth the user edits display_name in). The per-agent
+  // McpServerView from the Runtime doesn't carry it, so join by name here.
+  const catalog = useMcpStore((s) => s.catalog);
+  const loadCatalog = useMcpStore((s) => s.loadCatalog);
+  useEffect(() => {
+    if (catalog.length === 0) void loadCatalog();
+  }, [catalog.length, loadCatalog]);
+  const displayNameByName = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const c of catalog) {
+      const d = c.display_name?.trim();
+      if (d) m.set(c.name, d);
+    }
+    return m;
+  }, [catalog]);
 
   // Per-agent MCP server definitions (catalog ∪ local) from merged /tools.
   const [mcpServerDefs, setMcpServerDefs] = useState<McpServerView[]>([]);
@@ -513,6 +566,7 @@ export function ToolsTab() {
                     <McpServerCard
                       key={server.name}
                       server={server}
+                      displayName={displayNameByName.get(server.name)}
                       isChecked={isChecked}
                       tools={tools}
                       loading={!!perServerLoading[server.name]}
@@ -522,6 +576,11 @@ export function ToolsTab() {
                       }
                       switchDisabled={activationLoading || !selectedAgentId}
                       toolSwitchDisabled={mcpToolsSaving || !selectedAgentId}
+                      ensure={
+                        selectedAgentId
+                          ? ensureStatus[mcpEnsureKey(selectedAgentId, server.name)]
+                          : undefined
+                      }
                     />
                   );
                 })}

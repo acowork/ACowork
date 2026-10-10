@@ -8,11 +8,14 @@
 //! - PUT    /api/mcp-catalog         — replace the entire catalog
 //! - POST   /api/mcp-catalog         — add a single server entry
 //! - DELETE /api/mcp-catalog/{name}   — remove a server entry
-//! - POST   /api/mcp-catalog/probe   — probe a server config (health check)
-//! - POST   /api/mcp-catalog/{name}/probe — probe an existing catalog entry
-//! - POST   /api/mcp-catalog/install — install a preset, write it to the catalog
-//! - GET    /api/mcp-catalog/install/{name}         — pre-flight install check
-//! - GET    /api/mcp-catalog/install/{name}/status — in-flight install progress
+//!
+//! ADR-090: install execution moved to the Agent (Runtime) process —
+//! the Gateway is registry + key vault only. The former
+//! `/api/mcp-catalog/install*` endpoints are removed. Runtime health
+//! checks (probing) are likewise removed: a stdio probe spawns a process
+//! on whatever machine the Gateway runs on, which is meaningless once
+//! Runtimes live on arbitrary Nodes. Server usability is verified by the
+//! Agent at first enable (see `acowork-runtime/src/mcp_ensure.rs`).
 
 use axum::{
     extract::{Path, State},
@@ -21,14 +24,12 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::path::PathBuf;
-use std::time::Instant;
 
 use crate::http::routes::{ApiError, AppState, OperationAck};
 use crate::resource_cache;
 use acowork_core::operation::{OperationRecord, OperationState};
-use acowork_core::protocol::{InstallState, McpInstallSpec, McpServerConfigDef, McpTransportDef};
+use acowork_core::protocol::McpServerConfigDef;
 
 /// Build the MCP catalog router
 pub fn mcp_catalog_routes() -> Router<AppState> {
@@ -39,23 +40,10 @@ pub fn mcp_catalog_routes() -> Router<AppState> {
                 .put(replace_catalog)
                 .post(add_catalog_entry),
         )
-        .route("/api/mcp-catalog/probe", post(probe_server_config))
-        .route("/api/mcp-catalog/install", post(install_server))
-        .route(
-            "/api/mcp-catalog/install/{name}",
-            get(install_check).post(install_catalog_entry),
-        )
-        // Registered after the `{name}` route: axum's matchit is static-first,
-        // so `/install/{name}/status` resolves here regardless of order.
-        .route(
-            "/api/mcp-catalog/install/{name}/status",
-            get(install_status),
-        )
         .route(
             "/api/mcp-catalog/{name}",
             delete(remove_catalog_entry).put(update_catalog_entry),
         )
-        .route("/api/mcp-catalog/{name}/probe", post(probe_catalog_entry))
 }
 
 // ── Persistence helpers ──────────────────────────────────────────────
@@ -92,38 +80,67 @@ pub fn save_mcp_catalog(
 
 // ── Masking helper ───────────────────────────────────────────────────
 
-/// Mask sensitive env values for API responses.
-/// Returns a copy of the config with env values containing "key", "token",
-/// "secret", or "password" in their key name replaced with "••••".
-fn mask_sensitive_env(config: &McpServerConfigDef) -> McpServerConfigDef {
-    let sensitive_keywords = ["key", "token", "secret", "password"];
-    let masked_env: std::collections::HashMap<String, String> = config
-        .env
-        .iter()
+/// A field key (env var name or HTTP header name) whose value is a secret and
+/// must be masked in API responses. `authorization` is included so a Bearer
+/// token header is treated as sensitive the same way an `*_API_KEY` env is.
+fn is_sensitive_key(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    [
+        "key",
+        "token",
+        "secret",
+        "password",
+        "authorization",
+    ]
+    .iter()
+    .any(|kw| lower.contains(kw))
+}
+
+/// Replace sensitive values in a key/value map with "••••" (see is_sensitive_key).
+fn mask_sensitive_map(
+    map: &std::collections::HashMap<String, String>,
+) -> std::collections::HashMap<String, String> {
+    map.iter()
         .map(|(k, v)| {
-            let lower = k.to_lowercase();
-            let is_sensitive = sensitive_keywords.iter().any(|kw| lower.contains(kw));
             (
                 k.clone(),
-                if is_sensitive {
+                if is_sensitive_key(k) {
                     "••••".to_string()
                 } else {
                     v.clone()
                 },
             )
         })
-        .collect();
+        .collect()
+}
+
+/// Whether a config holds any secret (a sensitive env key or header key) that
+/// GET masks and PUT preserves — drives the "has API key" badge in the UI.
+fn has_sensitive_fields(config: &McpServerConfigDef) -> bool {
+    config.env.keys().any(|k| is_sensitive_key(k))
+        || config.headers.keys().any(|k| is_sensitive_key(k))
+}
+
+/// Mask sensitive env values for API responses.
+/// Returns a copy of the config with env values containing "key", "token",
+/// "secret", or "password" in their key name replaced with "•••". Sensitive
+/// HTTP header values are masked the same way.
+fn mask_sensitive_env(config: &McpServerConfigDef) -> McpServerConfigDef {
+    let masked_env = mask_sensitive_map(&config.env);
+    let masked_headers = mask_sensitive_map(&config.headers);
 
     McpServerConfigDef {
         name: config.name.clone(),
+        display_name: config.display_name.clone(),
         transport: config.transport.clone(),
         url: config.url.clone(),
         command: config.command.clone(),
         args: config.args.clone(),
         env: masked_env,
-        headers: config.headers.clone(),
+        headers: masked_headers,
         tool_timeout_secs: config.tool_timeout_secs,
         install: config.install.clone(),
+        required_secrets: config.required_secrets.clone(),
     }
 }
 
@@ -170,206 +187,6 @@ pub struct MessageResponse {
     pub message: String,
 }
 
-/// MCP probe response — result of a health check against an MCP server
-#[derive(Serialize)]
-pub struct McpProbeResponse {
-    /// Whether the connection succeeded
-    pub success: bool,
-    /// Number of tools discovered
-    pub tool_count: usize,
-    /// Tool names discovered
-    pub tools: Vec<String>,
-    /// Error message if failed
-    pub error: Option<String>,
-    /// Probe duration in milliseconds
-    pub duration_ms: u64,
-}
-
-// ── In-flight install registry ───────────────────────────────────────
-
-/// Coarse stage of an install run, surfaced to the Desktop so a row can
-/// show *what* is happening instead of a spinner with no context.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum InstallStage {
-    /// Probing that the package runtime (node / uv / cargo / docker) exists.
-    CheckingRuntime,
-    /// Running the derived install command (npm / pip / cargo / docker).
-    Installing,
-    /// Spawning the server + MCP initialize + tools/list handshake.
-    Verifying,
-}
-
-impl InstallStage {
-    fn as_str(self) -> &'static str {
-        match self {
-            InstallStage::CheckingRuntime => "checking_runtime",
-            InstallStage::Installing => "installing",
-            InstallStage::Verifying => "verifying",
-        }
-    }
-}
-
-/// One in-flight install: the stage it last reached + when it started.
-#[derive(Debug, Clone, Copy)]
-struct InstallProgress {
-    stage: InstallStage,
-    started_at: Instant,
-}
-
-/// `server name → progress` for installs currently running in this process.
-///
-/// The install pipeline (runtime probe → install command → MCP handshake)
-/// is multi-minute on a first run, and the HTTP request blocks for the
-/// whole of it. Without this registry the only signal a caller has is
-/// "the request has not returned yet", which says nothing about *where*
-/// the install is — and, worse, lets a second click start a duplicate
-/// install of the same server. The registry does both jobs: it is the
-/// source for `GET .../status` and the guard that rejects a concurrent
-/// install of the same name with 409.
-///
-/// ponytail: in-memory and per-Gateway-process. A Gateway restart drops a
-/// running install (the client sees the request fail and clears its
-/// spinner); installs are short-lived and never survive a restart anyway,
-/// so persisting them would buy nothing. Upgrade path if we ever fan an
-/// install out to a Node (ADR-055): move this map into a shared store the
-/// Node-reply path can write to, keyed by operation id.
-static INSTALLS: std::sync::LazyLock<parking_lot::Mutex<HashMap<String, InstallProgress>>> =
-    std::sync::LazyLock::new(|| parking_lot::Mutex::new(HashMap::new()));
-
-/// Guard returned when an install of `name` is already running. Holds the
-/// stage lock for the whole pipeline: dropping it removes the entry, so
-/// every exit path (including `?`) cleans up.
-struct InstallGuard {
-    name: String,
-}
-
-impl InstallGuard {
-    /// Register a new install for `name`, or return the current stage when
-    /// one is already in flight.
-    fn acquire(name: &str) -> Result<Self, InstallStage> {
-        let mut map = INSTALLS.lock();
-        if let Some(p) = map.get(name) {
-            return Err(p.stage);
-        }
-        map.insert(
-            name.to_string(),
-            InstallProgress {
-                stage: InstallStage::CheckingRuntime,
-                started_at: Instant::now(),
-            },
-        );
-        Ok(Self {
-            name: name.to_string(),
-        })
-    }
-
-    /// Advance the stage. No-op once the guard is gone (best effort).
-    fn stage(&self, stage: InstallStage) {
-        if let Some(p) = INSTALLS.lock().get_mut(&self.name) {
-            p.stage = stage;
-        }
-    }
-
-    /// Snapshot of a running install: `(stage, elapsed_ms)`.
-    fn status(name: &str) -> Option<(InstallStage, u64)> {
-        let map = INSTALLS.lock();
-        map.get(name)
-            .map(|p| (p.stage, p.started_at.elapsed().as_millis() as u64))
-    }
-}
-
-impl Drop for InstallGuard {
-    fn drop(&mut self) {
-        INSTALLS.lock().remove(&self.name);
-    }
-}
-
-/// `GET /api/mcp-catalog/install/{name}/status` — in-flight install progress.
-///
-/// Returns `running: false` for every server that is not currently being
-/// installed (including unknown names) so the caller can poll this
-/// unconditionally.
-pub async fn install_status(Path(name): Path<String>) -> Json<McpInstallStatusResponse> {
-    match InstallGuard::status(&name) {
-        Some((stage, elapsed_ms)) => Json(McpInstallStatusResponse {
-            name,
-            running: true,
-            stage: Some(stage.as_str().to_string()),
-            elapsed_ms,
-        }),
-        None => Json(McpInstallStatusResponse {
-            name,
-            running: false,
-            stage: None,
-            elapsed_ms: 0,
-        }),
-    }
-}
-
-// ── Install DTOs (ADR-072) ─────────────────────────────────────────────
-
-/// Request to install a preset MCP server (ADR-072). Install runs, then on
-/// success the derived spawn config is written to the catalog atomically
-/// (install-then-add, so a failed install never leaves a broken entry).
-#[derive(Deserialize)]
-pub struct McpInstallRequest {
-    /// MCP server name (catalog entry name, e.g. "docling").
-    pub name: String,
-    /// ADR-059 §7.3 optimistic-concurrency precondition (same as add).
-    #[serde(default)]
-    pub expected_version: Option<u64>,
-    /// Declarative install spec (kind × spec × spawn shape).
-    pub install: McpInstallSpec,
-    /// Optional pre-derived spawn config (frontend may pass its own);
-    /// otherwise Gateway derives it from `install.package`.
-    #[serde(default)]
-    pub spawn: Option<McpServerConfigDef>,
-    /// Preset env (e.g. API keys). Merged into the derived spawn env so
-    /// `$VAR` placeholders in spawn_args resolve during the health check.
-    #[serde(default)]
-    pub env: std::collections::HashMap<String, String>,
-}
-
-/// Pre-flight install check — what the installer *would* do and whether the
-/// runtime is ready. Drives the Install button (enabled/blocked + guidance).
-#[derive(Serialize)]
-pub struct McpInstallCheckResponse {
-    pub name: String,
-    pub runtime_ready: bool,
-    pub missing_runtime: Option<String>,
-    pub install_hint: Option<String>,
-    pub install_command: Option<Vec<String>>,
-    pub spawn: McpServerConfigDef,
-}
-
-/// In-flight install progress (`GET /api/mcp-catalog/install/{name}/status`).
-#[derive(Serialize)]
-pub struct McpInstallStatusResponse {
-    pub name: String,
-    /// An install of this server is running in this Gateway right now.
-    pub running: bool,
-    /// Last stage reached — `None` when `running` is false.
-    pub stage: Option<String>,
-    /// Wall-clock time since the install started.
-    pub elapsed_ms: u64,
-}
-
-/// Install run response (ADR-072).
-#[derive(Serialize)]
-pub struct McpInstallRunResponse {
-    pub name: String,
-    pub success: bool,
-    pub exit_code: Option<i32>,
-    pub stdout: String,
-    pub stderr: String,
-    pub install_duration_ms: u64,
-    pub tool_count: Option<usize>,
-    pub health_error: Option<String>,
-    /// Derived spawn config — present once install & health check succeeded.
-    pub spawn: Option<McpServerConfigDef>,
-}
-
 // ── Handlers ──────────────────────────────────────────────────────────
 
 /// `GET /api/mcp-catalog` — list all MCP server definitions (env values masked)
@@ -379,15 +196,11 @@ pub async fn list_catalog(
     let data_dir = get_data_dir(&state).await?;
     let catalog = load_mcp_catalog(&data_dir).map_err(|e| ApiError::internal(&e))?;
 
-    let sensitive_keywords = ["key", "token", "secret", "password"];
     let servers: Vec<McpCatalogEntryResponse> = catalog
         .iter()
         .map(|c| {
             let masked = mask_sensitive_env(c);
-            let has_secrets = c.env.keys().any(|k| {
-                let lower = k.to_lowercase();
-                sensitive_keywords.iter().any(|kw| lower.contains(kw))
-            });
+            let has_secrets = has_sensitive_fields(c);
             McpCatalogEntryResponse {
                 config: masked,
                 has_secrets,
@@ -430,15 +243,11 @@ pub async fn replace_catalog(
     // (The old ResourcePusher stub has been removed.)
 
     // Return masked response
-    let sensitive_keywords = ["key", "token", "secret", "password"];
     let servers: Vec<McpCatalogEntryResponse> = new_catalog
         .iter()
         .map(|c| {
             let masked = mask_sensitive_env(c);
-            let has_secrets = c.env.keys().any(|k| {
-                let lower = k.to_lowercase();
-                sensitive_keywords.iter().any(|kw| lower.contains(kw))
-            });
+            let has_secrets = has_sensitive_fields(c);
             McpCatalogEntryResponse {
                 config: masked,
                 has_secrets,
@@ -546,17 +355,37 @@ pub async fn update_catalog_entry(
         })
         .collect();
 
+    // Same masked-value round-trip for HTTP headers (e.g. an Authorization
+    // Bearer token): a value returned masked and sent back unchanged keeps
+    // the stored secret rather than overwriting it with "••••".
+    let old_headers = catalog[idx].headers.clone();
+    let merged_headers: std::collections::HashMap<String, String> = body
+        .config
+        .headers
+        .into_iter()
+        .map(|(k, v)| {
+            if v == "••••" {
+                let old_val = old_headers.get(&k).cloned().unwrap_or_default();
+                (k, old_val)
+            } else {
+                (k, v)
+            }
+        })
+        .collect();
+
     let new_name = body.config.name.clone();
     catalog[idx] = McpServerConfigDef {
         name: body.config.name,
+        display_name: body.config.display_name,
         transport: body.config.transport,
         url: body.config.url,
         command: body.config.command,
         args: body.config.args,
         env: merged_env,
-        headers: body.config.headers,
+        headers: merged_headers,
         tool_timeout_secs: body.config.tool_timeout_secs,
         install: body.config.install,
+        required_secrets: body.config.required_secrets,
     };
 
     save_mcp_catalog(&data_dir, &catalog).map_err(|e| ApiError::internal(&e))?;
@@ -614,434 +443,6 @@ pub async fn remove_catalog_entry(
     }))
 }
 
-// ── Probe handlers ──────────────────────────────────────────────────
-
-/// Substitute `$VAR_NAME` references in command args with values from the env map.
-/// Only substitutes references that have a matching key in the env map.
-fn substitute_env_vars_in_args(
-    args: &[String],
-    env: &std::collections::HashMap<String, String>,
-) -> Vec<String> {
-    args.iter()
-        .map(|arg| {
-            let mut result = arg.clone();
-            for (key, value) in env {
-                let pattern = format!("${}", key);
-                result = result.replace(&pattern, value);
-            }
-            result
-        })
-        .collect()
-}
-
-/// Core probe logic: attempt to connect to an MCP server and return health info.
-///
-/// If the initial stdio connection fails with "invalid JSON-RPC response" (which
-/// typically means the process started in HTTP mode instead of stdio), we
-/// automatically retry in HTTP mode to give the user a clear diagnosis.
-async fn do_probe(config: McpServerConfigDef) -> McpProbeResponse {
-    let start = std::time::Instant::now();
-
-    // Substitute $ENV_VAR references in args from env map
-    let resolved_args = substitute_env_vars_in_args(&config.args, &config.env);
-    let resolved_config = McpServerConfigDef {
-        args: resolved_args,
-        ..config.clone()
-    };
-
-    match acowork_mcp::McpClient::connect(resolved_config).await {
-        Ok(client) => {
-            let duration_ms = start.elapsed().as_millis() as u64;
-            let tools: Vec<String> = client.tools().into_iter().map(|t| t.name).collect();
-            let tool_count = tools.len();
-            // Disconnect cleanly
-            client.disconnect().await;
-            McpProbeResponse {
-                success: true,
-                tool_count,
-                tools,
-                error: None,
-                duration_ms,
-            }
-        }
-        Err(e) => {
-            let err_msg = format!("{:#}", e);
-
-            // Smart diagnosis: if stdio failed with "invalid JSON-RPC response",
-            // the process likely started in HTTP mode. Try HTTP fallback to confirm.
-            if config.transport == McpTransportDef::Stdio
-                && err_msg.contains("invalid JSON-RPC response")
-            {
-                // Common HTTP MCP endpoints, extended with package-declared
-                // ports (ADR-072 decision 5 — e.g. docling defaults to 8000).
-                let mut http_ports = vec![3333u16, 3000, 8080];
-                if let Some(install) = &config.install {
-                    let pkg = &install.package.http_probe_ports;
-                    if !pkg.is_empty() {
-                        http_ports.extend(pkg.iter().copied());
-                    }
-                }
-                let http_urls: Vec<String> = http_ports
-                    .iter()
-                    .map(|p| format!("http://127.0.0.1:{p}/mcp"))
-                    .collect();
-                for url in &http_urls {
-                    let http_config = McpServerConfigDef {
-                        transport: McpTransportDef::Http,
-                        url: Some(url.clone()),
-                        ..config.clone()
-                    };
-                    if let Ok(client) = acowork_mcp::McpClient::connect(http_config).await {
-                        let duration_ms = start.elapsed().as_millis() as u64;
-                        let tools: Vec<String> =
-                            client.tools().into_iter().map(|t| t.name).collect();
-                        let tool_count = tools.len();
-                        client.disconnect().await;
-                        return McpProbeResponse {
-                            success: true,
-                            tool_count,
-                            tools,
-                            error: None,
-                            duration_ms,
-                        };
-                    }
-                }
-
-                // HTTP fallback also failed — give a clear diagnosis
-                let duration_ms = start.elapsed().as_millis() as u64;
-                return McpProbeResponse {
-                    success: false,
-                    tool_count: 0,
-                    tools: Vec::new(),
-                    error: Some(format!(
-                        "{err_msg}\n\nThe server process started but did not respond on stdio. \
-                         It may be running in HTTP mode instead. \
-                         Try adding \"--stdio\" to the command arguments."
-                    )),
-                    duration_ms,
-                };
-            }
-
-            let duration_ms = start.elapsed().as_millis() as u64;
-            McpProbeResponse {
-                success: false,
-                tool_count: 0,
-                tools: Vec::new(),
-                error: Some(err_msg),
-                duration_ms,
-            }
-        }
-    }
-}
-
-/// `POST /api/mcp-catalog/probe` — probe an MCP server config (health check)
-///
-/// Accepts a full MCP server config, attempts to connect and perform the
-/// MCP initialize handshake + tools/list. Returns success/failure with
-/// tool names and duration. Used by the frontend to verify a server
-/// config is valid before saving it to the catalog.
-pub async fn probe_server_config(
-    Json(config): Json<McpServerConfigDef>,
-) -> Result<Json<McpProbeResponse>, ApiError> {
-    tracing::info!(server = %config.name, transport = ?config.transport, "Probing MCP server config");
-    Ok(Json(do_probe(config).await))
-}
-
-/// `POST /api/mcp-catalog/{name}/probe` — probe an existing catalog entry
-///
-/// Loads the real (unmasked) config from the catalog file and probes it.
-/// Used to re-verify an already-saved server's health.
-pub async fn probe_catalog_entry(
-    State(state): State<AppState>,
-    Path(name): Path<String>,
-) -> Result<Json<McpProbeResponse>, ApiError> {
-    let data_dir = get_data_dir(&state).await?;
-    let catalog = load_mcp_catalog(&data_dir).map_err(|e| ApiError::internal(&e))?;
-
-    let config = catalog
-        .into_iter()
-        .find(|c| c.name == name)
-        .ok_or_else(|| {
-            ApiError::not_found(&format!("MCP server '{}' not found in catalog", name))
-        })?;
-
-    tracing::info!(server = %name, "Probing existing catalog MCP server");
-    Ok(Json(do_probe(config).await))
-}
-
-// ── Install handlers (ADR-072) ─────────────────────────────────────────
-
-/// Core install pipeline shared by `install_server` and `install_catalog_entry`.
-///
-/// 1. Runtime dependency check (structured guidance — no auto-install).
-/// 2. Run the derived install command (if any).
-/// 3. Derive spawn config & health check (single handshake, one retry for
-///    slow first-run downloads).
-///
-/// Registers the run in [`INSTALLS`] first: a concurrent install of the
-/// same server is rejected with 409 instead of running a second copy, and
-/// `GET .../status` can report the stage. The returned guard is held for
-/// the whole pipeline so every exit path unregisters.
-async fn run_install_pipeline(
-    name: &str,
-    install: &McpInstallSpec,
-    spawn_override: Option<McpServerConfigDef>,
-    env: &std::collections::HashMap<String, String>,
-) -> Result<(McpInstallRunResponse, McpServerConfigDef), ApiError> {
-    let guard = InstallGuard::acquire(name).map_err(|stage| {
-        tracing::warn!(server = %name, stage = stage.as_str(), "Rejected duplicate MCP install");
-        ApiError::conflict(&format!(
-            "MCP server '{name}' is already being installed ({}).",
-            stage.as_str()
-        ))
-    })?;
-
-    let pkg = install.package.clone();
-
-    // 1. Runtime dependency check.
-    match acowork_mcp::ensure_runtime(&pkg) {
-        Ok(()) => {}
-        Err(acowork_mcp::DependencyStatus::Missing {
-            runtime,
-            install_hint,
-        }) => {
-            return Err(ApiError::conflict(&format!(
-                "Missing runtime '{}'. {} — install it first, then retry.",
-                runtime, install_hint
-            )));
-        }
-        Err(_) => return Err(ApiError::internal("unexpected runtime probe result")),
-    }
-
-    // 2. Run the install command (if any).
-    guard.stage(InstallStage::Installing);
-    let output = acowork_mcp::run_install(&pkg)
-        .await
-        .map_err(|e| ApiError::internal(&e))?;
-
-    if !output.success {
-        return Ok((
-            McpInstallRunResponse {
-                name: name.to_string(),
-                success: false,
-                exit_code: output.exit_code,
-                stdout: output.stdout,
-                stderr: output.stderr,
-                install_duration_ms: output.duration_ms,
-                tool_count: None,
-                health_error: None,
-                spawn: None,
-            },
-            McpServerConfigDef::default(),
-        ));
-    }
-
-    // 3. Derive spawn & health check with one retry.
-    let mut spawn = match spawn_override {
-        Some(s) => s,
-        None => acowork_mcp::derive_spawn_config(name, &pkg),
-    };
-    // Merge preset env (API keys) into the spawn env so `$VAR` placeholders
-    // in spawn_args resolve during the health check.
-    spawn.env = acowork_mcp::build_spawn_env(env);
-
-    guard.stage(InstallStage::Verifying);
-    let mut health = acowork_mcp::health_check(&spawn).await;
-    if health.is_err() {
-        // First-run downloads (e.g. uvx pulling deps) can exceed MCP_RECV;
-        // a cached retry usually starts in milliseconds.
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        health = acowork_mcp::health_check(&spawn).await;
-    }
-
-    match health {
-        Ok(tool_count) => Ok((
-            McpInstallRunResponse {
-                name: name.to_string(),
-                success: true,
-                exit_code: output.exit_code,
-                stdout: output.stdout,
-                stderr: output.stderr,
-                install_duration_ms: output.duration_ms,
-                tool_count: Some(tool_count),
-                health_error: None,
-                spawn: Some(spawn.clone()),
-            },
-            spawn,
-        )),
-        Err(e) => Ok((
-            McpInstallRunResponse {
-                name: name.to_string(),
-                success: false,
-                exit_code: output.exit_code,
-                stdout: output.stdout,
-                stderr: output.stderr,
-                install_duration_ms: output.duration_ms,
-                tool_count: None,
-                health_error: Some(e),
-                spawn: Some(spawn.clone()),
-            },
-            spawn,
-        )),
-    }
-}
-
-/// `POST /api/mcp-catalog/install` — install a preset MCP server and write
-/// it to the catalog on success (install-then-add, ADR-072 decision 7).
-///
-/// Body: [`McpInstallRequest`] (`name` + declarative `install` spec).
-/// On success returns the derived spawn config; the entry is persisted with
-/// `install.state = Installed` so the frontend "Install" button hides.
-pub async fn install_server(
-    State(state): State<AppState>,
-    Json(body): Json<McpInstallRequest>,
-) -> Result<(StatusCode, Json<McpInstallRunResponse>), ApiError> {
-    crate::http::routes::check_expected_version(&state, body.expected_version).await?;
-
-    if body.name.is_empty() {
-        return Err(ApiError::bad_request("MCP server name must not be empty"));
-    }
-
-    let data_dir = get_data_dir(&state).await?;
-    let (resp, spawn) =
-        run_install_pipeline(&body.name, &body.install, body.spawn, &body.env).await?;
-
-    if !resp.success {
-        return Ok((StatusCode::OK, Json(resp)));
-    }
-
-    // Write derived spawn + install state into the catalog (create or update).
-    let mut catalog = load_mcp_catalog(&data_dir).map_err(|e| ApiError::internal(&e))?;
-    let mut entry = spawn;
-    entry.name = body.name.clone();
-    entry.env = acowork_mcp::build_spawn_env(&body.env);
-    entry.install = Some(McpInstallSpec {
-        package: body.install.package.clone(),
-        state: InstallState::Installed,
-    });
-
-    let created = if let Some(existing) = catalog.iter_mut().find(|c| c.name == body.name) {
-        *existing = entry;
-        false
-    } else {
-        catalog.push(entry);
-        true
-    };
-    save_mcp_catalog(&data_dir, &catalog).map_err(|e| ApiError::internal(&e))?;
-
-    {
-        let mut gw = state.gateway_state.write().await;
-        resource_cache::rebuild_and_save_mcp_cache(&mut gw, &data_dir, &catalog);
-    }
-    if let Some(ref trigger) = state.mqtt_publisher_trigger {
-        trigger.trigger();
-    }
-
-    Ok((
-        if created {
-            StatusCode::CREATED
-        } else {
-            StatusCode::OK
-        },
-        Json(resp),
-    ))
-}
-
-/// `GET /api/mcp-catalog/install/{name}` — pre-flight check for an existing
-/// catalog entry (Repair path). Returns runtime readiness + derived spawn
-/// + install command so the frontend can gate the Install button.
-pub async fn install_check(
-    State(state): State<AppState>,
-    Path(name): Path<String>,
-) -> Result<Json<McpInstallCheckResponse>, ApiError> {
-    let data_dir = get_data_dir(&state).await?;
-    let catalog = load_mcp_catalog(&data_dir).map_err(|e| ApiError::internal(&e))?;
-
-    let entry = catalog
-        .iter()
-        .find(|c| c.name == name)
-        .ok_or_else(|| ApiError::not_found(&format!("MCP server '{name}' not found in catalog")))?;
-
-    let install = entry.install.clone().ok_or_else(|| {
-        ApiError::bad_request(&format!("MCP server '{name}' has no install spec"))
-    })?;
-    let pkg = install.package;
-
-    let spawn = acowork_mcp::derive_spawn_config(&name, &pkg);
-    let install_command = acowork_mcp::derive_install_command(&pkg);
-
-    match acowork_mcp::probe_runtime(&pkg) {
-        acowork_mcp::DependencyStatus::Ready => Ok(Json(McpInstallCheckResponse {
-            name,
-            runtime_ready: true,
-            missing_runtime: None,
-            install_hint: None,
-            install_command,
-            spawn,
-        })),
-        acowork_mcp::DependencyStatus::Missing {
-            runtime,
-            install_hint,
-        } => Ok(Json(McpInstallCheckResponse {
-            name,
-            runtime_ready: false,
-            missing_runtime: Some(runtime),
-            install_hint: Some(install_hint),
-            install_command,
-            spawn,
-        })),
-    }
-}
-
-/// `POST /api/mcp-catalog/install/{name}` — repair/reinstall an existing
-/// catalog entry. Uses the catalog's stored spawn config (may have been
-/// user-edited) and refreshes `install.state` on success.
-pub async fn install_catalog_entry(
-    State(state): State<AppState>,
-    Path(name): Path<String>,
-) -> Result<Json<McpInstallRunResponse>, ApiError> {
-    let data_dir = get_data_dir(&state).await?;
-    let catalog = load_mcp_catalog(&data_dir).map_err(|e| ApiError::internal(&e))?;
-
-    let entry = catalog
-        .into_iter()
-        .find(|c| c.name == name)
-        .ok_or_else(|| ApiError::not_found(&format!("MCP server '{name}' not found in catalog")))?;
-    let install = entry.install.clone().ok_or_else(|| {
-        ApiError::bad_request(&format!("MCP server '{name}' has no install spec"))
-    })?;
-
-    let (resp, _spawn) = run_install_pipeline(
-        &name,
-        &install,
-        Some(entry.clone()),
-        &std::collections::HashMap::new(),
-    )
-    .await?;
-
-    if !resp.success {
-        return Ok(Json(resp));
-    }
-
-    let mut catalog = load_mcp_catalog(&data_dir).map_err(|e| ApiError::internal(&e))?;
-    if let Some(existing) = catalog.iter_mut().find(|c| c.name == name) {
-        existing.install = Some(McpInstallSpec {
-            package: install.package.clone(),
-            state: InstallState::Installed,
-        });
-    }
-    save_mcp_catalog(&data_dir, &catalog).map_err(|e| ApiError::internal(&e))?;
-    {
-        let mut gw = state.gateway_state.write().await;
-        resource_cache::rebuild_and_save_mcp_cache(&mut gw, &data_dir, &catalog);
-    }
-    if let Some(ref trigger) = state.mqtt_publisher_trigger {
-        trigger.trigger();
-    }
-
-    Ok(Json(resp))
-}
-
 // ── Helpers ───────────────────────────────────────────────────────────
 
 /// Get the data_dir from Gateway state
@@ -1062,6 +463,7 @@ mod tests {
     fn test_mask_sensitive_env() {
         let config = McpServerConfigDef {
             name: "github".to_string(),
+            display_name: None,
             transport: acowork_core::protocol::McpTransportDef::Stdio,
             command: "npx".to_string(),
             args: vec![
@@ -1098,6 +500,7 @@ mod tests {
 
         let catalog = vec![McpServerConfigDef {
             name: "filesystem".to_string(),
+            display_name: None,
             transport: acowork_core::protocol::McpTransportDef::Stdio,
             command: "npx".to_string(),
             args: vec![
@@ -1128,53 +531,5 @@ mod tests {
         assert!(loaded.is_empty());
 
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// Regression guard for the duplicate-install report: clicking Install
-    /// twice used to fire two `POST /api/mcp-catalog/install` calls, and both
-    /// ran the full pipeline. The guard makes the second one a 409.
-    #[test]
-    fn test_install_guard_rejects_duplicate_and_reports_stage() {
-        // Unique name — the registry is process-global and `cargo test` runs
-        // tests in parallel threads.
-        let name = format!("test-guard-{}", std::process::id());
-
-        let guard = InstallGuard::acquire(&name).expect("first install must be admitted");
-        assert_eq!(
-            InstallGuard::status(&name).map(|(s, _)| s),
-            Some(InstallStage::CheckingRuntime),
-            "guard registers at the runtime-check stage"
-        );
-
-        // Second install of the same server is rejected with the live stage.
-        assert_eq!(
-            InstallGuard::acquire(&name).err(),
-            Some(InstallStage::CheckingRuntime)
-        );
-        guard.stage(InstallStage::Installing);
-        assert_eq!(
-            InstallGuard::acquire(&name).err(),
-            Some(InstallStage::Installing)
-        );
-
-        // A different server is unaffected — installs don't block each other.
-        let other = format!("{name}-other");
-        let other_guard = InstallGuard::acquire(&other);
-        assert!(other_guard.is_ok());
-        drop(other_guard);
-
-        // Elapsed time is reported and grows monotonically.
-        let (_, first) = InstallGuard::status(&name).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        let (_, second) = InstallGuard::status(&name).unwrap();
-        assert!(
-            second >= first,
-            "elapsed {second}ms must not go backwards from {first}ms"
-        );
-
-        // Dropping the guard frees the name for the next install.
-        drop(guard);
-        assert!(InstallGuard::status(&name).is_none());
-        assert!(InstallGuard::acquire(&name).is_ok());
     }
 }

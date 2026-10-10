@@ -255,6 +255,7 @@ pub fn classify(method: &Method, rest: &str) -> (Op, Tier) {
     if matches!(
         head,
         "config" | "prompts" | "skills" | "model" | "providers" | "mcp-servers"
+            | "mcp-ensure"
             | "mcp-tools" | "builtin-tools" | "tools" | "shell-risk-rules" | "avatar"
             | "avatar-config" | "avatar-file" | "cron" | "manifest"
     ) {

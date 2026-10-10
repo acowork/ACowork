@@ -1,442 +1,293 @@
-# ADR-090: MCP/LSP Server Install Ownership Moves to the Node — Read-only Presets, Runtime File as the Single Source of Truth
+# ADR-090: MCP Install Moves to the Agent's First Enable — Gateway Keeps the Global Registry and Key Vault
 
-> **Chinese source of truth**: [ADR-090](../zh/ADR-090-mcp-lsp-install-ownership-node.md)
-
-**Status**: Proposed (pending architecture review)
+**Status**: Accepted (implemented 2026-10-10)
 **Date**: 2026-10-09
-**Decision makers**: pending review
+**Decision makers**: Nicholas (plan confirmed)
+
+> The filename slug `mcp-lsp-install-ownership-node` is a historical artifact: this ADR was originally merged with LSP and proposed moving the entire registry down to the Node. After review it was split — the LSP part became [ADR-091](../zh/ADR-091-lsp-server-registry-node.md), and the MCP part was rewritten under the new model ("Gateway keeps the registry, install moves to the Agent"). The original filename is kept so existing links don't break.
 
 **Related**:
-- [ADR-055](../zh/ADR-055-remote-runtime-node-topology.md) (§6.1 responsibility table row ③, §3 L2 data layout — this ADR **amends** its classification of MCP as a Gateway global resource)
-- [ADR-072](../zh/ADR-072-mcp-install-package-spec.md) (declarative `McpPackageSpec` — this ADR **inherits** its Decisions 1/2/4/5/6/7 and **supersedes** Decision 3)
+- [ADR-055](../zh/ADR-055-remote-runtime-node-topology.md) (§6.1 responsibility table — this ADR **preserves** its classification of MCP as a Gateway global resource; the original ADR-090's plan to move it to the Node is **void**)
+- [ADR-072](../zh/ADR-072-mcp-install-package-spec.md) (declarative `McpPackageSpec` — this ADR **inherits** all of its decisions, changing only the **execution location** of install commands from the Gateway process to the Agent process)
 - [ADR-069](../zh/ADR-069-mcp-tool-level-optin.md) (MCP tool-level opt-in — `active_server_names` semantics unchanged)
-- [ADR-089](../zh/ADR-089-lsp-relay-reachability-vs-exposure.md) (D2 reverse-proxy routing pattern — this ADR **reuses** it, no re-design)
-- [ADR-019](../zh/ADR-019-lsp-relay-standalone-process.md) / [ADR-030](../zh/ADR-030-sidecar-endpoint-dynamic-push.md) (LSP relay process and endpoint push)
+- [ADR-091](../zh/ADR-091-lsp-server-registry-node.md) (LSP server registry moves to the Node — split from this ADR in the same review; MCP and LSP follow **different** models, see §4.4)
 
 ---
 
 ## 1. Decision Summary
 
-### 1.1 In one sentence
+### 1.1 One sentence
 
-Installing MCP and LSP servers is a **Node-local event** (stdio servers are `fork/exec`'d by the Runtime, so the binary must live on the same machine), therefore the **authoritative source of the server list is the Node, not the Gateway**.
-The Gateway degrades to a **pure reverse proxy plus scheduler**: it holds no MCP/LSP server list at all, and the UI always selects a Node first, then reads and writes per Node.
-Preset files in the install directory are **read-only** and serve only as initialization data. `{node_data_dir}/mcp_servers.json` and `{node_data_dir}/lsp_servers.json` are the **single runtime source of truth** (preset ∪ custom ∪ install state).
+The **imperative, machine-local** act of "installing" moves out of the Gateway process into the **Agent (Runtime) process**, executed when an Agent **first enables** an MCP server; the Gateway **keeps the full MCP registry and API Key Vault**, its responsibilities reduced to "add server + maintain key" — no install operations at all. The push policy changes from "push only installed entries" to "push everything except 'requires a key that isn't configured'". Installed-ness is not persisted as a boolean; it is probed by `health_check` (PATH is the machine's naturally shared state), achieving "install once per machine, later Agents skip it". **The registry does NOT move to the Node** — the original bug (Gateway installs on its own machine; a Runtime scheduled onto a remote Node can't find the binary when spawning) is fixed naturally by "install happens on the Agent's machine", with no Node-side MCP file, API, or reverse proxy.
 
 ### 1.2 Key decisions
 
 | # | Decision | Content |
 |---|----------|---------|
-| D1 | Presets read-only, shipped with the suite | `assets/mcp_presets.json` + `assets/mcp_install/`, structurally identical to `assets/lsp_servers.json` + `assets/lsp_install/`. Runtime MUST NOT write these files; **no** user-level preset override file is provided (former Open Question 1 resolved as: not allowed) |
-| D2 | Runtime file is the single source of truth | `{node_data_dir}/mcp_servers.json`, `{node_data_dir}/lsp_servers.json` — preset ∪ custom ∪ install state in one file, order preserved via `IndexMap` |
-| D3 | Same name, no conflict | The runtime file and the preset file share a name (`lsp_servers.json`); the path domain (install directory vs `{node_data_dir}`) disambiguates. No `_state` suffix is introduced |
-| D4 | Flat in the Node, no `data/` subdirectory | Follows the existing `{node_data_dir}` convention (`identity.json`, `state.json`, `packages/`, `logs/`, `runtime-logs/` all flat); the two new JSON files sit at the same level |
-| D5 | Gateway holds no server list | Delete `core/acowork-gateway/src/http/mcp_catalog_api.rs`; remove all `/api/mcp-catalog*` routes. UI reads via `/api/nodes/{node_id}/mcp/servers` (reusing ADR-089 D2 reverse proxy) |
-| D6 | Agent-level install capability removed | Delete the Runtime built-in `mcp_install` / `mcp_uninstall` tools. Agents **consume** MCP, they do not install it |
-| D7 | Runtime reads the local file directly | The Runtime reads `{node_data_dir}/mcp_servers.json` at startup (new `--node-data-dir`) instead of relying on the Gateway `RuntimeConfigUpdate` catalog push |
-| D8 | `source` field persisted | Every entry carries `source: "preset" \| "custom"`, used for UI grouping and preset-upgrade decisions |
-| D9 | Merge rule: metadata refreshed, instance config and state preserved | A preset upgrade refreshes `kind/spec/description/install_hint/category`; user `env/spawn_args/exec_override` and `install_state` are preserved |
-| D10 | No reset-to-preset | No "restore preset defaults" entry point; a user who misconfigures edits it back manually |
-| D11 | File mode 0600 + atomic write | Runtime files contain plaintext API keys, so they MUST be `mode 0600`; writes MUST be `tmp + fsync + rename` |
-| D12 | LSP refactored identically | LSP gains custom servers and persisted install state (both currently missing), sharing the MCP load/merge/write conventions |
-| D13 | Custom-server install script = paste into the settings UI | The instance section gains `install_script` (inline script text, not a filename). The user pastes the script in the MCP/LSP settings UI and the Node executes it with `run_command_with_idle_timeout` (reusing the LSP idle-timeout mechanism). A preset's `install_script` remains a **filename** under `assets/mcp_install/`; the two are disambiguated by `source` |
-| D14 | Preset files are not merged | `assets/mcp_presets.json` and `assets/lsp_servers.json` stay as two files (former Open Question 2 resolved as: no merge needed) — the schemas differ too much (MCP has `env`/`required_env`, LSP has `candidates`/`root_markers`), so merging would only produce a field pile of `Option`s |
+| D1 | Gateway responsibilities shrink | Gateway keeps the full MCP registry + API Key Vault and does only two things: "add server" and "maintain key"; Gateway-side install execution (`install_server` etc.) is **deleted**. MCP remains a Gateway global resource per ADR-055 §6.1 |
+| D2 | Separation of three concerns | Registry (declarative, global, Gateway) / install action (imperative, machine-local, Agent process) / install state (machine fact, PATH is the state, no state file) each return to their proper place instead of being bundled down to the Node |
+| D3 | Push filter policy change | `required_secrets` non-empty **and** any required name missing across `env ∪ headers` → **not pushed**; everything else (no-secret servers + fully keyed ones) is pushed to Agents. Replaces the old "push only when `install.state == Installed`" |
+| D4 | New backend field `required_secrets` | `McpServerConfigDef.required_secrets: Vec<String>` ([protocol.rs:1674](../../../core/acowork-core/src/protocol.rs#L1674)). Today "which keys are required" is hardcoded only in the frontend [mcp-presets.ts](../../../apps/acowork-desktop/src/lib/mcp-presets.ts); the backend knows nothing. For the Gateway to filter, the catalog must first learn it. **This is the ADR's only new schema.** Named `secrets`, not `env`: key location varies with transport (stdio keys live in `env`, custom HTTP keys in `headers`), so filtering resolves each key name across `env ∪ headers`, reusing the existing `extract_api_key_from_mcp_config` ([resource_cache.rs](../../../core/acowork-gateway/src/resource_cache.rs)) convention of scanning both — no second field |
+| D5 | Install moves down + health_check-first + toggle-triggered | **Trigger**: when the user **flips an MCP switch on** in the right panel (server enters `active_server_names`, i.e. ensure-usable). Order: `derive_spawn` → `health_check` (spawn directly) → connects ⇒ binary already on this machine, skip install; spawn fails (command not found) → `run_install` → `health_check` again. This **inverts** the current Gateway "unconditional install first" order |
+| D6 | Failure = cannot enable + detailed error + no persisted state | Final failure → **the MCP stays off (switch springs back)**, never silent; returns a **detailed error** (which runtime/dependency is missing, install-command stderr summary) so the user can fix their environment. Flipping the switch on again = rerun the whole flow. No persisted boolean `install_state`; all UI states (probing / usable on this machine / needs install / failed) are driven by `health_check`; "install once per machine" relies on PATH — a machine-local fact naturally shared across Agents — needing no state file or cross-process sync |
+| D7 | No machine-level install lock | No homegrown lock (marker-file locks risk permanent wedging when an agent crashes). Relies on pipx venv locks / cargo package-cache locks / docker content-addressing for concurrency safety; health_check-first shrinks the race window to the one-time "first on this machine, genuinely never installed" event. Residual race is **explicitly accepted** |
+| D8 | Script kind stays out of the automatic path | There are no `assets/mcp_install/*.sh` today; all presets are npm/uvx/pipx/cargo/go. First-enable only runs `derive_install_command` ([install.rs:257](../../../core/acowork-mcp/src/install.rs#L257)); no arbitrary shell is executed |
+| D9 | Keep `mcp_install`/`mcp_uninstall` tools | The Agent's ability to install its own MCPs is **not removed** — it writes the `local` list of `agent_mcp.json`, an independent path from the Gateway-pushed `catalog` list |
+| D10 | Install-status UI moves | Install status moves from the Settings menu to the right-panel MCP list, showing health_check-driven states |
+| D11 | Runtime needs no `--node-data-dir` | Compared to the original ADR-090, the Runtime no longer needs node_data_dir for MCP (there is no Node-level MCP file to read) |
+| D12 | Gateway install endpoints retired | `install_server` (:895), `install_check` (:953), `install_catalog_entry` (:999) deleted from `mcp_catalog_api.rs`; `add/update/list/remove/probe` kept (registry CRUD stays in the Gateway) |
+| D13 | Key delivery path unchanged | API keys keep the existing in-memory `mcp_key_vault` / `auth_token` delivery path ([resource_cache.rs](../../../core/acowork-gateway/src/resource_cache.rs) `build_mcp_key_vault`), never persisted to Agent disk; `pm`/`doc` HTTP MCP injection logic unchanged |
+| D14 | LSP is out of scope here | LSP follows [ADR-091](../zh/ADR-091-lsp-server-registry-node.md)'s "registry moves to the Node" model; the divergence is explained in §4.4 |
 
 ---
 
-## 2. Background and Current Facts
+## 2. Background & Current Facts
 
-### 2.1 What MCP install actually does (not "registration only")
+### 2.1 The original bug (the real problem this ADR solves)
 
-Install in `core/acowork-mcp/src/install.rs` does three things: `probe_runtime()` (PATH lookup) → `run_install()` (actually runs `pipx/cargo/go install`, `docker`, or `assets/mcp_install/*.sh`) → `health_check()` (spawns the derived command, initialize → list_tools).
+stdio MCP servers are `fork/exec`'d by the Runtime, so the binary must live on the **same machine** as the Runtime. The current flow: the user clicks "Install" in the Gateway settings page → the Gateway process ([mcp_catalog_api.rs:895](../../../core/acowork-gateway/src/http/mcp_catalog_api.rs#L895) `install_server` → `run_install_pipeline`:785) runs `pipx install` / `cargo install` on the **Gateway's machine** → the binary lands in the Gateway machine's PATH. When the Runtime is scheduled by a Node onto **another machine**, spawn can't find the binary.
 
-`PackageKind` splits into two classes, which **determines how a remote Node must be handled**:
+> The original ADR-090's fix was "move the whole registry to the Node". This ADR's fix is "move the install action into the Agent process" — wherever the Agent runs, the binary gets installed there; the bug disappears the same way, with a far smaller blast radius.
 
-| kind | `derive_install_command()` | Side-effect location | Remote feasibility |
-|------|---------------------------|----------------------|--------------------|
-| `npm` / `pypi`+`uvx` | `None` (`npx -y` / `uvx` resolve fresh each spawn) | none (or ephemeral cache) | pushing the spawn config suffices |
-| `pypi`+`pipx`/`pip`, `cargo`, `go`, `docker`, `script` | present | `~/.local/pipx/venvs/`, `~/.cargo/bin/`, `~/go/bin/`, local image cache | **must execute on the machine where the spawn happens** |
+### 2.2 Current install semantics probe the runtime, not the package
 
-This is the root cause behind D5/D7: installed artifacts are filesystem facts, and only the Node knows them.
+- `probe_runtime` ([install.rs:71](../../../core/acowork-mcp/src/install.rs#L71)) checks only whether the **runtime** exists (pipx/cargo/uvx installed?), **not the specific package** (it can't tell whether docling itself is installed).
+- The current `install_server`, once triggered, runs `run_install` **unconditionally** ([mcp_catalog_api.rs:907](../../../core/acowork-gateway/src/http/mcp_catalog_api.rs#L907)) without first probing whether the binary is already present.
+- `health_check` ([install.rs:339](../../../core/acowork-mcp/src/install.rs#L339)) does spawn + initialize + tools/list and returns the tool count. **It is itself the reliable probe of "is the binary there and usable".**
 
-### 2.2 Presets currently exist only in the frontend
+→ These two facts force D5 to invert the order to health_check-first; otherwise "install once per machine" would degrade into "every Agent reruns a minutes-long `cargo install`".
 
-The 8 built-in presets are hardcoded in `apps/acowork-desktop/src/lib/mcp-presets.ts` (`playwright`, `computer-use`, `brave-search`, `exa-search`, `context7`, `docling`, `notion`, `figma`; categories browser / search / document / knowledge / design).
+### 2.3 "Which keys are required" today: frontend-hardcoded, invisible to the backend
 
-Consequences:
+| Fact | Location |
+|------|----------|
+| "Which server needs which API key" = hand-written `requiredEnv` arrays in the frontend | [mcp-presets.ts](../../../apps/acowork-desktop/src/lib/mcp-presets.ts) (e.g. `brave-search → ["BRAVE_API_KEY"]`) |
+| Frontend type | [types.ts:2260](../../../apps/acowork-desktop/src/lib/types.ts#L2260) `McpPresetDef.requiredEnv` |
+| Backend `McpServerConfigDef` | **No** corresponding field ([protocol.rs:1674](../../../core/acowork-core/src/protocol.rs#L1674)) |
+| Whole-backend `grep required_env` | **Zero hits** |
 
-1. Zero built-ins on the Rust side — the Gateway sees the full spec only when `POST /api/mcp-catalog/install` arrives, so it cannot probe or validate in advance.
-2. Non-Desktop clients (CLI, third parties) have no preset list available.
-3. The `assets/` directory contains **no mcp-related files** (currently only `lsp_servers.json`, `lsp_install/`, `offline_providers.json`, `offline_embedding_providers.json`).
+The backend catalog stores only `env` (the **real key values** the user typed) and masks display via the `key/token/secret/password` keyword heuristic ([mcp_catalog_api.rs:387](../../../core/acowork-gateway/src/http/mcp_catalog_api.rs#L387)), but **does not know which keys are required**. Hence the D3 filter must live in the Gateway, and for the Gateway to filter it first needs the D4 field.
 
-### 2.3 The LSP physical chain (the reference implementation for this ADR)
+### 2.4 Push path today (kept, filter changes only)
 
-| Stage | Location |
-|-------|----------|
-| Preset metadata | `assets/lsp_servers.json` (151 lines, `version: 1`, `IndexMap<String, LspServerEntry>`) |
-| Install scripts | `assets/lsp_install/{rust,python,typescript,go,clangd,json,yaml,markdown,kotlin,java,css,html}.{sh,ps1}` |
-| dev copy | `apps/acowork-desktop/src-tauri/build.rs:142-156` → `target/{profile}/bin/` |
-| release packaging | `apps/acowork-desktop/src-tauri/tauri.conf.json:58` `bundle.resources` mapping |
-| Locator injection | `apps/acowork-desktop/src-tauri/src/commands/gateway.rs:545` `env("ACOWORK_LSP_CONFIG_DIR", resource_dir)` |
-| Load candidates | `core/acowork-lsp-relay/src/config.rs::build_config_candidates()`: `$ACOWORK_LSP_CONFIG_DIR` → `$CARGO_MANIFEST_DIR/../../assets` → `exe_dir` → `cwd` |
-| Fallback | `builtin_lsp_defaults()` (`config.rs:239`, **not** `#[cfg(test)]` — it is the safety net when the JSON is missing) |
+The `acowork/global/mcps` retained topic is built by [global_resources_builders.rs:258](../../../core/acowork-gateway/src/mqtt/global_resources_builders.rs#L258) `build_available_mcps`: reads the catalog, extracts env/headers → assembles the `McpRef` list → **additionally injects the Gateway-hosted `pm`/`doc` HTTP MCPs** (when `pm_mcp_url`/`doc_mcp_url` exist). The Runtime's `mqtt/client.rs` writes the received list into `agent_mcp.json`'s `catalog` ([agent_config.rs:892](../../../core/acowork-runtime/src/agent_config.rs#L892) `save_agent_mcp_config_catalog`).
 
-ADR-072 declared this mechanism as its reference but ported only the **command derivation matrix**, not the **asset layout**.
+> This ADR **keeps the whole path**, adding only the D3 filter in `build_available_mcps`. The `pm`/`doc` injection is untouched — they are HTTP, need no install, and naturally satisfy "no key required ⇒ pushed".
 
-### 2.4 Two capabilities LSP currently lacks
+### 2.5 The Runtime has no Node HTTP channel
 
-1. **Cannot add servers** — users can only override existing keys in `lsp_servers.json`, so the "preset ∪ custom merge" problem never surfaced.
-2. **Install state is not persisted** — state lives in an in-memory `RwLock<LspServersWithStatus>` and is re-probed on every restart. MCP cannot do the same: `pipx install` takes minutes, and re-running it on every restart is unacceptable.
-
-### 2.5 Current `{node_data_dir}` contents
-
-`core/acowork-node/src/cli.rs:60-62`: `--data-dir` (alias `--work-dir`, env `ACOWORK_NODE_HOME`), default `$HOME/.acowork/acowork-node`. Observed contents:
-
-```
-identity.json  state.json  packages/  logs/  runtime-logs/
-```
-
-No `data/` subdirectory. D4 chooses flat accordingly.
+`grep 19900|node.*http core/acowork-runtime/src/` → **zero hits**: the Runtime connects only to the Gateway (MQTT + localhost HTTP), **never directly to a Node**. This rules out "Agent calls the Node API to install on its behalf" (a new Runtime→Node link would be required) and conversely confirms D5's "Agent process execs pipx itself" as the cheapest wiring — the Runtime already links `acowork-mcp` (Cargo.toml), so `run_install`/`health_check` are direct calls, and the Runtime process inherits the Node machine's PATH/env.
 
 ---
 
 ## 3. Alternatives
 
-| Option | Description | Rejection reason |
-|--------|-------------|------------------|
-| A. Gateway keeps the registry, MQTT dispatches install | Gateway retains `mcp_catalog.json`; install is dispatched over MQTT to the Node for execution | Two sources (Gateway registry + Node reality) will always drift; Gateway state is untrustworthy while the Node is offline; in Desktop single-machine mode both are on the same host, so the extra layer buys nothing |
-| B. MCP-as-a-Service (a resident MCP gateway process per Node) | Mirror lsp-relay, MCP over RPC | MCP is a bidirectional long-lived JSON-RPC session (tool call / list_resources / subscribe), not an LSP-style one-shot initialize handshake; splitting into a service requires rewriting the transport layer |
-| C. Support remote only for `npm`/`uvx`, pin the rest to the Gateway host | Capability split by kind | Directly contradicts the goal (a Runtime drifting to a remote Node still having working MCP) |
-| D. Two-card UI (registry card + per-node installed card) | Split metadata and state across panes | The server list lives on the Node, so only the "Node view" form exists; separate panes create an illusion of a global registry. The LSP single-table-plus-status-column design is already proven sufficient |
-| **E. This ADR** | Read-only presets + Node runtime file as sole truth + Gateway as pure reverse proxy | — |
+| Option | Description | Rejection rationale |
+|--------|-------------|---------------------|
+| **A (original ADR-090)** | Move the whole registry to the Node; Gateway becomes a pure reverse proxy; Node holds `mcp_servers.json` + MCP API | Large blast radius (Node file + API + proxy + migration); violates ADR-055 §6.1 "MCP is a Gateway global resource"; introduced 3 blockers (pm/doc would disappear, migration is cross-machine, `--node-data-dir` breaks standalone). **This ADR supersedes A** |
+| **B** | Gateway keeps installing, then distributes binaries to every Node | Requires cross-machine binary transfer + per-machine state sync for every package manager; complexity explodes; YAGNI |
+| **C (this ADR)** | Registry/keys stay in the Gateway; install moves to the Agent's first enable; PATH is the state | **Adopted** |
+| **D** | Install moves to the Node (Agent calls Node API to install on its behalf) | The Runtime has no Node HTTP channel (§2.5); a new link would be needed; and the Node is just a per-machine daemon — letting it own install logic is less direct than the Agent process that actually uses the server installing it itself |
 
 ---
 
 ## 4. Rationale
 
-1. **Co-locating install and spawn is a hard constraint.** stdio MCP servers are `fork/exec`'d by the Runtime, so the binary must be on the same filesystem. "Installed or not" is therefore an attribute of the Node — not of the Agent, and certainly not of the Gateway.
-2. **One source beats two.** Option A needs continuous reconciliation; under this model the Gateway is stateless and every read forwards to the Node, so consistency is structural.
-3. **Per-Node filtering in the UI is already a fact.** The MCP/LSP settings panes already filter by Node (one-to-one with the Node), so "the Gateway has a global list" has no consumer in the UI.
-4. **The LSP chain is proven.** Asset layout, packaging, candidate paths, and fallback all have working implementations; D1/D3 copy rather than invent.
+### 4.1 Separation of concerns beats wholesale relocation
+"Which servers exist + which keys they need" is **declarative, global** knowledge — naturally a Gateway global resource. "Get the binary onto this machine" is an **imperative, machine-local** act — naturally the Agent process's job. The original ADR-090 bundled both to the Node to fix one bug ("install happened on the wrong machine") — but the root cause was only the **install action** running on the wrong machine; the registry in the Gateway was never wrong. Moving only the action fixes the bug just as well, with cleaner boundaries.
+
+### 4.2 PATH is the state: zero new storage for install-once semantics
+"Install once on this machine, later Agents skip it" needs no cross-Agent synchronized `install_state` file — whether the binary is in PATH, `health_check` learns it by spawning once. D5's health_check-first treats this naturally shared state directly as the install predicate, eliminating the whole apparatus of ADR-090-A's Node state file, merge rules, atomic writes, and permission management.
+
+### 4.3 Minimal blast radius
+Kept: MCP registry, `acowork/global/mcps` push, `pm`/`doc` injection, `mcp_install`/`mcp_uninstall` tools, Key Vault delivery path. Deleted: Gateway install-execution endpoints. Added: 1 schema field + 1 push filter + Runtime first-enable logic + UI status placement. The entire Node-side MCP scope is **not done**.
+
+### 4.4 Why LSP doesn't follow the same model (the split from ADR-091)
+
+| Dimension | MCP | LSP |
+|-----------|-----|-----|
+| Artifact shape | spawn-and-go package (binary in PATH is enough) | resident sidecar (must listen, must relay — not "just spawn it") |
+| State probe | `health_check` spawn probes it | no "PATH is the state" equivalent; needs an explicit registry + process lifecycle |
+| Ownership conclusion | install moves to the Agent, registry stays in the Gateway | registry moves to the Node (ADR-091) |
+
+An LSP server is a Node-hosted resident sidecar whose "installed? running?" is a Node process fact requiring a Node-level authority; an MCP server is an on-demand child process of the Agent whose "installed?" is a PATH fact needing no authority file. Hence the split.
 
 ---
 
 ## 5. Detailed Design
 
-### 5.1 File layout
+### 5.1 End-to-end flow (new model)
 
-```
-install directory (read-only, shipped with the suite)
-  assets/mcp_presets.json          # new, 8 built-in presets
-  assets/mcp_install/*.sh|*.ps1    # new, script-kind fallback
-  assets/lsp_servers.json          # unchanged
-  assets/lsp_install/*.sh|*.ps1    # unchanged
-
-{node_data_dir}/                   # $HOME/.acowork/acowork-node (flat per D4)
-  identity.json                    # existing
-  state.json                       # existing
-  mcp_servers.json                 # new, single runtime truth (D2)
-  lsp_servers.json                 # new, same name as the preset (D3)
-  packages/  logs/  runtime-logs/  # existing
-```
-
-Preset lookup follows the LSP candidate order:
-
-```
-1. $ACOWORK_MCP_CONFIG_DIR/mcp_presets.json
-2. $CARGO_MANIFEST_DIR/../../assets/mcp_presets.json   (dev/test)
-3. {exe_dir}/mcp_presets.json                          (release)
-4. {cwd}/mcp_presets.json                              (dev convenience)
-5. builtin_mcp_defaults()                              (safety net, 1-2 core presets only)
+```mermaid
+flowchart TD
+    subgraph GW["Gateway (global resources: registry + Key Vault)"]
+        A["Add MCP server<br/>(with required_secrets)"] --> B["mcp_catalog.json<br/>(required_secrets + env/headers values)"]
+        B --> C["build_available_mcps<br/>filter: required_secrets non-empty<br/>and any key unset in env∪headers → skip"]
+        C --> D["acowork/global/mcps<br/>retained topic"]
+        E["pm / doc HTTP MCP<br/>injection (unchanged)"] --> D
+    end
+    subgraph RT["Agent / Runtime (machine-local)"]
+        D --> F["write agent_mcp.json catalog list"]
+        F --> G["User flips server X's switch on"]
+        G --> H["derive_spawn → health_check"]
+        H -->|"connects"| I["binary already on this machine<br/>skip install; switch stays on"]
+        H -->|"command not found"| J["run_install (pipx/cargo/go/docker)"]
+        J --> K["health_check again"]
+        K -->|"connects"| I
+        K -->|"still fails"| L["switch springs back off + detailed error<br/>flip on again = rerun"]
+        H -->|"can't connect, not a missing command"| L
+    end
 ```
 
-Desktop already passes `resource_dir` to the Gateway via `ACOWORK_LSP_CONFIG_DIR`; `mcp_presets.json` lands in the same directory, so P7 reuses that path and MUST NOT add a second env var (unless separation becomes necessary, as a separate case).
+### 5.2 Schema change (D4)
 
-### 5.2 Schema
-
-**Preset (read-only, `assets/mcp_presets.json`)** — fields are ADR-072 `McpPackageSpec` plus display fields:
-
-```json
-{
-  "version": 1,
-  "presets": {
-    "brave-search": {
-      "kind": "npm",
-      "spec": "@modelcontextprotocol/server-brave-search",
-      "runner": null,
-      "entry_point": null,
-      "spawn_args": [],
-      "exec_override": null,
-      "install_script": null,
-      "http_probe_ports": [],
-      "transport": "stdio",
-      "description": "Privacy-first web & local search via Brave Search API.",
-      "install_hint": "Get free API key at https://brave.com/search/api/",
-      "required_env": ["BRAVE_API_KEY"],
-      "optional_env": {},
-      "category": "search"
-    }
-  }
+```rust
+// core/acowork-core/src/protocol.rs — McpServerConfigDef
+pub struct McpServerConfigDef {
+    // ... existing fields unchanged ...
+    /// Secret names this server REQUIRES to be usable (e.g. API keys).
+    /// Populated from the frontend preset at "add server" time and persisted
+    /// in the Gateway catalog. Gateway's `build_available_mcps` skips pushing
+    /// an entry whose required_secrets is non-empty while any required name is
+    /// missing/empty across BOTH `env` and `headers` (stdio keys live in env,
+    /// custom HTTP keys live in headers — same lookup convention as
+    /// `extract_api_key_from_mcp_config`). Empty vec => usable without secret.
+    #[serde(default)]
+    pub required_secrets: Vec<String>,
 }
 ```
 
-**Runtime (read-write, `{node_data_dir}/mcp_servers.json`)** — each entry has three sections:
+- At "add server" the frontend POSTs `preset.requiredEnv` into the catalog as well ([mcp_catalog_api.rs:453](../../../core/acowork-gateway/src/http/mcp_catalog_api.rs#L453) `add_catalog_entry` receives it). The preset's `requiredEnv` means exactly "required secret names": env names for stdio, header names for custom HTTP.
+- `#[serde(default)]` keeps old catalog files without the field working as "no key required" — backward compatible.
 
-```json
-{
-  "version": 1,
-  "servers": {
-    "brave-search": {
-      "source": "preset",
+### 5.3 Push filter (D3)
 
-      "kind": "npm",
-      "spec": "@modelcontextprotocol/server-brave-search",
-      "runner": null,
-      "entry_point": null,
-      "transport": "stdio",
-      "url": null,
-      "description": "...",
-      "install_hint": "...",
-      "category": "search",
+In `build_available_mcps` ([global_resources_builders.rs:258](../../../core/acowork-gateway/src/mqtt/global_resources_builders.rs#L258)) where the `McpRef` list is built, add a per-entry check. Key values are looked up in `env ∪ headers` (consistent with `extract_api_key_from_mcp_config`):
 
-      "spawn_args": [],
-      "exec_override": null,
-      "http_probe_ports": [],
-      "install_script": null,
-      "env": { "BRAVE_API_KEY": "<user supplied>" },
-      "tool_timeout_secs": null,
+```
+fn secret_configured(entry, name) -> bool {
+    entry.env.get(name).or(entry.headers.get(name))
+        .map(|v| !v.trim().is_empty()).unwrap_or(false)
+}
 
-      "install_state": "installed",
-      "installed_command": "npx",
-      "tool_count": 2,
-      "install_stdout": "...(truncated at 4 KB)",
-      "install_stderr": "...(truncated at 4 KB)",
-      "last_install_ms": 1762000000000
-    },
-    "my-private-mcp": { "source": "custom", "kind": "docker" }
-  }
+if !entry.required_secrets.is_empty()
+   && entry.required_secrets.iter().any(|k| !secret_configured(entry, k)) {
+    skip  // requires keys that aren't fully configured → don't push to Agents
 }
 ```
 
-`servers` MUST be an `IndexMap` — LSP once had its list shuffle on every restart because `HashMap`'s SipHash seed is random per process (`core/acowork-lsp-relay/src/config.rs:50-58` comment plus `test_lsp_servers_config_iteration_order_is_stable`). MCP must not repeat that.
+The `pm`/`doc` injection branch is unaffected (their `required_secrets` are empty or they go through separate injection).
 
-Field ownership:
+### 5.4 First-enable install logic (D5, Runtime side)
 
-- **Metadata section** (`kind/spec/runner/entry_point/transport/url/description/install_hint/category`) comes from the preset and is refreshed on preset upgrade;
-- **Instance section** (`spawn_args/exec_override/http_probe_ports/install_script/env/tool_timeout_secs`) belongs to the user and is never touched by preset upgrades; `install_script` holds **inline script text** when `source=="custom"`, and a **filename** under `assets/mcp_install/` when `source=="preset"` (inherited from the preset metadata section);
-- **State section** (`install_state/installed_command/tool_count/install_stdout/install_stderr/last_install_ms`) is written by install / health_check.
-
-`install_state` reuses ADR-072 `InstallState`: `unknown` / `detected` / `installing` / `installed` / `failed`.
-
-### 5.3 Merge rule
+The Runtime gains an "ensure server usable" routine (reuses `acowork-mcp`, no new dependency):
 
 ```
-load_mcp_servers(node_data_dir, preset_registry):
-  servers = read({node_data_dir}/mcp_servers.json) or empty
-  for (name, preset) in preset_registry.presets:
-    if name in servers:
-      servers[name].metadata section ← refreshed from preset     # D9
-      servers[name].instance section kept                        # D9
-      servers[name].state section    kept                        # D9
-      servers[name].source ← "preset"       # promoted if it previously existed as a custom of the same name
-    else:
-      servers[name] = McpServerEntry {
-        source: "preset",
-        metadata section: preset,
-        instance section: preset defaults (spawn_args / http_probe_ports copied in;
-                        env seeded from optional_env defaults, required_env left empty),
-        state section: install_state = "unknown",
-      }
-  # entries in servers with source=="custom" and no preset of that name are kept as-is
-  return servers
+fn ensure_usable(name, pkg, spawn, env):
+    // 1. probe first (PATH is the state)
+    match health_check(spawn).await:
+        Ok(_) => return Usable          // already on this machine, skip install
+        Err(command_not_found) => {}     // proceed to install
+        Err(other) => return Failed(other)   // can't connect, not a missing command → fail with reason
+    // 2. install (derive_install_command only, no shell)
+    match run_install(pkg).await:        // install.rs:301
+        Ok(_) => {}
+        Err(e) => return Failed(e)        // install failed: pass through stderr summary
+    // 3. re-probe
+    match health_check(spawn).await:
+        Ok(_) => return Usable
+        Err(e) => return Failed(e)
 ```
 
-Name collision policy: when a preset name collides with an existing custom entry, **the existing entry wins** (no silent overwrite). The UI validates name uniqueness on "add custom" (carrying over the duplicate-name 400 semantics from `mcp_catalog_api.rs`).
+- **Trigger**: when the user **flips an MCP switch on** in the right panel (server enters `active_server_names`, ADR-069 opt-in), ensure is triggered synchronously. The switch state = the ensure result: only `Usable` keeps it on; `Failed` **springs the switch back off** and shows the error.
+- **Failure means unusable**: no silent degradation. `Failed` must carry a **detailed error** — which runtime is missing (pipx/cargo/docker not installed), the install command's stderr summary, the health_check handshake failure reason — so the user can fix environment dependencies themselves.
+- **Retry = flip the switch again**: failed state is not cached; flipping on again reruns the whole flow (likely failing again, hence error quality is key).
+- npm/uvx kinds return `None` from `derive_install_command` (`npx -y`/`uvx` resolve lazily) → step 2 is skipped, relying on step 1's health_check (first spawn triggers the npx download).
+- Concurrency (D7): no locks; rely on package managers' own locks + the one-time window.
 
-### 5.4 Write path and permissions (D11)
+### 5.5 UI (D10)
 
-```
-save_mcp_servers(node_data_dir, servers):
-  final = {node_data_dir}/mcp_servers.json
-  tmp   = final.with_extension("json.tmp")
-  write(tmp, serde_json::to_string_pretty(servers))
-  f.sync_all()
-  set_permissions(tmp, 0o600)          # POSIX; Windows uses an ACL or degrades to no-op + warn
-  rename(tmp, final)                   # atomic on POSIX
-```
+- Remove the install-status section from the Settings menu.
+- The settings page is a **single list with two row kinds**: preset rows are permanent (not added → "Add"; added → "Added", with **no Remove** — the registry copy of a built-in template is not the user's to delete); custom rows (catalog entries matching no preset) carry Remove. Neither row kind has a **Test** button (see §5.6 — runtime probing is not the Gateway's job).
+- Each item in the right-panel MCP list shows a health_check-driven state: `probing / usable on this machine / needs install / failed (detailed reason)`. Wording uses "**usable on this machine**", not "installed for this Agent" — the binary is a machine-wide shared fact; avoid misleading users.
+- The failed state shows the detailed error (missing runtime / dependency / install stderr summary) and offers "retry" (= flip the switch back on).
+- "Which keys are required" display may still use the frontend preset (`requiredEnv`), but the **filter's source of truth is the catalog** (D4 `required_secrets`); the two must stay aligned.
 
-`env` holds plaintext API keys, so the runtime file MUST be 0600. API responses MUST mask — reusing the keyword table from `mcp_catalog_api.rs::mask_sensitive_env()` (`key` / `token` / `secret` / `password`) and the `has_secrets` flag, moved to the Node side.
+### 5.6 Deletions (D12)
 
-### 5.5 API and reverse proxy (D5)
+| Delete | Location |
+|--------|----------|
+| `install_server` | [mcp_catalog_api.rs:895](../../../core/acowork-gateway/src/http/mcp_catalog_api.rs#L895) |
+| `install_check` | [mcp_catalog_api.rs:953](../../../core/acowork-gateway/src/http/mcp_catalog_api.rs#L953) |
+| `install_catalog_entry` | [mcp_catalog_api.rs:999](../../../core/acowork-gateway/src/http/mcp_catalog_api.rs#L999) |
+| `run_install_pipeline` | [mcp_catalog_api.rs:785](../../../core/acowork-gateway/src/http/mcp_catalog_api.rs#L785) |
+| `/api/mcp-catalog/install*` routes | [mcp_catalog_api.rs:43-46](../../../core/acowork-gateway/src/http/mcp_catalog_api.rs#L43) |
 
-**Node side (`:19900`, node token auth)**
-
-```
-GET    /api/mcp/servers                       # preset ∪ custom ∪ state
-POST   /api/mcp/servers                       # add custom (409 on name collision)
-PUT    /api/mcp/servers/{name}                # edit the instance section (env / spawn_args / ...)
-DELETE /api/mcp/servers/{name}                # remove the record (does not delete pipx/cargo artifacts)
-POST   /api/mcp/servers/{name}/install        # run install + health_check, write back state
-GET    /api/mcp/servers/{name}/install/status # in-flight stage (reuses InstallStage)
-GET    /api/mcp/presets                       # read-only preset registry
-```
-
-LSP mirrors this: `/api/lsp/servers`, `/api/lsp/servers/{name}/install`, `/api/lsp/presets`.
-
-The `POST .../install` request body **narrows** from ADR-072's full `McpInstallSpec` to `name` (the Node looks up the preset) plus `env`; entries with `source=="custom"` already carry their spec, so install takes no spec for them.
-
-**Gateway side**: `/api/nodes/{node_id}/mcp/{*tail}` → `http://{node.proxy_endpoint}/api/mcp/{*tail}`, injecting `X-ACowork-Node-Token`. Same implementation path as ADR-089 D2's `/api/nodes/{id}/lsp/{*tail}` (`core/acowork-gateway/src/http/lsp_proxy.rs` + `http/proxy.rs`), only the prefix changes. The Gateway MUST NOT cache the server list.
-
-### 5.6 Runtime read path (D7)
-
-The Runtime gains `--node-data-dir` (env `ACOWORK_NODE_DATA_DIR`, injected by the Node at spawn time — see `core/acowork-node/src/process/spawn.rs`). Startup:
-
-```
-1. read {node_data_dir}/mcp_servers.json     → physically available set on this machine
-2. read {agent_home}/config/agent_mcp.json   → this agent's active subset + env overrides
-3. intersect active ⊆ available, then spawn
-```
-
-The `RuntimeConfigUpdate` catalog push path is retired. When `--node-data-dir` is missing the Runtime MUST fail loudly and MUST NOT silently degrade to an empty MCP list.
-
-### 5.7 The agent layer (D6)
-
-`{agent_home}/config/agent_mcp.json` is **kept**, but field semantics change:
-
-| Field | Before | After |
-|-------|--------|-------|
-| `catalog` | pushed by the Gateway | retired (replaced by the local file read in §5.6) |
-| `local` | written by the `mcp_install` tool | retired (agents no longer install) |
-| `active_server_names` | subset switch over `catalog` | **kept**, redefined as a subset of names in the local `mcp_servers.json` (ADR-069 tool-level opt-in semantics unchanged) |
-
-Delete `core/acowork-runtime/src/tools/builtin/mcp_install.rs`, `mcp_uninstall.rs`, and the install-notification path in `core/acowork-runtime/src/mcp_notify.rs`, along with the built-in registration entry at `core/acowork-core/src/tools/mod.rs:62` and the `"mcp_install"` item at `core/acowork-runtime/src/tools/builtin/mod.rs:282`.
-
-Rationale: MCP is installed per Node and agents merely consume it. Agent-level installation would bypass the Node's runtime file and create a third source of truth.
-
-### 5.8 LSP refactored identically (D12)
-
-LSP gains the two missing capabilities, sharing the conventions with MCP:
-
-1. **Custom servers**: `POST /api/lsp/servers` (`source: "custom"`), schema reusing `LspServerEntry` (`candidates` / `args` / `candidate_args` / `install_hint` / `install_script` / `root_markers`).
-2. **Persisted install state** in `{node_data_dir}/lsp_servers.json`; restarts no longer re-probe everything (one verification at startup plus an explicit user Refresh).
-
-`builtin_lsp_defaults()` remains as the safety net, symmetric with `builtin_mcp_defaults()`.
-
-### 5.9 Inline Script Execution for Custom Servers (D13)
-
-**Relation to ADR-072 Decision 6**: Decision 6 states the install endpoint "rejects arbitrary shell string concatenation" and accepts only a structured `McpPackageSpec` (kind allowlist). This ADR **relaxes that constraint for entries with `source=="custom"` and `kind=="script"`**. The justification is not convenience but the fact that **the threat model does not change**:
-
-- Installing a custom MCP server is itself executing third-party code — the `npm`/`pypi`/`cargo`/`go` kinds pull arbitrary packages and `docker` pulls arbitrary images. Those kinds have always amounted to arbitrary code execution.
-- Allowing a pasted script therefore opens no new attack surface; it restates the same risk in a form the user can read. What Decision 6 actually guarded against was an **unauthorized party injecting a spec** (string concatenation at the API layer), not an **authorized user deliberately installing arbitrary software**.
-
-The security boundary therefore moves to **who may call the endpoint**, not **what the endpoint accepts**:
-
-| Constraint | Content |
-|------------|---------|
-| Authentication | `POST /api/mcp/servers` and `.../install` MUST require node token auth (`X-ACowork-Node-Token`), and the Gateway MUST verify the caller's permission over that Node (ADR-087 Node ownership) |
-| No automatic execution | An inline script MUST NOT execute on `POST /api/mcp/servers` (adding the entry); it runs only when the user explicitly clicks Install (`POST .../install`) |
-| Show before running | The UI MUST display the full script text for confirmation before execution |
-| Timeout | Reuses the LSP idle-timeout: killed after 60 seconds without stdout/stderr output (`acowork_core::process::run_command_with_idle_timeout`), so a silent hang cannot stall the install |
-| Persistence | The full script text is stored in the `mcp_servers.json` instance section (0600); Repair reuses the same text rather than asking the user to paste again |
-| Platform | One field suffices — the runtime file is per-Node, so the user pastes a script suited to that Node's OS (`NodeInfo.os` / `NodeInfo.arch` are already reported and the UI can display the target OS) |
-
-A preset with `kind=="script"` still resolves through `assets/mcp_install/<name>.{sh,ps1}` filenames and MUST NOT accept inline text (preset files are read-only and their contents ship signed with the suite).
+`probe_server_config`/`probe_catalog_entry` and the `/api/mcp-catalog/probe*` routes are **deleted as well**. The original "keep them as a Gateway-side pre-add check" contradicted D1: a Gateway-process probe of a stdio server spawns on the **Gateway's machine** — the same bug class as "the binary must live on the Agent's machine" — and with multiple Nodes there is no answer to "which Node's server is being tested". Server usability is verified by the Agent at first enable (§5.4); the settings page performs no runtime probing.
 
 ---
 
-## 6. Amendments to Existing ADRs
+## 6. Impact on Existing ADRs
 
-| ADR | Location | Original text | Amendment |
-|-----|----------|---------------|-----------|
-| ADR-055 | §6.1 responsibility table, Gateway ③ | "global resource authority (providers / **MCP** / search / user profile / embedding model library)" | MCP removed → "global resource authority (providers / search / user profile / embedding model library)"; MCP/LSP server lists belong to the Node |
-| ADR-055 | §6.1 responsibility table, Node Agent | "④ node-local Sidecar host (LSP relay) … ⑥ node status reporting" | Append "⑦ authority for the MCP/LSP server registry and install state (`mcp_servers.json` / `lsp_servers.json`)" |
-| ADR-055 | §3 L2 data layout table | Gateway-private `{data_dir}` lists `mcp_catalog` | Remove `mcp_catalog`; the `mcp_catalog.json` file itself is retired |
-| ADR-072 | Decision 3 (catalog layering) | `McpServerConfigDef` gains an `install` field carrying the registry | **Superseded**: the `install` field stays for wire compatibility, but registry authority moves to `assets/mcp_presets.json` + `{node_data_dir}/mcp_servers.json`; the install API request narrows to `name` + `env` |
-| ADR-072 | Decision 6 (security boundary) | "accepts only the `McpInstallSpec` of an entry already registered in the catalog, or a structured `McpPackageSpec` returned by the frontend (kind allowlist); rejects arbitrary shell string concatenation" | **Partially relaxed**: `source=="custom"` with `kind=="script"` now accepts inline script text (§5.9). The constraint moves from "what the endpoint accepts" to "who may call it" — node token auth + ADR-087 Node ownership check + UI confirmation before execution + no automatic execution. The preset script kind is unchanged (still a read-only filename) |
-| ADR-072 | Related section | "Node Agent — MCP install may eventually be distributed across machines; this ADR's PackageSpec is machine-independent" | This ADR cashes that promise; `McpPackageSpec` and the command derivation matrix are **untouched** |
-
-ADR-055 needs a revision-log line pointing here.
+| ADR | Impact |
+|-----|--------|
+| ADR-055 §6.1 | **Preserves** "MCP is a Gateway global resource" — the original ADR-090's planned amendment is void; ADR-055 needs no change |
+| ADR-072 | **Inherits** all decisions; only the install command's execution location moves from the Gateway process to the Agent process (§2.1/§4.1); the declarative spec is unchanged |
+| ADR-069 | `active_server_names` semantics unchanged; first enable = "enters active AND ensure usable" |
+| ADR-091 | LSP independently follows "registry moves to the Node"; the divergence from this ADR is in §4.4 |
 
 ---
 
 ## 7. Consequences
 
-### 7.1 Upside
+### 7.1 Positive
+- The original remote-Node spawn bug disappears (install happens on the Agent's machine).
+- Blast radius far smaller than the original ADR-090: no Node MCP file/API/proxy, no migration, no `--node-data-dir`.
+- Gateway boundary returns to the ADR-055 global-resource classification; pm/doc injection unaffected.
+- "Install once per machine" rides on PATH's natural sharing — zero new storage.
+- The Agent's autonomous install capability (`mcp_install`) is preserved.
 
-1. MCP on remote Nodes goes from "pretending to exist" to actually working — the original bug is fixed.
-2. Single source of truth, no reconciliation. The Gateway becomes stateless here, so cross-machine deployments no longer return 5xx.
-3. Presets are promoted from a frontend island to a platform asset: CLI, third parties, and Node self-checks can all read them.
-4. Install state persists; restarts no longer re-run minute-long installs.
-5. LSP picks up custom-server support along the way.
-6. The UI collapses to "pick a Node → one table (preset ∪ custom + status column)"; the two-card-versus-one-card debate disappears.
+### 7.2 Negative & costs
+- One new schema field `required_secrets` (the only substantive data-model change).
+- The Runtime process gains the ability to run package managers (pipx/cargo/docker) — a wider permission surface (though the `mcp_install` tool already had it; no new attack surface).
+- Install state is a per-agent view; two Agents on the same machine could briefly disagree on health_check results (one just probed, one hasn't), but both point at the same PATH truth and converge.
 
-### 7.2 Downside and cost
-
-1. **Breaking API change**: all `/api/mcp-catalog*` routes are deleted, and the frontend `mcpStore.ts` (640 lines, 11 fetch sites) must be rewritten around the Node dimension.
-2. **Data migration**: the existing `{gateway_data_dir}/mcp_catalog.json` must be split once into each Node's `mcp_servers.json`. In single-machine mode both paths are on the same host and the migration is a plain filesystem operation; in multi-Node deployments the old catalog cannot say which machine it was installed on, so the conservative strategy in §8 MUST apply.
-3. **New Runtime startup parameter**: `--node-data-dir` fails loudly when absent (§5.6), so existing deployments must update their spawn arguments in step.
-4. **Preset upgrades rewrite the metadata section of a user-owned file**: `mcp_servers.json` is written by the program, so hand-edited metadata gets refreshed — the UI or a file header note MUST state that manual edits only hold for the instance section.
-
-### 7.3 Risks
+### 7.3 Risks (with mitigations)
 
 | Risk | Mitigation |
 |------|------------|
-| UI shows an empty list while the Node is offline, and users read it as "not installed" | The reverse proxy returns an explicit error code (`node_offline`); the UI shows "node unreachable" rather than an empty table |
-| Concurrent writes to the same file | One Node, one process writing its own file; installs inside a Node reuse ADR-072 Decision 7 idempotency plus `InstallGuard` serialization |
-| Windows lacks POSIX atomic rename | Delete the target first (non-atomic, a window exists) or use `MOVEFILE_REPLACE_EXISTING`; on failure degrade to direct overwrite plus warn |
-| The target Node for migrating the old `mcp_catalog.json` is undecidable | See §8: default to the Node for `local_node_id()`; other Nodes start empty and prompt for reinstall |
+| Same machine, concurrent first-enable of the same package → double install | Rely on pipx/cargo/docker's own locks; the window is the one-time "first on this machine, genuinely never installed" event; explicitly accepted (D7) |
+| `cargo install` recompiles for minutes | health_check-first avoids it: if the binary exists, connect directly, never rerun |
+| Frontend `requiredEnv` drifts from catalog `required_secrets` | D4 makes the catalog the filter's truth; written at add time, UI display aligned to the catalog |
+| Old catalogs lack `required_secrets` | `#[serde(default)]` → treated as "no key required", backward compatible |
 
 ---
 
-## 8. Migration and Rollback
+## 8. Migration & Rollback
 
-**Migration (one-time, at Node startup)**
-
-```
-if exists({gateway_data_dir}/mcp_catalog.json)
-   and not exists({node_data_dir}/mcp_servers.json):
-    convert entries to the §5.2 runtime schema
-      source: name matches a preset → "preset", otherwise "custom"
-      install_state: any pre-existing entry is marked "installed"
-                     (conservative assumption: reaching the old catalog
-                      means it once passed health_check)
-    write {node_data_dir}/mcp_servers.json (0600)
-    rename the original to mcp_catalog.json.migrated (do not delete)
-```
-
-This runs only for `local_node_id()` (the Node co-located with the Gateway). Remote Nodes have no legacy data to read, so they start empty and prompt for a reinstall.
-
-**Rollback**: this ADR is a pure ownership change. Rolling back means restoring the `mcp_catalog_api.rs` + `mcp_catalog.json` read/write path; keeping `mcp_servers.json` is harmless (the new format is a superset of the old). Within the rollback window `mcp_catalog.json.migrated` MUST NOT be deleted.
+- **Migration**: none. Old catalogs missing `required_secrets` fall back to the default (no key required), behaviorally equivalent to "push everything as before", breaking no existing Agent. The frontend fills `required_secrets` naturally on the next "add/edit server".
+- **Rollback**: the D4 field carries `#[serde(default)]`; rolling back code leaves the extra field ignored with no schema breakage. Deleting the Gateway install endpoints is the only irreversible move — to roll back, restore `install_server`; the registry and push path were never touched, so rollback cost is low.
 
 ---
 
 ## 9. Implementation Scope
 
-In dependency order; each step is independently reviewable:
+| Phase | Content | Files |
+|-------|---------|-------|
+| P0 | `McpServerConfigDef` gains `required_secrets`; frontend add/edit writes it | `protocol.rs`, `mcp_catalog_api.rs::add_catalog_entry`, frontend add-server flow |
+| P1 | `build_available_mcps` gains the D3 filter | `global_resources_builders.rs:258` |
+| P2 | Runtime toggle-triggered ensure-usable (health_check-first → run_install → re-probe; failure springs back + detailed error) | `acowork-runtime` (new routine, reusing `acowork-mcp::install`) |
+| P3 | Delete Gateway install endpoints + routes | `mcp_catalog_api.rs` |
+| P4 | UI install status moves from Settings menu to right panel | frontend HarnessPage / tools panel |
+| P5 | Regression: remote-Node spawn, concurrent first-enable, old-catalog compatibility | `dev/ci.sh` + integration tests |
 
-| # | Content | Touches |
-|---|---------|---------|
-| P1 | `assets/mcp_presets.json` + `assets/mcp_install/` (the 8 presets translated 1:1 from `mcp-presets.ts` into the §5.2 preset schema); `acowork-mcp` gains `McpPresetRegistry` (candidate paths + `builtin_mcp_defaults()` safety net) | `assets/`, `core/acowork-mcp/src/` |
-| P2 | `acowork-node` gains `mcp_servers.rs`: runtime schema, §5.3 merge, §5.4 atomic write + 0600, env masking | `core/acowork-node/src/` |
-| P3 | Node HTTP API (the 7 Node-side endpoints in §5.5); install reuses `acowork_mcp::{probe_runtime, run_install, health_check}` as-is; custom entries with `kind=="script"` run their inline script via `run_command_with_idle_timeout` (§5.9) | `core/acowork-node/src/node_api.rs` |
-| P4 | Gateway reverse proxy `/api/nodes/{id}/mcp/*` (reusing the ADR-089 D2 implementation); delete `mcp_catalog_api.rs`; update `AGENTS.md` and ADR-055 §6.1 | `core/acowork-gateway/src/http/` |
-| P5 | Runtime reads `{node_data_dir}/mcp_servers.json` (`--node-data-dir`); delete the `mcp_install` / `mcp_uninstall` / `mcp_notify` install paths; `agent_mcp.json` narrows to `active_server_names` | `core/acowork-runtime/src/`, `core/acowork-node/src/process/spawn.rs` |
-| P6 | Desktop: delete the hardcoded array in `mcp-presets.ts`, rewrite `mcpStore.ts` around the Node dimension, add a Node selector and status column to McpTab, and add an inline-script paste box with pre-execution confirmation to the custom-server form (§5.9) | `apps/acowork-desktop/src/` |
-| P7 | Packaging: `build.rs` copies `mcp_presets.json` + `mcp_install/`; `tauri.conf.json` `bundle.resources` gains two entries | `apps/acowork-desktop/src-tauri/` |
-| P8 | Migrator (§8) + a `ci.sh` red line: the Gateway MUST NOT read or write `mcp_catalog` / `lsp_servers` | `dev/ci.sh` |
-| P9 | LSP refactor (§5.8): `{node_data_dir}/lsp_servers.json`, custom servers, persisted state | `core/acowork-lsp-relay/src/`, `core/acowork-node/src/sidecar/` |
-
-P1–P3 touch neither the Gateway, the Runtime, nor the UI, so they can land first for review of the merge rule and file layout.
+**Not done**: Node-level `mcp_servers.json`, Node MCP API, Gateway→Node MCP reverse proxy, `--node-data-dir`, per-agent `install_state` persistence, machine-level install lock, script-kind automatic paths.
 
 ---
 
-## 10. Open Questions
+## 10. Settled Decisions (formerly open questions, resolved in review)
 
-All three former open questions are now settled; none remain:
-
-| Original question | Resolution | Where |
-|-------------------|------------|-------|
-| Should user-level overrides of the preset file be allowed (private registry scenarios)? | **Not allowed** | D1 |
-| Should `mcp_presets.json` and `lsp_servers.json` merge into one `assets/servers.json`? | **No merge** — the schemas differ too much; merging would only produce a pile of `Option` fields | D14 |
-| Where does a custom server's install script come from? | **Pasted inline in the settings UI**, one copy per Node, executed only on an explicit Install click | D13, §5.9 |
-
+1. **Trigger = flipping the switch on**: when the user flips an MCP switch on in the right panel (server enters `active_server_names`), ensure is triggered synchronously and status is shown immediately. Slow operations like `cargo install` run async with UI "probing/installing" states, never blocking interaction. See D5/§5.4.
+2. **Failure = cannot enable + detailed error + retry by re-flipping**: final ensure failure → switch springs back off, never silent; a detailed error (missing runtime/dependency, install stderr summary, handshake failure reason) is returned for the user to resolve environment dependencies; flipping on again = rerun the whole flow. See D6/§5.4.
+3. **Filter covers `env ∪ headers`**: the field is named `required_secrets` (not `required_env`); each key name resolves across `env ∪ headers`, reusing the existing `extract_api_key_from_mcp_config` convention of scanning both — stdio keys in env, custom HTTP keys in headers, covered in one pass without a second field. `pm`/`doc` are self-hosted without keys and unaffected. See D3/D4/§5.3.
+4. **UI wording = "usable on this machine"**: the binary is a machine-wide shared fact; status reads "usable on this machine", not "installed for this Agent", to avoid misleading. See D6/§5.5.

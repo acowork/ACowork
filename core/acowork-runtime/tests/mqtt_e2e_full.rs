@@ -600,6 +600,7 @@ fn integration_catalog_retained_persists_to_agent_mcp_json() {
                     headers: Default::default(),
                     tool_timeout_secs: 0,
                     auth_token: "redacted-secret".into(), // wire-only; never persisted
+                    install_spec_json: String::new(),
                 },
                 McpRef {
                     id: "openapi".into(),
@@ -612,6 +613,7 @@ fn integration_catalog_retained_persists_to_agent_mcp_json() {
                     headers: Default::default(),
                     tool_timeout_secs: 30,
                     auth_token: String::new(),
+                    install_spec_json: String::new(),
                 },
             ],
         };
@@ -944,6 +946,7 @@ fn integration_mcp_template_instance_id_substituted_at_runtime() {
                 headers,
                 tool_timeout_secs: 60,
                 auth_token: String::new(),
+                install_spec_json: String::new(),
             }],
         };
         let envelope = DataEnvelope {

@@ -200,6 +200,7 @@ impl Tool for McpInstallTool {
         // ── Step 3: Build config and write to local list ──
         let new_config = McpServerConfigDef {
             name: name.to_string(),
+            display_name: None,
             transport,
             url,
             command: command.to_string(),
@@ -208,6 +209,7 @@ impl Tool for McpInstallTool {
             headers: std::collections::HashMap::new(),
             tool_timeout_secs: None,
             install: None,
+            required_secrets: vec![],
         };
 
         let mut updated_config = current_config;

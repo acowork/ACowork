@@ -669,6 +669,7 @@ impl MqttClientHandler for RuntimeHandler {
                     .into_iter()
                     .map(|s| acowork_core::protocol::McpServerConfigDef {
                         name: s.name.clone(),
+                        display_name: None,
                         transport: mcp_transport_to_def(s.transport),
                         url: if s.url.is_empty() {
                             None
@@ -693,7 +694,30 @@ impl MqttClientHandler for RuntimeHandler {
                             .into_iter()
                             .map(|(k, v)| (k, resolve_instance_id(&v)))
                             .collect(),
-                        install: None,
+                        install: if s.install_spec_json.is_empty() {
+                            None
+                        } else {
+                            match serde_json::from_str::<
+                                acowork_core::protocol::McpInstallSpec,
+                            >(&s.install_spec_json)
+                            {
+                                Ok(spec) => Some(spec),
+                                Err(e) => {
+                                    // ADR-090 D5: without the spec the Agent
+                                    // cannot self-install on first enable —
+                                    // keep the entry (spawn config may still
+                                    // work if the binary is present) but make
+                                    // the drop visible.
+                                    tracing::warn!(
+                                        server = %s.name,
+                                        error = %e,
+                                        "MCP install_spec_json failed to parse — first-enable install disabled for this server"
+                                    );
+                                    None
+                                }
+                            }
+                        },
+                        required_secrets: vec![],
                         tool_timeout_secs: if s.tool_timeout_secs == 0 {
                             None
                         } else {

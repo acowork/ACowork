@@ -1673,6 +1673,12 @@ impl std::str::FromStr for SidecarKind {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct McpServerConfigDef {
     pub name: String,
+    /// Human-readable alias shown in the UI. Purely cosmetic — agents and the
+    /// wire protocol always reference a server by `name` (the immutable
+    /// identity key). Lets a machine-generated name like
+    /// `market-cmgjmcp00075722` be relabeled "CMJ Market" without a re-key.
+    #[serde(default)]
+    pub display_name: Option<String>,
     #[serde(default)]
     pub transport: McpTransportDef,
     #[serde(default)]
@@ -1688,9 +1694,21 @@ pub struct McpServerConfigDef {
     #[serde(default)]
     pub tool_timeout_secs: Option<u64>,
     /// Optional install context (ADR-072). Present for preset-added servers;
-    /// absent (None) for user-custom servers. Runtime ignores this field.
+    /// absent (None) for user-custom servers. Since ADR-090 the install
+    /// command is executed by the Runtime (Agent process) on first enable,
+    /// so this field is delivered to the Agent via `McpRef.install_spec_json`.
     #[serde(default)]
     pub install: Option<McpInstallSpec>,
+    /// Secret names this server REQUIRES to be usable (ADR-090 D4), e.g.
+    /// `["BRAVE_API_KEY"]`. Populated from the frontend preset at "add
+    /// server" time and persisted in the Gateway catalog. Gateway's
+    /// `build_available_mcps` skips pushing an entry whose `required_secrets`
+    /// is non-empty while any required name is missing/empty across BOTH
+    /// `env` and `headers` (stdio keys live in env, custom HTTP keys live in
+    /// headers — same lookup convention as `extract_api_key_from_mcp_config`).
+    /// Empty vec => usable without any secret.
+    #[serde(default)]
+    pub required_secrets: Vec<String>,
 }
 
 /// MCP transport type (wire format).
