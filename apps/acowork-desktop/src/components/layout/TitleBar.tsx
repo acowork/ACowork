@@ -6,6 +6,7 @@ import { useLayoutStore } from "../../stores/layoutStore";
 import { useTranslation } from "../../i18n/useTranslation";
 import { Tooltip } from "../common/Tooltip";
 import { GatewayStatusChip } from "./GatewayStatusChip";
+import { GatewaySwitcherMenu } from "./GatewaySwitcherMenu";
 
 /**
  * Right-panel toggle — VS Code's "layout panel" glyph: one outer frame with
@@ -109,9 +110,13 @@ export function TitleBar() {
       {/* Right: view toggles + window controls (Windows/Linux only).
           Two groups, not one: `gap-1` between window buttons vs `mr-2`
           before them, so the app-level toggles read as a separate cluster
-          from the OS chrome instead of a 4th/5th window button. */}
+          from the OS chrome instead of a 4th/5th window button.
+          Gateway switcher sits left of search: which Gateway this app is
+          pointed at is the more fundamental of the two — the search index
+          belongs to that Gateway — so it reads first. */}
       {!isMacOS && (
         <div className="flex items-center gap-1" onMouseDown={(e) => e.stopPropagation()}>
+          <GatewaySwitcherMenu />
           <Tooltip content={t("titleBar.globalSearch")} position="bottom">
             <button
               className="flex h-8 w-8 items-center justify-center rounded text-text-secondary hover:bg-zinc-300  dark:hover:bg-zinc-700"

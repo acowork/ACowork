@@ -99,6 +99,8 @@
     }
   },
   "titleBar": {
+    "gatewayStatus": "ゲートウェイの状態",
+    "gateway": "ゲートウェイ",
     "globalSearch": "グローバル検索 (Ctrl+Shift+F)",
     "collapseRightPanel": "Collapse Right Panel",
     "expandRightPanel": "Expand Right Panel"

@@ -122,22 +122,27 @@ describe("TitleBar Gateway outage chip", () => {
 
   it("mounts the chip on a steady-state gateway drop", () => {
     render(<TitleBar />);
-    expect(screen.getByRole("button", { expanded: false })).toBeTruthy();
+    expect(screen.getByRole("button", { expanded: false, name: /Gateway Status/ })).toBeTruthy();
   });
 
   it("renders no chip while the gateway is healthy", () => {
     act(() => useGatewayStore.setState({ status: "connected", gatewayUnreachable: false }));
     const { container } = render(<TitleBar />);
-    expect(container.querySelector('[aria-expanded]')).toBeNull();
+    // Scoped to the chip by name, not to `aria-expanded` in general: the
+    // title bar also hosts the gateway switcher's own disclosure button,
+    // which stays mounted whether or not the Gateway is reachable.
+    expect(
+      container.querySelector('[aria-label="Gateway Status"]'),
+    ).toBeNull();
   });
 
   it("stays on the title bar until recovery clears the signal, never auto-hides", () => {
     const { rerender } = render(<TitleBar />);
-    expect(screen.queryByRole("button", { expanded: false })).toBeTruthy();
+    expect(screen.queryByRole("button", { expanded: false, name: /Gateway Status/ })).toBeTruthy();
     // Recovery clears it — the connectivity module drops the
     // `gatewayUnreachable` signal on the MQTT rise; nothing else does.
     act(() => useGatewayStore.setState({ gatewayUnreachable: false }));
     rerender(<TitleBar />);
-    expect(screen.queryByRole("button", { expanded: false })).toBeNull();
+    expect(screen.queryByRole("button", { expanded: false, name: /Gateway Status/ })).toBeNull();
   });
 });

@@ -99,6 +99,8 @@
     }
   },
   "titleBar": {
+    "gatewayStatus": "게이트웨이 상태",
+    "gateway": "게이트웨이",
     "globalSearch": "전역 검색 (Ctrl+Shift+F)",
     "collapseRightPanel": "Collapse Right Panel",
     "expandRightPanel": "Expand Right Panel"

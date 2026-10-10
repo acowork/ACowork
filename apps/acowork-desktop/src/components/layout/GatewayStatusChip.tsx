@@ -120,6 +120,11 @@ export function GatewayStatusChip() {
       <button
         type="button"
         aria-expanded={open}
+        // Accessible name: the chip's visible label flips with the outage
+        // reason, so it can't double as the name. Without one this is an
+        // unnamed disclosure button — indistinguishable from the gateway
+        // switcher's in a screen reader's button list.
+        aria-label={t("titleBar.gatewayStatus")}
         onClick={() => setOpen((v) => !v)}
         className="inline-flex h-6 shrink-0 items-center gap-1.5 rounded-full bg-amber-500 pr-2 pl-2.5 text-xs font-medium text-white transition-colors hover:bg-amber-600 dark:bg-amber-600 dark:hover:bg-amber-500"
       >

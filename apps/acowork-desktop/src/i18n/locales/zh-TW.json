@@ -99,6 +99,8 @@
     }
   },
   "titleBar": {
+    "gatewayStatus": "閘道狀態",
+    "gateway": "閘道",
     "globalSearch": "全域搜尋 (Ctrl+Shift+F)",
     "collapseRightPanel": "Collapse Right Panel",
     "expandRightPanel": "Expand Right Panel"
