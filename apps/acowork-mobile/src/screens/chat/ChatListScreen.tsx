@@ -21,9 +21,50 @@ import { useAgentStore } from '../../stores/agentStore'
 import { useChatStore } from '../../stores/chatStore'
 import { useUserChatStore } from '../../stores/userChatStore'
 import { useNavStore } from '../../stores/navStore'
+import { useAuthStore } from '../../stores/authStore'
 import { hasUnread } from '../../lib/unread'
 import { formatListTime } from '../../lib/time'
 import { ListSection, ListRow } from '../../components/ui'
+import { AuthImage } from '../../components/AuthImage'
+import { BUILTIN_ICONS, BUILTIN_ICON_IDS } from '../../lib/builtinIcons'
+
+/** Pick a stable builtin icon ID for a given seed (same as Desktop). */
+function pickIconId(seed: string): string | null {
+  if (BUILTIN_ICON_IDS.length === 0 || !seed) return null
+  let h = 0
+  for (let i = 0; i < seed.length; i++) h = (seed.charCodeAt(i) + (h << 5) - h) | 0
+  return BUILTIN_ICON_IDS[Math.abs(h) % BUILTIN_ICON_IDS.length] ?? null
+}
+
+/** Render agent avatar: custom file → declared builtin → deterministic builtin. */
+function AgentAvatar({ name, icon, avatar, agentId, baseUrl }: { name: string; icon?: string | null; avatar?: string | null; agentId: string; baseUrl: string }) {
+  const picked = pickIconId(name)
+  const fallbackSrc = (icon && BUILTIN_ICONS[icon]) ? BUILTIN_ICONS[icon] : BUILTIN_ICONS[picked ?? '']
+  const fallbackEl = fallbackSrc
+    ? <img src={fallbackSrc} alt="" />
+    : <span>{name.charAt(0)}</span>
+
+  if (avatar) {
+    const url = `${baseUrl}/api/agents/${encodeURIComponent(agentId)}/avatar-file?path=${encodeURIComponent(avatar)}`
+    return <AuthImage src={url} fallback={fallbackEl} />
+  }
+  return fallbackEl
+}
+
+/** Render user avatar: custom file → builtin icon → deterministic builtin. */
+function UserAvatarEl({ name, avatar, builtinAvatar, baseUrl }: { name: string; avatar?: string | null; builtinAvatar?: string | null; baseUrl: string }) {
+  const picked = pickIconId(name)
+  const fallbackSrc = (builtinAvatar && BUILTIN_ICONS[builtinAvatar]) ? BUILTIN_ICONS[builtinAvatar] : BUILTIN_ICONS[picked ?? '']
+  const fallbackEl = fallbackSrc
+    ? <img src={fallbackSrc} alt="" />
+    : <span>{name.charAt(0)}</span>
+
+  if (avatar) {
+    const url = `${baseUrl}/api/user/avatar-file?path=${encodeURIComponent(avatar)}`
+    return <AuthImage src={url} fallback={fallbackEl} />
+  }
+  return fallbackEl
+}
 
 export function ChatListScreen() {
   const agents = useAgentStore((s) => s.agentList)
@@ -33,6 +74,7 @@ export function ChatListScreen() {
   const loading = useAgentStore((s) => s.directoryLoading)
   const openSession = useChatStore((s) => s.openSession)
   const push = useNavStore((s) => s.push)
+  const baseUrl = useAuthStore((s) => s.baseUrl)
 
   const chats = useUserChatStore((s) => s.chats)
   const refreshChats = useUserChatStore((s) => s.refreshChats)
@@ -110,7 +152,7 @@ export function ChatListScreen() {
           {agentRows.map(({ a, recent }) => (
             <ListRow
               key={a.id}
-              arrow
+              avatar={<AgentAvatar name={a.name} icon={a.icon} avatar={a.avatar} agentId={a.id} baseUrl={baseUrl} />}
               onClick={() => void openAgent(a.id, recent?.session_id ?? null)}
               label={
                 <span className="row-title">
@@ -121,8 +163,8 @@ export function ChatListScreen() {
                   ) : null}
                 </span>
               }
-              value={recent?.last_message || recent?.title || '暂无会话'}
-              hint={formatListTime(recent?.updated_at)}
+              value={formatListTime(recent?.updated_at)}
+              hint={recent?.last_message || recent?.title || '暂无会话'}
             />
           ))}
           {agents.length === 0 && !loading ? <ListRow label="暂无 Agent" hint="在桌面端安装后出现在这里" /> : null}
@@ -132,7 +174,7 @@ export function ChatListScreen() {
           {userRows.map(({ u, chat }) => (
             <ListRow
               key={u.id}
-              arrow
+              avatar={<UserAvatarEl name={u.display_name} avatar={u.avatar} builtinAvatar={u.builtin_avatar} baseUrl={baseUrl} />}
               onClick={() => openUser(u.id, u.display_name)}
               label={
                 <span className="row-title">
@@ -140,8 +182,8 @@ export function ChatListScreen() {
                   {u.online ? <span className="dot dot-online" aria-label="在线" /> : null}
                 </span>
               }
-              value={chat?.last_message_preview || '开始对话'}
-              hint={formatListTime(chat ? chat.last_active_at * 1000 : undefined)}
+              value={formatListTime(chat ? chat.last_active_at * 1000 : undefined)}
+              hint={chat?.last_message_preview || '开始对话'}
               badge={chat && chat.unread_count > 0 ? chat.unread_count : undefined}
             />
           ))}

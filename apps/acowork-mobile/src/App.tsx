@@ -12,13 +12,65 @@
  * of looking like a crash.
  */
 
+import { useEffect } from 'react'
 import { useNavStore, TABS, type Route } from './stores/navStore'
 import { useAuthStore } from './stores/authStore'
 import { ROUTES } from './routes'
 import { BootingScreen, ConnectScreen, DisconnectedScreen, LoginScreen, RestrictedScreen } from './screens/boot/Screens'
+import type { ComponentType } from 'react'
+import {
+  OutlineChatIcon, FilledChatIcon,
+  OutlineProjectsIcon, FilledProjectsIcon,
+  OutlineDocsIcon, FilledDocsIcon,
+  OutlineSettingsIcon, FilledSettingsIcon,
+} from './components/TabIcons'
+
+/**
+ * Per-tab icon pair, copied from the Desktop NavBar: the outline variant is
+ * shown when inactive, the filled variant when active — same silhouette, so
+ * selecting only changes the fill (highlight-coloured), not the shape.
+ */
+type TabIcon = ComponentType<{ className?: string }>
+const TAB_ICONS: Record<string, { outline: TabIcon; filled: TabIcon }> = {
+  chat: { outline: OutlineChatIcon, filled: FilledChatIcon },
+  projects: { outline: OutlineProjectsIcon, filled: FilledProjectsIcon },
+  docs: { outline: OutlineDocsIcon, filled: FilledDocsIcon },
+  settings: { outline: OutlineSettingsIcon, filled: FilledSettingsIcon },
+}
 
 export function App() {
   const phase = useAuthStore((s) => s.phase)
+
+  // Android hardware/gesture back button. Without a handler Tauri's default
+  // is to close the app on the first press, so every back press exited even
+  // mid-navigation. Registering a handler takes over that behaviour: pop the
+  // in-app nav stack, and only exit when the current tab is already at its
+  // root. The app is a SPA that never touches webview history, so the
+  // payload's `canGoBack` is irrelevant here — `pop()` is the source of truth.
+  // Guarded so plain-browser dev / vitest (no Tauri runtime) skip it, and
+  // loaded dynamically so the module never couples to the runtime at import.
+  useEffect(() => {
+    if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return
+    let listener: { unregister: () => Promise<void> } | null = null
+    let cancelled = false
+    void import('@tauri-apps/api/app')
+      .then(({ onBackButtonPress, exit }) =>
+        onBackButtonPress(() => {
+          if (!useNavStore.getState().pop()) void exit(0)
+        }),
+      )
+      .then((l) => {
+        if (cancelled) void l.unregister()
+        else listener = l
+      })
+      .catch(() => {
+        /* runtime without the back-button API: leave the default behaviour */
+      })
+    return () => {
+      cancelled = true
+      void listener?.unregister()
+    }
+  }, [])
 
   if (phase !== 'ready') {
     switch (phase) {
@@ -96,7 +148,12 @@ function TabBar() {
           className={`tabbar-item${t.key === activeTab ? ' is-active' : ''}`}
           onClick={() => switchTab(t.key)}
         >
-          <span className="tabbar-icon" data-icon={t.icon} aria-hidden />
+          {(() => {
+            const set = TAB_ICONS[t.key]
+            if (!set) return <span className="tabbar-icon" aria-hidden />
+            const Icon = t.key === activeTab ? set.filled : set.outline
+            return <Icon className="tabbar-svg" />
+          })()}
           <span className="tabbar-label">{t.label}</span>
         </button>
       ))}

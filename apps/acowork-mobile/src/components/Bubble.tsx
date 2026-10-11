@@ -1,19 +1,14 @@
 /**
  * One chat bubble, shared by the agent and the human thread (design §4.3).
  *
- * Two shapes: a text bubble, rendered through the Markdown subset, and a
- * collapsed tool-call row. A tool call is NOT a bubble — it is process, not
- * speech, and on a 390pt screen a wall of tool JSON pushes the actual answer
- * off the top. It renders as one line that expands on tap.
- *
- * Timestamps are seconds on the user-chat wire and milliseconds on the
- * agent wire (conversation JSONL → epoch ms in `mapConversationEntries`), so
- * `toMs` normalizes by magnitude rather than by caller.
+ * The avatar / sender-name row is owned by the screen (ChatDetailScreen) so
+ * that plain bubbles and ExploreBlocks align under the same left edge —
+ * mirroring the desktop's grouped layout. This component renders only the
+ * bubble body.
  */
 
 import { useState } from 'react'
 import { renderMarkdown } from '../lib/markdown'
-import { formatMessageTime } from '../lib/time'
 import type { ChatMessage } from '../lib/types'
 
 /** Seconds or milliseconds → milliseconds. A ts under 1e11 is seconds. */
@@ -31,7 +26,6 @@ export function Bubble({ msg }: { msg: ChatMessage }) {
   return (
     <div className={`bubble${self ? ' bubble-self' : ' bubble-peer'}`}>
       <div className="bubble-text">{renderMarkdown(msg.content)}</div>
-      <div className="bubble-time">{formatMessageTime(toMs(msg.created_at))}</div>
     </div>
   )
 }

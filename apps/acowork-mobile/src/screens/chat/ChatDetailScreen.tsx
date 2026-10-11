@@ -21,19 +21,58 @@
  *    when the session returns to idle — no streaming, ever, in v1.
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import { Clock } from 'lucide-react'
 import { useAgentStore } from '../../stores/agentStore'
 import { isActiveStatus, useChatStore } from '../../stores/chatStore'
 import { useNavStore } from '../../stores/navStore'
+import { useAuthStore } from '../../stores/authStore'
 import { useSessionReadOnly } from '../../lib/session-write-access'
 import { setSessionVisibility } from '../../lib/api'
 import { useForegroundRefresh } from '../../lib/foreground'
 import { Banner, ListRow, Sheet } from '../../components/ui'
 import { Bubble } from '../../components/Bubble'
-import { daySeparator } from '../../lib/time'
+import { ExploreBlock } from '../../components/ExploreBlock'
+import { AuthImage } from '../../components/AuthImage'
+import { BUILTIN_ICONS, BUILTIN_ICON_IDS } from '../../lib/builtinIcons'
+import { daySeparator, timeGapSeparator } from '../../lib/time'
 import { AgentDrawer } from './AgentDrawer'
 import { EdgeSwipe } from '../../components/EdgeSwipe'
-import type { LiveStatus } from '../../lib/types'
+import type { ChatMessage, LiveStatus } from '../../lib/types'
+
+/** Deterministic builtin icon picker (same algorithm as ChatListScreen). */
+function pickIconId(seed: string): string | null {
+  if (BUILTIN_ICON_IDS.length === 0 || !seed) return null
+  let h = 0
+  for (let i = 0; i < seed.length; i++) h = (seed.charCodeAt(i) + (h << 5) - h) | 0
+  return BUILTIN_ICON_IDS[Math.abs(h) % BUILTIN_ICON_IDS.length] ?? null
+}
+
+/** Fold consecutive tool_call / tool_result / thought messages into groups. */
+type RenderItem = { type: 'msg'; msg: ChatMessage } | { type: 'explore'; items: ChatMessage[] }
+function foldToolCalls(messages: ChatMessage[]): RenderItem[] {
+  const out: RenderItem[] = []
+  let toolBuffer: ChatMessage[] = []
+  const isProcess = (t: string | undefined) =>
+    t === 'tool_call' || t === 'tool_result' || t === 'thought'
+  const flush = () => {
+    if (toolBuffer.length > 0) {
+      out.push({ type: 'explore', items: toolBuffer })
+    }
+    toolBuffer = []
+  }
+  for (const m of messages) {
+    const payload = (m.payload ?? {}) as { type?: string }
+    if (isProcess(payload.type)) {
+      toolBuffer.push(m)
+    } else {
+      flush()
+      out.push({ type: 'msg', msg: m })
+    }
+  }
+  flush()
+  return out
+}
 
 /** §8: one status line, not a token stream. */
 function statusText(s: LiveStatus): string {
@@ -76,6 +115,33 @@ export function ChatDetailScreen() {
   const sessions = useAgentStore((s) => (agentId ? s.agents[agentId]?.sessions : undefined)) ?? []
   const activeId = state?.activeSessionId ?? null
   const readOnly = useSessionReadOnly(agentId, activeId)
+  const baseUrl = useAuthStore((s) => s.baseUrl)
+  const me = useAuthStore((s) => s.me)
+
+  // Build avatar nodes for bubbles
+  const agentAvatar: ReactNode = (() => {
+    if (!agent) return <span>{'?'}</span>
+    const picked = pickIconId(agent.name)
+    const fallbackSrc = (agent.icon && BUILTIN_ICONS[agent.icon]) ? BUILTIN_ICONS[agent.icon] : BUILTIN_ICONS[picked ?? '']
+    const fallbackEl = fallbackSrc ? <img src={fallbackSrc} alt="" /> : <span>{agent.name.charAt(0)}</span>
+    if (agent.avatar && agentId) {
+      const url = `${baseUrl}/api/agents/${encodeURIComponent(agentId)}/avatar-file?path=${encodeURIComponent(agent.avatar)}`
+      return <AuthImage src={url} fallback={fallbackEl} />
+    }
+    return fallbackEl
+  })()
+  const userAvatar: ReactNode = (() => {
+    if (!me) return <span>{'?'}</span>
+    const name = me.display_name || me.username
+    const picked = pickIconId(name)
+    const fallbackSrc = BUILTIN_ICONS[picked ?? '']
+    const fallbackEl = fallbackSrc ? <img src={fallbackSrc} alt="" /> : <span>{name.charAt(0)}</span>
+    if (me.avatar) {
+      const url = `${baseUrl}/api/users/${encodeURIComponent(me.user_id)}/avatar-file?path=${encodeURIComponent(me.avatar)}`
+      return <AuthImage src={url} fallback={fallbackEl} />
+    }
+    return fallbackEl
+  })()
 
   const [switcherOpen, setSwitcherOpen] = useState(false)
   const [drawerOpen, setDrawerOpen] = useState(false)
@@ -143,21 +209,25 @@ export function ChatDetailScreen() {
   return (
     <EdgeSwipe onBack={onBack} onDrawer={() => setDrawerOpen(true)}>
       <div className="screen">
-        {/* The title IS the session switcher. */}
-        <header className="navbar">
+        {/* Three balanced zones: back (left) · centered title · session-history
+            (right). The switcher is triggered by the right-hand history icon
+            (Desktop's SessionTabBar uses the same clock glyph), not the title,
+            so the title reads as a label and the bar has clear thirds. */}
+        <header className="navbar navbar--chat">
           <button type="button" className="navbar-back" onClick={onBack} aria-label="返回">
-            返回
+            <svg width="11" height="18" viewBox="0 0 12 20" fill="none" style={{ display: 'block' }}>
+              <path d="M10 2L2 10l8 8" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+            </svg>
           </button>
+          <span className="navbar-title">{active?.title ?? agent?.name ?? '会话'}</span>
           <button
             type="button"
-            className="navbar-title navbar-title-button"
+            className="navbar-history"
             onClick={() => setSwitcherOpen(true)}
-            aria-label="切换会话"
+            aria-label="会话历史"
           >
-            {active?.title ?? agent?.name ?? '会话'}
-            <span className="chevron-down" aria-hidden />
+            <Clock size={22} aria-hidden />
           </button>
-          <span className="navbar-trail" />
         </header>
 
         {readOnly ? (
@@ -171,32 +241,85 @@ export function ChatDetailScreen() {
           {state?.loaded && state.messages.length === 0 && !isActiveStatus(state.status) ? (
             <div className="empty-state">还没有消息</div>
           ) : null}
-          {state?.messages.map((m, i) => {
-            const sep = daySeparator(i > 0 ? state.messages[i - 1]!.created_at : null, m.created_at)
-            return (
-              <div key={m.id} className="msg-wrap">
-                {sep ? <div className="day-sep">{sep}</div> : null}
-                <Bubble msg={m} />
-              </div>
-            )
-          })}
+          {state?.messages.length ? (() => {
+            const folded = foldToolCalls(state.messages)
+            const userName = me?.display_name || me?.username || '我'
+            const lastMsgOf = (it: RenderItem): ChatMessage =>
+              it.type === 'msg' ? it.msg : it.items[it.items.length - 1]!
+            // Desktop cohesion: fold consecutive same-role items into one
+            // "turn". The avatar + name/role header render ONCE per turn and
+            // the turn's bubbles / explore blocks stack tightly inside it. A
+            // role change, day change or >5-min gap breaks a turn (so the
+            // avatar re-appears for the new turn).
+            type Turn = { isUser: boolean; items: RenderItem[]; firstTs: number; prevTs: number | null; key: string }
+            const turns: Turn[] = []
+            folded.forEach((item, i) => {
+              const firstMsg = item.type === 'msg' ? item.msg : item.items[0]!
+              const isUser = firstMsg.role === 'user'
+              const prevMsg = i > 0 ? lastMsgOf(folded[i - 1]!) : null
+              const prevTs = prevMsg ? prevMsg.created_at : null
+              const breakHere = !prevMsg
+                || prevMsg.role !== firstMsg.role
+                || !!daySeparator(prevTs, firstMsg.created_at)
+                || !!timeGapSeparator(prevTs, firstMsg.created_at)
+              if (!breakHere) {
+                turns[turns.length - 1]!.items.push(item)
+              } else {
+                turns.push({
+                  isUser,
+                  items: [item],
+                  firstTs: firstMsg.created_at,
+                  prevTs,
+                  key: item.type === 'explore' ? `explore-${item.items[0]!.id}` : item.msg.id,
+                })
+              }
+            })
+            return turns.map((turn) => {
+              const sep = daySeparator(turn.prevTs, turn.firstTs) ?? timeGapSeparator(turn.prevTs, turn.firstTs)
+              const avatar = turn.isUser ? userAvatar : agentAvatar
+              const name = turn.isUser ? userName : (agent?.name ?? '助手')
+              const role = turn.isUser ? null : (agent?.role ?? null)
+              return (
+                <Fragment key={turn.key}>
+                  {sep ? <div className="time-sep">{sep}</div> : null}
+                  <div className={`msg-group${turn.isUser ? ' msg-group-self' : ' msg-group-peer'}`}>
+                    <div className="msg-avatar">{avatar}</div>
+                    <div className="msg-main">
+                      <div className="msg-sender">
+                        <span className="msg-sender-name">{name}</span>
+                        {role ? <span className="msg-sender-role">{role}</span> : null}
+                      </div>
+                      {turn.items.map((item) =>
+                        item.type === 'explore'
+                          ? <ExploreBlock key={`explore-${item.items[0]!.id}`} items={item.items} />
+                          : <Bubble key={item.msg.id} msg={item.msg} />,
+                      )}
+                    </div>
+                  </div>
+                </Fragment>
+              )
+            })
+          })() : null}
           {/* Failed draft: kept visible with an explicit retry (edge states). */}
           {state?.pendingSend ? (
-            <div className="msg-wrap">
-              <div
-                className={`bubble bubble-self bubble-raw bubble-failed${state.pendingSend.state === 'sending' ? ' is-sending' : ''}`}
-              >
-                {state.pendingSend.content}
-              </div>
-              {state.pendingSend.state === 'failed' ? (
-                <button
-                  type="button"
-                  className="retry-link"
-                  onClick={() => agentId && activeId && void sendMessage(agentId, activeId)}
+            <div className="msg-group msg-group-self">
+              <div className="msg-avatar">{userAvatar}</div>
+              <div className="msg-main">
+                <div
+                  className={`bubble bubble-self bubble-raw bubble-failed${state.pendingSend.state === 'sending' ? ' is-sending' : ''}`}
                 >
-                  发送失败 · 重试
-                </button>
-              ) : null}
+                  {state.pendingSend.content}
+                </div>
+                {state.pendingSend.state === 'failed' ? (
+                  <button
+                    type="button"
+                    className="retry-link"
+                    onClick={() => agentId && activeId && void sendMessage(agentId, activeId)}
+                  >
+                    发送失败 · 重试
+                  </button>
+                ) : null}
+              </div>
             </div>
           ) : null}
           {/* v1.1 §8: status line instead of streaming output. */}

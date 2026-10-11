@@ -17,7 +17,9 @@ export function ListSection({ title, children }: { title?: string; children: Rea
   )
 }
 
-/** One row. `value` renders right-aligned secondary text; `arrow` the chevron. */
+/** One row. `value` renders right-aligned secondary text; `arrow` the chevron.
+ *  `avatar` shows a 48px left image/initial block (WeChat chat-list style).
+ *  `icon` shows a 24px leading icon (WeChat settings style). */
 export function ListRow({
   label,
   value,
@@ -27,6 +29,9 @@ export function ListRow({
   destructive,
   hint,
   badge,
+  avatar,
+  avatarClass,
+  icon,
 }: {
   label: ReactNode
   value?: ReactNode
@@ -37,6 +42,12 @@ export function ListRow({
   hint?: string
   /** Count bubble. Only ever a NUMBER the server actually reported. */
   badge?: number
+  /** Avatar element (image or initials block) rendered 48px left. */
+  avatar?: ReactNode
+  /** Extra class on the avatar container (e.g. color variant). */
+  avatarClass?: string
+  /** Leading icon element (24px) for settings-style rows. */
+  icon?: ReactNode
 }) {
   const Tag = onClick ? 'button' : 'div'
   return (
@@ -46,14 +57,14 @@ export function ListRow({
       type={onClick ? 'button' : undefined}
       role={onClick ? 'button' : undefined}
     >
-      <div className="list-row-trail">
-        {badge && badge > 0 ? <span className="badge-count">{badge > 99 ? '99+' : badge}</span> : null}
-      </div>
+      {avatar ? <div className={`list-row-avatar${avatarClass ? ' ' + avatarClass : ''}`}>{avatar}</div> : null}
+      {icon && !avatar ? <div className="list-row-icon">{icon}</div> : null}
       <div className="list-row-main">
         <div className="list-row-label">{label}</div>
         {hint ? <div className="list-row-hint">{hint}</div> : null}
       </div>
       <div className="list-row-trail">
+        {badge && badge > 0 ? <span className="badge-count">{badge > 99 ? '99+' : badge}</span> : null}
         {value !== undefined ? <div className="list-row-value">{value}</div> : null}
         {arrow ? <span className="chevron" aria-hidden /> : null}
       </div>

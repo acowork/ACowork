@@ -31,7 +31,11 @@ export interface SessionInfo {
 export interface AgentSummary {
   id: string
   name: string
+  role?: string | null
+  /** Builtin icon ID (e.g. "icon-05"). */
   icon?: string | null
+  /** Custom avatar file path (served via /api/agents/{id}/avatar-file?path=). */
+  avatar?: string | null
   status?: 'idle' | 'busy' | 'error' | 'offline'
   /** Count of sessions this account has open/created. */
   session_count?: number
@@ -42,7 +46,10 @@ export interface AgentSummary {
 export interface UserSummary {
   id: string
   display_name: string
+  /** Custom avatar file path. */
   avatar?: string | null
+  /** Builtin icon ID (e.g. "icon-05"). */
+  builtin_avatar?: string | null
   online?: boolean
   last_message?: string | null
   updated_at?: number
@@ -127,6 +134,8 @@ export interface AgentRow {
   agent_id: string
   name: string
   display_name?: string | null
+  role?: string | null
+  avatar?: string | null
   builtin_avatar?: string | null
   alive: boolean
   lifecycle: string

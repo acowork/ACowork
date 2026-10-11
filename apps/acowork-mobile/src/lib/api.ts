@@ -190,10 +190,10 @@ export async function fetchSessions(agentId: string, page: number): Promise<{ it
 }
 
 /**
- * Conversation JSONL → chat bubbles. v1 renders user/assistant text;
- * `tool_call` entries become collapsed tool rows, `tool_result` folds into
- * the preceding tool call, `thought`/`system`/`compaction` are not surfaced
- * (same reader contract as Desktop; `metadata.internal` is skipped).
+ * Conversation JSONL → chat bubbles. user/assistant render as text bubbles;
+ * `tool_call` / `tool_result` / `thought` are emitted with a payload type tag
+ * so `foldToolCalls` can group them into ExploreBlock. `system` / `compaction`
+ * / `metadata.internal` entries are skipped.
  */
 export function mapConversationEntries(entries: ConversationEntry[]): ChatMessage[] {
   const out: ChatMessage[] = []
@@ -213,19 +213,41 @@ export function mapConversationEntries(entries: ConversationEntry[]): ChatMessag
         })
         break
       case 'tool_call': {
-        const name = (e.metadata as { tool_name?: string } | undefined)?.tool_name ?? 'tool'
+        const md = e.metadata as { tool_name?: string; tool_call_id?: string } | undefined
         out.push({
           id: e.id,
           role: 'assistant',
           content: e.content,
           created_at: isoToMs(e.ts),
           kind: 'text',
-          payload: { type: 'tool_call', name },
+          payload: { type: 'tool_call', name: md?.tool_name ?? 'tool', toolCallId: md?.tool_call_id ?? '' },
         })
         break
       }
+      case 'tool_result': {
+        const md = e.metadata as { tool_name?: string; tool_call_id?: string } | undefined
+        out.push({
+          id: e.id,
+          role: 'assistant',
+          content: e.content,
+          created_at: isoToMs(e.ts),
+          kind: 'text',
+          payload: { type: 'tool_result', name: md?.tool_name ?? 'tool', toolCallId: md?.tool_call_id ?? '' },
+        })
+        break
+      }
+      case 'thought':
+        out.push({
+          id: e.id,
+          role: 'assistant',
+          content: e.content,
+          created_at: isoToMs(e.ts),
+          kind: 'text',
+          payload: { type: 'thought' },
+        })
+        break
       default:
-        // thought / tool_result / system: not rendered in v1
+        // system: not rendered
         break
     }
   }

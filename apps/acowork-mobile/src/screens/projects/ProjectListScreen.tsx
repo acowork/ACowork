@@ -42,7 +42,6 @@ export function ProjectListScreen() {
         {projects.map((p) => (
           <ListRow
             key={p.id}
-            arrow
             onClick={() => open(p.id)}
             label={<span className="row-title">{p.title}</span>}
             hint={p.description || undefined}
