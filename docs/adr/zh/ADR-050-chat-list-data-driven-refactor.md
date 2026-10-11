@@ -1800,6 +1800,8 @@ adapter.blocks = foldMessages([...messages[], ...liveBuffer.streams()])
 - **不打断阅读**：门控沿用 `record_complete` handler 的 at-tail 表达式（`isAtTail(...) && !messagesStale`），停在历史中部的读者不会被拽到尾部——其 `scrollToBottom` 本就会加载最新页。
 - **不按可见性门控**：后台会话的缓存同样由 `record_complete` 实时维护，而 `ensureLatestInCache` 的 `tailCovered` 判据读的是**本地** `messageTotal`，分歧的后台会话在打开时会看起来"已覆盖尾部"从而永不愈合。此处对齐让本地计数保持诚实。
 
-**不变量**：每条已持久化的记录，最终对每个客户端可见。在"事件流按设计角色不完整"与"MQTT 尽力投递"两个既有事实下，该不变量只能由数据驱动的对齐承载——任何纯事件方案都需要它，因此它是承重结构，不是延迟优化。
+**时延**：约 500ms 量级。链路是 `append_message_with_id` → `notify_state_change()`（无节流）→ `spawn_state_change_relay` 的 **500ms coalesce 窗口**（取窗口内最新快照）→ QoS 1 + retain 的 `session_state` → 客户端对齐规则重拉。user 记录落盘后约半秒即出现在桌面端，与本轮回答何时结束无关（实测确认：远端发送后秒回）。coalesce 只影响多条记录合并为一次推送，不影响计数正确性——快照里的 `message_count` 是持久累计值。
 
-若将来需要远端 user 消息**即时**出现（而非本轮结束时），正确顺序是：先让实时追加路径按 id 幂等（使重复气泡按构造不可能），再考虑为 `user` 角色补事件；并须先移除 `record_complete` handler 中"未知角色静默折叠为 `assistant`"的行为。不得以"不发事件"作为压制重复的手段。
+之所以能做到秒级，是因为 `session_state` 的触发源是 `notify_state_change()`（任何记录落盘都会调用），而非状态转换。若曾把 `session_state` 理解为"只在 idle/状态变化时推送"，就会误判延迟来源并错把修复绑到生命周期上——那正是本次根因。
+
+**不变量**：每条已持久化的记录，最终对每个客户端可见。在"事件流按设计角色不完整"与"MQTT 尽力投递"两个既有事实下，该不变量只能由数据驱动的对齐承载——任何纯事件方案都需要它，因此它是承重结构，不是延迟优化。
