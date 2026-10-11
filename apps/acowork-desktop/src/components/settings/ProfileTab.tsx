@@ -300,7 +300,7 @@ export function ProfileTab() {
                 if (!avatarPopupOpen) computeAvatarPopupPos();
                 setAvatarPopupOpen((v) => !v);
               }}
-              className="relative block rounded-full ring-1 ring-zinc-300/60 transition hover:ring-zinc-400 dark:ring-zinc-600/60 dark:hover:ring-zinc-400"
+              className="relative block rounded-lg ring-1 ring-zinc-300/60 transition hover:ring-zinc-400 dark:ring-zinc-600/60 dark:hover:ring-zinc-400"
             >
               <UserAvatar
                 size={64}
@@ -416,7 +416,7 @@ export function ProfileTab() {
                               src={BUILTIN_ICONS[iconId] ?? ""}
                               alt={iconId}
                               draggable={false}
-                              className="h-12 w-12 rounded-full object-cover"
+                              className="h-12 w-12 rounded-lg object-cover"
                             />
                           </button>
                         );
