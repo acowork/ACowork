@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# package_desktop_linux.sh - Build ACowork Desktop package for Linux
+# package_desktop_macos.sh - Build ACowork Desktop package for macOS
 
 set -euo pipefail
 
@@ -9,26 +9,26 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-WORKSPACE_ROOT="$(dirname "$SCRIPT_DIR")"
+WORKSPACE_ROOT="$(dirname "$(dirname "$(dirname "$SCRIPT_DIR")")")"
 DESKTOP_DIR="$WORKSPACE_ROOT/apps/acowork-desktop"
 BIN_DIR="$DESKTOP_DIR/src-tauri/bin"
 
-if [ "$(uname -s)" != "Linux" ]; then
-    echo -e "${RED}This script is for Linux only.${NC}"
+if [ "$(uname -s)" != "Darwin" ]; then
+    echo -e "${RED}This script is for macOS only.${NC}"
     exit 1
 fi
 
 echo -e "${CYAN}========================================${NC}"
-echo -e "${CYAN}ACowork Desktop Package (Linux)${NC}"
+echo -e "${CYAN}ACowork Desktop Package (macOS)${NC}"
 echo -e "${CYAN}========================================${NC}"
 echo ""
 
 find_ort_lib() {
     local found=""
-    for ort_dir in "$WORKSPACE_ROOT"/.ort/onnxruntime-linux-*; do
+    for ort_dir in "$WORKSPACE_ROOT"/.ort/onnxruntime-osx-*; do
         [ -d "$ort_dir" ] || continue
-        if [ -f "$ort_dir/lib/libonnxruntime.so" ]; then
-            found="$ort_dir/lib/libonnxruntime.so"
+        if [ -f "$ort_dir/lib/libonnxruntime.dylib" ]; then
+            found="$ort_dir/lib/libonnxruntime.dylib"
             break
         fi
     done
@@ -37,22 +37,22 @@ find_ort_lib() {
 
 ORT_LIB="$(find_ort_lib)"
 if [ -z "$ORT_LIB" ]; then
-    "$SCRIPT_DIR/setup_ort.sh"
+    "$SCRIPT_DIR/../../common/setup_ort.sh"
     ORT_LIB="$(find_ort_lib)"
 fi
 
 if [ -z "$ORT_LIB" ]; then
-    echo -e "${RED}ONNX Runtime library not found. Run ./dev/setup_ort.sh first.${NC}"
+    echo -e "${RED}ONNX Runtime library not found. Run ./dev/common/setup_ort.sh first.${NC}"
     exit 1
 fi
 
 export ORT_LIB_LOCATION="$(dirname "$ORT_LIB")"
 export ORT_DYLIB_PATH="$ORT_LIB"
 export ORT_PREFER_DYNAMIC_LINK=1
-export LD_LIBRARY_PATH="$ORT_LIB_LOCATION:${LD_LIBRARY_PATH:-}"
+export DYLD_LIBRARY_PATH="$ORT_LIB_LOCATION:${DYLD_LIBRARY_PATH:-}"
 
 mkdir -p "$BIN_DIR"
-cp "$ORT_LIB" "$BIN_DIR/libonnxruntime.so"
+cp "$ORT_LIB" "$BIN_DIR/libonnxruntime.dylib"
 echo -e "${GREEN}Bundled ORT library: $ORT_LIB${NC}"
 
 # Bundle LSP Relay binary (sibling of acowork-gateway, ADR-019).
@@ -65,7 +65,7 @@ if [ -f "$LSP_RELAY_BIN" ]; then
     echo -e "${GREEN}Bundled LSP Relay binary: $LSP_RELAY_BIN${NC}"
 else
     echo -e "${YELLOW}WARN: acowork-lsp-relay not found at $LSP_RELAY_BIN.${NC}"
-    echo -e "${YELLOW}      Run ./dev/build_core.sh (release) first.${NC}"
+    echo -e "${YELLOW}      Run ./dev/desktop/macos/build_macos.sh (release) first.${NC}"
     echo -e "${YELLOW}      Without it, Gateway startup will fail with:${NC}"
     echo -e "${YELLOW}        acowork-lsp-relay binary not found${NC}"
 fi
@@ -80,7 +80,7 @@ if [ -f "$NODE_BIN" ]; then
     echo -e "${GREEN}Bundled Node Agent binary: $NODE_BIN${NC}"
 else
     echo -e "${YELLOW}WARN: acowork-node not found at $NODE_BIN.${NC}"
-    echo -e "${YELLOW}      Run ./dev/build_core.sh (release) first.${NC}"
+    echo -e "${YELLOW}      Run ./dev/desktop/macos/build_macos.sh (release) first.${NC}"
     echo -e "${YELLOW}      Without it, Gateway startup will fail with:${NC}"
     echo -e "${YELLOW}        acowork-node binary not found — node topology disabled${NC}"
 fi
@@ -95,7 +95,7 @@ if [ -f "$PM_BIN" ]; then
     echo -e "${GREEN}Bundled PM service binary: $PM_BIN${NC}"
 else
     echo -e "${YELLOW}WARN: acowork-pm not found at $PM_BIN.${NC}"
-    echo -e "${YELLOW}      Run ./dev/build_core.sh (release) first.${NC}"
+    echo -e "${YELLOW}      Run ./dev/desktop/macos/build_macos.sh (release) first.${NC}"
     echo -e "${YELLOW}      Without it, /api/pm/* returns 503 (PM unavailable).${NC}"
 fi
 
@@ -110,7 +110,7 @@ if [ -f "$DOC_BIN" ]; then
     echo -e "${GREEN}Bundled Doc service binary: $DOC_BIN${NC}"
 else
     echo -e "${YELLOW}WARN: acowork-doc not found at $DOC_BIN.${NC}"
-    echo -e "${YELLOW}      Run ./dev/build_core.sh (release) first.${NC}"
+    echo -e "${YELLOW}      Run ./dev/desktop/macos/build_macos.sh (release) first.${NC}"
     echo -e "${YELLOW}      Without it, /api/doc/* returns 503 (Doc unavailable).${NC}"
 fi
 
@@ -126,7 +126,7 @@ if [ -f "$USER_BIN" ]; then
     echo -e "${GREEN}Bundled User service binary: $USER_BIN${NC}"
 else
     echo -e "${YELLOW}WARN: acowork-user not found at $USER_BIN.${NC}"
-    echo -e "${YELLOW}      Run ./dev/build_core.sh (release) first.${NC}"
+    echo -e "${YELLOW}      Run ./dev/desktop/macos/build_macos.sh (release) first.${NC}"
     echo -e "${YELLOW}      Without it, /api/auth/*, /api/users/* and /api/user/* return 503.${NC}"
 fi
 

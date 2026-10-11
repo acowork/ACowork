@@ -21,12 +21,24 @@ One-off probes, debug helpers, and ad-hoc experiments do not belong here — see
 ONNX Runtime is **not** a manual prerequisite — `setup_ort.*` installs it into
 `.ort/`, and `ort_env.js` makes Tauri auto-detect it on every platform.
 
+## Layout
+
+Scripts are grouped by **scope**, not by file type:
+
+| Folder | Contains |
+|---|---|
+| [`common/`](common/) | Cross-platform build steps that ship a `.sh` + `.ps1` twin (`build_core`, `setup_ort`, `start_node`, `build-agent`). The `.sh` serves both Linux and macOS, so the twins live together rather than under an OS folder. |
+| [`desktop/windows/`](desktop/windows/) · [`desktop/macos/`](desktop/macos/) · [`desktop/linux/`](desktop/linux/) | Per-OS desktop packaging (`package_desktop_*`), plus the macOS one-click build and the Windows stop-latency test. |
+| [`android/`](android/) | Mobile build/sign helpers — `sign_release.ps1` drives keystore creation, `gradle.properties`, and the signed release build. Authoritative flow: [apps/acowork-mobile/README.md](../apps/acowork-mobile/README.md). |
+| `ci.sh`, `ort_env.js` (repo root of `dev/`) | Kept at the top level because they are referenced by path from `AGENTS.md`, `apps/acowork-desktop/package.json`, and the ADR corpus. |
+| [`deploy/`](deploy/), [`e2e_frontend_smoke/`](e2e_frontend_smoke/) | Server deployment units and the frontend smoke suite (unchanged locations). |
+
 ## First build
 
 ```bash
-./dev/setup_ort.sh                    # Linux / macOS
-./dev/setup_ort.ps1                   # Windows
-./dev/build_core.sh                   # or build_core.ps1 on Windows
+./dev/common/setup_ort.sh           # Linux / macOS
+./dev/common/setup_ort.ps1          # Windows
+./dev/common/build_core.sh          # or build_core.ps1 on Windows
 ```
 
 `build_core.*` builds the Gateway, Runtime, and Node Agent in the release
@@ -37,18 +49,18 @@ profile. `-Debug` / `--debug` switches to the debug profile and auto-raises
 
 | Script | What it does |
 |---|---|
-| [`build_core.ps1`](build_core.ps1) · [`build_core.sh`](build_core.sh) | Build Gateway + Runtime + Node Agent. `-Start` stops the old Gateway and starts a new one; `-Start -Remote` binds `0.0.0.0` and advertises the detected LAN IP instead of `127.0.0.1` — this is how you make the Gateway reachable from a phone on the same network. |
-| [`build_macos.sh`](build_macos.sh) | macOS one-click build: skips the slow `setup_ort.sh` download, pulls the Apple Silicon ONNX Runtime with `download-ort,coreml`, installs Homebrew `pkg-config`/`cmake`. |
-| [`start_node.ps1`](start_node.ps1) · [`start_node.sh`](start_node.sh) | Start a local `acowork-node` daemon joined to a remote Gateway (`<host>:<port>`). |
+| [`build_core.ps1`](common/build_core.ps1) · [`build_core.sh`](common/build_core.sh) | Build Gateway + Runtime + Node Agent. `-Start` stops the old Gateway and starts a new one; `-Start -Remote` binds `0.0.0.0` and advertises the detected LAN IP instead of `127.0.0.1` — this is how you make the Gateway reachable from a phone on the same network. |
+| [`build_macos.sh`](desktop/macos/build_macos.sh) | macOS one-click build: skips the slow `setup_ort.sh` download, pulls the Apple Silicon ONNX Runtime with `download-ort,coreml`, installs Homebrew `pkg-config`/`cmake`. |
+| [`start_node.ps1`](common/start_node.ps1) · [`start_node.sh`](common/start_node.sh) | Start a local `acowork-node` daemon joined to a remote Gateway (`<host>:<port>`). |
 | [`ort_env.js`](ort_env.js) | Invoked by `tauri.conf.json`'s `beforeDevCommand`; not run by hand. Probes `.ort/`, then the Cargo cache, and injects `--features download-ort[,coreml\|cuda\|directml]` when nothing is installed. |
 
 ## Packaging
 
 | Script | What it does |
 |---|---|
-| [`package_desktop_windows.ps1`](package_desktop_windows.ps1) | Windows installer (`.msi` / NSIS bundle). `-ReinstallOrt`, `-NoMirror`. |
-| [`package_desktop_macos.sh`](package_desktop_macos.sh) | macOS `.app` / `.dmg`. |
-| [`package_desktop_linux.sh`](package_desktop_linux.sh) | Linux `.deb` / `.rpm` / AppImage. |
+| [`package_desktop_windows.ps1`](desktop/windows/package_desktop_windows.ps1) | Windows installer (`.msi` / NSIS bundle). `-ReinstallOrt`, `-NoMirror`. |
+| [`package_desktop_macos.sh`](desktop/macos/package_desktop_macos.sh) | macOS `.app` / `.dmg`. |
+| [`package_desktop_linux.sh`](desktop/linux/package_desktop_linux.sh) | Linux `.deb` / `.rpm` / AppImage. |
 
 App icons are **not** generated here. `npx tauri icon assets/app-icon.svg`
 produces the platform set, `scripts/generate-store-logos.py` adds the Windows
@@ -60,7 +72,7 @@ shrinks back inside the canvas.
 
 | Script | What it does |
 |---|---|
-| [`build-agent.ps1`](build-agent.ps1) · [`build-agent.sh`](build-agent.sh) | Zip an `.agent` directory into a signed package, generating signing keys on first use. Pass an agent directory, or use `-All` to build every agent under `examples/`. |
+| [`build-agent.ps1`](common/build-agent.ps1) · [`build-agent.sh`](common/build-agent.sh) | Zip an `.agent` directory into a signed package, generating signing keys on first use. Pass an agent directory, or use `-All` to build every agent under `examples/`. |
 
 ## CI and tests
 
@@ -89,7 +101,7 @@ Tests that live outside the Cargo test harness:
 |---|---|
 | [`e2e_frontend_smoke/smoke_test.py`](e2e_frontend_smoke/smoke_test.py) | The `smoke` mode above. Covers the cases enumerated in `docs/plan/zh/e2e-frontend-smoke-test.md`, plus the PM member feature end-to-end across processes. |
 | [`e2e_frontend_smoke/onboarding_installs_all_agents.py`](e2e_frontend_smoke/onboarding_installs_all_agents.py) | ADR-059 first-run bootstrap handshake regression. `GET /api/bootstrap` is the readiness source of truth, **not** `/health`. |
-| [`e2e_stop_test.ps1`](e2e_stop_test.ps1) | Stop-response latency after the control/data channel split: open a WebSocket, stream a long message over HTTP, send `stop` on the first delta, measure the latency. Referenced by [ADR-077](../docs/adr/zh/ADR-077-system-agent-demotion-to-default-agent.md). |
+| [`e2e_stop_test.ps1`](desktop/windows/e2e_stop_test.ps1) | Stop-response latency after the control/data channel split: open a WebSocket, stream a long message over HTTP, send `stop` on the first delta, measure the latency. Referenced by [ADR-077](../docs/adr/zh/ADR-077-system-agent-demotion-to-default-agent.md). |
 
 ## Deployment
 

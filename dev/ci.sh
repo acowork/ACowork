@@ -472,13 +472,13 @@ run_lsp_registry_redline() {
 # "Mutex poisoned" (the poison of ort's own internal Mutex, not ours).
 #
 # The compiled api level must therefore never exceed the ORT minor version the
-# project still supports (ORT_VERSION_LEGACY in dev/setup_ort.sh, the legacy
+# project still supports (ORT_VERSION_LEGACY in dev/common/setup_ort.sh, the legacy
 # glibc 2.31 build). GetApi is backward compatible, so a LOW api level runs
 # fine on a newer runtime — this is a one-sided constraint.
 run_ort_api_redline() {
     echo "Checking ONNX Runtime API-level compatibility red line..."
     local cargo_toml="$SCRIPT_DIR/../core/Cargo.toml"
-    local setup_ort="$SCRIPT_DIR/setup_ort.sh"
+    local setup_ort="$SCRIPT_DIR/common/setup_ort.sh"
 
     local api_feature
     api_feature=$(grep -oE '"api-[0-9]+"' "$cargo_toml" | head -1 | grep -oE '[0-9]+')
@@ -490,7 +490,7 @@ run_ort_api_redline() {
     local legacy
     legacy=$(grep -oE '^ORT_VERSION_LEGACY="[0-9]+\.[0-9]+' "$setup_ort" | grep -oE '[0-9]+\.[0-9]+$')
     if [ -z "$legacy" ]; then
-        echo "ERROR: could not read ORT_VERSION_LEGACY from dev/setup_ort.sh."
+        echo "ERROR: could not read ORT_VERSION_LEGACY from dev/common/setup_ort.sh."
         exit 1
     fi
 
@@ -499,7 +499,7 @@ run_ort_api_redline() {
     local legacy_minor="${legacy#*.}"
     if [ "$api_feature" -gt "$legacy_minor" ]; then
         echo "ERROR: ort api-${api_feature} is newer than ONNX Runtime ${legacy}"
-        echo "(ORT_VERSION_LEGACY in dev/setup_ort.sh, the oldest supported runtime)."
+        echo "(ORT_VERSION_LEGACY in dev/common/setup_ort.sh, the oldest supported runtime)."
         echo "Loading any embedding model will panic in ort's global init and then"
         echo "fail as 'Mutex poisoned'. Lower the api-N feature, or raise"
         echo "ORT_VERSION_LEGACY and the minimum glibc it implies."
@@ -518,7 +518,7 @@ run_clippy() {
 
 run_test() {
     echo "Running cargo test..."
-    # acowork-embed links to ONNX Runtime (dev/setup_ort.sh). On machines
+    # acowork-embed links to ONNX Runtime (dev/common/setup_ort.sh). On machines
     # without ORT installed, building its tests fails at link time — but
     # it isn't depended on by any other crate's tests, so test the rest of
     # the workspace first, then attempt the embed tests separately and
@@ -552,7 +552,7 @@ run_integration() {
 # memory, docs, settings + Phase 5a auth). Requires debug binaries.
 run_smoke() {
     echo "=== Building debug binaries for smoke tests ==="
-    # acowork-embed needs ONNX Runtime (dev/setup_ort.sh) which may not
+    # acowork-embed needs ONNX Runtime (dev/common/setup_ort.sh) which may not
     # be installed on this machine; it is spawned as a sidecar and not
     # depended on by the other crates, so rebuild everything else and
     # reuse an existing embed binary when ORT is unavailable.

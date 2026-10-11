@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # build_core.sh - Cross-platform rebuild (and optional start) Gateway + Runtime
-# Usage: ./dev/build_core.sh [OPTIONS]
+# Usage: ./dev/common/build_core.sh [OPTIONS]
 #   (no args)                Build release (default)
 #   --debug                  Build debug
 #   --release                Build release
@@ -31,7 +31,7 @@ NC='\033[0m' # No Color
 
 # Determine workspace root
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-WORKSPACE_ROOT="$(dirname "$SCRIPT_DIR")"
+WORKSPACE_ROOT="$(dirname "$(dirname "$SCRIPT_DIR")")"
 CORE_DIR="$WORKSPACE_ROOT/core"
 
 # Detect OS
@@ -66,7 +66,7 @@ for arg in "$@"; do
         --skip-embed) SKIP_EMBED=true ;;
         -h|--help)
             cat <<'EOF'
-Usage: ./dev/build_core.sh [OPTIONS]
+Usage: ./dev/common/build_core.sh [OPTIONS]
 
 Options:
   --debug           Build debug (auto-enables ACOWORK_GATEWAY_LOG_LEVEL=debug)
@@ -382,9 +382,9 @@ echo ""
 #
 # This script probes .ort/onnxruntime-*/lib for a local ONNX Runtime install
 # and exports ORT_LIB_LOCATION / ORT_DYLIB_PATH / ORT_PREFER_DYNAMIC_LINK
-# before invoking cargo. Run dev/setup_ort.sh first to download ORT.
+# before invoking cargo. Run dev/common/setup_ort.sh first to download ORT.
 #
-# Users can skip this step entirely with: ./dev/build_core.sh --skip-embed
+# Users can skip this step entirely with: ./dev/common/build_core.sh --skip-embed
 
 if [ "$SKIP_EMBED" = "true" ]; then
     echo -e "${YELLOW}[3.5/8] Skipping Embedding Runtime (--skip-embed).${NC}"
@@ -436,7 +436,7 @@ else
         done
     fi
     if [ -z "$ORT_LIB_LOCATION" ]; then
-        echo -e "${RED}  ONNX Runtime not found. Run ./dev/setup_ort.sh first.${NC}"
+        echo -e "${RED}  ONNX Runtime not found. Run ./dev/common/setup_ort.sh first.${NC}"
         if [ "$PROFILE" = "release" ]; then
             echo -e "${RED}  Alternative: cargo build --release -p acowork-embed --features download-ort${NC}"
         else
@@ -669,7 +669,7 @@ if [ "$START_GATEWAY" = "true" ]; then
 
     # Step 4.7: First-boot admin password setup (ADR-076 decision 12 v3).
     #
-    # Mirrors dev/build_core.ps1:678-783. The Gateway starts in first-boot
+    # Mirrors dev/common/build_core.ps1:678-783. The Gateway starts in first-boot
     # restricted mode whenever its seeded `admin` account still has the
     # `$disabled$` placeholder hash -- every /api/* returns 403
     # setup_required until the operator sets a real password via the

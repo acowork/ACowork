@@ -2,14 +2,14 @@
 # setup_ort.sh - Auto-detect system and install compatible ONNX Runtime
 #
 # Usage:
-#   source dev/setup_ort.sh           # Detect, install, export env vars
-#   ./dev/setup_ort.sh                # Detect, install, generate env file only
-#   ./dev/setup_ort.sh --reinstall    # Force re-download even if already installed
-#   ./dev/setup_ort.sh --version 1.21.0  # Override ORT version
-#   ./dev/setup_ort.sh --no-mirror    # Skip China mirrors, use GitHub directly
+#   source dev/common/setup_ort.sh           # Detect, install, export env vars
+#   ./dev/common/setup_ort.sh                # Detect, install, generate env file only
+#   ./dev/common/setup_ort.sh --reinstall    # Force re-download even if already installed
+#   ./dev/common/setup_ort.sh --version 1.21.0  # Override ORT version
+#   ./dev/common/setup_ort.sh --no-mirror    # Skip China mirrors, use GitHub directly
 #
 # After running, env vars are set for the current session. To build:
-#   ./dev/build_core.sh               # Auto-detects .ort/ and builds all crates
+#   ./dev/common/build_core.sh               # Auto-detects .ort/ and builds all crates
 #   cargo build -p acowork-embed      # Direct build (env set in this session)
 #
 # Supported platforms:
@@ -30,7 +30,7 @@ NC='\033[0m'
 
 # ── Paths ───────────────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-WORKSPACE_ROOT="$(dirname "$SCRIPT_DIR")"
+WORKSPACE_ROOT="$(dirname "$(dirname "$SCRIPT_DIR")")"
 CORE_DIR="$WORKSPACE_ROOT/core"
 
 # ── Defaults ────────────────────────────────────────────────────────────────
@@ -405,7 +405,7 @@ echo ""
 echo -e "${BOLD}Next steps:${NC}"
 echo ""
 echo -e "  ${YELLOW}Build & Run${NC} (recommended):"
-echo -e "    ${CYAN}./dev/build_core.sh${NC}"
+echo -e "    ${CYAN}./dev/common/build_core.sh${NC}"
 echo ""
 echo -e "  ${YELLOW}Build Embed only${NC} (env already set in this session):"
 echo -e "    ${CYAN}cargo build --release -p acowork-embed${NC}"

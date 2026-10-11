@@ -2,13 +2,13 @@
 # start_node.sh - Start a local acowork-node daemon connected to a remote Gateway
 #
 # Usage:
-#   ./dev/start_node.sh <GATEWAY_HOST:PORT> [options]
+#   ./dev/common/start_node.sh <GATEWAY_HOST:PORT> [options]
 #
 # Examples:
-#   ./dev/start_node.sh 192.168.1.10:19875
-#   ./dev/start_node.sh gateway.local:19875 --addr auto
-#   ./dev/start_node.sh 10.0.0.5:19875 --addr 10.0.0.5:19900 --debug
-#   ./dev/start_node.sh 192.168.1.10:19875 --no-build
+#   ./dev/common/start_node.sh 192.168.1.10:19875
+#   ./dev/common/start_node.sh gateway.local:19875 --addr auto
+#   ./dev/common/start_node.sh 10.0.0.5:19875 --addr 10.0.0.5:19900 --debug
+#   ./dev/common/start_node.sh 192.168.1.10:19875 --no-build
 #
 # Stops an existing local Node / Runtimes / LSP relay, builds
 # acowork-node + runtime + lsp-relay (incremental; default profile:
@@ -32,7 +32,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+PROJECT_ROOT="$(dirname "$(dirname "$SCRIPT_DIR")")"
 CORE_DIR="$PROJECT_ROOT/core"
 
 # Colors
@@ -48,7 +48,7 @@ ok()   { echo -e "${GREEN}[node]${NC} $*"; }
 warn() { echo -e "${YELLOW}[node]${NC} $*"; }
 die()  { echo -e "${RED}[node]${NC} $*" >&2; exit 1; }
 
-# OS detection (matches dev/build_core.sh so the binary path convention is
+# OS detection (matches dev/common/build_core.sh so the binary path convention is
 # consistent across all dev/ scripts).
 OS="unknown"
 case "$(uname -s)" in
@@ -192,9 +192,9 @@ fi
 
 # Fail loudly when a required binary is still missing (e.g. --no-build on
 # a fresh checkout).
-[ -f "$BIN" ] || die "binary not found at $BIN — run dev/build_core.sh first (or drop --no-build)"
+[ -f "$BIN" ] || die "binary not found at $BIN — run dev/common/build_core.sh first (or drop --no-build)"
 for s in acowork-runtime acowork-lsp-relay; do
-    [ -f "$TARGET_DIR/$s$SUFFIX" ] || die "sibling binary not found at $TARGET_DIR/$s$SUFFIX — run dev/build_core.sh first (or drop --no-build)"
+    [ -f "$TARGET_DIR/$s$SUFFIX" ] || die "sibling binary not found at $TARGET_DIR/$s$SUFFIX — run dev/common/build_core.sh first (or drop --no-build)"
 done
 
 # ── Start ───────────────────────────────────────────────────────────

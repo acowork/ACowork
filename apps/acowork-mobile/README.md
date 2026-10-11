@@ -40,13 +40,68 @@ npx tauri android build --apk --debug --target aarch64
 ```
 
 产物：`src-tauri/gen/android/app/build/outputs/apk/arm64/debug/app-arm64-debug.apk`
-（debug 包 ~124 MB，未做 strip/LTO；release 需要先配签名）。
+（debug 包 ~124 MB，未做 strip/LTO；release 需要先配签名，见下）。
+
+### release 签名
+
+Android 签名走标准 Gradle `signingConfigs`，**不写在 `tauri.conf.json` 里**。密钥
+放在机器级 `~/.gradle/gradle.properties`，仓库里永不出现密码；`build.gradle.kts` 的
+签名块是空值安全的——属性缺失时 release 也能打未签名包，debug 完全不受影响。
+
+```powershell
+# 1. 生成 keystore（放到仓库外，比如用户目录）
+keytool -genkey -v -keystore $HOME/acowork-mobile.keystore `
+  -alias acowork -keyalg RSA -keysize 2048 -validity 10000
+
+# 2. 往 ~/.gradle/gradle.properties 追加（值替换成你自己的）
+#    acowork.release.storeFile=C:/Users/<you>/acowork-mobile.keystore
+#    acowork.release.storePassword=<库密码>
+#    acowork.release.keyAlias=acowork
+#    acowork.release.keyPassword=<键密码>
+
+# 3. 打已签名的 release 包（tauri android build 默认即 release，不需额外参数）
+npx tauri android build --apk --target aarch64
+```
+
+产物：`.../outputs/apk/arm64/release/app-arm64-release.apk`。
+
+> 手动步骤之上，可用一键脚本 [`dev/android/sign_release.ps1`](../../dev/android/README.md)：
+> 自动定位 `keytool`、创建/复用 keystore、写入 `gradle.properties`（默认地址即上面两个）
+> 并直接打 release 包；全程交互，回车即用默认值。
+
+> **`gen/android` 是 gitignore 的**：`build.gradle.kts` 里那段 `signingConfigs` +
+> release 内的 `signingConfig = ...` 赋行，换机器 / 删 `gen/` 重跑 `tauri android init`
+> 后要**重新贴一次**（这是项目对手改 gen 的既有约定，与下方符号链接绕法同源）。
+
+### Windows 前置：开启开发者模式（符号链接权限）
+
+Tauri CLI 打包时会把 `libacowork_mobile_lib.so` **符号链接**进 `jniLibs/`，而 Windows
+默认不允许普通进程创建符号链接，会直接中断构建：
+
+```
+Creation symbolic link is not allowed for this system.
+```
+
+**一键脚本 `sign_release.ps1` 和手动 `npx tauri android build` 都会踩到，务必先开开发者模式**
+（一次性、可逆，弹 UAC 点"是"即可，等价于 设置 → 隐私和安全 → 开发者选项 → 开启）：
+
+```powershell
+# 提权写入开发者模式开关（确认 UAC）
+Start-Process pwsh -Verb RunAs -Wait -ArgumentList '-NoProfile','-Command',
+  'reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock" /t REG_DWORD /f /v AllowDevelopmentWithoutDevLicense /d 1'
+
+# 验证：输出 1 即已生效
+(Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock").AllowDevelopmentWithoutDevLicense
+```
+
+> 不想常驻开启开发者模式时的替代：以**管理员身份**运行终端再构建（管理员默认有
+> `SeCreateSymbolicLinkPrivilege`），或按下方坑表用"复制 `.so` + 直接 `gradlew`"绕过 CLI。
 
 本机踩过的三个坑，换机器时按同样顺序检查：
 
 | 坑 | 现象 | 处置 |
 |---|---|---|
-| Windows 不允许创建符号链接 | `Creation symbolic link is not allowed for this system`（CLI 把 `.so` 软链进 jniLibs） | 开"开发者模式"（设置 → 隐私与安全 → For developers，需管理员）。绕法：手动把 `.so` **复制**到 `app/src/main/jniLibs/arm64-v8a/`，再直接 `./gradlew :app:assembleArm64Debug -x :app:rustBuildArm64Debug -x :app:rustBuildUniversalDebug` 跳过 CLI |
+| Windows 不允许创建符号链接 | `Creation symbolic link is not allowed for this system`（CLI 把 `.so` 软链进 jniLibs） | 首选：开启开发者模式（见上方「Windows 前置」，一次性彻底解决）。绕法：手动把 `.so` **复制**到 `app/src/main/jniLibs/arm64-v8a/`，再直接 `./gradlew :app:assembleArm64Debug -x :app:rustBuildArm64Debug -x :app:rustBuildUniversalDebug` 跳过 CLI |
 | `@tauri-apps/api` 与 Rust `tauri` crate 主次版本不一致 | CLI 直接拒绝构建 | 两边对齐（当前 2.12.x） |
 | 国内网络下 `services.gradle.org` / `repo.maven.apache.org` / `static.rust-lang.org` 被限速 | Gradle 发行包 0 B/s、crate 下载 20 KB/s | 换镜像：wrapper 用腾讯 Gradle 镜像、`~/.gradle/init.gradle` 改写 mavenCentral 到阿里云、`RUSTUP_DIST_SERVER` 与 `~/.cargo/config.toml` 指向 rsproxy.cn |
 

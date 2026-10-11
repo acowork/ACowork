@@ -151,7 +151,7 @@ staging — prefer them over calling `cargo` directly.
 | Rust         | **nightly** | `rustup default nightly`                                                                                           |
 | Node.js      | >= 18       | Desktop App and Tauri CLI                                                                                          |
 | PowerShell   | 7.x         | Required on Windows (`.ps1` scripts); `pwsh` recommended                                                          |
-| ONNX Runtime | auto-managed | Installed by `dev/setup_ort.*` into `.ort/onnxruntime-<plat>-<arch>-<ver>/`                                       |
+| ONNX Runtime | auto-managed | Installed by `dev/common/setup_ort.*` into `.ort/onnxruntime-<plat>-<arch>-<ver>/`                                       |
 
 ```bash
 git clone https://github.com/tranxon/ACowork.git
@@ -162,27 +162,27 @@ cd ACowork
 
 ```bash
 # Windows PowerShell
-.\dev\setup_ort.ps1
+.\dev\common\setup_ort.ps1
 
 # macOS / Linux / WSL / Git Bash
-./dev/setup_ort.sh
+./dev/common/setup_ort.sh
 ```
 
 ### Step 2 — Build & start the backend (Gateway + Runtime + Node)
 
 ```bash
 # Windows — release build, then start Gateway
-.\dev\build_core.ps1 -Start
+.\dev\common\build_core.ps1 -Start
 
 # macOS / Linux — release build + start
-./dev/build_core.sh
+./dev/common/build_core.sh
 
 # Debug profile
-.\dev\build_core.ps1 -Debug -Start      # Windows
-./dev/build_core.sh --debug              # bash
+.\dev\common\build_core.ps1 -Debug -Start      # Windows
+./dev/common/build_core.sh --debug              # bash
 ```
 
-macOS users on Apple Silicon can also use `./dev/build_macos.sh` for a one-click build with CoreML enabled.
+macOS users on Apple Silicon can also use `./dev/desktop/macos/build_macos.sh` for a one-click build with CoreML enabled.
 
 ### Step 3 — Launch the Desktop App
 
@@ -292,7 +292,7 @@ You are a QA Agent, helping users with quality management and code review.
 Then build & sign:
 
 ```bash
-./dev/build-agent.sh examples/qa-agent   # produces com.example.qa-agent.agent
+./dev/common/build-agent.sh examples/qa-agent   # produces com.example.qa-agent.agent
 ```
 
 > **Status**: ACowork is in **alpha**. The Gateway, Runtime, Grafeo memory engine, and Desktop App are under active

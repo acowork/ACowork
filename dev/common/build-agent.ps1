@@ -4,7 +4,7 @@
     ACowork Agent Package Builder and Signer (PowerShell)
 .DESCRIPTION
     Builds and signs .agent packages for one or all example agents.
-    Equivalent to dev/build-agent.sh for Windows.
+    Equivalent to dev/common/build-agent.sh for Windows.
 .PARAMETER AgentDir
     Path to a single agent directory. If omitted with -All, builds all agents.
 .PARAMETER OutputDir
@@ -12,9 +12,9 @@
 .PARAMETER All
     Build all agents in the examples/ directory.
 .EXAMPLE
-    .\dev\build-agent.ps1 examples\senior-engineer-agent
+    .\dev\common\build-agent.ps1 examples\senior-engineer-agent
 .EXAMPLE
-    .\dev\build-agent.ps1 -All
+    .\dev\common\build-agent.ps1 -All
 #>
 
 param(
@@ -30,7 +30,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$ProjectRoot = Split-Path -Parent $ScriptDir
+$ProjectRoot = Split-Path -Parent (Split-Path -Parent $ScriptDir)
 
 # ── Defaults ────────────────────────────────────────────────────────
 
@@ -67,8 +67,8 @@ if ($All) {
     $agentDirs = @($AgentDir)
 } else {
     Write-Error_ "Error: Specify -AgentDir or -All"
-    Write-Host "Usage: .\dev\build-agent.ps1 <agent-dir>"
-    Write-Host "       .\dev\build-agent.ps1 -All"
+    Write-Host "Usage: .\dev\common\build-agent.ps1 <agent-dir>"
+    Write-Host "       .\dev\common\build-agent.ps1 -All"
     exit 1
 }
 

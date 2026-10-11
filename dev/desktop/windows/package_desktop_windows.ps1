@@ -7,7 +7,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$WorkspaceRoot = Split-Path -Parent $PSScriptRoot
+$WorkspaceRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
 $DesktopDir = Join-Path $WorkspaceRoot "apps\acowork-desktop"
 $OrtVersion = "1.22.0"
 $OrtDir = Join-Path $WorkspaceRoot ".ort\onnxruntime-win-x64-$OrtVersion"
@@ -24,7 +24,7 @@ if (-not (Test-Path $OrtDll) -or $ReinstallOrt) {
     $setupArgs = @("-Version", $OrtVersion)
     if ($ReinstallOrt) { $setupArgs += "-Reinstall" }
     if ($NoMirror) { $setupArgs += "-NoMirror" }
-    & (Join-Path $PSScriptRoot "setup_ort.ps1") @setupArgs
+    & (Join-Path $PSScriptRoot "..\..\common\setup_ort.ps1") @setupArgs
 }
 
 if (-not (Test-Path $OrtDll)) {
@@ -53,7 +53,7 @@ if (Test-Path $LspRelayBin) {
     Write-Host "Bundled LSP Relay binary: $LspRelayBin" -ForegroundColor Green
 } else {
     Write-Host "WARN: acowork-lsp-relay.exe not found at $LspRelayBin." -ForegroundColor Yellow
-    Write-Host "      Run .\dev\build_core.ps1 (release) first." -ForegroundColor Yellow
+    Write-Host "      Run .\dev\common\build_core.ps1 (release) first." -ForegroundColor Yellow
     Write-Host "      Without it, Gateway startup will fail with:" -ForegroundColor Yellow
     Write-Host "        acowork-lsp-relay binary not found" -ForegroundColor Yellow
 }
@@ -68,7 +68,7 @@ if (Test-Path $NodeBin) {
     Write-Host "Bundled Node Agent binary: $NodeBin" -ForegroundColor Green
 } else {
     Write-Host "WARN: acowork-node.exe not found at $NodeBin." -ForegroundColor Yellow
-    Write-Host "      Run .\dev\build_core.ps1 (release) first." -ForegroundColor Yellow
+    Write-Host "      Run .\dev\common\build_core.ps1 (release) first." -ForegroundColor Yellow
     Write-Host "      Without it, Gateway startup will fail with:" -ForegroundColor Yellow
     Write-Host "        acowork-node binary not found — node topology disabled" -ForegroundColor Yellow
 }
@@ -83,7 +83,7 @@ if (Test-Path $PmBin) {
     Write-Host "Bundled PM service binary: $PmBin" -ForegroundColor Green
 } else {
     Write-Host "WARN: acowork-pm.exe not found at $PmBin." -ForegroundColor Yellow
-    Write-Host "      Run .\dev\build_core.ps1 (release) first." -ForegroundColor Yellow
+    Write-Host "      Run .\dev\common\build_core.ps1 (release) first." -ForegroundColor Yellow
     Write-Host "      Without it, /api/pm/* returns 503 (PM unavailable)." -ForegroundColor Yellow
 }
 
@@ -98,7 +98,7 @@ if (Test-Path $DocBin) {
     Write-Host "Bundled Doc service binary: $DocBin" -ForegroundColor Green
 } else {
     Write-Host "WARN: acowork-doc.exe not found at $DocBin." -ForegroundColor Yellow
-    Write-Host "      Run .\dev\build_core.ps1 (release) first." -ForegroundColor Yellow
+    Write-Host "      Run .\dev\common\build_core.ps1 (release) first." -ForegroundColor Yellow
     Write-Host "      Without it, /api/doc/* returns 503 (Doc unavailable)." -ForegroundColor Yellow
 }
 
@@ -114,7 +114,7 @@ if (Test-Path $UserBin) {
     Write-Host "Bundled User service binary: $UserBin" -ForegroundColor Green
 } else {
     Write-Host "WARN: acowork-user.exe not found at $UserBin." -ForegroundColor Yellow
-    Write-Host "      Run .\dev\build_core.ps1 (release) first." -ForegroundColor Yellow
+    Write-Host "      Run .\dev\common\build_core.ps1 (release) first." -ForegroundColor Yellow
     Write-Host "      Without it, /api/auth/*, /api/users/* and /api/user/* return 503." -ForegroundColor Yellow
 }
 

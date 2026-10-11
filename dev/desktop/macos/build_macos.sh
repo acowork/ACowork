@@ -7,17 +7,17 @@
 #   4. Auto-configure Homebrew + pkg-config + cmake
 #
 # Usage:
-#   ./dev/build_macos.sh               # Default Apple Silicon optimized, release
-#   ./dev/build_macos.sh --debug       # Debug build (auto-enables ACOWORK_GATEWAY_LOG_LEVEL=debug)
-#   ./dev/build_macos.sh --release     # Release build (explicit, default)
-#   ./dev/build_macos.sh --cpu         # CPU only (best compatibility)
-#   ./dev/build_macos.sh --start       # Build + start Gateway in daemon mode after build
-#   ./dev/build_macos.sh --stop        # Explicit stop of existing processes before build
-#   ./dev/build_macos.sh --local       # With --start: bind Gateway to 127.0.0.1 only (default)
-#   ./dev/build_macos.sh --remote      # With --start: bind Gateway to 0.0.0.0 and advertise
+#   ./dev/desktop/macos/build_macos.sh               # Default Apple Silicon optimized, release
+#   ./dev/desktop/macos/build_macos.sh --debug       # Debug build (auto-enables ACOWORK_GATEWAY_LOG_LEVEL=debug)
+#   ./dev/desktop/macos/build_macos.sh --release     # Release build (explicit, default)
+#   ./dev/desktop/macos/build_macos.sh --cpu         # CPU only (best compatibility)
+#   ./dev/desktop/macos/build_macos.sh --start       # Build + start Gateway in daemon mode after build
+#   ./dev/desktop/macos/build_macos.sh --stop        # Explicit stop of existing processes before build
+#   ./dev/desktop/macos/build_macos.sh --local       # With --start: bind Gateway to 127.0.0.1 only (default)
+#   ./dev/desktop/macos/build_macos.sh --remote      # With --start: bind Gateway to 0.0.0.0 and advertise
 #                                      # the detected LAN IP. Implies --start.
-#   ./dev/build_macos.sh --skip-embed  # Skip embed
-#   ./dev/build_macos.sh --help
+#   ./dev/desktop/macos/build_macos.sh --skip-embed  # Skip embed
+#   ./dev/desktop/macos/build_macos.sh --help
 #
 # Profile selection: --debug/--release flag > $ACOWORK_BUILD_PROFILE > release
 
@@ -33,7 +33,7 @@ NC='\033[0m'
 
 # ── Paths ───────────────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-WORKSPACE_ROOT="$(dirname "$SCRIPT_DIR")"
+WORKSPACE_ROOT="$(dirname "$(dirname "$(dirname "$SCRIPT_DIR")")")"
 CORE_DIR="$WORKSPACE_ROOT/core"
 
 # ── Defaults ────────────────────────────────────────────────────────────────
@@ -66,7 +66,7 @@ for arg in "$@"; do
         --skip-embed) SKIP_EMBED=true ;;
         -h|--help)
             cat << 'EOF'
-Usage: ./dev/build_macos.sh [OPTIONS]
+Usage: ./dev/desktop/macos/build_macos.sh [OPTIONS]
 
 Options:
   --debug           Build debug (auto-enables ACOWORK_GATEWAY_LOG_LEVEL=debug)
@@ -85,13 +85,13 @@ Environment:
   ACOWORK_BUILD_PROFILE   debug|release  (overridden by --debug/--release)
 
 Examples:
-  ./dev/build_macos.sh               # Apple Silicon + CoreML, release (recommended)
-  ./dev/build_macos.sh --debug       # Debug build
-  ./dev/build_macos.sh --start       # Build + start Gateway in daemon mode
-  ./dev/build_macos.sh --stop        # Build with explicit stop of existing processes
-  ./dev/build_macos.sh --remote      # Start in LAN-reachable mode (advertise IP)
-  ./dev/build_macos.sh --cpu         # CPU only (Intel Mac or compatibility)
-  ./dev/build_macos.sh --skip-embed  # Skip embed, build only Gateway + Runtime
+  ./dev/desktop/macos/build_macos.sh               # Apple Silicon + CoreML, release (recommended)
+  ./dev/desktop/macos/build_macos.sh --debug       # Debug build
+  ./dev/desktop/macos/build_macos.sh --start       # Build + start Gateway in daemon mode
+  ./dev/desktop/macos/build_macos.sh --stop        # Build with explicit stop of existing processes
+  ./dev/desktop/macos/build_macos.sh --remote      # Start in LAN-reachable mode (advertise IP)
+  ./dev/desktop/macos/build_macos.sh --cpu         # CPU only (Intel Mac or compatibility)
+  ./dev/desktop/macos/build_macos.sh --skip-embed  # Skip embed, build only Gateway + Runtime
 EOF
             exit 0
             ;;
@@ -537,7 +537,7 @@ if [ "$START_GATEWAY" = "true" ]; then
 
     # Step 5.5: First-boot admin password setup (ADR-076 decision 12 v3).
     #
-    # Mirrors dev/build_core.sh (Step 4.7) and dev/build_core.ps1:678-783.
+    # Mirrors dev/common/build_core.sh (Step 4.7) and dev/build_core.ps1:678-783.
     # The Gateway starts in first-boot restricted mode whenever its seeded
     # `admin` account still has the `$disabled$` placeholder hash -- every
     # /api/* returns 403 setup_required until the operator sets a real

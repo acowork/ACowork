@@ -41,15 +41,15 @@
     Skip the build step; fail loudly if the binary is missing instead
     of silently compiling.
 .EXAMPLE
-    .\dev\start_node.ps1 '192.168.1.10:19875'
+    .\dev\common\start_node.ps1 '192.168.1.10:19875'
 .EXAMPLE
-    .\dev\start_node.ps1 gateway.local:19875 -Addr auto -Debug
+    .\dev\common\start_node.ps1 gateway.local:19875 -Addr auto -Debug
 #>
 
 # NOTE: PowerShell treats a bare `HOST:PORT` as a drive/scope path. Quote the
 # argument so the colon reaches the script:
-#   .\dev\start_node.ps1 '192.168.1.10:19875'
-#   .\dev\start_node.ps1 gateway.local:19875 -Addr auto
+#   .\dev\common\start_node.ps1 '192.168.1.10:19875'
+#   .\dev\common\start_node.ps1 gateway.local:19875 -Addr auto
 # Unquoted `1.2.3.4:19875` fails with "A positional parameter cannot be
 # found that accepts argument …" — the colon is PSH syntax, not ours.
 
@@ -77,14 +77,14 @@ $ErrorActionPreference = "Stop"
 
 if ([string]::IsNullOrEmpty($GatewayHost)) {
     Write-Host "[node] ERROR: missing GATEWAY_HOST:PORT (first positional argument)." -ForegroundColor Red
-    Write-Host "[node] Usage: .\dev\start_node.ps1 '192.168.1.10:19875' [-Addr HOST:PORT] [-Debug|-Release] [-NoStop] [-NoBuild]" -ForegroundColor Red
+    Write-Host "[node] Usage: .\dev\common\start_node.ps1 '192.168.1.10:19875' [-Addr HOST:PORT] [-Debug|-Release] [-NoStop] [-NoBuild]" -ForegroundColor Red
     exit 1
 }
 
 # ── Profile resolution ──────────────────────────────────────────────
 
 # -Debug / -Release switch > $env:ACOWORK_BUILD_PROFILE > release
-# (mirrors dev/build_core.ps1). The profile also selects the target dir:
+# (mirrors dev/common/build_core.ps1). The profile also selects the target dir:
 # debug -> target\debug, release -> target\release.
 if ($Debug -and $Release) {
     Write-Host "[node] ERROR: -Debug and -Release are mutually exclusive." -ForegroundColor Red
@@ -103,7 +103,7 @@ elseif ($env:ACOWORK_BUILD_PROFILE) {
 }
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$ProjectRoot = Split-Path -Parent $ScriptDir
+$ProjectRoot = Split-Path -Parent (Split-Path -Parent $ScriptDir)
 $CoreDir = Join-Path $ProjectRoot "core"
 $Bin = Join-Path $ProjectRoot "target\$Profile\acowork-node.exe"
 
@@ -189,7 +189,7 @@ $requiredBins = @((Split-Path $Bin -Leaf)) + $SiblingBins
 foreach ($name in $requiredBins) {
     $path = Join-Path (Split-Path $Bin) $name
     if (-not (Test-Path $path)) {
-        Write-Err "Binary not found at $path — run dev/build_core.ps1 first (or drop -NoBuild)."
+        Write-Err "Binary not found at $path — run dev/common/build_core.ps1 first (or drop -NoBuild)."
         exit 1
     }
 }

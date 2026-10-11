@@ -1,17 +1,17 @@
-﻿#!/usr/bin/env pwsh
+#!/usr/bin/env pwsh
 # build_core.ps1 - Build Gateway + Runtime + Node Agent (debug or release mode)
 # Usage:
-#   .\dev\build_core.ps1                  Build release (default)
-#   .\dev\build_core.ps1 -Debug           Build debug
-#   .\dev\build_core.ps1 -Release         Build release (explicit)
-#   .\dev\build_core.ps1 -Start                 Build release + stop old + start Gateway (loopback)
-#   .\dev\build_core.ps1 -Debug -Start          Build debug + stop old + start Gateway (loopback)
-#   .\dev\build_core.ps1 -Stop                  Build release + stop old Gateway
-#   .\dev\build_core.ps1 -Debug -Stop           Build debug + stop old Gateway
-#   .\dev\build_core.ps1 -Start -Local          Build + start Gateway bound to 127.0.0.1 only (default)
-#   .\dev\build_core.ps1 -Start -Remote         Build + start Gateway bound to 0.0.0.0 (LAN-reachable)
+#   .\dev\common\build_core.ps1                  Build release (default)
+#   .\dev\common\build_core.ps1 -Debug           Build debug
+#   .\dev\common\build_core.ps1 -Release         Build release (explicit)
+#   .\dev\common\build_core.ps1 -Start                 Build release + stop old + start Gateway (loopback)
+#   .\dev\common\build_core.ps1 -Debug -Start          Build debug + stop old + start Gateway (loopback)
+#   .\dev\common\build_core.ps1 -Stop                  Build release + stop old Gateway
+#   .\dev\common\build_core.ps1 -Debug -Stop           Build debug + stop old Gateway
+#   .\dev\common\build_core.ps1 -Start -Local          Build + start Gateway bound to 127.0.0.1 only (default)
+#   .\dev\common\build_core.ps1 -Start -Remote         Build + start Gateway bound to 0.0.0.0 (LAN-reachable)
 #                                               and advertise the detected LAN IP. Implies -Start.
-#   .\dev\build_core.ps1 -Debug -Start -Remote  Build debug + start Gateway in remote (LAN) mode
+#   .\dev\common\build_core.ps1 -Debug -Start -Remote  Build debug + start Gateway in remote (LAN) mode
 #
 # Profile selection: -Debug / -Release switch > $env:ACOWORK_BUILD_PROFILE > release
 # In debug profile, $env:ACOWORK_GATEWAY_LOG_LEVEL is auto-set to "debug" so any
@@ -29,7 +29,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$WorkspaceRoot = Split-Path -Parent $PSScriptRoot
+$WorkspaceRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $CoreDir = Join-Path $WorkspaceRoot "core"
 
 # Resolve profile: CLI switch > $env:ACOWORK_BUILD_PROFILE > default (release)
@@ -452,7 +452,7 @@ if ($preferredOrt) {
     }
 }
 if (-not $env:ORT_LIB_LOCATION) {
-    Write-Host "  ONNX Runtime not found. Run .\dev\setup_ort.ps1 first." -ForegroundColor Red
+    Write-Host "  ONNX Runtime not found. Run .\dev\common\setup_ort.ps1 first." -ForegroundColor Red
     if ($Profile -eq "release") {
         Write-Host "  Alternative: cargo build --release -p acowork-embed --features download-ort" -ForegroundColor Red
     } else {
@@ -815,9 +815,9 @@ if ($Start) {
     Write-Host "========================================" -ForegroundColor Cyan
     Write-Host "Build complete (not started)." -ForegroundColor Cyan
     if ($Profile -eq "debug") {
-        Write-Host "To start: .\dev\build_core.ps1 -Debug -Start" -ForegroundColor Cyan
+        Write-Host "To start: .\dev\common\build_core.ps1 -Debug -Start" -ForegroundColor Cyan
     } else {
-        Write-Host "To start: .\dev\build_core.ps1 -Start" -ForegroundColor Cyan
+        Write-Host "To start: .\dev\common\build_core.ps1 -Start" -ForegroundColor Cyan
     }
     Write-Host "========================================" -ForegroundColor Cyan
 }

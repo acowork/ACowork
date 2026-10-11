@@ -145,7 +145,7 @@ ACowork 采用扁平的三层拓扑：**Gateway**（每个集群唯一控制面�
 | Rust         | **nightly**   | `rustup default nightly`                                                                                          |
 | Node.js      | >= 18         | Desktop App 与 Tauri CLI                                                                                          |
 | PowerShell   | 7.x           | Windows 必需（`.ps1` 脚本）；推荐 `pwsh`                                                                          |
-| ONNX Runtime | 自动管理       | 由 `dev/setup_ort.*` 安装到 `.ort/onnxruntime-<plat>-<arch>-<ver>/`                                               |
+| ONNX Runtime | 自动管理       | 由 `dev/common/setup_ort.*` 安装到 `.ort/onnxruntime-<plat>-<arch>-<ver>/`                                               |
 
 ```bash
 git clone https://github.com/tranxon/ACowork.git
@@ -156,27 +156,27 @@ cd ACowork
 
 ```bash
 # Windows PowerShell
-.\dev\setup_ort.ps1
+.\dev\common\setup_ort.ps1
 
 # macOS / Linux / WSL / Git Bash
-./dev/setup_ort.sh
+./dev/common/setup_ort.sh
 ```
 
 ### Step 2 — 编译并启动后端（Gateway + Runtime + Node）
 
 ```bash
 # Windows —— release 构建，然后启动 Gateway
-.\dev\build_core.ps1 -Start
+.\dev\common\build_core.ps1 -Start
 
 # macOS / Linux —— release 构建并启动
-./dev/build_core.sh
+./dev/common/build_core.sh
 
 # Debug profile
-.\dev\build_core.ps1 -Debug -Start      # Windows
-./dev/build_core.sh --debug              # bash
+.\dev\common\build_core.ps1 -Debug -Start      # Windows
+./dev/common/build_core.sh --debug              # bash
 ```
 
-macOS Apple Silicon 用户也可使用 `./dev/build_macos.sh` 一键编译（自动启用 CoreML）。
+macOS Apple Silicon 用户也可使用 `./dev/desktop/macos/build_macos.sh` 一键编译（自动启用 CoreML）。
 
 ### Step 3 — 启动 Desktop App
 
@@ -281,7 +281,7 @@ tools = ["rag_query", "read_file", "write_file"]
 构建并签名：
 
 ```bash
-./dev/build-agent.sh examples/qa-agent   # 产出 com.example.qa-agent.agent
+./dev/common/build-agent.sh examples/qa-agent   # 产出 com.example.qa-agent.agent
 ```
 
 > **当前状态**：ACowork 处于 **Alpha 阶段**。Gateway、Runtime、Grafeo 记忆引擎与 Desktop App 都在积极开发中。

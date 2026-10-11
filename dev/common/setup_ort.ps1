@@ -2,13 +2,13 @@
 # setup_ort.ps1 - Download and configure ONNX Runtime for Windows
 #
 # Usage:
-#   .\dev\setup_ort.ps1                       # Auto-detect and install
-#   .\dev\setup_ort.ps1 -Version "1.22.0"     # Specific version
-#   .\dev\setup_ort.ps1 -Reinstall            # Force re-download
-#   .\dev\setup_ort.ps1 -NoMirror             # Skip China mirrors, use GitHub directly
+#   .\dev\common\setup_ort.ps1                       # Auto-detect and install
+#   .\dev\common\setup_ort.ps1 -Version "1.22.0"     # Specific version
+#   .\dev\common\setup_ort.ps1 -Reinstall            # Force re-download
+#   .\dev\common\setup_ort.ps1 -NoMirror             # Skip China mirrors, use GitHub directly
 #
 # After running, env vars are set for the current session. To build:
-#   .\dev\build_core.ps1              # Auto-detects .ort/ and builds all crates
+#   .\dev\common\build_core.ps1              # Auto-detects .ort/ and builds all crates
 #   cargo build -p acowork-embed      # Direct build (env set in this session)
 
 param(
@@ -18,7 +18,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$WorkspaceRoot = Split-Path -Parent $PSScriptRoot
+$WorkspaceRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 
 Write-Host "============================================" -ForegroundColor Cyan
 Write-Host "  ONNX Runtime Setup for ACowork.AI (Win)" -ForegroundColor Cyan
@@ -175,7 +175,7 @@ Write-Host ""
 Write-Host "Next steps:" -ForegroundColor Yellow
 Write-Host ""
 Write-Host "  Build & Run (recommended):" -ForegroundColor White
-Write-Host "    .\dev\build_core.ps1" -ForegroundColor Cyan
+Write-Host "    .\dev\common\build_core.ps1" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "  Build Embed only (env already set in this session):" -ForegroundColor White
 Write-Host "    cd core" -ForegroundColor Cyan
