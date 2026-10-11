@@ -27,7 +27,11 @@ export function ConnectScreen() {
       return
     }
     const ok = await probe(url)
-    if (!ok) setErr('无法连接：请确认桌面端已开启「允许局域网连接」，且两台设备在同一 Wi-Fi')
+    // No "allow LAN" toggle exists on Desktop — the Gateway binds 0.0.0.0 by
+    // default. A failed probe is almost always: not on the same network, the
+    // Gateway is down, or the phone's Wi-Fi power-save dropped the LAN link
+    // (an adb-reverse USB tunnel sidesteps it). Point at those, not a phantom switch.
+    if (!ok) setErr('无法连接：请确认桌面端 Gateway 正在运行、两台设备在同一网络（手机未走蜂窝数据）；若用局域网地址仍连不上，多为手机 Wi-Fi 省电断开了局域网，可亮屏重试，或先插 USB 用 http://127.0.0.1:19876 直连')
   }
 
   return (

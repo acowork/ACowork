@@ -111,9 +111,18 @@ Start-Process pwsh -Verb RunAs -Wait -ArgumentList '-NoProfile','-Command',
 | `@tauri-apps/api` 与 Rust `tauri` crate 主次版本不一致 | CLI 直接拒绝构建 | 两边对齐（当前 2.12.x） |
 | 国内网络下 `services.gradle.org` / `repo.maven.apache.org` / `static.rust-lang.org` 被限速 | Gradle 发行包 0 B/s、crate 下载 20 KB/s | 换镜像：wrapper 用腾讯 Gradle 镜像、`~/.gradle/init.gradle` 改写 mavenCentral 到阿里云、`RUSTUP_DIST_SERVER` 与 `~/.cargo/config.toml` 指向 rsproxy.cn |
 
-### 手机连不上网关时先查这两件事
+### 手机连不上网关时先查这几件事
 
-1. **明文 HTTP 是允许的**：debug 构建把 `usesCleartextTraffic=true` 写进 manifest；
+1. **release 包必须放行明文 HTTP**：Android 自 API 28 起默认禁止 App 发明文
+   `http://`。debug 构建已把 `usesCleartextTraffic=true` 写进 manifest，但
+   `tauri android init` 生成的 `build.gradle.kts` 里 **release 默认是 `false`**，
+   于是 release 包连 `http://<局域网IP>:19876` 会在系统网络安全策略层直接被拒
+   （fetch 根本到不了 Gateway），UI 却只笼统显示"无法连接"。本机 curl 不受该
+   策略约束能连通，别被"curl 通、App 不通"误导去查防火墙/AP 隔离。修法：在
+   `src-tauri/gen/android/app/build.gradle.kts` 的 `getByName("release")` 块加
+   `manifestPlaceholders["usesCleartextTraffic"] = "true"`（relay/远程路径本就显式
+   走 `https://`，不受影响）。⚠️ `gen/` 被 gitignore，重跑 `tauri android init`
+   会冲掉这行——与下方签名块同样，属每次 init 后需重打的手动补丁。
    WebView 的 origin 是 `http://tauri.localhost`（Tauri 在 Android 上默认 http），
    所以访问 `http://<局域网IP>:19876` 不属于混合内容。
 2. **Windows 防火墙默认拦公网入站**：`Get-NetConnectionProfile` 显示 WLAN 是
