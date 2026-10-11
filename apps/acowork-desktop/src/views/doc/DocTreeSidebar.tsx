@@ -12,7 +12,6 @@
 import { useEffect, useRef, useState } from "react";
 import {
   BookOpen,
-  ChevronRight,
   FilePlus2,
   FileText,
   Folder,
@@ -399,9 +398,11 @@ function DirRow({
         )}
         style={{ paddingLeft: depth * 14 + 4 }}
       >
-        <button
-          type="button"
+        <span
+          role="button"
+          tabIndex={0}
           aria-label={isOpen ? t("doc.collapse") : t("doc.expand")}
+          className="flex min-w-0 flex-1 items-center gap-1.5 rounded py-0.5 select-none focus:outline-none focus-visible:ring-1 focus-visible:ring-current"
           onClick={() => void toggle()}
           onKeyDown={(e) => {
             // 键盘导航：→ 展开 / ← 折叠
@@ -413,22 +414,11 @@ function DirRow({
               void toggle();
             }
           }}
-          className="flex h-4 w-4 shrink-0 items-center justify-center rounded text-text-tertiary hover:text-zinc-700 dark:hover:text-zinc-100"
         >
+          {/* 展开/折叠只靠文件夹开合图标表达，不再叠加 chevron 箭头。 */}
           {isLoading ? (
-            <Loader2 className="h-3 w-3 animate-spin" aria-hidden />
-          ) : (
-            <ChevronRight
-              className={cn("h-3.5 w-3.5 transition-transform", isOpen && "rotate-90")}
-              aria-hidden
-            />
-          )}
-        </button>
-        <span
-          className="flex min-w-0 flex-1 items-center gap-1.5 py-0.5 select-none"
-          onClick={() => void toggle()}
-        >
-          {isOpen ? (
+            <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-text-tertiary" aria-hidden />
+          ) : isOpen ? (
             <FolderOpen className="h-3.5 w-3.5 shrink-0 text-sky-500" aria-hidden />
           ) : (
             <Folder className="h-3.5 w-3.5 shrink-0 text-sky-500" aria-hidden />

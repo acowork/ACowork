@@ -21,7 +21,7 @@ describe('mapConversationEntries', () => {
     ...over,
   })
 
-  it('keeps user/assistant, drops thought/system/compaction/internal', () => {
+  it('keeps user/assistant/thought/tool_call, drops system/compaction/internal', () => {
     const out = mapConversationEntries([
       e({ id: '1', role: 'user', content: 'hi' }),
       e({ id: '2', role: 'thought', content: 'hmm' }),
@@ -30,7 +30,7 @@ describe('mapConversationEntries', () => {
       e({ id: '5', role: 'assistant', content: 'c', kind: 'compaction' }),
       e({ id: '6', role: 'assistant', content: 'i', metadata: { internal: true } }),
     ])
-    expect(out.map((m) => m.id)).toEqual(['1', '3'])
+    expect(out.map((m) => m.id)).toEqual(['1', '2', '3'])
   })
 
   it('parses ISO ts to epoch ms and never NaN', () => {

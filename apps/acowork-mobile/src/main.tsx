@@ -11,6 +11,7 @@ import { useSettingsStore } from './stores/settingsStore'
 import type { AgentSummary, UserSummary } from './lib/types'
 import './styles/tokens.css'
 import './styles/app.css'
+import './styles/mobile.css'
 
 // Wire the transport before the first render: a screen that mounts and
 // immediately calls openSession would otherwise find a null transport and
@@ -65,13 +66,15 @@ setDirectorySource({
     return rows.map((r) => ({
       id: r.instance_id,
       name: r.display_name ?? r.name,
+      role: r.role ?? null,
       icon: r.builtin_avatar ?? null,
+      avatar: r.avatar ?? null,
       status: !r.alive ? 'offline' : r.lifecycle === 'failed' ? 'error' : 'idle',
     }))
   },
   loadUsers: async (): Promise<UserSummary[]> => {
     const rows = await fetchDirectory()
-    return rows.map((u) => ({ id: u.user_id, display_name: u.display_name, avatar: u.avatar ?? null }))
+    return rows.map((u) => ({ id: u.user_id, display_name: u.display_name, avatar: u.avatar ?? null, builtin_avatar: u.builtin_avatar ?? null }))
   },
 })
 
@@ -83,6 +86,8 @@ if (import.meta.hot) import.meta.hot.dispose(() => stopThemeWatch())
 
 // Cold start: decide the boot phase from persisted state (§7.1).
 void useAuthStore.getState().boot()
+// DIAG: log every phase change to WebView console (visible via remote debug / logcat)
+useAuthStore.subscribe((s, prev) => { if (s.phase !== prev.phase) console.log('[AUTH] PHASE', prev.phase, '→', s.phase) })
 // Directory + previews refresh whenever we reach `ready`.
 useAuthStore.subscribe((s, prev) => {
   if (s.phase === "ready" && prev.phase !== "ready") void useAgentStore.getState().refreshInbox()

@@ -3,9 +3,9 @@
  * matches native-feeling apps rather than looking like a shrunken desktop. */
 
 :root {
-  --color-bg: #ffffff;
+  --color-bg: #ededed;
   --color-bg-elevated: #ffffff;
-  --color-bg-grouped: #f2f2f7;
+  --color-bg-grouped: #ededed;
   --color-separator: #c6c6c8;
   --color-label: #000000;
   --color-label-secondary: #8e8e93;
@@ -13,9 +13,9 @@
   --color-destructive: #ff3b30;
   --color-success: #34c759;
   --color-warning: #ff9500;
-  --color-bubble-self: #007aff;
-  --color-bubble-self-text: #ffffff;
-  --color-bubble-peer: #e9e9eb;
+  --color-bubble-self: #95ec69;
+  --color-bubble-self-text: #000000;
+  --color-bubble-peer: #ffffff;
 
   --space-1: 4px;
   --space-2: 8px;
@@ -29,8 +29,20 @@
   --radius-lg: 16px;
 
   --touch-min: 44px;
-  --tabbar-height: 49px;
+  --tabbar-height: 56px;
+  --tabbar-icon: 26px;
+  --tabbar-label: 11px;
   --navbar-height: 44px;
+
+  /* WeChat-style list metrics */
+  --avatar-size: 48px;
+  --avatar-radius: 6px;
+  --list-row-h: 64px;
+  --list-row-pad-x: 16px;
+  --list-row-gap: 12px;
+  --list-sep-indent: 76px; /* pad + avatar + gap */
+  --settings-row-h: 52px;
+  --settings-icon-size: 22px;
 
   --safe-top: env(safe-area-inset-top, 0px);
   --safe-bottom: env(safe-area-inset-bottom, 0px);
@@ -79,16 +91,20 @@
  * dark OS — with a media query that combination cannot be expressed without
  * duplicating this whole block. */
 :root[data-theme='dark'] {
-  --color-bg: #000000;
-  --color-bg-elevated: #1c1c1e;
-  --color-bg-grouped: #000000;
-  --color-separator: #38383a;
-  --color-label: #ffffff;
-  --color-label-secondary: #98989d;
-  --color-tint: #0a84ff;
-  --color-destructive: #ff453a;
-  --color-bubble-peer: #26262a;
-  --color-bubble-self: #0a84ff;
+  --color-bg: #111111;
+  --color-bg-elevated: #1a1a1a;
+  --color-bg-grouped: #111111;
+  --color-separator: #2c2c2e;
+  /* Softened from pure #ffffff — a full-white foreground on the near-black
+   * bg glares. ~90% white matches WeChat's dark-mode text and reads easier
+   * while keeping contrast well above AA on #111. */
+  --color-label: #e5e5e5;
+  --color-label-secondary: #8f8f8f;
+  --color-tint: #07c160;
+  --color-destructive: #fa5151;
+  --color-bubble-peer: #2a2a2a;
+  --color-bubble-self: #3a7a3a;
+  --color-bubble-self-text: #ffffff;
   color-scheme: dark;
 }
 :root[data-theme='light'] {

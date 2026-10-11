@@ -15,9 +15,11 @@ import { useEffect, useState } from 'react'
 import { useNavStore } from '../../stores/navStore'
 import { useAuthStore } from '../../stores/authStore'
 import { useSettingsStore } from '../../stores/settingsStore'
+import { probeStatus } from '../../lib/api'
 import { ACCENTS, type ThemePref } from '../../lib/theme'
 import { clearUnread } from '../../lib/unread'
 import { ListRow, Segmented, Banner } from '../../components/ui'
+import { User, Cog, Palette, Server, Wrench, Puzzle } from 'lucide-react'
 import { EdgeSwipe } from '../../components/EdgeSwipe'
 
 /** Uptime as "3 天 4 小时" — a raw second count is unreadable on a phone. */
@@ -55,16 +57,18 @@ export function SettingsRootScreen() {
         <h1 className="navbar-title">设置</h1>
       </header>
       <div className="scroll">
-        <ListRow arrow onClick={() => push('settings/profile')} label={<span className="row-title">个人资料</span>} hint="账号、头像、角色" value={me?.display_name} />
-        <ListRow arrow onClick={() => push('settings/general')} label={<span className="row-title">通用</span>} hint="语言、通知、默认行为" />
-        <ListRow arrow onClick={() => push('settings/appearance')} label={<span className="row-title">外观</span>} hint="主题、高亮色" />
-        <ListRow arrow onClick={() => push('settings/gateway')} label={<span className="row-title">网关</span>} hint="连接地址、状态" />
+        <div className="list-section list-section--settings">
+          <ListRow arrow icon={<User size={22} />} onClick={() => push('settings/profile')} label="个人资料" hint="账号、头像、角色" value={me?.display_name} />
+          <ListRow arrow icon={<Cog size={22} />} onClick={() => push('settings/general')} label="通用" hint="语言、通知、默认行为" />
+          <ListRow arrow icon={<Palette size={22} />} onClick={() => push('settings/appearance')} label="外观" hint="主题、高亮色" />
+          <ListRow arrow icon={<Server size={22} />} onClick={() => push('settings/gateway')} label="网关" hint="连接地址、状态" />
+        </div>
 
-        {/* Present to say the feature exists elsewhere, not to pretend it is
-            here — the design's explicit call on Harness / Extensions. */}
-        <div className="list-section-title" style={{ padding: 'var(--space-3) var(--space-4) 0' }}>仅桌面端</div>
-        <ListRow disabled label={<span className="row-title">Harness</span>} hint="移动端不提供，请在桌面端使用" />
-        <ListRow disabled label={<span className="row-title">扩展 / Skills</span>} hint="移动端不提供，请在桌面端使用" />
+        <div className="list-section-title">仅桌面端</div>
+        <div className="list-section list-section--settings">
+          <ListRow disabled icon={<Wrench size={22} />} label="Harness" hint="移动端不提供，请在桌面端使用" />
+          <ListRow disabled icon={<Puzzle size={22} />} label="扩展 / Skills" hint="移动端不提供，请在桌面端使用" />
+        </div>
       </div>
     </div>
   )
@@ -182,12 +186,14 @@ export function GatewayScreen() {
   const logout = useAuthStore((s) => s.logout)
   const [confirming, setConfirming] = useState(false)
 
-  // Re-probe on entry so the uptime shown is current, not whatever the boot
-  // sequence happened to fetch minutes ago.
-  const probe = useAuthStore((s) => s.probe)
+  // Refresh gateway status on entry (uptime, agents etc) without touching
+  // the auth phase — the old `probe()` call unconditionally set login.
   useEffect(() => {
-    if (baseUrl) void probe(baseUrl)
-  }, [baseUrl, probe])
+    if (!baseUrl) return
+    probeStatus(baseUrl)
+      .then((st) => useAuthStore.setState({ status: st }))
+      .catch(() => { /* keep stale status on transient failure */ })
+  }, [baseUrl])
 
   return (
     <SubScreen title="网关">

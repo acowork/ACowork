@@ -1,27 +1,39 @@
 /**
  * A 1:1 thread with another human (design §2.3, ADR-076 §决策 8).
  *
- * Same visual grammar as the agent thread — bubbles, composer, edge-swipe
- * back — but a much shorter list of concerns: there is no session to switch,
- * no `can_write` gate, no live status, no approval card. A human chat is a
- * flat log. Rendering it through the agent machinery would have meant
- * inventing a fake session for it, which is exactly what the previous
- * version of this screen did (and why tapping a 联系人 404'd).
+ * Same visual grammar as the agent thread — turn grouping, avatar + name
+ * header, bubbles, composer, edge-swipe back — but a much shorter list of
+ * concerns: there is no session to switch, no `can_write` gate, no live
+ * status, no approval card, and no tool/explore blocks. A human chat is a
+ * flat log, so a "turn" here is just consecutive messages from the same
+ * sender; the avatar and name render ONCE per turn and the bubbles stack
+ * tightly beneath it (desktop cohesion).
  *
  * Freshness is polling-only: the MQTT bridge carries agent sessions, not
  * user chat. 5s while the thread is open, plus an immediate refresh when the
  * app returns to the foreground (§11.3).
  */
 
-import { useEffect, useRef, useState } from 'react'
+import { Fragment, useEffect, useRef, useState, type ReactNode } from 'react'
 import { useNavStore } from '../../stores/navStore'
 import { useUserChatStore, startUserChatPoll, stopUserChatPoll } from '../../stores/userChatStore'
 import { useAuthStore } from '../../stores/authStore'
+import { useAgentStore } from '../../stores/agentStore'
 import { Bubble, toMs } from '../../components/Bubble'
-import { daySeparator } from '../../lib/time'
+import { AuthImage } from '../../components/AuthImage'
+import { BUILTIN_ICONS, BUILTIN_ICON_IDS } from '../../lib/builtinIcons'
+import { daySeparator, timeGapSeparator } from '../../lib/time'
 import { Banner, ListRow } from '../../components/ui'
 import { EdgeSwipe } from '../../components/EdgeSwipe'
 import type { ChatMessage } from '../../lib/types'
+
+/** Deterministic builtin icon picker (same algorithm as ChatListScreen). */
+function pickIconId(seed: string): string | null {
+  if (BUILTIN_ICON_IDS.length === 0 || !seed) return null
+  let h = 0
+  for (let i = 0; i < seed.length; i++) h = (seed.charCodeAt(i) + (h << 5) - h) | 0
+  return BUILTIN_ICON_IDS[Math.abs(h) % BUILTIN_ICON_IDS.length] ?? null
+}
 
 export function UserChatScreen() {
   const peer = useUserChatStore((s) => s.activePeerId)
@@ -33,6 +45,8 @@ export function UserChatScreen() {
   const send = useUserChatStore((s) => s.send)
   const pop = useNavStore((s) => s.pop)
   const me = useAuthStore((s) => s.me)
+  const baseUrl = useAuthStore((s) => s.baseUrl)
+  const peerUser = useAgentStore((s) => (peer ? s.users.find((u) => u.id === peer) : undefined))
 
   const [draft, setDraft] = useState('')
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -63,6 +77,39 @@ export function UserChatScreen() {
     if (await send(text)) setDraft('')
   }
 
+  // Avatars mirror ChatDetailScreen: custom file → declared builtin →
+  // deterministic builtin → initial. There is no per-user avatar-file route
+  // for a peer, so the AuthImage fetch falls back to the builtin on failure.
+  const myName = me?.display_name || me?.username || '我'
+  const meAvatar: ReactNode = (() => {
+    if (!me) return <span>{'?'}</span>
+    const picked = pickIconId(myName)
+    const fallbackSrc = me.builtin_avatar && BUILTIN_ICONS[me.builtin_avatar]
+      ? BUILTIN_ICONS[me.builtin_avatar]
+      : BUILTIN_ICONS[picked ?? '']
+    const fallbackEl = fallbackSrc ? <img src={fallbackSrc} alt="" /> : <span>{myName.charAt(0)}</span>
+    if (me.avatar) {
+      const url = `${baseUrl}/api/users/${encodeURIComponent(me.user_id)}/avatar-file?path=${encodeURIComponent(me.avatar)}`
+      return <AuthImage src={url} fallback={fallbackEl} />
+    }
+    return fallbackEl
+  })()
+  const peerDisplayName = peerUser?.display_name || peerName || peer || ''
+  const peerAvatar: ReactNode = (() => {
+    const picked = pickIconId(peerDisplayName)
+    const fallbackSrc = peerUser?.builtin_avatar && BUILTIN_ICONS[peerUser.builtin_avatar]
+      ? BUILTIN_ICONS[peerUser.builtin_avatar]
+      : BUILTIN_ICONS[picked ?? '']
+    const fallbackEl = fallbackSrc
+      ? <img src={fallbackSrc} alt="" />
+      : <span>{(peerDisplayName || '?').charAt(0)}</span>
+    if (peerUser?.avatar && peer) {
+      const url = `${baseUrl}/api/users/${encodeURIComponent(peer)}/avatar-file?path=${encodeURIComponent(peerUser.avatar)}`
+      return <AuthImage src={url} fallback={fallbackEl} />
+    }
+    return fallbackEl
+  })()
+
   if (!peer) {
     // Deep-linked or the store was cleared (logout): say so, never spin.
     return (
@@ -78,8 +125,6 @@ export function UserChatScreen() {
       </EdgeSwipe>
     )
   }
-
-  let prevTs: number | null = null
 
   return (
     <EdgeSwipe onBack={() => pop()}>
@@ -100,16 +145,51 @@ export function UserChatScreen() {
         <div className="scroll scroll-chat" ref={scrollRef}>
           {loading ? <div className="empty-state">载入中…</div> : null}
           {!loading && messages.length === 0 ? <div className="empty-state">还没有消息</div> : null}
-          {messages.map((m) => {
-            const sep = daySeparator(prevTs, m.created_at)
-            prevTs = m.created_at
-            return (
-              <div key={m.id} className="msg-wrap">
-                {sep ? <div className="day-sep">{sep}</div> : null}
-                <Bubble msg={m} />
-              </div>
-            )
-          })}
+          {messages.length
+            ? (() => {
+                // Fold consecutive same-sender messages into one turn (the
+                // agent thread's cohesion model): the avatar + name render
+                // once, the bubbles stack tightly. A sender change, day
+                // change or >5-min gap breaks a turn.
+                type Turn = { isUser: boolean; items: ChatMessage[]; firstTs: number; prevTs: number | null }
+                const turns: Turn[] = []
+                messages.forEach((m, i) => {
+                  const isUser = m.role === 'user'
+                  const prev = i > 0 ? messages[i - 1]! : null
+                  const prevTs = prev ? prev.created_at : null
+                  const breakHere = !prev
+                    || prev.role !== m.role
+                    || !!daySeparator(prevTs, m.created_at)
+                    || !!timeGapSeparator(prevTs, m.created_at)
+                  if (!breakHere) {
+                    turns[turns.length - 1]!.items.push(m)
+                  } else {
+                    turns.push({ isUser, items: [m], firstTs: m.created_at, prevTs })
+                  }
+                })
+                return turns.map((turn) => {
+                  const sep = daySeparator(turn.prevTs, turn.firstTs) ?? timeGapSeparator(turn.prevTs, turn.firstTs)
+                  const avatar = turn.isUser ? meAvatar : peerAvatar
+                  const name = turn.isUser ? myName : peerDisplayName
+                  return (
+                    <Fragment key={turn.items[0]!.id}>
+                      {sep ? <div className="time-sep">{sep}</div> : null}
+                      <div className={`msg-group${turn.isUser ? ' msg-group-self' : ' msg-group-peer'}`}>
+                        <div className="msg-avatar">{avatar}</div>
+                        <div className="msg-main">
+                          <div className="msg-sender">
+                            <span className="msg-sender-name">{name}</span>
+                          </div>
+                          {turn.items.map((m) => (
+                            <Bubble key={m.id} msg={m} />
+                          ))}
+                        </div>
+                      </div>
+                    </Fragment>
+                  )
+                })
+              })()
+            : null}
         </div>
 
         <div className="composer">

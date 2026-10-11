@@ -54,7 +54,29 @@ export function daySeparator(prevMs: number | null, ms: number): string | null {
   const cur = new Date(ms)
   if (prevMs !== null && startOfDay(prevMs) === startOfDay(ms)) return null
   const days = Math.round((startOfDay(Date.now()) - startOfDay(ms)) / DAY)
-  if (days <= 0) return '今天'
-  if (days === 1) return '昨天'
-  return `${cur.getFullYear()}/${cur.getMonth() + 1}/${cur.getDate()}`
+  const time = formatClock(cur)
+  if (days <= 0) return `今天 ${time}`
+  if (days === 1) return `昨天 ${time}`
+  return `${cur.getMonth() + 1}\u6708${cur.getDate()}\u65e5 ${time}`
+}
+
+/** 5-minute gap time separator (WeChat style). */
+const GAP_MS = 5 * 60_000
+
+export function timeGapSeparator(prevMs: number | null, ms: number): string | null {
+  if (prevMs === null) return null
+  // Only show if gap > 5 min AND not already showing a day separator
+  if (startOfDay(prevMs) !== startOfDay(ms)) return null // day sep handles it
+  if (ms - prevMs < GAP_MS) return null
+  return formatClock(new Date(ms))
+}
+
+function formatClock(d: Date): string {
+  const h = d.getHours()
+  const m = d.getMinutes().toString().padStart(2, '0')
+  if (h < 6) return `凌晨 ${h}:${m}`
+  if (h < 12) return `上午 ${h}:${m}`
+  if (h < 14) return `中午 ${h === 12 ? 12 : h - 12}:${m}`
+  if (h < 18) return `下午 ${h - 12}:${m}`
+  return `晚上 ${h - 12}:${m}`
 }

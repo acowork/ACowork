@@ -13,6 +13,7 @@
  */
 
 import { useEffect, useState } from 'react'
+import { Folder, FolderOpen, FileText } from 'lucide-react'
 import { useNavStore } from '../../stores/navStore'
 import { flatten, useDocStore } from '../../stores/docStore'
 import { ListRow, Banner } from '../../components/ui'
@@ -114,9 +115,13 @@ export function DocListScreen() {
           hits.map((h) => (
             <ListRow
               key={h.doc_id}
-              arrow
               onClick={() => goDoc(h.doc_id)}
-              label={<span className="row-title">{h.name}</span>}
+              label={
+                <span className="row-title doc-tree-label">
+                  <FileText size={15} className="doc-tree-icon doc-tree-icon-file" aria-hidden />
+                  <span className="doc-tree-name">{h.name}</span>
+                </span>
+              }
               hint={h.path}
             />
           ))
@@ -131,8 +136,11 @@ export function DocListScreen() {
                 key={r.key}
                 onClick={() => void toggle(r.dir_id)}
                 label={
-                  <span className="row-title" style={{ paddingLeft: r.depth * INDENT }}>
-                    <span className="tree-caret">{r.open ? '▾' : '▸'}</span> {r.name}
+                  <span className="row-title doc-tree-label" style={{ paddingLeft: r.depth * INDENT }}>
+                    {r.open
+                      ? <FolderOpen size={15} className="doc-tree-icon doc-tree-icon-dir" aria-hidden />
+                      : <Folder size={15} className="doc-tree-icon doc-tree-icon-dir" aria-hidden />}
+                    <span className="doc-tree-name">{r.name}</span>
                   </span>
                 }
                 hint={r.loading ? '载入中…' : undefined}
@@ -141,11 +149,11 @@ export function DocListScreen() {
             ) : (
               <ListRow
                 key={r.key}
-                arrow
                 onClick={() => goDoc(r.doc_id)}
                 label={
-                  <span className="row-title" style={{ paddingLeft: r.depth * INDENT }}>
-                    {r.name}
+                  <span className="row-title doc-tree-label" style={{ paddingLeft: r.depth * INDENT }}>
+                    <FileText size={15} className="doc-tree-icon doc-tree-icon-file" aria-hidden />
+                    <span className="doc-tree-name">{r.name}</span>
                   </span>
                 }
                 value={formatListTime(Date.parse(r.updated_at))}
