@@ -106,7 +106,8 @@
     "extensions": "拡張機能",
     "harness": "Harness",
     "settings": "Settings",
-    "ariaLabelMainNavigation": "メインナビゲーション"
+    "ariaLabelMainNavigation": "メインナビゲーション",
+    "unreadMessages": "未読のメッセージ"
   },
   "account": {
     "loginTitle": "ログイン",

@@ -106,7 +106,8 @@
     "extensions": "扩展",
     "harness": "Harness",
     "settings": "设置",
-    "ariaLabelMainNavigation": "主导航"
+    "ariaLabelMainNavigation": "主导航",
+    "unreadMessages": "有未读消息"
   },
   "account": {
     "loginTitle": "登录",

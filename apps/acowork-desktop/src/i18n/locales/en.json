@@ -14,7 +14,8 @@
     "extensions": "Extensions",
     "harness": "Harness",
     "settings": "Settings",
-    "ariaLabelMainNavigation": "Main navigation"
+    "ariaLabelMainNavigation": "Main navigation",
+    "unreadMessages": "Unread messages"
   },
   "account": {
     "loginTitle": "Sign in",
