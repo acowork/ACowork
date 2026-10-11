@@ -1,6 +1,6 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicovite96/tauri-v2-schema/main/schema.json",
-  "productName": "ACowork Mobile",
+  "productName": "ACowork",
   "version": "0.1.0",
   "identifier": "com.acowork.mobile",
   "build": {
