@@ -24,8 +24,9 @@ vi.mock("@tauri-apps/api/core", () => ({
 
 const OLD_URL = "http://192.168.1.10:19876";
 const NEW_URL = "http://192.168.1.11:19876";
-// Must match MAX_WAIT_MS in SplashScreen.tsx
-const MAX_WAIT_MS = 30_000;
+// Must match REMOTE_MAX_WAIT_MS in SplashScreen.tsx (this case boots in
+// remote mode, where the boot budget is the short reachability probe).
+const MAX_WAIT_MS = 12_000;
 
 /** Flush chained microtasks (bootGateway awaits several resolved mocks). */
 async function flushMicrotasks() {

@@ -6,8 +6,9 @@
  * the 5s fallback window elapses, SplashScreen must:
  *   1. Probe the history concurrently.
  *   3. Render the candidate chooser INSIDE the loading view (NOT yet the
- *      30s timeout view) so the user can pick one before the hard
- *      timeout fires.
+ *      hard-timeout view — 12s in remote/relay, 30s in local, see
+ *      REMOTE_MAX_WAIT_MS / LOCAL_MAX_WAIT_MS) so the user can pick one
+ *      before the timeout fires.
  *   2. Picking a candidate persists the URL and re-runs the boot flow.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
@@ -27,7 +28,9 @@ const RELAY_URL = "https://c8cb2bed-ffd4-4821-a913-718618482157.relay.acowork.ai
 // Must mirror `UNREACHABLE_HINT_MS` — the shared boot/runtime budget
 // in lib/connectivity/gatewayConnectivity.ts.
 const CANDIDATE_FALLBACK_MS = 5_000;
-const MAX_WAIT_MS = 30_000;
+// Must mirror REMOTE_MAX_WAIT_MS in SplashScreen.tsx (the chooser tests
+// all run in remote/relay mode, where the boot budget is the short one).
+const MAX_WAIT_MS = 12_000;
 
 async function flushMicrotasks() {
     for (let i = 0; i < 10; i++) {
@@ -113,7 +116,8 @@ describe("SplashScreen 5s candidate chooser", () => {
         expect(useGatewayStore.getState().candidates).toHaveLength(0);
 
         // Advance just past the fallback window (still well below the
-        // 30s hard timeout so the timeout view doesn't appear).
+        // hard timeout — 12s in remote/relay — so the timeout view doesn't
+        // appear).
         await act(async () => {
             vi.advanceTimersByTime(CANDIDATE_FALLBACK_MS + 100);
         });

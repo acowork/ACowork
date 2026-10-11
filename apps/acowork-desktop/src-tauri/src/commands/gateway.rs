@@ -125,15 +125,22 @@ pub async fn set_gateway_config(
     // locally-spawned Gateway to free the port — neither remote nor
     // relay mode ever uses the child, and an orphan on the shared port
     // would shadow a user-configured remote/relay Gateway.
+    //
+    // Use the pid-only stop (no sidecar name sweep): switching modes must
+    // not kill a Desktop-created ADR-087 node that may be repointing at the
+    // new remote/relay Gateway. In remote/relay mode there is no child, so
+    // this block never runs and nothing local is touched.
     if mode != GatewayMode::Local {
         let mut proc = state.gateway_process.lock().await;
-        if let Some(mut child) = proc.take() {
+        if let Some(child) = proc.take() {
             tracing::info!(
                 "[CFG] Switching to {}: stopping local Gateway (pid: {:?})",
                 mode.as_str(),
                 child.id()
             );
-            let _ = child.kill();
+            let pid = child.id();
+            crate::process_stop::stop_gateway_pid(pid);
+            let mut child = child; // Child::wait needs &mut
             let _ = child.wait();
         }
     }
@@ -611,8 +618,9 @@ pub async fn spawn_gateway(
 
 /// Stop the locally running Gateway process and all its children.
 ///
-/// On Windows, uses `taskkill /T /F` to kill the entire process tree
-/// (Gateway + Runtime + Embed) in one shot.
+/// On Windows, uses `taskkill /T /F` to kill the process tree, then reaps the
+/// sidecars that detach from that tree (LSP relay, Node, the Runtimes the Node
+/// hosts, embed, PM, doc, user) by image name — see [`crate::process_stop`].
 /// On Unix, sends SIGINT so the Gateway's signal handler cleans up
 /// children before exiting.
 #[tauri::command]
@@ -622,19 +630,8 @@ pub async fn stop_local_gateway(state: tauri::State<'_, AppState>) -> Result<(),
         let pid = child.id();
         tracing::info!(pid = pid, "Stopping local Gateway process tree");
 
-        #[cfg(target_os = "windows")]
-        {
-            let _ = std::process::Command::new("taskkill")
-                .args(["/PID", &pid.to_string(), "/T", "/F"])
-                .output();
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            // Send SIGINT so Gateway's signal handler cleans up children
-            let _ = std::process::Command::new("kill")
-                .args(["-INT", &pid.to_string()])
-                .output();
-        }
+        crate::process_stop::stop_gateway_process(pid);
+
         // Reap the child to avoid zombies
         let mut child = child; // Child::wait needs &mut
         let _ = child.wait();

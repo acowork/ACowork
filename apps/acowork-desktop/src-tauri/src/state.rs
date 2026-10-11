@@ -232,18 +232,7 @@ impl Drop for AppState {
         {
             let pid = child.id();
             tracing::info!(pid = pid, "AppState dropped, stopping Gateway process tree");
-            #[cfg(target_os = "windows")]
-            {
-                let _ = std::process::Command::new("taskkill")
-                    .args(["/PID", &pid.to_string(), "/T", "/F"])
-                    .output();
-            }
-            #[cfg(not(target_os = "windows"))]
-            {
-                let _ = std::process::Command::new("kill")
-                    .args(["-INT", &pid.to_string()])
-                    .output();
-            }
+            crate::process_stop::stop_gateway_process(pid);
             let _ = child.wait();
         }
     }

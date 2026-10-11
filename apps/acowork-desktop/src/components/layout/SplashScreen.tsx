@@ -9,15 +9,29 @@ import { initDocTreeChangeListener } from "../../lib/docFsEvents";
 import { getGatewayUrl } from "../../lib/config";
 import { UNREACHABLE_HINT_MS, probeKnownCandidates } from "../../lib/connectivity/gatewayConnectivity";
 import { useTranslation } from "../../i18n/useTranslation";
+import { StyledInput } from "../common/StyledInput";
+import { Dropdown } from "../common/Dropdown";
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import pkg from "../../../package.json";
 import brandMark from "../../../../../assets/brand-mark.svg";
 import { log } from "../../lib/logger";
-import type { BootstrapStateView, GatewayBootResult } from "../../lib/types";
+import type { BootstrapStateView, GatewayBootResult, GatewayMode } from "../../lib/types";
 
 const POLL_INTERVAL = 500;
 const MIN_SPLASH_MS = 1500;
-const MAX_WAIT_MS = 30_000;
+/**
+ * Hard cap on the boot pipeline before the recovery (timeout) view is
+ * surfaced. Mode-aware, because the two paths have very different
+ * legitimate latencies:
+ *   - remote/relay only PROBE a Gateway for reachability, so a dead host is
+ *     known quickly — a short budget gets the user to the recovery view fast.
+ *   - local additionally WAITS for the Gateway to spawn and finish its
+ *     bootstrap (ONNX / embed model load), which can legitimately take tens
+ *     of seconds. A false timeout there is worse than a slightly long wait,
+ *     so local keeps the bigger budget.
+ */
+const REMOTE_MAX_WAIT_MS = 12_000;
+const LOCAL_MAX_WAIT_MS = 30_000;
 /**
  * Fallback-window: how long SplashScreen waits before giving up on the
  * persisted Gateway URL and surfacing alternative reachable URLs from
@@ -259,6 +273,7 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
     const candidates = useGatewayStore((s) => s.candidates);
     const clearCandidates = useGatewayStore((s) => s.clearCandidates);
     const gatewayMode = useSettingsStore((s) => s.gatewayMode);
+    const setGatewayMode = useSettingsStore((s) => s.setGatewayMode);
     /**
      * Whether the candidate chooser has been offered in this boot
      * session. Gates the 5s fallback timer so we don't reprobe on every
@@ -268,6 +283,13 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
     const [candidatesOffered, setCandidatesOffered] = useState(false);
     const [statusText, setStatusText] = useState("Starting Gateway...");
     const [timedOut, setTimedOut] = useState(false);
+    /**
+     * The boot budget that actually fired the current timeout, captured at
+     * fire time so the recovery message can print the real number even after
+     * the user switches mode on the timeout view (which would otherwise make
+     * a freshly-derived value disagree with what just happened).
+     */
+    const [timedOutBudgetMs, setTimedOutBudgetMs] = useState(REMOTE_MAX_WAIT_MS);
     // Hard boot failure (a rejected `invoke` inside `bootGateway`).
     // Rendered in the same recovery view as `timedOut`, with the error
     // text instead of the "did not respond" copy. Cleared by retry.
@@ -351,6 +373,11 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
     useEffect(() => {
         startTimeRef.current = Date.now();
         mountedRef.current = true;
+
+        // Mode-aware boot budget: remote/relay probe reachability (fail fast),
+        // local additionally waits for spawn + bootstrap (see the constants).
+        const maxWaitMs =
+            gatewayMode === "local" ? LOCAL_MAX_WAIT_MS : REMOTE_MAX_WAIT_MS;
 
         let pollTimer: ReturnType<typeof setInterval>;
         let maxTimer: ReturnType<typeof setTimeout>;
@@ -456,9 +483,10 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
         maxTimer = setTimeout(() => {
             if (mountedRef.current) {
                 clearInterval(pollTimer);
+                setTimedOutBudgetMs(maxWaitMs);
                 setTimedOut(true);
             }
-        }, MAX_WAIT_MS);
+        }, maxWaitMs);
 
         init();
 
@@ -603,46 +631,90 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
                                 <p className="max-w-md text-center text-sm break-words text-text-secondary ">
                                     {bootError
                                         ? `Gateway initialization failed: ${bootError}`
-                                        : `Gateway did not respond within ${MAX_WAIT_MS / 1000}s`}
+                                        : `Gateway did not respond within ${timedOutBudgetMs / 1000}s`}
                                 </p>
                             </div>
                             <p className="max-w-md text-center text-xs text-text-tertiary ">
                                 {bootError
-                                    ? "The Desktop could not complete its startup sequence. Fix the cause and retry."
-                                    : "Make sure the Gateway is running on port 19876"}
+                                    ? t("splashScreen.bootFailedHint")
+                                    : t("splashScreen.timeoutHint")}
                             </p>
-                            {/* Always show the URL input on timeout — previously this
-                                was gated on `mode === "remote"`, which made the local
-                                + stale-remote-URL combination a deadlock (the user
-                                had no way to recover the URL from the splash view).
-                                `handleRetry` already routes by mode (local → start
-                                local, remote → just re-probe) and persists a new
-                                URL via `setGatewayUrl` before probing. */}
-                            <div className="mt-1 flex flex-col items-center gap-1.5">
+                            {/* Compact recovery form — a two-column grid
+                                (`auto` label column + `1fr` control column).
+                                The label column sizes to the longest label so
+                                text NEVER wraps (the earlier fixed `w-24`
+                                column forced wrapping the moment a label was
+                                wider), while every control — mode picker,
+                                address field, action button — lands in the
+                                second column and shares ONE left edge via
+                                `justify-self-start`. Locale-agnostic. The mode
+                                picker is the escape hatch for the deadlock
+                                where a remote Gateway is down and there is
+                                nothing to connect to — switching to `local`
+                                flips the button into "start a local Gateway"
+                                (bootGateway / handleRetry already route by
+                                mode: local → spawn + adopt, remote/relay →
+                                re-probe the edited URL). StyledInput / Dropdown
+                                keep the splash on the shared form scale
+                                (text-xs + --ui-input-py / --ui-btn-py + theme
+                                tokens) instead of the old hardcoded zinc/text-sm. */}
+                            <div className="mt-2 grid w-full max-w-xs grid-cols-[auto_1fr] items-center gap-x-2 gap-y-2">
                                 <label
-                                    htmlFor="splash-gateway-url"
-                                    className="text-xs text-text-tertiary "
+                                    htmlFor="splash-gateway-mode"
+                                    className="text-xs text-text-tertiary"
                                 >
-                                    {t("splashScreen.gatewayAddress")}
+                                    {t("splashScreen.modeLabel")}
                                 </label>
-                                <input
-                                    id="splash-gateway-url"
-                                    type="text"
-                                    value={gatewayUrlInput}
-                                    onChange={(e) => setGatewayUrlInput(e.target.value)}
-                                    spellCheck={false}
-                                    autoCapitalize="off"
-                                    autoCorrect="off"
-                                    className="w-80 rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm text-text-secondary outline-none focus:border-zinc-400 dark:border-zinc-600 dark:bg-zinc-800  dark:focus:border-zinc-500"
+                                <Dropdown
+                                    id="splash-gateway-mode"
+                                    size="small"
+                                    className="w-auto justify-self-start"
+                                    value={gatewayMode}
+                                    onChange={(v) => setGatewayMode(v as GatewayMode)}
+                                    options={[
+                                        { value: "local", label: t("splashScreen.modeLocal") },
+                                        { value: "remote", label: t("splashScreen.modeRemote") },
+                                        { value: "relay", label: t("splashScreen.modeRelay") },
+                                    ]}
                                 />
+                                {/* Address field only applies to remote/relay —
+                                    local is pinned to the loopback default. */}
+                                {gatewayMode !== "local" && (
+                                    <>
+                                        <label
+                                            htmlFor="splash-gateway-url"
+                                            className="text-xs text-text-tertiary"
+                                        >
+                                            {t("splashScreen.gatewayAddress")}
+                                        </label>
+                                        <StyledInput
+                                            id="splash-gateway-url"
+                                            type="text"
+                                            value={gatewayUrlInput}
+                                            onChange={(e) => setGatewayUrlInput(e.target.value)}
+                                            spellCheck={false}
+                                            autoCapitalize="off"
+                                            autoCorrect="off"
+                                            fontMono
+                                            className="w-full min-w-0"
+                                        />
+                                    </>
+                                )}
+                                {/* Empty label cell keeps the button on the
+                                    same control column as the fields above. */}
+                                <span aria-hidden="true" />
+                                <button
+                                    onClick={() => { void handleRetry(); }}
+                                    disabled={retrying}
+                                    className="btn-accent justify-self-start rounded-md px-4 py-[var(--ui-btn-py)] text-xs font-medium disabled:opacity-40"
+                                >
+                                    {retrying
+                                        ? t("splashScreen.retrying")
+                                        : gatewayMode === "local"
+                                            ? t("splashScreen.startLocal")
+                                            : t("splashScreen.retryConnection")}
+                                </button>
                             </div>
-                            <button
-                                onClick={() => { void handleRetry(); }}
-                                disabled={retrying}
-                                className="mt-2 rounded-md bg-zinc-200 px-5 py-2 text-sm font-medium text-text-secondary transition-colors hover:bg-zinc-300 disabled:opacity-40 dark:bg-zinc-700  dark:hover:bg-zinc-600"
-                            >
-                                {retrying ? t("splashScreen.retrying") : t("splashScreen.retryConnection")}
-                            </button>
                         </>
                     ) : (
                         <>

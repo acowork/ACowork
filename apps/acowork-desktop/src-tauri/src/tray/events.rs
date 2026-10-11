@@ -88,8 +88,9 @@ pub fn on_menu_event(app: &AppHandle, event: MenuEvent) {
     }
 }
 
-/// Stop an owned Gateway process tree (taskkill /T /F on Windows, SIGINT
-/// elsewhere), then reap the child. Used by the tray-quit "stop" path.
+/// Stop an owned Gateway process tree (taskkill /T /F + detached-sidecar
+/// sweep on Windows, SIGINT elsewhere), then reap the child. Used by the
+/// tray-quit "stop" path.
 fn stop_owned_gateway(gateway_process: &tokio::sync::Mutex<Option<std::process::Child>>) {
     let Ok(mut proc) = gateway_process.try_lock() else {
         return;
@@ -97,19 +98,7 @@ fn stop_owned_gateway(gateway_process: &tokio::sync::Mutex<Option<std::process::
     if let Some(child) = proc.take() {
         let pid = child.id();
         tracing::info!(pid = pid, "Stopping Gateway process tree on quit");
-        #[cfg(target_os = "windows")]
-        {
-            let _ = std::process::Command::new("taskkill")
-                .args(["/PID", &pid.to_string(), "/T", "/F"])
-                .output();
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            // Send SIGINT so Gateway's signal handler cleans up children
-            let _ = std::process::Command::new("kill")
-                .args(["-INT", &pid.to_string()])
-                .output();
-        }
+        crate::process_stop::stop_gateway_process(pid);
         // Reap the child to avoid zombies
         let mut child = child; // Child::wait needs &mut
         let _ = child.wait();
