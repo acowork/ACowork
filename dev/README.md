@@ -27,7 +27,7 @@ Scripts are grouped by **scope**, not by file type:
 
 | Folder | Contains |
 |---|---|
-| [`common/`](common/) | Cross-platform build steps that ship a `.sh` + `.ps1` twin (`build_core`, `setup_ort`, `start_node`, `build-agent`). The `.sh` serves both Linux and macOS, so the twins live together rather than under an OS folder. |
+| [`common/`](common/) | Cross-platform build steps that ship a `.sh` + `.ps1` twin (`build_core`, `setup_ort`, `start_node`, `build-agent`, `gen_icons`). The `.sh` serves both Linux and macOS, so the twins live together rather than under an OS folder. |
 | [`desktop/windows/`](desktop/windows/) · [`desktop/macos/`](desktop/macos/) · [`desktop/linux/`](desktop/linux/) | Per-OS desktop packaging (`package_desktop_*`), plus the macOS one-click build and the Windows stop-latency test. |
 | [`android/`](android/) | Mobile build/sign helpers — `sign_release.ps1` drives keystore creation, `gradle.properties`, and the signed release build. Authoritative flow: [apps/acowork-mobile/README.md](../apps/acowork-mobile/README.md). |
 | `ci.sh`, `ort_env.js` (repo root of `dev/`) | Kept at the top level because they are referenced by path from `AGENTS.md`, `apps/acowork-desktop/package.json`, and the ADR corpus. |
@@ -62,11 +62,17 @@ profile. `-Debug` / `--debug` switches to the debug profile and auto-raises
 | [`package_desktop_macos.sh`](desktop/macos/package_desktop_macos.sh) | macOS `.app` / `.dmg`. |
 | [`package_desktop_linux.sh`](desktop/linux/package_desktop_linux.sh) | Linux `.deb` / `.rpm` / AppImage. |
 
-App icons are **not** generated here. `npx tauri icon assets/app-icon.svg`
-produces the platform set, `scripts/generate-store-logos.py` adds the Windows
-Store logos that `tauri icon` does not emit, and
-`scripts/check-app-icon-fill.mts` fails if a regenerated icon's background
-shrinks back inside the canvas.
+App icons come straight from the Tauri CLI — there is no wrapper pipeline.
+[`common/gen_icons.ps1`](common/gen_icons.ps1) · [`common/gen_icons.sh`](common/gen_icons.sh)
+runs `npx tauri icon assets/app-icon.svg` for **both** apps in one shot and
+enforces ownership: the mobile app keeps `icons/android/` + `icons/ios/` (plus
+the PNGs its `bundle.icon` references), the desktop app drops them (a desktop
+bundle never ships mobile icons) — `tauri icon` has no per-platform switch, so
+this split is the whole point of the script. To change the brand icon: update
+`assets/app-icon.svg`, run the script. For mobile it also syncs
+`icons/android/*` into the checked-out `gen/android` res so the next
+`tauri android build` picks them up — do **not** re-run `tauri android init`,
+which would clobber the hand-written signing block.
 
 ## Agent packages
 

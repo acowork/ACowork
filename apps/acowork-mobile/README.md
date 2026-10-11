@@ -39,6 +39,12 @@ npx tauri android init                 # 生成 src-tauri/gen/android（已 giti
 npx tauri android build --apk --debug --target aarch64
 ```
 
+> **图标**：启动器图标来自 `src-tauri/icons/android/`（`tauri android init` 会拷进 gen
+> res）。换品牌图标后用 [`dev/common/gen_icons.ps1`](../../dev/common/gen_icons.ps1)
+> （或 `.sh`）一条命令同时重生成 desktop + mobile 并做归属裁剪（mobile 留 `android/`
+> `ios/`，desktop 删之）。已 checkout `gen/android` 时脚本会把 `icons/android/*` 同步
+> 进 gen res——**别**为此重跑 `tauri android init`，那会冲掉手写签名块。
+
 产物：`src-tauri/gen/android/app/build/outputs/apk/arm64/debug/app-arm64-debug.apk`
 （debug 包 ~124 MB，未做 strip/LTO；release 需要先配签名，见下）。
 
